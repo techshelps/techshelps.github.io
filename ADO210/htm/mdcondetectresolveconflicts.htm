@@ -1,0 +1,141 @@
+﻿<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML DIR="LTR"><HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<TITLE>Detecting and Resolving Conflicts</TITLE>
+<SCRIPT SRC="../stylesheets/vs70link.js"></SCRIPT>
+<SCRIPT SRC="../stylesheets/vs70.js"></SCRIPT>
+<SCRIPT LANGUAGE="JScript" SRC="../stylesheets/ADO.js"></SCRIPT></HEAD>
+<body topmargin=0 id="bodyID" class = "dtBODY">
+
+<div id="scrbanner">
+<div id="bannerrow1">
+<TABLE CLASS="bannerparthead" CELLSPACING=0>
+<TR ID="hdr">
+<TD CLASS="bannerparthead td" nowrap>ADO 2.5</TD><TD valign=middle><a href="#Feedback"><IMG name="feedb" onclick=startFeedback(SDKFeedB) style="CURSOR: hand;" hspace=15 alt="" src="../stylesheets/mailto.gif" align=right></a></TD>
+</TR>
+</TABLE>
+</div>
+</div>
+<DIV id="scrtext" valign="bottom">
+<H2 class="dtH2"><A NAME="mdcondetectresolveconflicts"></A>Detecting and Resolving Conflicts</H2>
+
+<P>If you are dealing with your <B>Recordset</B> in immediate mode, there is much less chance for concurrency problems to arise. On the other hand, if your application uses batch mode updating, there may be a good chance that one user will change a record before changes made by another user editing the same record are saved. In such a case, you will want your application to gracefully handle the conflict. It may be your wish that the last person to send an update to the server "wins." Or you may want to let the most recent user to decide which update should take precedence by providing him with a choice between the two conflicting values.</P>
+
+<P>Whatever the case, ADO provides the <B>UnderlyingValue</B> and <B>OriginalValue</B> properties of the <B>Field</B> object in order to handle these types of conflicts. Use these properties in combination with the <B>Resync</B> method and <B>Filter</B> property of the <B>Recordset</B>.</P>
+
+<H3 class="dtH3">Detecting Errors</H3>
+
+<P>When ADO encounters a conflict during a batch update, a warning will be placed in the <B>Errors</B> collection. Therefore, you should always check for errors immediately after calling <B>BatchUpdate</B>, and if you find them, begin testing the assumption that you have encountered a conflict. The first step is to set the <B>Filter</B> property on the <B>Recordset</B> equal to <B>adFilterConflictingRecords</B> (the <B>Filter</B> property is discussed in the preceding chapter). This limits the view on your <B>Recordset</B> to only those records that are in conflict. If the <B>RecordCount</B> property is equal to zero after this step, you know the error was raised by something other than a conflict.</P>
+
+<P>When you call <B>BatchUpdate</B>, ADO and the provider are generating SQL statements to perform updates on the data source. Remember that certain data sources have limitations on which types of columns can be used in a WHERE clause.</P>
+
+<P>Next, call the <B>Resync</B> method on the <B>Recordset</B> with the <I>AffectRecords</I> argument set equal to <B>adAffectGroup</B> and the <I>ResyncValues</I> argument set equal to <B>adResyncUnderlyingValues</B>. The <B>Resync</B> method refreshes the data in the current <B>Recordset</B> object from the underlying database. By using <B>adAffectGroup</B>, you are ensuring that only the records visible with the current filter setting, that is, only the conflicting records, are resynchronized with the database. This could make a significant performance difference if you are dealing with a large <B>Recordset</B>. By setting the <I>ResyncValues</I> argument to <B>adResyncUnderlyingValues</B> when calling <B>Resync</B>, you ensure that the <B>UnderlyingValue</B> property will contain the (conflicting) value from the database, that the <B>Value</B> property will maintain the value entered by the user, and that the <B>OriginalValue</B> property will hold the original value for the field (the value it had before the last successful <B>UpdateBatch</B> call was made). You can then use these values to resolve the conflict programmatically or require the user to choose the value that will be used.</P>
+
+<P>This technique is shown in the code example below. The example artificially creates a conflict by using a separate <B>Recordset</B> to change a value in the underlying table before <B>UpdateBatch</B> is called.</P>
+
+<PRE class="code">'BeginConflicts
+    On Error GoTo ErrHandler:
+    
+    Dim objRs1 As New ADODB.Recordset
+    Dim objRs2 As New ADODB.Recordset
+    Dim strSQL As String
+    Dim strMsg As String
+    
+    strSQL = "SELECT * FROM Shippers WHERE ShipperID = 2"
+                 
+    'Open Rs and change a value
+    objRs1.CursorLocation = adUseClient
+    objRs1.Open strSQL, strConn, adOpenStatic, adLockBatchOptimistic, adCmdText
+    objRs1("Phone") = "(111) 555-1111"
+    
+    'Introduce a conflict at the db...
+    objRs2.Open strSQL, strConn, adOpenKeyset, adLockOptimistic, adCmdText
+    objRs2("Phone") = "(999) 555-9999"
+    objRs2.Update
+    objRs2.Close
+    Set objRs2 = Nothing
+    
+    On Error Resume Next
+    objRs1.UpdateBatch
+    
+    If objRs1.ActiveConnection.Errors.Count &lt;&gt; 0 Then
+        Dim intConflicts As Integer
+        
+        intConflicts = 0
+        
+        objRs1.Filter = adFilterConflictingRecords
+        
+        intConflicts = objRs1.RecordCount
+        
+        'Resync so we can see the UnderlyingValue and offer user a choice.
+        'This sample only displays all three values and resets to original.
+        objRs1.Resync adAffectGroup, adResyncUnderlyingValues
+        
+        If intConflicts &gt; 0 Then
+            strMsg = "A conflict occurred with updates for " &amp; intConflicts &amp; _
+                     " record(s)." &amp; vbCrLf &amp; "The values will be restored" &amp; _
+                     " to their original values." &amp; vbCrLf &amp; vbCrLf
+                     
+            objRs1.MoveFirst
+            While Not objRs1.EOF
+                strMsg = strMsg &amp; "SHIPPER = " &amp; objRs1("CompanyName") &amp; vbCrLf
+                strMsg = strMsg &amp; "Value = " &amp; objRs1("Phone").Value &amp; vbCrLf
+                strMsg = strMsg &amp; "UnderlyingValue = " &amp; _
+                                   objRs1("Phone").UnderlyingValue &amp; vbCrLf
+                strMsg = strMsg &amp; "OriginalValue = " &amp; _
+                                   objRs1("Phone").OriginalValue &amp; vbCrLf
+                strMsg = strMsg &amp; vbCrLf &amp; "Original value has been restored."
+                  
+                MsgBox strMsg, vbOKOnly, _
+                      "Conflict " &amp; objRs1.AbsolutePosition &amp; _
+                      " of " &amp; intConflicts
+                  
+                objRs1("Phone").Value = objRs1("Phone").OriginalValue
+                objRs1.MoveNext
+            Wend
+            
+            objRs1.UpdateBatch adAffectGroup
+        Else
+            'Other error occurred. Minimal handling in this example.
+             strMsg = "Errors occurred during the update. " &amp; _
+                        objRs1.ActiveConnection.Errors(0).Number &amp; " " &amp; _
+                        objRs1.ActiveConnection.Errors(0).Description
+        End If
+        
+        On Error GoTo 0
+    End If
+    
+    objRs1.MoveFirst
+    
+    'Clean up
+    objRs1.Close
+    Set objRs1 = Nothing
+    Exit Sub
+    
+ErrHandler:
+   
+    If Not objRs1 Is Nothing Then
+        If objRs1.State = adStateOpen Then objRs1.Close
+        Set objRs1 = Nothing
+    End If
+    
+    If Not objRs2 Is Nothing Then
+        If objRs2.State = adStateOpen Then objRs2.Close
+        Set objRs2 = Nothing
+    End If
+    
+    If Err &lt;&gt; 0 Then
+        MsgBox Err.Source &amp; "--&gt;" &amp; Err.Description, , "Error"
+    End If
+    
+'EndConflicts</PRE>
+
+<P>You can use the <B>Status</B> property of the current <B>Record</B> or of a specific <B>Field</B> to determine what kind of a conflict has occurred.</P>
+
+<P>For more detailed information on error handling, see <A HREF="mdconerrorhandling.htm">Chapter 6: Error Handling</A>.</P>
+<H4><A NAME="feedback"></A></H4>
+<SPAN id="SDKFeedB"></SPAN>
+</div>
+<P align="center"><A HREF="ado_sdk_copyright_and_trademarks.htm">&copy; 1998-2003 Microsoft Corporation. All rights reserved.</A></P>
+</BODY>
+</HTML>
