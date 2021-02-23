@@ -1,0 +1,9 @@
+#Define 17e0c14a-39ef-4ab0-a777-e568dfcfa7ef	60
+#Define c7a332aa-834e-424e-a5ba-7dec3b13b5fa	20
+#Define a4faa4d4-f3fb-4fb4-b926-5fd3086d01bd	2010
+#Define 3074d592-88d8-4ed9-84a1-a05ac65a539c	2020
+#Define d6e9a9f9-f801-4dca-9bf7-0f691d7e8e7f	2030
+#Define 2c1410c5-9af7-4f13-9ae2-5eca687d1901	2040
+#Define 045fedcd-8fc2-44f4-8c98-d68fffad0af4	40
+#Define be577940-538a-41aa-9f17-a68886036a83	50
+#Define ee61396b-63a2-4e0a-91f7-2f64a05244b4	200
