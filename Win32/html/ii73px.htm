@@ -1,0 +1,481 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<TITLE>Server Using Completion Routines</TITLE>
+</HEAD>
+
+<BODY BGCOLOR="#FFFFC8" TEXT="#341717">
+
+
+
+<P><A NAME="ii73px"></A><B>Server Using Completion Routines</B></P>
+
+<P>The <A HREF="fm7wz7.htm"><B>ReadFileEx</B></A> and <A HREF="12g2wey.htm"><B>WriteFileEx</B></A> functions provide another form of overlapped I/O. Unlike the overlapped <A HREF="cjnd8p.htm"><B>ReadFile</B></A> and <A HREF="g0sox_.htm"><B>WriteFile</B></A> functions, which use an event object to signal completion, the extended functions specify a completion routine. A completion routine is a function that is queued for execution when the read or write operation is done. The completion routine is not executed until the thread that called <B>ReadFileEx</B> and <B>WriteFileEx</B> enters an alertable wait by calling one of the extended wait functions: <A HREF="aqe6qk.htm"><B>WaitForSingleObjectEx</B></A>, <A HREF="1xsv84l.htm"><B>WaitForMultipleObjectsEx</B></A>, or <A HREF="fmres8.htm"><B>SleepEx</B></A>. These functions are like the other wait functions in that they return when a specified object is in the signaled state or when a time-out interval has elapsed. However, these functions can also perform an alertable wait, which occurs when their <I>fAlertable</I> parameter is set to TRUE. In an alertable wait, the functions also return when a <B>ReadFileEx</B> or <B>WriteFileEx</B> completion routine is queued for execution. A server process can use the extended functions to perform a sequence of read and write operations for each client that connects to it. Each read or write operation in the sequence specifies a completion routine, and each completion routine initiates the next step in the sequence. </P>
+
+<P>Like the previous example, this example is a single-threaded server process that creates a message-type pipe and uses overlapped operations. The server process differs in that it uses the extended functions <B>ReadFileEx</B> and <B>WriteFileEx</B> to perform overlapped I/O. Unlike the overlapped <B>ReadFile</B> and <B>WriteFile</B> functions, which signal an event object upon completion, the extended functions specify a completion routine, which is queued for execution when the operation is finished. The server process uses the <B>WaitForSingleObjectEx</B> function, which performs an alertable wait that returns when a completion routine is ready to execute. The wait function also returns when an event object is signaled, which in this example indicates that the overlapped <A HREF="ksa3sm.htm"><B>ConnectNamedPipe</B></A> operation has finished (a new client has connected). </P>
+
+<P>Initially, the server process creates a single instance of the pipe and starts an overlapped <B>ConnectNamedPipe</B> operation. When a client connects, the server allocates a structure to provide storage for that pipe instance and then calls the <B>ReadFileEx</B> function to start a sequence of I/O operations to handle communications with the client. Each operation specifies a completion routine that performs the next operation in the sequence. The sequence terminates when the client is disconnected and the pipe instance closed. After starting the sequence of operations for the new client, the server creates another pipe instance and waits for the next client to connect. </P>
+
+<P>The parameters of the <B>ReadFileEx</B> and <B>WriteFileEx</B> functions specify a completion routine and a pointer to an <A HREF="1n286m5.htm"><B>OVERLAPPED</B></A> structure. This pointer is later passed to the completion routine in its <I>lpOverLap</I> parameter. Because the <B>OVERLAPPED</B> structure points to the first member in the structure allocated for each pipe instance, the completion routine can use its <I>lpOverLap</I> parameter to access the structure for the pipe instance. </P>
+
+<P>To avoid duplication, the listing for the ConnectToNewClient subroutine is not shown; it is identical to the one used by the overlapped server process in the previous section. </P>
+
+<P>#include &lt;windows.h&gt;  </P>
+
+<P></P>
+
+<P>typedef struct </P>
+
+<P>{ </P>
+
+<P>OVERLAPPED oOverlap; </P>
+
+<P>HANDLE hPipeInst; </P>
+
+<P>CHAR chBuf[BUFSIZE]; </P>
+
+<P>DWORD cbToWrite; </P>
+
+<P>} PIPEINST, *LPPIPEINST; </P>
+
+<P></P>
+
+<P>BOOL CreateAndConnectInstance(); </P>
+
+<P>BOOL ConnectToNewClient(HANDLE, LPOVERLAPPED); </P>
+
+<P>VOID GetDataToWriteToClient(LPPIPEINST); </P>
+
+<P>VOID DisconnectAndClose(LPPIPEINST); </P>
+
+<P>VOID WINAPI CompletedWriteRoutine(DWORD, DWORD, LPOVERLAPPED); </P>
+
+<P>VOID WINAPI CompletedReadRoutine(DWORD, DWORD, LPOVERLAPPED); </P>
+
+<P></P>
+
+<P>HANDLE hPipe; </P>
+
+<P></P>
+
+<P>DWORD main(VOID) </P>
+
+<P>{ </P>
+
+<P>HANDLE hConnectEvent; </P>
+
+<P>OVERLAPPED oConnect; </P>
+
+<P>LPPIPEINST lpPipeInst; </P>
+
+<P>DWORD dwWait, cbBytes; </P>
+
+<P>BOOL fSuccess, fPendingIO; </P>
+
+<P></P>
+
+<P>// Create one event object for the connect operation. </P>
+
+<P></P>
+
+<P>hConnectEvent = CreateEvent( </P>
+
+<P>NULL,    // no security attribute</P>
+
+<P>TRUE,    // manual reset event </P>
+
+<P>TRUE,    // initial state = signaled </P>
+
+<P>NULL);   // unnamed event object </P>
+
+<P>if (hConnectEvent == NULL) </P>
+
+<P>MyErrExit("CreateEvent"); </P>
+
+<P></P>
+
+<P>oConnect.hEvent = hConnectEvent; </P>
+
+<P></P>
+
+<P>// Call a subroutine to create one instance, and wait for </P>
+
+<P>// the client to connect. </P>
+
+<P></P>
+
+<P>fPendingIO = CreateAndConnectInstance(&amp;oConnect); </P>
+
+<P></P>
+
+<P>while (1) </P>
+
+<P>{ </P>
+
+<P>// Wait for a client to connect, or for a read or write </P>
+
+<P>// operation to be completed, which causes a completion </P>
+
+<P>// routine to be queued for execution. </P>
+
+<P></P>
+
+<P>dwWait = WaitForSingleObjectEx( </P>
+
+<P>hConnectEvent,  // event object to wait for </P>
+
+<P>INFINITE,       // waits indefinitely </P>
+
+<P>TRUE);          // alertable wait enabled </P>
+
+<P></P>
+
+<P>switch (dwWait) </P>
+
+<P>{ </P>
+
+<P>// The wait is satisfied by a completed connect operation. </P>
+
+<P>case 0: </P>
+
+<P>// If an operation is pending, get the result of the </P>
+
+<P>// connect operation. </P>
+
+<P></P>
+
+<P>if (fPendingIO) </P>
+
+<P>{ </P>
+
+<P>fSuccess = GetOverlappedResult( </P>
+
+<P>hPipe,     // pipe handle </P>
+
+<P>&amp;oConnect, // OVERLAPPED structure </P>
+
+<P>&amp;cbBytes,  // bytes transferred </P>
+
+<P>FALSE);    // does not wait </P>
+
+<P>if (!fSuccess) </P>
+
+<P>MyErrExit("ConnectNamedPipe"); </P>
+
+<P>} </P>
+
+<P></P>
+
+<P>// Allocate storage for this instance. </P>
+
+<P></P>
+
+<P>lpPipeInst = (LPPIPEINST) GlobalAlloc( </P>
+
+<P>GPTR, sizeof(PIPEINST)); </P>
+
+<P>if (lpPipeInst == NULL) </P>
+
+<P>MyErrExit("GlobalAlloc lpPipeInst"); </P>
+
+<P></P>
+
+<P>lpPipeInst-&gt;hPipeInst = hPipe; </P>
+
+<P></P>
+
+<P>// Start the read operation for this client. </P>
+
+<P>// Note that this same routine is later used as a </P>
+
+<P>// completion routine after a write operation. </P>
+
+<P></P>
+
+<P>lpPipeInst-&gt;cbToWrite = 0; </P>
+
+<P>CompletedWriteRoutine(0, 0, (LPOVERLAPPED) lpPipeInst); </P>
+
+<P></P>
+
+<P>// Create new pipe instance for the next client. </P>
+
+<P></P>
+
+<P>fPendingIO = CreateAndConnectInstance( </P>
+
+<P>&amp;oConnect); </P>
+
+<P>break; </P>
+
+<P></P>
+
+<P>// The wait is satisfied by a completed read or write </P>
+
+<P>// operation. This allows the system to execute the </P>
+
+<P>// completion routine. </P>
+
+<P></P>
+
+<P>case WAIT_IO_COMPLETION: </P>
+
+<P>break; </P>
+
+<P></P>
+
+<P>// An error occurred in the wait function. </P>
+
+<P></P>
+
+<P>default: </P>
+
+<P>MyErrExit("WaitForSingleObjectEx"); </P>
+
+<P>} </P>
+
+<P>} </P>
+
+<P>return 0; </P>
+
+<P>} </P>
+
+<P></P>
+
+<P>// CompletedWriteRoutine(DWORD, DWORD, LPOVERLAPPED) </P>
+
+<P>// This routine is called as a completion routine after writing to </P>
+
+<P>// the pipe, or when a new client has connected to a pipe instance. It </P>
+
+<P>// starts another read operation. </P>
+
+<P></P>
+
+<P>VOID WINAPI CompletedWriteRoutine(DWORD dwErr, DWORD cbWritten, </P>
+
+<P>LPOVERLAPPED lpOverLap) </P>
+
+<P>{ </P>
+
+<P>LPPIPEINST lpPipeInst; </P>
+
+<P>BOOL fRead = FALSE; </P>
+
+<P></P>
+
+<P>// lpOverlap points to storage for this instance. </P>
+
+<P></P>
+
+<P>lpPipeInst = (LPPIPEINST) lpOverLap; </P>
+
+<P></P>
+
+<P>// The write operation has finished, so read the next request (if </P>
+
+<P>// there is no error). </P>
+
+<P></P>
+
+<P>if ((dwErr == 0) &amp;&amp; (cbWritten == lpPipeInst-&gt;cbToWrite)) </P>
+
+<P>fRead = ReadFileEx( </P>
+
+<P>lpPipeInst-&gt;hPipeInst, </P>
+
+<P>lpPipeInst-&gt;chBuf, </P>
+
+<P>BUFSIZE, </P>
+
+<P>(LPOVERLAPPED) lpPipeInst, </P>
+
+<P>(LPOVERLAPPED_COMPLETION_ROUTINE) CompletedReadRoutine); </P>
+
+<P></P>
+
+<P>// Disconnect if an error occurred. </P>
+
+<P></P>
+
+<P>if (! fRead) </P>
+
+<P>DisconnectAndClose(lpPipeInst); </P>
+
+<P>} </P>
+
+<P></P>
+
+<P>// CompletedReadRoutine(DWORD, DWORD, LPOVERLAPPED) </P>
+
+<P>// This routine is called as an I/O completion routine after reading a </P>
+
+<P>// request from the client. It gets data and writes it to the pipe. </P>
+
+<P></P>
+
+<P>VOID WINAPI CompletedReadRoutine(DWORD dwErr, DWORD cbBytesRead, </P>
+
+<P>LPOVERLAPPED lpOverLap) </P>
+
+<P>{ </P>
+
+<P>LPPIPEINST lpPipeInst; </P>
+
+<P>BOOL fWrite = FALSE; </P>
+
+<P></P>
+
+<P>// lpOverlap points to storage for this instance. </P>
+
+<P></P>
+
+<P>lpPipeInst = (LPPIPEINST) lpOverLap; </P>
+
+<P></P>
+
+<P>// The read operation has finished, so write a response (if no </P>
+
+<P>// error occurred). </P>
+
+<P></P>
+
+<P>if ((dwErr == 0) &amp;&amp; (cbBytesRead != 0)) </P>
+
+<P>{ </P>
+
+<P>GetDataToWriteToClient(lpPipeInst); </P>
+
+<P></P>
+
+<P>fWrite = WriteFileEx( </P>
+
+<P>lpPipeInst-&gt;hPipeInst, </P>
+
+<P>lpPipeInst-&gt;chBuf, </P>
+
+<P>lpPipeInst-&gt;cbToWrite, </P>
+
+<P>(LPOVERLAPPED) lpPipeInst, </P>
+
+<P>(LPOVERLAPPED_COMPLETION_ROUTINE) CompletedWriteRoutine); </P>
+
+<P>} </P>
+
+<P></P>
+
+<P>// Disconnect if an error occurred. </P>
+
+<P></P>
+
+<P>if (! fWrite) </P>
+
+<P>DisconnectAndClose(lpPipeInst); </P>
+
+<P>} </P>
+
+<P></P>
+
+<P>// DisconnectAndClose(LPPIPEINST) </P>
+
+<P>// This routine is called when an error occurs or the client closes </P>
+
+<P>// its handle to the pipe. </P>
+
+<P></P>
+
+<P>VOID DisconnectAndClose(LPPIPEINST lpPipeInst) </P>
+
+<P>{ </P>
+
+<P>// Disconnect the pipe instance. </P>
+
+<P></P>
+
+<P>if (! DisconnectNamedPipe(lpPipeInst-&gt;hPipeInst) ) </P>
+
+<P>MyErrExit("DisconnectNamedPipe"); </P>
+
+<P></P>
+
+<P>// Close the handle to the pipe instance. </P>
+
+<P></P>
+
+<P>CloseHandle(lpPipeInst-&gt;hPipeInst); </P>
+
+<P></P>
+
+<P>// Release the storage for the pipe instance. </P>
+
+<P></P>
+
+<P>if (lpPipeInst != NULL) </P>
+
+<P>GlobalFree(lpPipeInst); </P>
+
+<P>} </P>
+
+<P></P>
+
+<P>// CreateAndConnectInstance(LPOVERLAPPED) </P>
+
+<P>// This function creates a pipe instance and connects to the client. </P>
+
+<P>// It returns TRUE if the connect operation is pending and FALSE if </P>
+
+<P>// the connection has been completed. </P>
+
+<P></P>
+
+<P>BOOL CreateAndConnectInstance(LPOVERLAPPED lpoOverlap) </P>
+
+<P>{ </P>
+
+<P>LPTSTR lpszPipename = "\\\\.\\pipe\\mynamedpipe"; </P>
+
+<P></P>
+
+<P>hPipe = CreateNamedPipe( </P>
+
+<P>lpszPipename,             // pipe name </P>
+
+<P>PIPE_ACCESS_DUPLEX |      // read/write access </P>
+
+<P>FILE_FLAG_OVERLAPPED,     // overlapped mode </P>
+
+<P>PIPE_TYPE_MESSAGE |       // message-type pipe </P>
+
+<P>PIPE_READMODE_MESSAGE |   // message read mode </P>
+
+<P>PIPE_WAIT,                // blocking mode </P>
+
+<P>PIPE_UNLIMITED_INSTANCES, // unlimited instances </P>
+
+<P>BUFSIZE,                  // output buffer size </P>
+
+<P>BUFSIZE,                  // input buffer size </P>
+
+<P>PIPE_TIMEOUT,             // client time-out </P>
+
+<P>NULL);                    // no security attributes</P>
+
+<P>if (hPipe == INVALID_HANDLE_VALUE) </P>
+
+<P>MyErrExit("CreatePipe"); </P>
+
+<P></P>
+
+<P>// Call a subroutine to connect to the new client. </P>
+
+<P></P>
+
+<P>return ConnectToNewClient(hPipe, lpoOverlap); </P>
+
+<P>} </P>
+
+<P></P>
+
+</BODY>
+</HTML>
