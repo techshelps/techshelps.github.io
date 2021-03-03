@@ -1,0 +1,203 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Win32 Q &amp; A</title>
+<style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000 dir=ltr>
+<Font face="verdana,arial,helvetica" size="2">
+<h1><a name="win32qa"></a>Win32 Q &amp; A</h1>
+<p class=indent>
+By Jeffrey Richter</p>
+<p>
+<b>Q.  </b>In my multithreaded application, the user-interface thread is responsible for creating all of the windows and running the message loop to dispatch messages to these windows. The other threads are worker threads that perform various database lookups and calculations. Periodically, the worker threads send messages to the windows created by the user-interface thread. My application seems to work just fine, but I have a nagging feeling that I should synchronize the worker threads’ access to the user-interface windows and thread. Am I just lucky that my application is working? Will it fail some day?</p>
+<p class=indent>
+<i>Robin H. Sanner</i></p>
+<p>
+<b>A.  </b>I get asked this question quite frequently, and fortunately I have a good answer to report: your application will work as well tomorrow as it does today. You don’t need additional synchronization because the system is synchronizing the worker threads’ access to the user-interface thread for you automatically. There is a Win32® rule that goes like this: the thread that creates the window must process all messages for that window. In other words, a window will have all of its messages processed by a single thread. If only one thread ever accesses a resource—a window in this case—you never need to synchronize access to this resource.</p>
+<p>
+When a worker thread sends a message to your window, the SendMessage function internally queues up the message for the window, and then the worker thread suspends itself. The next time the user-interface thread calls GetMessage, PeekMessage, or WaitMessage, it sees the queued sent message, pulls it from the queue, and processes the window’s window procedure. When the window procedure has finished processing the message, the worker thread resumes execution and returns from its call to SendMessage.</p>
+<p>
+If SendMessage is called from the same thread that owns the window, the message is never queued; rather, the window callback, CallWindowProc, handles the message. If PostMessage had been used, the thread would queue the message for later processing, but would immediately return from the PostMessage call to continue the thread procedure.</p>
+<p>
+If you have multiple worker threads that each call SendMessage, the system queues up all of their requests for the one user-interface thread. Each worker thread will be suspended until the user-interface thread has had a chance to process the sent message completely.</p>
+<p>
+If two worker threads call SendMessage at exactly the same time (let’s say you have a dual-processor machine), you cannot control which message is appended to the user-interface thread’s queue first. For most applications, this is usually not important. However, if you have an application where this is important, you will have to synchronize the calls to SendMessage manually using mutexes, semaphores, events, and so on.</p>
+<p>
+The “Window Messages and Asynchronous Input” chapter in my book, <i>Advanced Windows, Third Edition</i> (Microsoft® Press, 1997), has considerably more detail and information on this topic that space prevents me from going into here. </p>
+<p>
+<b>Q.  </b>My application calls SetSystemTime to change the system time. While perusing the Win32 documentation I came across the WM_TIMECHANGE message. The documentation for this message states, “An application sends the WM_TIMECHANGE message to all top-level windows after changing the system time.” To be a good citizen, I modified my code as follows:</p>
+<pre><code>SetSystemTime(&amp;st);
+SendMessage(HWND_BROADCAST, WM_TIMECHANGE, 0, 0);
+</code></pre>
+<p>
+But when I execute the call to SendMessage, the call never returns to me and my application is hung. What is going on here?</p>
+<p class=indent>
+<i>Dave Bender</i></p>
+<p>
+<b>A.  </b>Apparently, somewhere in the system a thread has created a top-level window that is busy and unable to process window messages. By calling SendMessage, you are telling the system that your thread should not continue running until every top-level window has completely processed the WM_TIMECHANGE message. However, if a thread that created a top-level window cannot process the WM_TIMECHANGE message right now, your thread will wait and your call to SendMessage will not return. </p>
+<p>
+The Win32 API offers many functions that you can use to defensively code against this problem. The absolute best choice is to use PostMessage instead of SendMessage. PostMessage simply queues the WM_TIMECHANGE message and returns immediately so that your thread does not hang.</p>
+<p>
+There are two problems with using PostMessage. First, PostMessage fails if you post a standard Windows message that takes a pointer as a wParam or lParam. For example, this call to PostMessage always fails:</p>
+<pre><code>PostMessage(HWND_BROADCAST, WM_SETTEXT, 0, 
+            (LPARAM) "Pointer to String");
+</code></pre>
+<p>
+PostMessage fails this call to protect you. Say that you have the following code:</p>
+<pre><code>void SomeFunc (HWND hwnd) {
+   char sz[100] = "Blah blah blah";
+   PostMessage(hwnd, WM_SETTEXT, 
+               0, sz);
+}
+</code></pre>
+<p>
+The problem with this function is that the local variable sz is on the function’s stack. It’s very likely that the stack will become corrupted before the thread that created the window ever gets a chance to process the WM_SETTEXT message that was posted to it. If the system allowed the WM_SETTEXT message to be posted, the receiving window’s window procedure would get an lParam that pointed to garbage on the thread’s stack. So, to protect you from yourself, the operating system is designed to not allow messages that require pointers to be used with the PostMessage function.</p>
+<p>
+Since the WM_TIMECHANGE message doesn’t pass a pointer in its wParam or lParam, you can use PostMessage instead of SendMessage to solve your problem. However, there is a second problem with using PostMessage that has to do with priority. Posted messages are processed after sent messages. It would be better if the top-level windows in the system could process the WM_TIMECHANGE  message as soon as possible, so that they can see the  time change notification shortly after it happened. To increase the priority of the WM_TIMECHANGE message, I recommend that you call the SendNotifyMessage function as follows:</p>
+<pre><code>SendNotifyMessage(HWND_BROADCAST, WM_TIMECHANGE, 0, 0); 
+</code></pre>
+<p>
+If you are sending a message to a window created by another thread, SendNotifyMessage queues the message with higher priority and returns immediately. However, if SendNotifyMessage sends a message to a window created by the calling thread, it works just like SendMessage. In the intrathread case, SendNotifyMessage may hang and not return, just like your original call to SendMessage. If this happens, it’s because your thread isn’t processing the message and you can modify your code to correct the problem. At least your thread is no longer dependent on the way other applications have implemented their code.</p>
+<p>
+That answers your question, but for the sake of completeness, let me address what you should do to send a message that has to pass an address in its wParam or lParam parameter. For example, to change the caption of every top-level window to Jeff, you should write the following:</p>
+<pre><code>DWORD dwResult;
+SendMessageTimeout(HWND_BROADCAST, WM_SETTEXT, 0,
+                   (LPARAM) "Jeff", SMTO_ABORTIFHUNG, 
+                   5000, &amp;dwResult); 
+</code></pre>
+<p>
+This call broadcasts the WM_SETTEXT message with its lParam set to a string pointer. When you make this call, the system attempts to send the message like SendMessage. However, this function allows you to specify a timeout value (5,000 milliseconds in my example). If the message is not processed by all the top-level windows in the specified amount of time, the system stops trying to send the messages and returns. The windows that were created by any threads that were too busy to process the sent message will not get the message at all.</p>
+<p>
+Obviously, you should consider carefully which of these functions is best for you. Make your decision based on being able to send messages with pointers to data, the urgency of getting the message processed, and defensively coding against being hung.</p>
+<p>
+<b>Q.  </b>When I select the Applications tab in the Windows NT® Task Manager, in the listview control, the Task Manager shows which applications are running and whether they are responding. What is the definition of “Not Responding,” and how does the Task Manager determine whether an application is responding?</p>
+<p class=indent>
+<i>Michael Schoettner</i></p>
+<p>
+<b>A.  </b>First of all, the Task Manager’s Applications tab (see Figure 1) does not actually show applications—it shows the captions of visible, top-level windows (since this is how users typically decide which application they want to switch to). The Task Manager builds this list by walking through all of the top-level windows in the system (using something like EnumWindows), and adds to the list the windows that have the WS_VISIBLE style bit turned on.</p>
+<p>
+<img src="win321211_fig01.gif" border=0></p>
+<p>
+<b>Figure 1: Task Manager</b></p>
+<p>
+A window is not responding if the thread that created that window has not called GetMessage, PeekMessage, WaitMessage, or SendMessage within the past five seconds. The code in Figure 2 demonstrates this. First, build and run the application in Figure 2, then run the Task Manager. The Task Manager will indicate that the application is Running. Next, click the right mouse button over the message box. This causes the thread to sleep for 10 seconds, not calling the message box’s GetMessage loop. If you now watch the Task Manager, it will update its display (in about five seconds) to show that the application is Not Responding. If you wait another five seconds or so, the Task Manager will again update its display to show that the application is Responding.</p>
+<p>
+<b>Figure 2: Task manager Test App</b></p>
+<pre><code>LRESULT WINAPI GetMsgProc(int code, WPARAM wParam, LPARAM lParam) {
+   PMSG pmsg = (PMSG) lParam;
+   if (pmsg-&gt;message == WM_RBUTTONDOWN) 
+      Sleep(10000);
+   return(0);
+}
+
+
+int WINAPI WinMain (HINSTANCE hinstExe, HINSTANCE hinstExePrev,
+                    LPSTR pszCmdLine, int nCmdShow) {
+
+   HHOOK hhook = SetWindowsHookEx(WH_GETMESSAGE, GetMsgProc, NULL,
+                                  GetCurrentThreadId());
+   MessageBox(NULL, "Click right mouse button to hang this thread",
+              "MSJ Win32 Q &amp; A App", MB_OK);
+   UnhookWindowsHookEx(hhook);
+}
+</code></pre>
+<p>
+Every few seconds, the Task Manager walks through its list of displayed windows. For each window, the Task Manager makes the following call:</p>
+<pre><code>DWORD dwResult;
+BOOL fResponding = SendMessageTimeout(hwndInQuestion,
+     WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 5000, &amp;dwResult);
+// fResponding is TRUE if the thread is responding and // FALSE if not.
+</code></pre>
+<p>
+This call attempts to send a WM_NULL message (what should be a benign message) to a window. If the thread that created that window has not called GetMessage, PeekMessage, WaitMessage, or SendMessage within the past five seconds, SendMessageTimeout returns immediately because the SMTO_ABORTIFHUNG flag was specified. If the system doesn’t think the thread that created the window is hung, then it tries to send the message to the window. If the thread isn’t busy, it will process the message immediately and return. If the thread is busy, the Task Manager’s thread waits for up to 5,000 milliseconds for the message to be processed. If the message cannot be processed, SendMessageTimeout returns FALSE, which indicates the window—more correctly, the thread—is not responding.</p>
+<p>
+<b>Q.  </b>I use the __FILE__ macro in my source code to display the name of the source code module in a message box, as shown below:</p>
+<pre><code>int WINAPI WinMain (HINSTANCE hinstExe,
+                    HINSTANCE hinstExePrev,
+                    LPSTR pszCmdLine, int nCmdShow) {
+
+   TCHAR szBuf[100];
+   wsprintf(szBuf, "Source file name: %s", __FILE__);
+   MessageBox(NULL, szBuf, NULL, MB_OK);
+   return(0);
+}
+</code></pre>
+<p>
+I want to be able to compile the module natively for ANSI or Unicode. So I define the Unicode symbol and I change the wsprintf line so that it looks like this:</p>
+<pre><code>wsprintf(szBuf, __TEXT("Source file name: %s"),
+         __TEXT(__FILE__));
+</code></pre>
+<p>
+But now, whenever I compile the module, the compiler gives me the following warning:</p>
+<pre><code>error C2065: 'L__FILE__' : undeclared identifier
+</code></pre>
+<p>
+I realize that I could pass the __FILE__ macro to the MultiByteToWideChar function, but I’d like an easier and more efficient way of doing this. Is there an easy way to get the Unicode version of __FILE__?</p>
+<p class=indent>
+<i>Anj</i></p>
+<p>
+<b>A.  </b>Yes, there is an easy way to do this, but it isn’t very intuitive. All you have to do is change the __TEXT to TEXT (without the underscore in front) and recompile. This is what the line should look like:</p>
+<pre><code>wsprintf(szBuf, TEXT("Source file name: %s"),
+         TEXT(__FILE__));
+</code></pre>
+<p>
+If you examine WINNT.H carefully, you’ll see that TEXT is defined as</p>
+<pre><code>#define TEXT(quote) __TEXT(quote)
+</code></pre>
+<p>
+and the Unicode version of __TEXT is defined as</p>
+<pre><code>#define __TEXT(quote) L##quote
+</code></pre>
+<p>
+and the non-Unicode version of __TEXT is defined as</p>
+<pre><code>#define __TEXT(quote) quote
+</code></pre>
+<p>
+After looking at these few lines you’ll notice that all TEXT does is expand to __TEXT, so what difference does it  make whether you use TEXT or __TEXT? Well, it makes a difference to the preprocessor. When going through the two levels of indirection, the preprocessor can clearly determine that __FILE__ refers to a string containing the file name.</p>
+<p>
+As a side note, I sometimes like to put messages inside my source code for things that I must remember to come back to. The Visual C++® compiler supports a pragma that allows you to make notes to yourself inside your code. Here is an example:</p>
+<pre><code>#pragma message("Add error checking here later")
+</code></pre>
+<p>
+When the compiler comes across this line in my source code, it displays “Add error checking here later” in the output window, mixed in with any errors or warnings I might have. This is a nice way to make notes to yourself because you’ll be reminded of them every time you compile your module. </p>
+<p>
+It would be really nice if the compiler automatically added the name of the source code module and the line number to the message string. That way, you could double-click the message line in the IDE’s output window to immediately open the proper source code module and be positioned exactly at the line where you have the note.</p>
+<p>
+Unfortunately, the compiler does not add this information to the message, but you can add it yourself. I always define a macro called chMSG as follows:</p>
+<pre><code>#define chSTR(x)           #x
+#define chSTR2(x)        chSTR(x)
+#define chMSG(desc) message(__FILE__ "("\
+    chSTR2(__LINE__) "):" #desc)
+</code></pre>
+<p>
+Then, inside my source code modules, I place a message to myself like this:</p>
+<pre><code>#pragma chMSG(Add error checking here later)
+</code></pre>
+<p>
+When the compiler sees this line, it adds the following line to the output window:</p>
+<pre><code>C:\Project\BoBo.cpp(296):Add error checking here later
+</code></pre>
+<p>
+The Visual C++ IDE knows how to parse this line properly in order to load the correct source code file (C:\Projects\ BoBo.cpp) and position you at the desired line (296). </p>
+<p>
+As in the earlier example of TEXT and __TEXT, the chMSG macro calls the chSTR2 macro, which in turn calls the chSTR macro. I’m certain that you’ll agree there should be no need for chSTR2—why not just place a call to chSTR right inside the definition of chMSG? As it turns out, this extra level of indirection is very necessary; the preprocessor knows exactly what to do with the __LINE__ macro. Without the extra level of indirection, the preprocessor gets confused and displays the message like this:</p>
+<pre><code>C:\Project\BoBo.cpp(__LINE__):Add error checking here later
+</code></pre>
+<p>
+<b>Q.  </b>I’m writing a wizard-like application that leads the user through some setup tasks. Since I spawn this application from my main application, I don’t want the system’s taskbar to show a button for this window. I’ve performed many experiments and I can’t seem to figure out what rules the taskbar uses to determine whether it should show a button for a window. What are the rules?</p>
+<p class=indent>
+<i>Karen Fries</i></p>
+<p>
+<b>A.  </b>The rules the taskbar uses to decide whether a button should be shown for a window are really quite simple, but are not well documented. When you create a window, the taskbar examines the window’s extended style to see if either the WS_EX_APPWINDOW (defined as 0x00040000) or WS_EX_TOOLWINDOW (defined as 0x00000080) style is turned on. If WS_EX_APPWINDOW is turned on, the taskbar shows a button for the window, and if WS_EX_ TOOLWINDOW is turned on, the taskbar does not show a button for the window. You should never create a window that has both of these extended styles.</p>
+<p>
+You can create a window that doesn’t have either of these styles. If a window has neither style, the taskbar decides to create a button if the window is unowned and does not create a button if the window is owned.</p>
+<p>
+One final note: before making any of the above tests, the taskbar first checks to see if a window has the standard WS_VISIBLE window style turned on. If this style bit is off, the window is hidden; the taskbar never shows a button  for a hidden window. Only if the WS_VISIBLE style bit is on will the taskbar check the WS_EX_APPWINDOW, WS_ EX_TOOLWINDOW, and window ownership information.u</p>
+<p>
+To obtain complete source code listings, see the MSJ Web site at  http://www.microsoft.com/msj.</p>
+<p>
+Have a question about programming in Win32? Contact Jeffrey Richter at http://www.JeffreyRichter.com</p>
+</font></BODY>
+</HTML>

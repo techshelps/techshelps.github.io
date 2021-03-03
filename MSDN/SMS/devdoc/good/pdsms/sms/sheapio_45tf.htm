@@ -1,0 +1,174 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Sequential Processing of Domain Folders</title>
+<link disabled rel=stylesheet href=../../../backsdk3.css>
+<style type="text/css">
+@import url(../../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h3><a name="sms_sequential_processing_of_domain_folders"></a>Sequential Processing of Domain Folders</h3>
+<p>
+The simplest method for retrieving machine folders from multiple domain folders is sequential processing. Your application processes each domain folder one at a time. This means that your application initializes, and waits for the retrieval of, all machine folders for a single domain folder before initializing another domain folder.</p>
+<p>
+The following example populates a site container and retrieves the machines for each domain, one domain at a time.</p>
+<pre><code>// Function to display all domains and machine folders for all 
+// sites in a site container.
+// Function uses asynchronous population with
+// event notification for every 10 machines
+// that are retrieved.
+
+SMS_STATUS EnumerateMachinesInSiteContainer(
+    HANDLE hConnect)
+
+{
+SMS_STATUS stat;
+// Open a site container.
+HANDLE hSiteContainer;
+stat = SmsOpenContainer( C_SITE,
+                         hConnect,
+                         &amp;hSiteContainer);
+
+// Create the notification event (auto-reset, non-signaled).
+HANDLE hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+NOTIFY Notify;
+Notify.dwFreq  = 10;  // Notify every 10 machines.
+Notify.hEvent  = hEvent;
+// Populate the container with no site filters to retrieve 
+// a flat list of all sites in the site database.
+stat = SmsPopulate( hSiteContainer, 
+                    POP_ASYNC | POP_EVENT,
+                    &amp;Notify );
+
+// Get count of folders in container.
+DWORD totFolders;
+SmsGetFolderCount( hSiteContainer, F_ANY, &amp;totFolders );
+printf("The site container has %d site folders.\n",
+       totFolders );
+
+HANDLE hSiteFolder;
+HANDLE hDomainFolder;
+HANDLE hMachineFolder;
+DWORD dwSiteI;
+DWORD dwDomainI;
+DWORD dwMachineI;
+DWORD totDFolders;
+DWORD totMFolders;
+DWORD fType;
+DWORD dwRet;
+char szfType[SMS_DATA_BUFF_SIZE];
+char szFolderID[SMS_DATA_BUFF_SIZE];
+// Open each site folder and process it.
+// Note site folders are retrieved synchronously.
+for (dwSiteI = 0; dwSiteI &lt; totFolders; dwSiteI++) {
+    stat = SmsGetNextFolder( hSiteContainer,
+                             F_ANY,
+                             &amp;hSiteFolder );
+    if (stat != SMS_OK) {
+        printf("SmsGetNextFolder failed for site container.\n");
+        printf("Status code: %d\n", stat);
+        break;
+    }
+    // If site folder is retrieved, display the site name.
+    SmsGetFolderID( hSiteFolder, szFolderID );
+    SmsGetFolderType( hSiteFolder, &amp;fType, szfType );
+    printf("%s: \"%s\"\n", szfType, szFolderID);
+    // Count how many domain folders.
+    SmsGetFolderCount( hSiteFolder, F_DOMAIN, &amp;totDFolders );
+    // Retrieve the domain folders within the site folder.
+    // Note domain folders are retrieved synchronously.
+    for (dwDomainI = 0; dwDomainI &lt; totDFolders; dwDomainI++) {
+        stat = SmsGetNextFolder( hSiteFolder,
+                                 F_DOMAIN,
+                                 &amp;hDomainFolder );
+        if (stat != SMS_OK) {
+            printf("\tSmsGetNextFolder failed for site folder.\n");
+            printf("\tStatus code: %d\n", stat);
+            break;
+        }
+        // If domain folder is retrieved, display the domain name.
+        SmsGetFolderID( hDomainFolder, szFolderID );
+        SmsGetFolderType( hDomainFolder, &amp;fType, szfType );
+        printf("\t%s: \"%s\"\n", szfType, szFolderID);
+        // Trigger asynchronous retrieval for the domain folder
+        // by calling SmsGetFolderCount for the domain folder.
+        SmsGetFolderCount( hDomainFolder, 
+                           F_MACHINE, 
+                           &amp;totMFolders );
+        // Process machine folders as the number specified by
+        // the frequency is retrieved
+        // and print "." for progress.
+        printf("\t\tRetrieving machines");
+        while (1) {
+            dwRet = WaitForSingleObject( Notify.hEvent, 1000 );
+            if (dwRet != WAIT_OBJECT_0) {
+                printf("."); // Simple wait indication.
+                continue;
+            }
+            SmsGetFolderCount( hDomainFolder, 
+                               F_MACHINE, 
+                               &amp;totMFolders );
+            printf("\n\t\tCurrently %d folders in %s.\n",
+                   totMFolders,
+                   szFolderID);
+            // Retrieved at least Notify.dwFreq machines.
+            // Retrieve the machine folders currently 
+            // in the domain folder.
+            for (dwMachineI = 0; dwMachineI &lt; Notify.dwFreq;
+             dwMachineI++) {
+               stat = SmsGetNextFolder( hDomainFolder,
+                                         F_MACHINE,
+                                         &amp;hMachineFolder );
+               // If machine folder is retrieved, 
+               // display the machine ID and type.
+               if (stat == SMS_OK) {
+                   SmsGetFolderID( hMachineFolder, szFolderID );
+                   SmsGetFolderType( hMachineFolder, 
+                                     &amp;fType, 
+                                     szfType );
+                   printf("\t\t%s: \"%s\"\n", szfType, szFolderID);
+                   // Close the machine folder.
+                   SmsCloseFolder( hMachineFolder );
+            }
+               else if (stat == SMS_NO_MORE_DATA) {
+                   // End of folder list break out of loop.
+                   printf("\t\tEnd of folder list for domain.\n");
+                   break;
+               }
+               else {
+                   printf("\t\tSmsGetNextFolder failed for domain folder.\n");
+                   printf("\t\tStatus code: %d\n", stat);
+                   break;
+               }
+            }
+            // Check the status of retrieval.
+            // If SMS_OK, then go back to wait for more folders.
+            // If SMS_NO_MORE_DATA, then all machine folders in
+            // the domain have already been processed
+            // so the loop can be terminated.
+            if (stat == SMS_OK) {
+                printf("\t\tRetrieving more machines.\n");
+            }
+            else if (stat == SMS_NO_MORE_DATA) {
+                printf("\t\tNo more machines in domain\n");
+                break;
+            }
+            else {
+                printf("\t\tSmsGetNextFolder failed: %d\n", stat);
+                break;  // Exit machine folder retrieval loop
+            }
+        }
+        // Close the Domain folder.
+         SmsCloseFolder( hDomainFolder );
+    }
+    // Close the Site folder.
+    SmsCloseFolder( hSiteFolder );
+}
+return stat;
+} /* EnumerateMachinesInSiteContainer */
+</code></pre>
+<p>&nbsp;</p></body>
+</HTML>

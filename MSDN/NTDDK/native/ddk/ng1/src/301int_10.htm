@@ -1,0 +1,109 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML>
+<HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>1.4  Restrictions on Intermediate Drivers</TITLE>
+<style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD>
+<BODY BGPROPERTIES="FIXED" TEXT="#000000" BGCOLOR="#FFFFFF">
+
+<FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<H2><A NAME="DDK_Restrictions_on_Intermediate_Drivers_NG"></A>1.4  Restrictions on Intermediate Drivers </H2>
+<P>
+Previous sections have described specific actions an intermediate driver <I>must</I>
+follow to perform correctly, summarized as follows: 
+<OL>
+<LI>
+An intermediate driver must set the NDIS_ATTRIBUTE_INTERMEDIATE_DRIVER flag
+when it calls <B><A HREF="../../nr/src/103ndisx_130.htm">NdisMSetAttributesEx</A></B>
+in its MiniportInitialize function. NDIS identifies that a driver is an
+intermediate type only through the presence of this flag and takes special
+steps to ensure that deferred actions, such as passing internally-queued send
+packets on to the intermediate driver, occur without deadlocks. 
+<P>
+<LI>
+An intermediate driver <I>must always</I>, at a minimum, replace an incoming
+packet descriptor for a packet that it passes down to an underlying driver on
+a send or up to a higher level driver on a receive with a fresh packet
+descriptor, allocated by the intermediate driver. It must also then replace
+its own packet descriptor with the one that originally was associated with the
+packet when it was passed to the intermediate driver, for instance, when
+completing a send or completing a receive indication. The intermediate driver
+must return the resources it has &quot;borrowed&quot; from a higher or lower
+driver promptly by returning that driver&#39;s packet descriptor and the
+resources it specifies. 
+<P>
+<LI>
+An intermediate driver is <I>always</I>&nbsp;a full-duplex driver unless it reports
+the media type of its virtual NIC as <B>NdisMediumWan</B>. Any other
+intermediate driver <I>must</I>&nbsp;follow the rules that apply to any full-duplex
+miniport driver, in particular, the following guideline:
+<P>
+<I>If any internal driver resources are shared between an intermediate
+driver’s send function and any other MiniportXxx function, that resource must
+be protected by a spin lock.</I>&nbsp;The only exception to this is in the
+MiniportReset path, which is serialized by NDIS with respect to the
+MiniportSend or MiniportSendPackets function and all other Miniport<I>Xxx</I>
+functions.
+<P>
+As for any full-duplex miniport driver, an intermediate driver that organizes
+its per-binding context area into discrete receive-specific, send-specific,
+and shared ranges, with only the shared resource(s) protected by spin lock(s),
+will exhibit far better performance than a driver that must overprotect its
+context area because send-specific, receive-specific, and shared variables are
+scattered throughout.
+<P>
+<LI>
+When an intermediate driver is performing as a protocol driver, that is, in a
+Protocol<I>Xxx</I>&nbsp;function, it <I>cannot</I>&nbsp;call any <B>NdisM</B><I>Xxx</I>
+functions. It can call only the set of <B>Ndis</B><I>Xxx</I>&nbsp;functions that
+are callable by any protocol driver and certain <B>NdisIM</B><I>Xxx</I>
+functions specific to intermediate drivers. An intermediate driver in a
+protocol code path that needs to call an <B>NdisM</B><I>Xxx</I>&nbsp;function must
+call NDIS to switch to a miniport context before making the call. How this is
+accomplished is described next.
+</OL>
+<P>
+NDIS synchronizes the execution of Miniport<I>Xxx</I>&nbsp;functions as already
+explained in Part 2. To perform this same synchronization for an intermediate
+driver so that it can act as a miniport, any Protocol<I>Xxx</I>&nbsp;function in
+the intermediate driver must call <B><A HREF="../../nr/src/103ndisx_74.htm">NdisIMSwitchToMiniport</A></B>
+before the driver calls an <B>NdisM</B><I>Xxx</I>&nbsp;that indicates up to the
+higher level driver. For instance, before ProtocolReceive calls <B>NdisMIndicateReceivePacket</B>
+or <B>NdisM</B><I>Xxx</I><B>IndicateReceive</B>&nbsp;to pass a packet to the next
+higher driver, it must call NDIS to get into the context of a miniport. 
+<P>
+An intermediate driver first calls <B><A HREF="../../nr/src/103ndisx_74.htm">NdisIMSwitchToMiniport</A></B>.
+If <B>NdisIMSwitchToMiniport</B>&nbsp;returns TRUE, ProtocolReceive(Packets) can
+make its <B>NdisM</B><I>Xxx</I>&nbsp;call followed by a call to <B><A HREF="../../nr/src/103ndisx_73.htm">NdisIMRevertBack</A></B>
+when its miniport-only operations are complete. <B>NdisIMSwitchToMiniport</B>
+acquires a spin lock that prevents other Miniport<I>Xxx</I>&nbsp;functions in the
+same driver from running while the spin lock is held. Therefore, it is
+important that the intermediate driver call <B>NdisIMRevertBack</B>&nbsp;as quickly
+as possible. 
+<P>
+If <B>NdisIMSwitchToMiniport</B>&nbsp;returns FALSE, ProtocolReceive(Packets) must
+call <B><A HREF="../../nr/src/103ndisx_71.htm">NdisIMQueueMiniportCallback</A></B>
+to schedule a callback function in which to forward the receive indication.
+NDIS calls the driver-supplied callback function when it obtains the necessary
+spin lock, thereby allowing the callback function to perform the same actions
+the intermediate driver would have performed if the preceding call to <B>NdisIMSwitchToMiniport</B>
+had been successful.
+<P>
+When <B>NdisIMQueueMiniportCallback</B>&nbsp;returns, Protocol<I>Xxx</I>&nbsp;can resume
+protocol operations. If <B>NdisIMQueueMiniportCallback</B>&nbsp;returns
+NDIS_STATUS_SUCCESS, the miniport-only operations have been completed in the
+MiniportCallback function before the return. 
+<P>
+Note that the general restriction of switching to a miniport context applies
+to protocol actions other than just indicating up received packets. For
+instance, an intermediate driver&#39;s ProtocolStatus function also must make
+a context switch to being a miniport before the driver calls <B><A HREF="../../nr/src/103ndisx_108.htm">NdisMIndicateStatus</A></B>
+to forward a status indication from a lower level driver to a higher level
+driver. 
+<P>
+<B>NdisIMSwitchToMiniport</B>, <B>NdisIMRevertBack</B>&nbsp;and <B>NdisIMQueueMiniportCallback</B>
+must <I>not<B>&nbsp;</I></B>be called from any Miniport<I>Xxx</I>&nbsp;function. It is a
+fatal error to make such a call. 
+<P></FONT>
+</BODY>
+</HTML>

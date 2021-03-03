@@ -1,0 +1,946 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Animation in Windows</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_sprites"></a></sup>Animation in Windows</h1>
+<p>
+Herman Rodent<br>
+Starring: Nell and Olivia, the Wonder Dog</p>
+<p>
+Created: April 28, 1993</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="1203">
+</OBJECT><a href="javascript:sample1.Click()">Click to open or copy the files in the Sprites sample application for this technical article.</a></p>
+<h2>Abstract</h2>
+<p>
+This article is aimed at people who would like to create a Microsoft® Windows™-based application that does some form of animation, or who would like to understand how to improve the performance of an existing animated application, or who are considering porting an MS-DOS®–based application to Windows. The main focus of the article is on using device-independent bitmaps (DIBs) for the images and the DIB driver (DIB.DRV) for the off-screen image buffer. The article is written around a sample application, Sprites, which is included with the article. Some knowledge of animation techniques is assumed. If you're looking for a "How to Do Animation" article, this isn't it. The following points are covered:
+<ul type=disc>
+<li>
+Using DIBs<br><br></li>
+<li>
+Using the DIB driver<br><br></li>
+<li>
+Palettes<br><br></li>
+<li>
+Measuring and improving performance<br><br></li>
+<li>
+Lots of useful little tips and hints</li>
+</ul>
+<h2>Introduction</h2>
+<p>
+It's commonly thought that Microsoft® Windows™ is too slow to do any sort of animation effectively. This misconception has hindered the porting of many good MS-DOS®–based applications (notably games) to Windows. In addition to the theory that Windows is too slow, many programmers of MS-DOS–based applications fear having to learn how to program in the Windows environment and recreate an existing application from scratch, using strange new function calls and techniques. To top this off, there are a number of existing applications that, while adequate at what they do, do not show what the system is capable of.</p>
+<p>
+The Video for Windows technology, recently released to developers, shows what really can be achieved—video of reasonable quality in a window. The frame rates are not excessive, and the window sizes are not huge, but the net effect is very impressive and not difficult to achieve.</p>
+<p>
+If you are considering adding some animation to an existing Windows-based application, improving the performance of an existing animated application, or porting an MS-DOS–based application to Windows, this article and its accompanying sample code should help you along the way.</p>
+<p>
+As for me, I do not pretend to be an animation wizard. Before I wrote this article, I thought I had some pretty good ideas about how all this should be done, and a few of them were even right! By experimenting with my own ideas and those of others, I have discovered a lot of useful tips that I thought were worth passing on. Much of the information about palettes is reproduced from Ron Gery's articles, available among the other GDI Articles (Technical Articles, Windows Articles) on the Developer Network CD. Huge volumes of information also came from Todd Laney, without whom frame animation in Windows might never have gotten beyond one frame per second.</p>
+<h2>Architecture</h2>
+<p>
+When I decided to write the Sprites sample application, I made two major choices that determined the architecture of the entire application and, hence, this article: first, to use DIBs for all the images, and second, to use the DIB driver for the off-screen image buffer. Because these choices are so fundamental to what follows, some discussion of them is in order. This section also includes some notes on the use of palettes.</p>
+<h3>Using DIBs</h3>
+<p>
+Before the advent of device-independent bitmaps (DIBs) in Windows version 3.0, we had to create applications with different device-dependent bitmaps (DDBs) for each screen resolution and color depth we wanted the application to run on. DIBs provide a way around that problem by packaging together information about the image size, a color table, and the bits themselves into a single file. DIBs are inherently portable between different Windows environments, the only problem being that there are no Windows functions to render them directly, which make DIBs seem somewhat difficult to use. I chose to use them in my sample application because of the portability they provide. It turns out that the code required to manipulate them is not complicated, and any difficulty in writing the code is easily outweighed by the advantages of using DIBs.</p>
+<h4>DIB file formats</h4>
+<p>
+One irritating complexity of the DIB file format is that there are two different versions of it. One was designed for Windows version 3.0, and the other for the Presentation Manager® in OS/2®. The two formats do essentially the same thing but in slightly different ways.</p>
+<p>
+The Windows format uses four bytes for each color-table entry, which keeps the color-table elements DWORD-aligned and is efficient to access on a 32-bit platform. The Presentation Manager format uses three bytes for each color-table entry, resulting in a smaller color table (big deal compared with the image size!), but inefficient access.</p>
+<p>
+Both formats exist in applications designed for Windows. The Windows system handles both formats internally, but may not handle the Presentation Manager format in the future. A good application that reads DIB files should be able to handle both, the only complexity being creating a palette from the color table. More information about recognizing the format of a DIB and how to deal with it appears later in this article.</p>
+<p>
+The other irritation of the DIB format, a hangover from the Presentation Manager design, is that the scan lines in the DIB are upside-down with respect to their address in the file. In other words, the bits for the last scan line are first, and the bits for the first scan line are last. This requires some mental juggling when you manipulate or blt the bits in your code. Figure 1 illustrates the problem.</p>
+<p>
+<img src="sprites_1.gif" border=0></p>
+<p class=label>
+<b>Figure 1. DIB scan lines are inverted</b></p>
+<p>
+The DIB file structure consists of two blocks: a header and the bits. The header is actually three structures packed together, so the overall picture looks like Figure 2.</p>
+<p>
+<img src="sprites_2.gif" border=0></p>
+<p class=label>
+<b>Figure 2. Windows and Presentation Manager DIB file formats</b></p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;In the case of the Windows format, the BITMAPINFOHEADER and RGBQUAD array are both contained within a BITMAPINFO structure. In the case of the PM format file, the BITMAPCOREHEADER and RGBTRIPLE array are contained within a BITMAPCOREINFO structure. All of these structures are documented in the Microsoft Windows version 3.1 Software Development Kit (SDK).</p>
+<h4>DIBs in memory</h4>
+<p>
+If you examine the file format structures carefully, you will see that the file header contains a pointer to the position of the image bits within the file, implying that the block containing the bits need not be contiguous with the header. This is a convenience for the file format but a nuisance for a memory image format because we don't want to have to manage two memory blocks for the DIB, and we don't want to allocate memory that doesn't contain any useful information. So when we read a DIB file into memory, we calculate the total memory required for the header (excluding the BITMAPFILEHEADER, which is not required) and the bits, allocate a single block for the whole thing, and read the header and bits separately into this block so that they end up contiguous within it.</p>
+<p>
+But what about the two different formats? Instead of dealing with both formats in the application, I chose always to internally convert Presentation Manager DIBs to the Windows DIB format, providing only one format to deal with. This is easily done when the DIB image is created in memory. However, a DIB subsequently saved to file may end up being converted from Presentation Manager format to Windows format.</p>
+<p>
+A Windows-format DIB that is contained in a single memory block with its header immediately preceding the bits is called a <i>packed DIB</i> and is used to transfer DIBs via the Clipboard. Its Clipboard-format name is CF_DIB.</p>
+<h4>Handles or pointers?</h4>
+<p>
+Because we will allocate a block of memory for the packed DIB information, should we retain the handle to the memory or a pointer to it? In days of old when knights were bold and memory wasn't addressed by descriptor tables (real mode), we always worked with handles. Since we now live in a protected mode environment and are rapidly approaching the happy days of 32-bit, flat-model programming for Windows, I have chosen to keep a pointer to all my global objects rather than a handle. This avoids thousands of unnecessary calls to <b>GlobalLock</b> and <b>GlobalUnlock</b>, which both simplifies and speeds up the code. To make the code as portable as possible, I use macros (<b>ALLOCATE</b> and <b>FREE</b>) to allocate and free memory blocks.</p>
+<p>
+When I was writing the sample application, I found that I needed to use information like the height and width of the DIB a lot, so I initially created a structure that held all the information about the DIB that I used frequently and a pointer to the packed DIB itself. This wasn't really as efficient as it might have been because we were back to having two memory blocks to describe one DIB. I decided to implement a set of macros to do all the pointer de-referencing (<b>DIB_HEIGHT</b>, and so forth), and these were used throughout the application. Code speed is an issue here. It could be argued that all the pointer de-referencing used in the macros leads to slower code than could be achieved by having the commonly used DIB parameters cached in a single place. The macros help make the code a bit simpler to look at and result in a DIB being only a single memory block in CF_DIB format, which on balance I prefer. Figure 3 shows the format of a packed DIB in memory.</p>
+<p>
+<img src="sprites_3.gif" border=0></p>
+<p class=label>
+<b>Figure 3. Packed DIB memory organization</b></p>
+<h4>General DIB notes</h4>
+<p>
+When accessing the bits of a DIB in memory, be very careful that you use the correct type of pointer. If the DIB is less than 64K in size, you can use a far pointer to access all of it. If the DIB is larger than 64K, it's very important that you use a huge pointer so that the address arithmetic will be performed correctly. Bitmaps of 100 by 640, 200 by 320 or 250 by 250 are all just under 64K.</p>
+<p>
+Far pointers only have 64K offsets, so if you attempt to go beyond 64K, the offset will wrap, and the address will have a low offset value rather than the big one you expect. This problem is most noticeable when writing to the DIB in memory because an address wrap while writing the DIB bits will cause the BITMAPINFO header to be overwritten, and consequently, the integrity of the DIB will be trashed. I know about this—I've done it. The code always looks just fine, but something keeps trashing the header. Be warned!</p>
+<p>
+When accessing the bits in a DIB, also be aware that the width of a scan line is always divisible by 4 (DWORD-aligned), and consequently, the pixel position is not determined simply by the scan line number and image width. The Sprites header file, GLOBAL.H, includes a set of macros for accessing information on a DIB, given a pointer to it. The <b>DIB_STORAGEWIDTH</b> macro returns the physical length of the scan line. The <b>DIB_WIDTH</b> macro returns the width of the image.</p>
+<h3>The DIB Driver</h3>
+<p>
+The DIB driver was developed in response to requests from the many software developers who wanted to be able to manipulate the bits of a bitmap directly in memory. The DIB driver was originally developed as a part of the Multimedia extensions to Windows and, subsequently, shipped as a standard component of Windows version 3.1.</p>
+<h4>Direct bitmap memory access</h4>
+<p>
+It is not possible to directly access the bits of a Windows DDB. This is not simply because we (Microsoft) won't tell you how to find it; it's because allocation of the bitmap memory is done by the video device driver and the driver can choose to use any memory available to it, including memory on the video adapter card. In the case of the 8514 driver, there is quite a bit of spare video memory in some video modes, and it makes good sense for the video driver to make use of it if it can. If the memory for a bitmap is allocated on the adapter card, there is no direct access to it possible because that memory is not mapped into the processor address space.</p>
+<p>
+In addition to the problem of where the memory is located, the device driver defines the format of the memory allocated for the bitmap. This makes a lot of sense because it allows the driver to choose a memory organization that makes it easy to transfer (blt) chunks to and from the video memory. But because this format can vary from driver to driver, there is no way you could know how the memory is organized—even if you could access the memory.</p>
+<p>
+The DIB driver solves the problem of memory access and bitmap organization by requiring the application to allocate the memory for the bits and provide the information on how the bitmap bits are organized. The application does this by creating a packed DIB in memory and passing the address of this structure to the DIB driver when the application requests the creation of a device context (DC). The packed DIB structure contains a BITMAPINFO structure at its start that gives the width and height of the bitmap and also describes its color table and pixel color organization. Directly following the header are the bitmap bits, organized the same way as the bitmap bits in a DIB file.</p>
+<h4>What the DIB driver can do for you</h4>
+<p>
+By using the DIB driver to create a DC in a piece of memory that you have allocated and whose organization you understand, you can choose to create images in that DC in two ways: Use graphics device interface (GDI) operations in the same way as for any other DC, or manipulate the bits directly in memory.</p>
+<p>
+For an animation application, this means that you can use the DIB driver to manage the off-screen image buffer. You create a packed DIB of the same size and organization as the window in which the animation will play, and then use the DIB driver to create a DC for it. Thereafter, you can do all your image rendering to the off-screen DIB and use the <b>StretchDIBits</b> function to move areas of the off-screen DIB to the display window DC.</p>
+<h4>Drawing to the DIB driver DC</h4>
+<p>
+As mentioned above, you can perform regular GDI operations on a DIB driver DC. Because the DIB driver is a nonpalette device, there is no point in selecting and realizing a palette in the DC. There is no harm in doing this, however, as the driver simply ignores the request. Generic code that selects and realizes a palette when drawing to an arbitrary DC will still work okay if used on a DIB driver DC.</p>
+<h3>DIB Blt Functions</h3>
+<p>
+No function exists for directly causing a packed DIB to blt to a DC, but there are a small number of functions designed to move DIB bits between a DIB and a DDB or the screen DC. Table 1 lists the functions.</p>
+<p class=label>
+<b>Table 1. DIB Functions</b></p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=36%><b>Name</b></td>
+<td class=label width=64%><b>Description</b></td>
+</tr>
+<tr valign=top>
+<td width=36%><b>SetDIBits</b></td>
+<td width=64%>Move DIB bits to a DDB</td>
+</tr>
+<tr valign=top>
+<td width=36%><b>GetDIBits</b></td>
+<td width=64%>Move DDB bits to a DIB</td>
+</tr>
+<tr valign=top>
+<td width=36%><b>SetDIBitsToDevice</b></td>
+<td width=64%>Move DIB bits to a device</td>
+</tr>
+<tr valign=top>
+<td width=36%><b>StretchDIBits</b></td>
+<td width=64%>Move DIB bits to a device and optionally stretch them</td>
+</tr>
+</table><br>
+<p>
+The <b>SetDIBits</b> and <b>GetDIBits</b> functions are directly implemented by screen and printer device drivers. The <b>SetDIBitsToDevice</b> function is a hangover from Windows version 3.0 DIB development and should not be used in new projects. Use <b>StretchDIBits</b> instead of <b>SetDIBitsToDevice</b>. <b>StretchDIBits</b>, the "do all" function used to transfer DIB images between DCs, is optionally implemented by the screen device driver. If <b>StretchDIBits</b> is not implemented in the device driver, GDI uses combinations of <b>SetDIBits</b>, <b>GetDIBits</b>, and <b>BitBlt</b> to emulate it. Having GDI emulate <b>StretchDIBits</b> means awful performance. More about performance issues later.</p>
+<h4>StretchDIBits</h4>
+<p>
+Understanding what is going on with the color-table entries when <b>StretchDIBits</b> is called can be difficult. The following figures show what happens when <b>StretchDIBIts</b> is used to draw DIBs to DCs of both palette and nonpalette devices. The source DIB color table can be either RGB values (the DIB_RGB_COLORS flag is used) or palette index values (the DIB_PAL_COLORS flag is used). The four possible combinations are explained here.</p>
+<p>
+<img src="sprites_4.gif" border=0></p>
+<p class=label>
+<b>Figure 4. Using StretchDIBits with DIB_RGB_COLORS to draw on a palette device DC</b></p>
+<p>
+When drawing RGB values to a palette device, GDI translates each RGB value to an index in the current physical palette by calling an internal version of <b>GetNearestPaletteIndex</b>. The set of indices is then passed to the device driver. The driver tests the index set to see if it is an <i>identity palette</i>. An identity palette is one that has an exact 1:1 mapping of logical palette index values to the current physical palette. In other words, the palette table contains the values 0, 1, 2, ... 255. If the driver detects an identity palette, the DIB bits can be moved directly to the screen memory without translation. If the palette is not an identity palette, each pixel value (palette index) in the source DIB has to be translated through the lookup table supplied by GDI to the correct physical palette index value.</p>
+<p>
+<img src="sprites_5.gif" border=0></p>
+<p class=label>
+<b>Figure 5. Using StretchDIBits with DIB_PAL_COLORS to draw on a palette device DC</b></p>
+<p>
+When drawing palette index values to a palette device, GDI builds a translation table to map the logical index values in the DIB to the current physical palette index values. The set of indices and the translation table are then passed to the device driver. If the palette is found to be an identity palette, no translation is performed. (See the previous example in Figure 5.)</p>
+<p>
+<img src="sprites_6.gif" border=0></p>
+<p class=label>
+<b>Figure 6. Using StretchDIBits with DIB_RGB_COLORS to draw on a nonpalette device DC</b></p>
+<p>
+When drawing RGB values to a nonpalette device, GDI does no translating. The driver gets the RGB values directly. In the case of the DIB driver and an 8-bit DIB, these RGB values are converted to 8-bit pixel values by looking them up in the color table associated with the DIB on which the DIB driver has created a DC.</p>
+<p>
+<img src="sprites_7.gif" border=0></p>
+<p class=label>
+<b>Figure 7. Using StretchDIBits with DIB_PAL_COLORS to draw on a nonpalette device DC</b></p>
+<p>
+When drawing palette index values to a nonpalette device, GDI looks up each index in the currently selected logical palette and translates it to an RGB value. The table of RGB values is passed to the device driver.</p>
+<h3>Palettes</h3>
+<p>
+Most of the popular display cards today provide a resolution of 640 by 480 with 256 colors, and Windows provides palette management for the available colors. Any application wishing to use these colors will need to create and use one or more palettes. If you are not familiar with how palettes work in Windows, please refer to Ron Gery's articles, "The Palette Manager: How and Why" and "Using DIBs with Palettes," on the Developer Network CD (Technical Articles, Windows Articles, GDI Articles).</p>
+<p>
+In designing an animation application, we must consider how color will be used and create one or more palettes accordingly.</p>
+<h3>Palette Operations Take Time</h3>
+<p>
+Each time an application selects a palette for use by itself, Windows creates a mapping between the colors in the requested (logical) palette and the system (physical) palette. Exactly how it does this and the rules governing it are covered in Ron's articles. The important point is that the process of mapping a logical palette to the system palette takes a finite time and is not something we want to be doing every time we draw an image. In fact, GDI attempts to be helpful here and recognizes when the palette being realized in the current foreground application is the same as the one realized before it and doesn't repeat the matching operation needlessly. Nonetheless, we need to be careful about our use of palettes or the performance of our application will suffer.</p>
+<h4>One palette fits all</h4>
+<p>
+For the Sprites application, I chose to use only one palette. Rather than build the palette into the application, I chose to always create the palette from the color table contained in the DIB used for the background scene. This was purely a convenience for me. You could just as easily read a palette in from any DIB file and use that one.</p>
+<p>
+If all the images are to look reasonable when rendered with one common palette, the choice of the colors in that palette is obviously very important. How you should go about choosing those colors is beyond the scope of this article. I chose mine the coward's way, by letting the scanning software choose it for me. It so happens that the scanner I used created a common palette to save all of the images I scanned. It's not a great palette, but it's okay for the purpose of demonstrating the principle. The scanner used was a Hewlett-Packard® ScanJet® IIc and the software was Hewlett-Packard's DeskScan® II version 1.5.</p>
+<p>
+If you have several images and want to play with their palettes, try running the BitEdit and PalEdit tools available in the Video for Windows Software Development Kit (SDK). If you want to experiment, try looking at the images in the Sprites application.</p>
+<h4>Creating a palette</h4>
+<p>
+Creating a palette from the color table of a DIB is reasonably straightforward once you know how many colors you want to use. A LOGPALETTE structure is created large enough for the number of colors; the color information is copied from the DIB header; and a call made to <b>CreatePalette</b>. The LOGPALETTE structure is then freed. Because creating a palette is a common requirement when dealing with DIBs, I wrote a function to create a palette directly from the BITMAPINFOHEADER of a DIB. This function is called <b>CreateDIBPalette</b> and is in the PALETTE.C module of the Sprites sample code. Here it is with the comments and some of the error-handling code removed:</p>
+<pre><code>HPALETTE CreateDIBPalette(LPBITMAPINFO lpBmpInfo)
+{
+ &nbsp;&nbsp; LPBITMAPINFOHEADER lpBmpInfoHdr;
+ &nbsp;&nbsp; HANDLE hPalMem;
+ &nbsp;&nbsp; LOGPALETTE *pPal;
+ &nbsp;&nbsp; HPALETTE hPal;
+ &nbsp;&nbsp; LPRGBQUAD lpRGB;
+ &nbsp;&nbsp; int iColors, i;
+
+ &nbsp;&nbsp; lpBmpInfoHdr = (LPBITMAPINFOHEADER) lpBmpInfo;
+ &nbsp;&nbsp; if (!IsWinDIB(lpBmpInfoHdr)) return NULL;
+
+ &nbsp;&nbsp; lpRGB = (LPRGBQUAD)((LPSTR)lpBmpInfoHdr + (WORD)lpBmpInfoHdr-&gt;biSize);
+ &nbsp;&nbsp; iColors = NumDIBColorEntries(lpBmpInfo);
+ &nbsp;&nbsp; if (!iColors) return NULL;
+
+ &nbsp;&nbsp; hPalMem = LocalAlloc(LMEM_MOVEABLE,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sizeof(LOGPALETTE) + iColors * sizeof(PALETTEENTRY));
+ &nbsp;&nbsp; if (!hPalMem) return NULL;
+ &nbsp;&nbsp; pPal = (LOGPALETTE *) LocalLock(hPalMem);
+ &nbsp;&nbsp; pPal-&gt;palVersion = 0x300; // Windows 3.0
+ &nbsp;&nbsp; pPal-&gt;palNumEntries = iColors; // table size
+ &nbsp;&nbsp; for (i=0; i&lt;iColors; i++) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pPal-&gt;palPalEntry[i].peRed = lpRGB[i].rgbRed;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pPal-&gt;palPalEntry[i].peGreen = lpRGB[i].rgbGreen;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pPal-&gt;palPalEntry[i].peBlue = lpRGB[i].rgbBlue;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pPal-&gt;palPalEntry[i].peFlags = 0;
+ &nbsp;&nbsp; }
+
+ &nbsp;&nbsp; hPal = CreatePalette(pPal);
+ &nbsp;&nbsp; LocalUnlock(hPalMem);
+ &nbsp;&nbsp; LocalFree(hPalMem);
+
+ &nbsp;&nbsp; return hPal;
+}
+</code></pre>
+<p>
+The <b>CreateDIBPalette</b> function uses <b>NumDIBColorEntries</b> to get the number of colors in the DIB color table. <b>NumDIBColorEntries</b> copes with the somewhat obscure rules governing exactly how many color entries there are in a DIB color table. The structure contains a <b>biClrUsed</b> field that should have the number of colors in it but is often set to zero, meaning that the color table is the maximum size appropriate for the color depth.</p>
+<p>
+All of the DIB management code in the example assumes that the DIB is in Windows format (having been converted from PM format, if required, when it was loaded). The helper function <b>IsWinDIB</b> is used to make the test. More information about the DIB support functions can be found later in this article.</p>
+<h2>The Sprites Sample Application</h2>
+<p>
+I decided to make my sample some form of sprite (cast-based) animation for several reasons. First, it's much more challenging than frame animation and I'm a sucker for punishment. Second, all the techniques required for frame animation are used in sprite animation, so an example of sprite animation code also effectively provides a frame example. Of course, the real reason is that I could scan some images to make the sprites, which meant less artwork!</p>
+<h3>An Overview</h3>
+<p>
+The Sprites application uses a DIB for a background scene and allows the loading of multiple sprites on top of the background scene. Each sprite has x, y, and z coordinates and optional x and y velocity. It also has a flag to say if it can be dragged by the mouse or not.</p>
+<p>
+A background and set of sprites can be combined into a scene described in a simple .INI file. The entire scene can be loaded using the Load Scene command from the File menu.</p>
+<p>
+The application updates the positions of all sprites that have a nonzero velocity as fast as it can, using a <b>PeekMessage</b> loop.</p>
+<p>
+Sprites that have the selectable attribute set can be dragged with the mouse. Double-clicking a sprite opens a dialog box that allows all the sprite attributes to be set.</p>
+<p>
+The z-order value of zero is the front-most position, and values greater than zero go toward the back. I used a maximum value of 100, but the limit is actually 65,535.</p>
+<p>
+A separate debug information window works in conjunction with <b>dprintf</b> statements in the code and the Debug menu to show what's going on.</p>
+<p>
+Figure 8 shows how the background DIB, DIB driver DC, common palette, and screen DC relate to each other.</p>
+<p>
+<img src="sprites_8.gif" border=0></p>
+<p class=label>
+<b>Figure 8. The architecture of the Sprites application</b></p>
+<h3>Code Notes</h3>
+<p>
+The Sprites sample code has some features that I will mention here to help you avoid confusion when you read the code.</p>
+<p>
+The various <b>dprintf</b> statements throughout the code are used to print debugging information in the debug window. The amount of information is controlled by the current debug level, which can be set from the Debug menu. I try to use level 1 for error messages (most important), level 2 for general procedural steps (for example, entering a major function), level 3 for increased procedural detail (for example, what's happening in the function), and level 4 for data dumps and events that occur too fast to want data about them all the time. The <b>dprintf</b> statements are implemented as macros in GLOBAL.H.</p>
+<p>
+Because the world of Windows-based programming is moving rapidly towards 32 bits, I try not to include the near or far attribute in pointer names. So instead of <i>npDIB</i>, <i>lpDIB</i> or <i>fpDIB</i>, I simply use <i>pDIB</i>. This might seem confusing because it is so common to see <i>lpSomething</i> in Windows code, but I believe that it will help in the long run. Almost all pointers in the code are actually far pointers, though a few huge pointers for dealing with big objects and one or two near pointers to data in the local heap for enhanced performance also exist.</p>
+<p>
+In many cases when code fragments are included in the text of the article, I have removed comments, debug code, and sometimes error-reporting statements to help clarify what I'm talking about. Please look at the actual code in the sample before writing your own.</p>
+<p>
+Be aware that last-minute changes to the code before publication might mean some slight differences between what's in the article and what's in the sample code. If in doubt, go with the code in the sample.</p>
+<h3>The Background</h3>
+<p>
+The background scene of the animation is a single DIB. The color table found in the background DIB is used to create the palette used to render all the images to the window DC. You can load a background by using the Load Background command from the File menu or load a scene by using the Load Scene command. The <b>LoadBackground</b> function in BKGND.C is responsible for doing the work. We'll look at the code for each step of the function with a brief description of what is happening at each stage.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;DeleteSpriteList();
+</code></pre>
+<p>
+<b>DeleteSpriteList</b> deletes the current set of sprites. Although doing this isn't entirely necessary, it greatly simplifies the set of dependencies. The background provides the common palette, and each sprite has its color table adjusted to fit the background color set, so it was easier to start again each time a background was loaded.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;DeleteDIB(pdibBkGnd);
+</code></pre>
+<p>
+This <b>DeleteDIB</b> function deletes the existing background DIB although it does nothing if the DIB does not currently exist.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;pdibBkGnd = LoadDIB(pszPath);
+</code></pre>
+<p>
+This line of code loads the new background DIB. If no path is provided for the background DIB, a dialog box is presented to choose it.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;if (hpalCurrent) DeleteObject(hpalCurrent);
+ &nbsp;&nbsp; hpalCurrent = CreateDIBPalette(pdibBkGnd);
+</code></pre>
+<p>
+This code deletes any current palette from a previous background DIB and any new one created from the new background DIB. The <b>CreateDIBPalette</b> function is in the DIB.C module.</p>
+<p>
+At this point the palette could be modified to ensure that the first ten and last ten entries exactly match the system-color entries. This is important to do so that the palette indices will not need translation when they are blted to the screen. (This subject is discussed at greater length later in this article.)</p>
+<p>
+The window rectangle is then adjusted to fit the new background. I'll skip the code for that since it's commonplace.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;if (hdcOffScreen) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DeleteDC(hdcOffScreen);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hdcOffScreen = NULL;
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; DeleteDIB(pdibOffScreen);
+</code></pre>
+<p>
+Any existing off-screen DC and its associated DIB are deleted. The <b>DeleteDIB</b> function is in DIB.C.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;pdibOffScreen = CreateCompatibleDIB(pdibBkGnd);
+</code></pre>
+<p>
+This code creates a new off-screen DIB the same size as the background DIB. The <b>CreateCompatibleDIB</b> function is in DIB.C.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;hdcOffScreen = CreateDC("DIB", NULL, NULL, (LPSTR)pdibOffScreen);
+</code></pre>
+<p>
+A new off-screen DC is created using the DIB driver and the new off-screen DIB. Note that the DIB driver requires that the last argument be a pointer to a packed DIB structure.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;if (!pPalClrTable) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pPalClrTable = (LPBITMAPINFO) ALLOCATE(sizeof(BITMAPINFOHEADER)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; + 256 * sizeof(WORD));
+ &nbsp;&nbsp; }
+
+ &nbsp;&nbsp; _fmemcpy(pPalClrTable,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pdibOffScreen,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sizeof(BITMAPINFOHEADER));
+
+ &nbsp;&nbsp; pIndex = (LPWORD)((LPSTR)pPalClrTable + sizeof(BITMAPINFOHEADER));
+ &nbsp;&nbsp; for (i=0; i&lt;256; i++) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *pIndex++ = (WORD) i;
+ &nbsp;&nbsp; }
+</code></pre>
+<p>
+A 1:1 color lookup table is required when <b>StretchDIBits</b> is used later to copy image data from the off-screen DC to the window DC. If the table doesn't already exist, the memory is allocated for it. The table header is copied from the background DIB. This sets the size information to be the same as the background and off-screen DIBs. Last, the color table is filled with the values 0 through 255, which give the 1:1 color index mapping we will need later.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;Redraw(NULL, bUpdateScreen);
+</code></pre>
+<p>
+A call is made to render the background image to the off-screen DC and to update the window DC with the new image.</p>
+<h3>The Sprites</h3>
+<p>
+Each sprite consists of a DIB that provides the image and a set of variables that describes its size, position, and, optionally, its velocity. The information about each sprite is contained in a SPRITE structure:</p>
+<pre><code>typedef struct _SPRITE {
+ &nbsp;&nbsp; struct _SPRITE FAR *pNext;&nbsp; // Pointer to the next item
+ &nbsp;&nbsp; struct _SPRITE FAR *pPrev;&nbsp; // Pointer to the previous item
+ &nbsp;&nbsp; PDIB pDIB;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // The DIB image of the sprite
+ &nbsp;&nbsp; int x;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // X Coordinate of top-left corner
+ &nbsp;&nbsp; int y;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Y Coordinate of top-left corner
+ &nbsp;&nbsp; int z;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Z-order for sprite
+ &nbsp;&nbsp; int vx;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // X velocity
+ &nbsp;&nbsp; int vy;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Y velocity
+ &nbsp;&nbsp; int width;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Width of bounding rectangle
+ &nbsp;&nbsp; int height;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Height of bounding rectangle
+ &nbsp;&nbsp; BYTE bTopLeft;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Top-left pixel value
+ &nbsp;&nbsp; COLORREF rgbTopLeft;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Top-left pixel color
+ &nbsp;&nbsp; BOOL bSelectable;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // TRUE if sprite can be mouse-selected
+} SPRITE, FAR *PSPRITE;
+</code></pre>
+<p>
+The transparent regions of the sprite are determined by the color of the top-left pixel of its DIB. When the DIB is authored, one color is reserved (it doesn't matter what color it is) for the transparent regions, and they are all filled with that color. The top-left pixel is also set to that color. This is easy to achieve in practice because it is natural that the corners of the sprite rectangle are transparent for most real object shapes.</p>
+<p>
+To see how these parameters are set, let's look at the <b>LoadSprite</b> function in SPRITE.C:</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;pSprite = (PSPRITE) ALLOCATE(sizeof(SPRITE));
+</code></pre>
+<p>
+Memory is allocated for the SPRITE structure.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;pSprite-&gt;pDIB = LoadDIB(pszPath);
+</code></pre>
+<p>
+The DIB image of the sprite is loaded. If no path was supplied to <b>LoadSprite</b>, a dialog box opens, so you can select the DIB.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;pSprite-&gt;width = (int) DIB_WIDTH(pSprite-&gt;pDIB);
+ &nbsp;&nbsp; pSprite-&gt;height = (int) DIB_HEIGHT(pSprite-&gt;pDIB);
+ &nbsp;&nbsp; pSprite-&gt;x = 0;
+ &nbsp;&nbsp; pSprite-&gt;y = 0;
+ &nbsp;&nbsp; pSprite-&gt;z = 0;
+ &nbsp;&nbsp; pSprite-&gt;vx = 0;
+ &nbsp;&nbsp; pSprite-&gt;vy = 0;
+ &nbsp;&nbsp; pSprite-&gt;bSelectable = TRUE;
+ &nbsp;&nbsp; pSprite-&gt;pNext = NULL;
+ &nbsp;&nbsp; pSprite-&gt;pPrev = NULL;
+</code></pre>
+<p>
+The defaults are set for the sprite parameters.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;MapDIBColorTable(pSprite-&gt;pDIB, pdibBkGnd);
+</code></pre>
+<p>
+The color table in the DIB is mapped to the color table of the background DIB. This isn't required if all the sprite DIBs are authored with the same color table as the background DIB. If the color tables differ, this at least renders the sprite image in the best way possible rather than as a collection of seemingly random colors. The <b>MapDIBColorTable</b> function is in DIB.C.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;pSprite-&gt;bTopLeft = GetDIBPixelValue(pSprite-&gt;pDIB, 0, 0);
+ &nbsp;&nbsp; pSprite-&gt;rgbTopLeft = GetDIBPixelColor(pSprite-&gt;pDIB, 0, 0);
+</code></pre>
+<p>
+The index value and color of the top-left pixel are saved for later use in determining the transparent areas of the image.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;if (pSpriteList) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pSpriteList-&gt;pPrev = pSprite;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pSprite-&gt;pNext = pSpriteList;
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; pSpriteList = pSprite;
+</code></pre>
+<p>
+The sprite is added to the top of the sprite list. For now, the position in the list doesn't matter. It will be adjusted when the z-order is set.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;SetSpriteZOrder(pSprite, 50, NO_UPDATE);
+</code></pre>
+<p>
+The z-order of the sprite is set to a default value. Z-order zero is the front-most sprite. Sprites with the same z-order are drawn with the one at the top of the sprite list front-most. Painting is done from the bottom of the list to the top. The list is always maintained in z-order, so don't set the z-order value directly; use the <b>SetSpriteZOrder</b> function, which correctly manages the list.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;if (bRedraw != NO_UPDATE) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GetSpriteRect(pSprite, &amp;rc);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Redraw(&amp;rc, UPDATE_SCREEN);
+ &nbsp;&nbsp; }
+</code></pre>
+<p>
+If redrawing the sprite was requested, the sprite rectangle is added to the redraw list. A single sprite loaded manually from the menu needs to be redrawn to be visible, but if the sprite is being loaded along with other sprites to form a scene, the redraw operation needs to be done only when all the sprites are loaded.</p>
+<h3>The DIB Functions and Macros</h3>
+<p>
+Inasmuch as Windows provides no functions to deal with DIBs the way it does with DDBs, we need to create our own. The DIB.C module contains all the DIB-handling functions used in the application, except those used for rendering, which are in the DRAW.C module. A brief description of each function is given in Table 2. See the Sprites code for more details. A set of macros is defined in GLOBAL.H for accessing various parameters of a DIB. They are described in Table 3.</p>
+<p class=label>
+<b>Table 2. DIB Macros</b></p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=50%><b>Macro name</b></td>
+<td class=label width=50%><b>Function</b></td>
+</tr>
+<tr valign=top>
+<td width=50%><pre><code>DIB_WIDTH(pDIB)&nbsp;&nbsp;&nbsp;&nbsp; </code></pre>
+</td>
+<td width=50%>Image width</td>
+</tr>
+<tr valign=top>
+<td width=50%><pre><code>DIB_HEIGHT(pDIB)&nbsp;&nbsp;&nbsp; </code></pre>
+</td>
+<td width=50%>Image height</td>
+</tr>
+<tr valign=top>
+<td width=50%><pre><code>DIB_PLANES(pDIB)&nbsp;&nbsp;&nbsp; </code></pre>
+</td>
+<td width=50%>Number of color planes</td>
+</tr>
+<tr valign=top>
+<td width=50%><pre><code>DIB_BITCOUNT(pDIB)&nbsp; </code></pre>
+</td>
+<td width=50%>Number of bits per pixel</td>
+</tr>
+<tr valign=top>
+<td width=50%><pre><code>DIB_CLRUSED(pDIB)&nbsp;&nbsp; </code></pre>
+</td>
+<td width=50%>Number of colors used</td>
+</tr>
+<tr valign=top>
+<td width=50%><pre><code>DIB_COLORS(pDIB)&nbsp;&nbsp;&nbsp; </code></pre>
+</td>
+<td width=50%>Number of colors</td>
+</tr>
+<tr valign=top>
+<td width=50%><pre><code>DIB_PCLRTAB(pDIB)&nbsp;&nbsp; </code></pre>
+</td>
+<td width=50%>Pointer to the color table</td>
+</tr>
+<tr valign=top>
+<td width=50%><pre><code>DIB_BISIZE(pDIB)&nbsp;&nbsp;&nbsp; </code></pre>
+</td>
+<td width=50%>Size of the BITMAPINFO struct</td>
+</tr>
+<tr valign=top>
+<td width=50%><pre><code>DIB_PBITS(pDIB)&nbsp;&nbsp;&nbsp;&nbsp; </code></pre>
+</td>
+<td width=50%>Pointer to the bits</td>
+</tr>
+<tr valign=top>
+<td width=50%><pre><code>DIB_PBI(pDIB)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; </code></pre>
+</td>
+<td width=50%>Pointer to the BITMAPINFO struct</td>
+</tr>
+<tr valign=top>
+<td width=50%><pre><code>DIB_STORAGEWIDTH(pDIB) </code></pre>
+</td>
+<td width=50%>Scan line storage width</td>
+</tr>
+</table><br>
+<p class=label>
+<b>Table 3. DIB Functions </b></p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=50%><b>Function</b></td>
+<td class=label width=50%><b>Description</b></td>
+</tr>
+<tr valign=top>
+<td width=50%><code>PDIB LoadDIB(LPSTR pszPath)</code></td>
+<td width=50%>Load a DIB. <i>pszPath</i> is the file path or NULL to invoke the File Open dialog box.</td>
+</tr>
+<tr valign=top>
+<td width=50%><code>void DeleteDIB(PDIB pDIB)</code></td>
+<td width=50%>Delete a DIB. If <i>pDIB</i> is NULL, the request is ignored.</td>
+</tr>
+<tr valign=top>
+<td width=50%><code>BYTE GetDIBPixelValue(PDIB pDIB, int x, int y)</code></td>
+<td width=50%>Get the value (color-table index) of a pixel at coordinates x,y of the DIB pointed to by <i>pDIB</i>.</td>
+</tr>
+<tr valign=top>
+<td width=50%><code>COLORREF GetDIBPixelColor(PDIB pDIB, int x, int y)</code></td>
+<td width=50%>Get the color (RGB) of a pixel at coordinates x,y of the DIB pointed to by <i>pDIB</i>.</td>
+</tr>
+<tr valign=top>
+<td width=50%><code>BOOL IsWinDIB(LPBITMAPINFOHEADER pBI)</code></td>
+<td width=50%>Test if a DIB is Windows format (rather than Presentation Manager format).</td>
+</tr>
+<tr valign=top>
+<td width=50%><code>void ShowInfo(LPBITMAPINFO lpBmpInfo)</code></td>
+<td width=50%>A debugging function to display attributes of a DIB in the debug window.</td>
+</tr>
+<tr valign=top>
+<td width=50%><code>WORD NumDIBColorEntries(LPBITMAPINFO lpBmpInfo)</code></td>
+<td width=50%>Get the number of colors in the color table of a DIB. Used in the <b>DIB_COLORS</b> macro.</td>
+</tr>
+<tr valign=top>
+<td width=50%><code>PDIB CreateCompatibleDIB(PDIB pOld)</code></td>
+<td width=50%>Create a new DIB the same size and color format as an existing DIB.</td>
+</tr>
+<tr valign=top>
+<td width=50%><code>HPSTR GetDIBPixelAddress(PDIB pDIB, int x, int y)</code></td>
+<td width=50%>Get a pointer to the pixel at address x,y in the DIB pointed to by <i>pDIB</i>.</td>
+</tr>
+<tr valign=top>
+<td width=50%><code>void MapDIBColorTable(PDIB pdibObj, PDIB pdibRef)</code></td>
+<td width=50%>Map the colors in the color table of the DIB pointed to by <i>pdibObj</i> to the colors in the color table of the DIB pointed to by <i>pdibRef</i>. This is done by creating a temporary DIB driver DC the same size as the object DIB, with the color table of the reference DIB. The object DIB is then rendered to the DIB driver DC using <b>StretchDIBBits</b> with the DIB_RGB_COLORS option. The resulting bits (now mapped to the reference color table) are copied back to the object DIB bits.</td>
+</tr>
+</table><br>
+<h3>The Drawing Functions</h3>
+<p>
+The module DRAW.C contains all of the functions to render images to the off-screen DIB driver DC and to the window DC. The most important functions are <b>RenderDIBBitsOffScreen</b>, <b>Redraw</b>, and <b>Paint</b>.</p>
+<h4>RenderDIBBitsOffScreen</h4>
+<p>
+This function is used to render the background DIB and the sprites to the off-screen DC. It uses two functions—<b>CopyDIBBits</b> and <b>TransCopyDIBBits</b> in the FAST32.ASM module—to perform the actual bit transfers. Here's a description of the function:</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;rcDraw.top = rcDraw.left = 0;
+ &nbsp;&nbsp; rcDraw.right = DIB_WIDTH(pdibOffScreen) - 1;
+ &nbsp;&nbsp; rcDraw.bottom = DIB_HEIGHT(pdibOffScreen) - 1;
+
+ &nbsp;&nbsp; if (prcClip) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!IntersectRect(&amp;rcDraw, &amp;rcDraw, prcClip)) return;
+ &nbsp;&nbsp; }
+
+ &nbsp;&nbsp; rcDIB.left = x;
+ &nbsp;&nbsp; rcDIB.right = x + DIB_WIDTH(pDIB) - 1;
+ &nbsp;&nbsp; rcDIB.top = y;
+ &nbsp;&nbsp; rcDIB.bottom = y + DIB_HEIGHT(pDIB) - 1;
+
+ &nbsp;&nbsp; if (!IntersectRect(&amp;rcDraw, &amp;rcDraw, &amp;rcDIB)) return;
+</code></pre>
+<p>
+The function is supplied with a clipping rectangle describing the area to be drawn into. The first step is to intersect that rectangle with the off-screen DIB boundary so that we don't try to draw outside the bounds of the DIB. If there is no intersection, there is nothing to do. The resultant rectangle is intersected again, this time with the bounding rectangle of the DIB itself to ensure we aren't going to be doing more work than is really necessary. Again, if there is no intersection, the DIB isn't visible, and the function returns.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;pStartS = GetDIBPixelAddress(pDIB,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rcDraw.left - x,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rcDraw.bottom - y);
+
+ &nbsp;&nbsp; pStartD = GetDIBPixelAddress(pdibOffScreen,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rcDraw.left,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rcDraw.bottom);
+
+ &nbsp;&nbsp; lScanS = DIB_STORAGEWIDTH(pDIB);
+ &nbsp;&nbsp; lScanD = DIB_STORAGEWIDTH(pdibOffScreen);
+</code></pre>
+<p>
+The address of the bottom-left corner of the draw rectangle is found in both the source DIB and the destination DIB. The length of the physical scan line for each DIB is obtained. The addresses represent the lowest address of the DIB bits we need to copy.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;if (!bTrans) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CopyDIBBits(pStartD, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pStartS, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rcDraw.right - rcDraw.left + 1,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rcDraw.bottom - rcDraw.top + 1,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lScanD,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lScanS);
+ &nbsp;&nbsp; } else {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; TransCopyDIBBits(pStartD, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pStartS, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rcDraw.right - rcDraw.left + 1,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rcDraw.bottom - rcDraw.top + 1,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lScanD,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lScanS,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; bTranClr);
+ &nbsp;&nbsp; }
+</code></pre>
+<p>
+If the DIB is to be treated as nontransparent (as the background DIB is), the <b>CopyDIBBits</b> function is called. If the DIB has a transparency color associated with it (as a sprite DIB has), then the <b>TransCopyDIBBits</b> function is used. These two copy functions are implemented in 32-bit assembly language in FAST32.ASM.</p>
+<h4>Redraw</h4>
+<p>
+This function is used in two ways, depending on whether the screen needs to be updated or not. When rendering multiple images, it is important to do the least amount of work, so the function is used to add items to the redraw list and, optionally, to do the actual redraw. Here's what goes on:</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;if (prcClip) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AddDrawRectItem(&amp;DrawList, prcClip);
+ &nbsp;&nbsp; } else {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (pdibBkGnd) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rcAll.left = rcAll.top = 0;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rcAll.right = DIB_WIDTH(pdibBkGnd);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rcAll.bottom = DIB_HEIGHT(pdibBkGnd);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AddDrawRectItem(&amp;DrawList, &amp;rcAll);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; if (bUpdate == NO_UPDATE) return;
+</code></pre>
+<p>
+The first stage adds the supplied clipping rectangle to the redraw list. If NULL is specified, it means that the entire window needs to be redrawn, causing a rectangle the size of the background DIB to be added to the list instead. If no request was made to update the screen, the function exits here.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;MergeDrawRectList(&amp;DrawList);
+ &nbsp;&nbsp; pLastSprite = pSpriteList;
+ &nbsp;&nbsp; if (pLastSprite) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; while (pLastSprite-&gt;pNext) pLastSprite = pLastSprite-&gt;pNext;
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; if (bUpdate == UPDATE_SCREEN) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hDC = GetDC(hwndMain);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; pDrawRect = DrawList.pHead;
+ &nbsp;&nbsp; while (pDrawRect) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RenderDIBBitsOffScreen(pdibBkGnd, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0, 0, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;(pDrawRect-&gt;rc),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; FALSE);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pSprite = pLastSprite;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; while (pSprite) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RenderSpriteOffScreen(pSprite, &amp;(pDrawRect-&gt;rc));
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pSprite = pSprite-&gt;pPrev;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (bUpdate == UPDATE_SCREEN) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Paint(hDC, &amp;(pDrawRect-&gt;rc));
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDrawRect = pDrawRect-&gt;pNext;
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; if (bUpdate == UPDATE_SCREEN) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ReleaseDC(hwndMain, hDC);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; EmptyDrawRectList(&amp;DrawList);
+</code></pre>
+<p>
+The first step in the rendering process is to merge all the overlapping rectangles in the redraw list. This results in a list of nonoverlapping rectangles and gives us the smallest area requiring modification. Pointers are obtained to the last sprite in the sprite list and the first rectangle in the redraw list. The sprite list is walked from bottom to top so that high z-order sprites (which are at the bottom of the list) appear at the back of the scene.</p>
+<p>
+Then, for each rectangle, the background is replaced in the off-screen DC by calling <b>RenderDIBBitsOffScreen</b>. The sprite list is then walked, rendering each sprite. The clipping of each sprite is handled in part by the <b>RenderSpriteOffScreen</b> function and in part by the <b>RenderDIBBitsOffScreen</b> function.</p>
+<p>
+If <b>Redraw</b> was called with the UPDATE_SCREEN flag, the screen DC is repainted by calling the <b>Paint</b> function for the current draw rectangle in the list.</p>
+<p>
+When all of the rectangles in the list have been redrawn, the list is reset to empty by a call to <b>EmptyDrawRectList</b>.</p>
+<p>
+All of the drawing rectangle functions can be found in DRAW.C.</p>
+<h4>Paint</h4>
+<p>
+The <b>Paint</b> function handles updating the screen DC from the off-screen DIB driver DC. Here's the code:</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;if (prcClip) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; w = prcClip-&gt;right - prcClip-&gt;left;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; h = prcClip-&gt;bottom - prcClip-&gt;top;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; xs = xd = prcClip-&gt;left;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; yd = prcClip-&gt;top;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ys = DIB_HEIGHT(pdibOffScreen) - prcClip-&gt;bottom;
+ &nbsp;&nbsp; } else {
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; w = DIB_WIDTH(pdibOffScreen);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; h = DIB_HEIGHT(pdibOffScreen);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; xs = xd = ys = yd = 0;
+ &nbsp;&nbsp; }
+</code></pre>
+<p>
+The above code computes the width and height of the rectangle to be copied and the start point in the off-screen DC and the window DC, based on either the supplied clipping rectangle or the size of the off-screen image.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;if (hpalCurrent) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hOldPal = SelectPalette(hDC, hpalCurrent, 0);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RealizePalette(hDC);
+ &nbsp;&nbsp; }
+</code></pre>
+<p>
+The current palette (obtained originally from the background DIB color table) is selected into the screen DC and realized. This operation takes a significant amount of time only the first time it is called after the application has become the foreground application.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;StretchDIBits(hDC,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Destination DC
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; xd,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Destinaton x
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; yd,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Destination y
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; w,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Destination width
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; h,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Destination height
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; xs,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Source x
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ys,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Source y
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; w,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Source width
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; h,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Source height
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DIB_PBITS(pdibOffScreen), // Bits
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pPalClrTable,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // BITMAPINFO
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DIB_PAL_COLORS,&nbsp;&nbsp;&nbsp;&nbsp; // Options
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SRCCOPY);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Raster operation (ROP)
+</code></pre>
+<p>
+<b>StretchDIBits</b> is called to copy the bits of the off-screen image to the screen memory. Note the use of DIB_PAL_COLORS and the 1:1 color lookup table (<i>pPalClrTable</i>). See the section below on performance for more details.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;if (hOldPal) SelectPalette(hDC, hOldPal, 0);
+</code></pre>
+<p>
+The palette in the screen DC is restored.</p>
+<h3>Updating Positions</h3>
+<p>
+The <b>UpdatePositions</b> function really has very little to do with creating sprites. I included this to show off the performance by whizzing a few images across the screen. The code walks down the sprite list looking for any sprites that have a nonzero velocity vector. When it finds one, it adds the current position to the redraw list so that it will be erased from there. The sprite position is updated and the new position of the sprite added to the redraw list. In both cases, the <b>Redraw</b> function is called with the NO_UPDATE option to prevent any actual draw operations until we are finished walking the list.</p>
+<p>
+Once all the sprites have been updated, a test is made to see if any changes occurred; if so, the <b>Redraw</b> function is called one more time, but this time with the UPDATE_SCREEN option, which causes the redraw rectangle list to be walked and redrawn with all the updates being reflected to the screen DC.</p>
+<p>
+If you want to do special case sprite movements (funny trajectories, flipping sprite images as they move, and so on), this is the place to add the code.</p>
+<h3>The Scene File Format</h3>
+<p>
+To make life easier while debugging the Sprites application, I created an .INI file to describe the background DIB to use and which sprites to load. The format isn't very tidy, but it's documented here so that you can create your own files. A nice improvement to the application would be an option to save the current scene in a file.</p>
+<p>
+Here's part of the GARDEN.INI file showing the description of the background and two of the sprites:</p>
+<pre><code>[Background]
+dib=bkgnd.dib
+</code></pre>
+<p>
+This describes the background DIB to use. There is only one entry to specify the name of the DIB file. The default is to load the file from the current directory. If this isn't what you want, put in the full path.</p>
+<pre><code>[Sprites]
+sun=1
+cloud2=1
+</code></pre>
+<p>
+This section gives a list of sprites to be loaded. The "=1" bit is bogus. Only the list of names is used by the loader code.</p>
+<pre><code>[Sun]
+x=400
+y=0
+z=99
+dib=sun.dib
+selectable=0
+vy=1
+</code></pre>
+<p>
+This describes the sun sprite listed in the [sprites] section.</p>
+<pre><code>[Cloud1]
+x=150
+y=20
+z=80
+vx=2
+dib=cloud16.dib
+</code></pre>
+<p>
+This describes one of the cloud sprites listed in the [sprites] section.</p>
+<p>
+Table 4 shows the list of attributes for a sprite, a description of each one, and the default if the entry is omitted.</p>
+<p class=label>
+<b>Table 4. The Sprite Attributes</b></p>
+<table border=1 cellpadding=5 cols=3 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=13%><b>Key</b></td>
+<td class=label width=50%><b>Description</b></td>
+<td class=label width=37%><b>Default value</b></td>
+</tr>
+<tr valign=top>
+<td width=13%>dib</td>
+<td width=50%>The path of the DIB file.</td>
+<td width=37%>None (This is a required entry.)</td>
+</tr>
+<tr valign=top>
+<td width=13%>x</td>
+<td width=50%>The x position of the top-left corner of the sprite.</td>
+<td width=37%>0</td>
+</tr>
+<tr valign=top>
+<td width=13%>y</td>
+<td width=50%>The y position of the top-left corner of the sprite.</td>
+<td width=37%>0</td>
+</tr>
+<tr valign=top>
+<td width=13%>z</td>
+<td width=50%>The z-order value. O is front-most. More than one sprite can have the same z-order value.</td>
+<td width=37%>50</td>
+</tr>
+<tr valign=top>
+<td width=13%>vx</td>
+<td width=50%>The x velocity in pixels per redraw cycle.</td>
+<td width=37%>0</td>
+</tr>
+<tr valign=top>
+<td width=13%>vy</td>
+<td width=50%>The y velocity in pixels per redraw cycle.</td>
+<td width=37%>0</td>
+</tr>
+<tr valign=top>
+<td width=13%>selectable</td>
+<td width=50%>Means the sprite can be selected for dragging by the mouse.</td>
+<td width=37%>1 (DIB can be selected.)</td>
+</tr>
+</table><br>
+<p>
+Note that you cannot enter negative values directly because the code uses <b>GetPrivateProfileInt</b> to retrieve them. Negative values must be entered as 16-bit two's complement values. Enter -1, for example, as 0xFFFF or 65535.</p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;<b>GetPrivateProfileInt</b> is an example of a stupidly named Windows function. It has "Int" in the name, but always works with unsigned integers. This rather frustrating and brain-dead feature will, unfortunately, be with us for life. Such is the mission of backward compatibility in Windows.</p>
+<h2>Measuring Performance</h2>
+<p>
+One of the problems with this sort of work is that analysis of the results can be rather subjective, which is something I detest. Often I hear, "Hmm, I'm sure it was faster before you did that." It's very nice to be able to respond with a list of timings and prove the point objectively. To this end, I have used two different ways to measure how long various operations in the code took to execute.</p>
+<h3>Using Software Timing</h3>
+<p>
+The first timing technique involves reading the system clock at the beginning and end of a section of code and reporting the elapsed time. This technique is okay with two provisos: that the time measurements are accurate enough and that displaying the timing information does not contribute significantly to the times being measured.</p>
+<p>
+Timing measurements were done with the MMSYSTEM function <b>timeGetTime</b> rather than the regular Windows function <b>GetTickCount</b> because <b>timeGetTime</b> returns a millisecond count accurate to the nearest millisecond and <b>GetTickCount</b> returns a millisecond count only accurate to the nearest 55 ms (or one DOS clock tick, hence the name).</p>
+<p>
+Displaying the results using the debug print statements (<b>dprintf</b>) is, however, rather invasive, and if you use this technique, you must be aware that painting the debug information window is a slow process. Although displaying the debug information might not contribute to the execution time of the piece of code you are measuring, it certainly does contribute to the overall execution time of the application and, hence, slows down the animation significantly. Using a small (two or three lines) debug window helps to minimize this.</p>
+<p>
+Despite the invasive nature of showing the results, the timings of small sections of code are quite accurate. Such timings are also very helpful in determining whether optimizing a particular piece of code is worthwhile and, once optimized, exactly what the improvement was.</p>
+<h3>Using Hardware Techniques</h3>
+<p>
+The second technique I used is covered in another article of mine, "Use Your Printer Port to Measure System Timings." This technique sets and clears bits of a printer port at various places in the code. By using an oscilloscope to monitor when the transitions of the bits take place, you can make accurate timing measurements. Using the oscilloscope to monitor various operations in the Sprites code was instrumental in discovering several performance problems, the most notable being that allocating small blocks of memory with <b>GlobalAlloc</b> is very slow and inefficient. For the details on how this technique works, please see "Use Your Printer Port to Measure System Timings" on the Developer Network CD (Technical Articles, Windows Articles, Development Environment Articles).</p>
+<h2>Improving Performance</h2>
+<p>
+While creating the Sprites sample, I measured the execution times of various bits of my code in order to determine where the bottlenecks were. This section describes what I found out.</p>
+<h3>Memory Allocation</h3>
+<p>
+The first discovery I made when I started looking at performance was that using <b>GlobalAlloc</b> to allocate all of the dynamic memory blocks in the application isn't the best choice. I had defined a macro to allocate and free memory blocks so that the technique could be easily changed if required. I had decided to allocate all memory the same way—which essentially ruled out using local memory for anything. This was a big mistake. I was using my <b>ALLOCATE</b> macro (which calls <b>GlobalAlloc</b>) to allocate the elements of the redraw rectangle list. Using the oscilloscope, I measured the time taken to be almost 3 ms on my 386/33 Compaq (in enhanced mode). I was quite disgusted by this and rewrote the rectangle functions to use local memory blocks allocated with <b>LocalAlloc</b> and near pointers to access the structures. The result was that the execution time of <b>AddDrawRectItem</b> fell from about 3 ms to about 50 us. This cut almost 6 ms from the 72-ms-cycle time of one of my test scenes, which has a single sprite (a dog) moving one pixel at a time from left to right across a plain blue background.</p>
+<p>
+The memory for the SPRITE structure could also be allocated locally and the far pointers used within the structure for <b>pPrev</b> and <b>pNext</b> replaced with near pointers. This might give a small improvement in the rendering time because the sprite list is walked quite often.</p>
+<h3>Rendering DIBs to the Off-Screen DIB</h3>
+<p>
+My first try at rendering the sprite DIBs to the off-screen DC was a complete disaster. I tried to use raster operations to create monochrome masks for the transparency regions of each sprite and to insert the nontransparent areas into the off-screen DIB. After many hours of fruitless work and a phone call or two, I was reminded that the DIB driver supports a background mode called NEW_TRANSPARENT, and if this is set, <b>StretchDIBits</b> will treat the current background color as the transparency color of a bitmap. The resulting code is implemented in the <b>RenderDIBOffScreen</b> function in DRAW.C.</p>
+<p>
+Close examination of the code shows that the call to <b>StretchDIBits</b> is made using the DIB_RGB_COLORS option, which causes the RGB values in the color table of the source DIB to be mapped to the RGB values of the color table in the destination DIB (the off-screen DIB in this case). This mapping of RGB values can be handy if your two DIBs have different color tables, but is rather a waste of time if they are the same. Even assuming that you wanted to use DIBs with different color tables, it seems ridiculous to do the mapping every time the DIB is rendered. Why not do the mapping once and save the results?</p>
+<p>
+To do the mapping once, I created the <b>MapDIBColorTable</b> function in DIB.C. This function creates a temporary DC using the DIB driver, renders the DIB to the DC using <b>StretchDIBits</b> with the DIB_RGB_COLORS option, and then copies the resulting bits in the DIB driver DC DIB back to the original source DIB. The net result is that the pixels in the source DIB are now mapped to the color table supplied by the reference DIB (the background DIB in our case).</p>
+<p>
+So far, so good. I then got way too clever and modified the <b>StretchDIBits</b> call in the <b>RenderDIBOffScreen</b> function to use DIB_PAL_COLORS with a 1:1 color table (as is used in the <b>Paint</b> routine). This didn't work; I got weird colors. After some research, I discovered that you can't use DIB_PAL_COLORS when working with a nonpalette device, and the DIB driver is a nonpalette device. What happens is that GDI tries to be helpful: It detects that the device driver is not a palette device, maps the palette indices to RGB values, and sends those to the driver. Net result: a waste of processor time and the wrong colors. There is a way around this problem, however. In MMSYSTEM.H, a macro called DIBINDEX can be used to define the colors in the DIB color table as palette index values.</p>
+<pre><code>clr[n] = DIBINDEX[n]
+</code></pre>
+<p>
+This line of code sets a special flag in the COLORREF structure that the DIB driver recognizes, and instead of matching the RGB values normally found in the color table, it treats the low byte as a palette index. But by this time I'd lost interest in using <b>StretchDIBits</b> and decided to do my own thing.</p>
+<p>
+I decided to implement a function simply to copy the bits of the sprite DIB to the off-screen DIB, ignoring the transparency problem for the moment. This worked great. The performance was significantly better, and the colors were right. I added some code to implement the transparency feature (all of this in C), and although I now had transparent sprites again, the performance went back down. The cause of the loss of performance was the code generated by the C compiler, which dealt with all the huge pointers I was using. Still, the idea seemed good.</p>
+<p>
+I recoded the function to copy a scan line of the DIB in assembly language and found that the speed improved quite a lot. I improved the assembly language function to copy a whole block rather than calling it multiple times to copy scan lines, and the result, which is in FAST16.ASM, was another small speed improvement.</p>
+<p>
+The final touch was to use a technique developed by Todd Laney to create a 32-bit code segment for the assembly language routine to run in. This code can be found in FAST32.ASM and the macros that support it in CMACRO32.INC. The code was taken from FAST16.ASM and optimized by Todd. The several rules regarding the use of 32-bit code segments and how to generate them are detailed in the section "Using 32-Bit Code Segments" below.</p>
+<p>
+Table 4 shows some timings measured at various points through the development cycle of this piece of code. The cycle time shown is the time the application takes to complete one move-render-redraw cycle. The background time is the time taken to render the background DIB, which is not transparent, into the area the sprite is being moved from, and the sprite time is the time taken to render the sprite image in the new position. All times are in milliseconds (ms). The sprite was SMOLIVIA.DIB, a 256-color image. For all cases, the paint time was constant at about 7 ms.</p>
+<p class=label>
+<b>Table 5. Code Timings</b></p>
+<table border=1 cellpadding=5 cols=4 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=58%><b>Description</b></td>
+<td class=label width=14%><b>Cycle</b></td>
+<td class=label width=14%><b>Bkgnd</b></td>
+<td class=label width=14%><b>Sprite</b></td>
+</tr>
+<tr valign=top>
+<td width=58%><b>StretchDIBits</b> with DIB_RGB_COLORS</td>
+<td width=14%>300</td>
+<td width=14%>12</td>
+<td width=14%>280</td>
+</tr>
+<tr valign=top>
+<td width=58%><b>StretchDIBits</b> with DIB_PAL_COLORS</td>
+<td width=14%>75</td>
+<td width=14%>35</td>
+<td width=14%>35</td>
+</tr>
+<tr valign=top>
+<td width=58%>Primitive C code rectangle copy</td>
+<td width=14%>12</td>
+<td width=14%>-</td>
+<td width=14%>-</td>
+</tr>
+<tr valign=top>
+<td width=58%>C code with transparency using huge pointers</td>
+<td width=14%>40</td>
+<td width=14%>1.8</td>
+<td width=14%>31</td>
+</tr>
+<tr valign=top>
+<td width=58%>Using 16-bit assembly language to copy lines</td>
+<td width=14%>17</td>
+<td width=14%>2</td>
+<td width=14%>6</td>
+</tr>
+<tr valign=top>
+<td width=58%>Using 16-bit assembly language to copy blocks</td>
+<td width=14%>16</td>
+<td width=14%>1.6</td>
+<td width=14%>5.5</td>
+</tr>
+<tr valign=top>
+<td width=58%>Using 32-bit assembly language to copy blocks</td>
+<td width=14%>16</td>
+<td width=14%>1.6</td>
+<td width=14%>4.6</td>
+</tr>
+<tr valign=top>
+<td width=58%>Optimized 32-bit assembly language</td>
+<td width=14%>11</td>
+<td width=14%>0.6</td>
+<td width=14%>2.6</td>
+</tr>
+</table><br>
+<p>
+One further improvement remains untried. I expect that using run-length encoded (RLE) DIBs to define a sprite might increase efficiency. The RLE code scheme allows for blocks of the DIB to be skipped over using a form of relative addressing. This scheme could be used to encode only the visible areas of a sprite. For images that have a lot of transparency, this method could result in great improvements in the rendering time.</p>
+<h3>Updating the Window DC from the Off-Screen DIB</h3>
+<p>
+The first and most important thing to know here is that you can't use <b>BitBlt</b> to move bits from the DIB driver DC to the screen DC. <b>BitBlt</b> is a device-driver-implemented function and each driver only understands its own DCs. The DIB driver owns the DIB driver (off-screen) DC and the screen device driver owns the window DC. This rule also prevents you from using <b>BitBlt</b> to copy data from a screen DC to a printer DC. Where I most often get caught by this is in creating compatible DCs. It's very easy to forget that a particular DC was created (and therefore is owned by) a particular device driver. So if you create a DC compatible with an existing printer DC or DIB driver DC, you still can't use <b>BitBlt</b> to move data between that DC and any DC owned by the screen-device driver. This is where the DIB-specific functions come in.</p>
+<p>
+Updating the window from the off-screen DIB is reasonably straightforward:
+<ol>
+<li>
+The palette created from the background DIB when it was loaded is selected into the window DC and realized.<br><br></li>
+<li>
+<b>StretchDIBits</b> is called with the DIB_PAL_COLORS option and a 1:1 color table.<br><br></li>
+<li>
+The original palette is reselected into the DC.</li>
+</ol>
+<p>
+That's all it takes. Using the DIB_PAL_COLORS option prevents any color matching. Actually, the first time the palette is realized, GDI establishes a new system palette and modifies the index values in the logical palette so that they map directly to the system palette. Once this has been done, there is no need to map a logical palette index to a physical palette index, and consequently, the process runs very quickly. This mapping stays valid so long as the system palette doesn't change.</p>
+<h3>Redraw Rectangle List</h3>
+<p>
+Since rendering images to the off-screen DC and copying the changed areas to the main window DC are really what take all the time, Sprites attempts to reduce the number of blts to a minimum. To achieve this economy, the code maintains a list of rectangles that need to be redrawn on the off-screen DIB and repainted to the window DC. As the first step in performing a redraw, the redraw list is merged so that any overlapping rectangles are combined into a single rectangle. Then, each rectangle in the list is redrawn. In this way, Sprites modifies the minimum area each time. Choose the Show Update Rects command from the Debug menu to look at the redraw areas (in cyan) and the repaint-to-the-screen areas (bordered in magenta).</p>
+<h3>Using Assembly Language Code</h3>
+<p>
+Writing critical sections of the code in assembly language can provide two advantages. First, the code is often smaller and faster than that generated by the compiler; and second, because of the way Windows allocates descriptor table entries for large (&gt;64K) memory blocks, you can access an entire block of memory (for example, a packed DIB) with the selector to the base of the block and a 32-bit offset. Simply using a 32-bit register (ESI, for example) for the offset forces the assembly language to include an addressing modifier into the code, which results in a 32-bit offset being used. This is how the FAST16.ASM module works.</p>
+<h3>Using 32-Bit Code Segments</h3>
+<p>
+You can also include 32-bit code segments in your application. Using 32-bit code is almost exactly the same as the 16-bit assembly language case, except that the code is now running with 32-bit offsets by default, so no addressing modifier needs to be included before an instruction that uses a 32-bit offset. On a 386, almost no improvement in performance results from this because the execution time of the modifier is so low, but on a 486, the presence of a modifier alters the instruction pipelining, resulting in a very noticeable reduction in performance. So using 32-bit code segments provides a minor improvement on a 386 (a few percent) and a major improvement on a 486 (usually one-and-a-half to two times better). <i>Using 32-bit code segments has nothing to do with a flat-model address space; you are still working with segment and offset.</i> Currently, the only way to implement 32-bit code segments is in assembly language, using a special version of the C macros. Following are some regulations governing how these segments must be created and used:
+<ul type=disc>
+<li>
+The 32-bit segment must be separate from any 16-bit code segments. To ensure this, give the 32-bit segment a unique name (such as TEXT32) and link it with the <b>/NOPACKCODE</b> option in the linker to prevent the segment being merged with other segments. Failure to keep the segment isolated will result in a GP fault when one of your 32-bit functions attempts to return to the 16-bit calling code.<br><br></li>
+<li>
+The 32-bit code segment should not call any 16-bit code. This restriction—and the fact that the 32-bit code is running with a 16-bit stack—limits the 32-bit code to doing data manipulation tasks.<br><br></li>
+<li>
+The assembly language code must include the special CMACRO32.INC file, a modified version of CMACROS.INC that handles 32-bit code segments.<br><br></li>
+<li>
+The code must be assembled with MASM version 5.1, not MASM version 6.0, which is not backward compatible with the macros.</li>
+</ul>
+<p>
+The way that the 32-bit segments are integrated is quite ingenious. Each procedure has a short piece of code at its start that determines if the segment is running in 32-bit mode. If it is found to be in 16-bit mode, a jump is made to a piece of fix-up code at the start of the segment that modifies the descriptor-table entry for the segment to change the mode to 32-bit and then returns to the called function, which now executes in 32-bit mode. This fix-up only needs to occur once for the segment. Once it has been set to 32-bit mode, it stays that way.</p>
+<p>
+Using 32-bit code segments presents one minor problem. The linker sets a bit in the .EXE file header in the segment table to mark the 32-bit code segment as being a 32-bit segment, much as you might expect. Windows ignores many of the flags in the segment information, including this one. However, the ROM Windows version of Windows makes use of this bit to mark a segment as being in ROM, which causes disastrous results if you try to run an application with 32-bit code segments in RAM. This problem can be cured by modifying the flag bits in the segment information table of the .EXE file. There is currently no tool available to do this.</p>
+<h3>Sprite Design</h3>
+<p>
+Since performance is limited largely by the amount of data being moved about, make sure that sprites don't have borders around them. Even though the border is transparent, these areas cause trouble because the entire sprite rectangle needs to be redrawn whenever the sprite is moved.</p>
+<p>
+<img src="sprites_9.gif" border=0></p>
+<p class=label>
+<b>Figure 9. Good and bad sprite designs</b></p>
+<h3>Run-Time Decisions</h3>
+<p>
+Not all device drivers have the <b>StretchDIBits</b> function implemented. Even in some of the drivers that do have it implemented, the implementation may not be all that good. If <b>StretchDIBits</b> is not implemented in the driver, GDI will simulate it by using combinations of <b>SetDIBits</b> and <b>BitBlt</b>. This requires the use of an intermediate DDB that GDI uses to band the image in 64K chunks. This is horrendously slow. The Video for Windows code tests the performance of <b>StretchDIBits</b> when it starts up by timing a few calls to <b>StretchDIBits</b> against calls to <b>SetDIBits</b> and <b>BitBlt</b> for the same image. If <b>StretchDIBits</b> is slower, the driver is either missing the <b>StretchDIBits</b> function or has a very bad implementation. In any case, the Video for Windows code reports the problem to the user and carries on using the <b>SetDIbits</b> and <b>BitBlt</b> option. Note that, although the application still runs without a device driver, implementation of <b>StretchDIBits</b> is much slower than it would be if the function were present.</p>
+<h2>Notes About BitBlt</h2>
+<p>
+During the early stages of developing the Sprites application, I tried creating DDBs from the sprite DIBs and then creating monochrome bitmap masks for their transparent areas. The bitmaps were combined together with the background bitmap using various raster operations. Even though <b>BitBlt</b> isn't used anywhere in the final Sprites code, I thought my notes, which follow, might still be of some interest.
+<ul type=disc>
+<li>
+When a DC is first created (for example, by calling <b>CreateCompatibleDC</b>), it has a default 1-by-1 monochrome bitmap selected into it. So, if you subsequently call <b>CreateCompatibleBitmap</b>, you will get a monochrome bitmap. This isn't what you'd expect if you started with a color DC, created a compatible DC from that, and then asked for a compatible bitmap. To ensure that your bitmap is the same color format as the original DC, get the color information by calling <b>GetDeviceCaps</b> for BITSPIXEL and PLANES, and then use that information in a call to <b>CreateBitmap</b>:<pre><code>BitsPixel = GetDeviceCaps(hDC, BITSPIXEL);
+ &nbsp; Planes = GetDeviceCaps(hDC, PLANES);
+ &nbsp; hbm = CreateBitmap(width, height, Planes, BitsPixel, NULL);
+</code></pre>
+</li>
+<li>
+When using <b>BitBlt</b> to convert a color bitmap to a monochrome bitmap, if the pixel color of the source bitmap is the same as the current background color, the monochrome output is white (1); otherwise, it is black (0).<br><br></li>
+<li>
+If you want to be able to use blt operations such as XOR and AND to do transparency masking onto a DIB DC, the sprite image and mask must also be in DIB DCs. This is because <b>BitBlt</b> cannot work with device contexts from two different drivers.</li>
+</ul>
+<h2>Unimplemented Features</h2>
+<p>
+The Sprites application supports only 8-bit DIBs. It won't let you load a 2- or 4-bit DIB. It also doesn't support RLE DIBs.</p>
+<p>
+It turned out that once the code was complete, the DIB driver had taken a back seat in the design and, in fact, could be removed altogether. The only function it provides is to map RGB color values to index values, and this could just as easily be done with a small piece of code.</p>
+<p>
+The background DIB is treated as a special case throughout the code. It might have been better to treat it as just another sprite with a z-order value of 65,535. If so, it would still be used to create the common palette when loaded as the background DIB, but once that was done, it would simply be added to the tail end of the sprite list.</p>
+<p>
+Some sprites are simply rectangles, and in these cases, it would be nice to be able to set a flag to say that transparency does not apply to this sprite. This can easily be done by changing the BYTE value used in the <b>bTransColor</b> field of SPRITE to be a UINT (or WORD) with a special reserved value of 0xFFFF, meaning that there is no transparent color.</p>
+<p>
+Another possible improvement to the architecture might be to use two off-screen DIBs in a double buffering arrangement. Each time an image is rendered to a buffer, the difference between the new image and the old one in the other buffer would be recorded (in a third DIB) and then converted to RLE before being sent to the screen DC. This might look like a lot of work, but it has the advantage of minimizing the amount of data going to the screen DC, which is a limiting factor. Doing the render, comparison, and update to the off-screen DIBs could be done very efficiently with a small piece of assembly language code.</p>
+<h2>Windows NT Issues</h2>
+<p>
+The DIB driver is not provided in Windows NT™ and may not be provided in future versions of Windows. Instead, there will be a new function called <b>CreateDIBSection</b> that will allow you to do the same things but in a slightly different way. If you want to be able to port your application trivially to Windows NT, you should remove the DIB driver and use your own code to do the RGB-to-index-color conversions and also remove the 32-bit assembly language code because this is very platform-dependent.</p>
+<p>
+The <b>ALLOCATE</b> and <b>FREE</b> macros used for memory management in the Sprites sample don't map very well to Windows NT functions. A better approach would be to include the WINDOWSX.H header file and use the <b>GlobalAllocPtr</b> and <b>GlobalFreePtr</b> macros, which have direct mapping to Windows NT functions.</p>
+<p>
+Another issue with porting to Windows NT is the use of LPSTR casts when doing address arithmetic, which is used to calculate the offset of DIB bits in a packed DIB. It is better to use LPBYTE because this points to an 8-bit object in both 16- and 32-bit Windows environments. LPSTR points to a 16-bit object in Windows NT.</p>
+</BODY>
+</HTML>

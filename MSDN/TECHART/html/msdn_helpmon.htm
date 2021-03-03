@@ -1,0 +1,307 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Viewing HelpDesk Activity: A DHTML System Monitor</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><a name="msdn_helpmon"></a>Viewing HelpDesk Activity: A DHTML System Monitor</h1>
+<p>
+Steve Kirk<br>
+MSDN Content Development Group</p>
+<p>
+December 1997<br>
+Updated: February 2, 1998</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="5176">
+</OBJECT><a href="javascript:sample1.Click()">Click to copy the sample files for this technical article.</a></p>
+<h2>Introduction</h2>
+<p>
+In this project, I'll use Dynamic HTML (DHTML) and the DirectAnimation Structured Graphics Control (included with Microsoft® Internet Explorer 4.0) in a statistical monitoring application for the HelpDesk system. The monitoring application presents the system administrator with a graphical model of system activity along a continuous time line. The DHTML display can be navigated by zooming and panning and provides the ability to drill into the graphical representation to retrieve detail data. The Structured Graphics Control allows you to create windowless vector graphics where overlapping lines and shapes are treated as individual programmable entities.</p>
+<p>
+I'll start by developing a method for gathering and storing periodic snapshots of system status with consideration of data depth, polling frequency, and scalability. I'll then develop the DHTML client application and include an exploration of DirectAnimation vector graphics and an architecture of HTML components (scriptlets). In both the client and the server, I'll use COM components written in Microsoft Visual Basic® for lower-level data services.</p>
+<p>
+The HelpDesk sample application includes a set of client applications, multitiered COM services, and a SQL Server database. The HelpDesk Monitor client requires Internet Explorer 4.0 and the server requires Microsoft SQL Server 6.5 and the HelpDesk database. The HelpDesk API components are also required.</p>
+<h3>An Overview of the Monitoring System</h3>
+<p>
+Figure 1 shows the HelpDesk object model, including the monitoring components. A recurring scheduled task in SQL Server controls a COM component that takes a snapshot of system data, packages the data into a single entity, and then inserts the entity into the database. Because the packaging operation can be more easily written in Visual Basic than in Transact-SQL, I placed the packaging code in an external COM component (HDMonSvr) that calls back into the SQL Server database through the DBExec layer of the HelpDesk COM API.</p>
+<p>
+On the client, the DHTML graphics components provide timeline graphics and detail reports from data provided through a specialized COM component (HDMonCli) and the HelpDesk client component (HDClient). Code in HDMonCli retrieves, caches, and unpackages snapshot data to service the graphics components.</p>
+<p>
+<b><img src="hdobjmod.gif" border=0></b></p>
+<p class=label>
+<b>Figure 1. Overview of the monitoring system</b></p>
+<h3>Recording Data Snapshots</h3>
+<p>
+Determining the right amount of performance data to capture and save necessitates an analysis of the tradeoffs between depth, frequency, and storage. Highly detailed snapshots taken at a high frequency and stored forever will allow a lot of historical playback, trend analysis, and detail drilling, but they will also consume massive resources. If only a few data fields are captured from a request queue containing only a hundred records at a lazy rate of once a minute, there will soon be a great amount of data stored. Therefore, this system is designed around the following guidelines:
+<ul type=disc>
+<li>
+Store snapshot data in a space-efficient structure that provides easy access to summary information while preserving a reasonable amount of raw detail that can be retrieved with greater effort.<br><br></li>
+<li>
+Periodically thin snapshots by quantity and depth. Save every snapshot for the current period, every other snapshot for the previous period, and every fourth for the period before that. As detail becomes irrelevant, remove it from snapshot entities and leave only summary data.<br><br></li>
+<li>
+Schedule the snapshot task to capture data at a reasonable frequency and to run only during hours of interest.</li>
+</ul>
+<p>
+By using a single data entity with a variable length field for each snapshot, the data can be stored compactly and it can be retrieved with relatively inexpensive (joinless) queries. By describing the request queue hierarchically, with summary information easily accessible at the beginning of the structure and detail data available by parsing the data more completely, a top-level overview is readily available and details can be retrieved with more work on demand. The structure also allows data to be thinned as it becomes less current by simply lopping off detail and leaving totals and subtotals. Table 1 shows the Snapshot data entity. </p>
+<p class=label>
+<b>Table 1. Snapshot Data Entity</b></p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=31%><b>Field</b></td>
+<td class=label width=69%><b>Description</b></td>
+</tr>
+<tr valign=top>
+<td width=31%>PKId</td>
+<td width=69%>Primary key identifier</td>
+</tr>
+<tr valign=top>
+<td width=31%>Date</td>
+<td width=69%>Date/time of snapshot</td>
+</tr>
+<tr valign=top>
+<td width=31%>SnapData</td>
+<td width=69%>Data describing system state</td>
+</tr>
+</table><br>
+<h4>Gathering snapshot data</h4>
+<p>
+Figure 2 shows the snapshot procedure that is executed at regular intervals under the control of a recurring scheduled task. The task executes pcSnapshot, which calls out to the HDMonSvr COM component to query the request table (tbReq) and to package the resultant data for insertion into the Snapshot table (tbSnapshot) as a snapshot entity. Data thinning follows a parallel process with additional scheduled tasks in SQL Server and a few thinning procedures in the COM component.</p>
+<p>
+<b><img src="helpmon2.gif" border=0></b></p>
+<p class=label>
+<b>Figure 2 Gathering and storing snapshot data</b></p>
+<p>
+The following Transact-SQL code from pcSnapshot shows how the COM object is instantiated and how the <b>SysSnapshot</b> method of the HDMonSvr.CSnapshot object is called:</p>
+<pre><code>CREATE PROCEDURE pcSnapshot AS
+. . .
+--Instantiate HDMonSvr CSnapshot object
+EXEC @hr = sp_OACreate 'HDMonSvr.CSnapshot', @Monitor OUT
+. . .
+--Call SysSnapshot method
+EXEC @hr = sp_OAMethod @Monitor, 'SysSnapshot'
+. . .
+--Destroy the object
+EXEC @hr = sp_OADestroy @Monitor
+. . .
+GO
+</code></pre>
+<p>
+The following Visual Basic code within HDMonSvr retrieves an array of all current requests and packages this data into a single string for use in the SnapData field of the Snapshot entity. The procedure then inserts the packaged snapshot data into the Snapshot table by executing pcIns_Snapshot:</p>
+<pre><code>Public Function SysSnapShot()
+. . .
+sQry = scExecute &amp; scSysSnapshot
+' New instance of CExec class under MTS.
+Set oExec = New DBExec.CExec
+' Fill array with status data from database.
+If oExec.ExecFillArray(scConnect, sQry, sData) Then
+' Package data in snapdata format.
+ &nbsp;&nbsp; If PackSnapData(sData, sSnap) Then
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sQry = scExecute &amp; scInsertSnapshot
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sQry = sQry &amp; " @SnapData = " &amp; sSnap
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 'Insert snapshot entity into database.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; If oExec.ExecQuery(scConnect, sQry) Then
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SysSnapShot = True
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; End If
+ &nbsp;&nbsp; End If
+End If
+' Release oExec.
+Set oExec = Nothing
+End Function</code></pre>
+<h3>&nbsp;The DHTML Client Application</h3>
+<p>
+The monitor application page, monitor.htm, contains data services objects and a timeline object that exposes the programming model described in Table 2. The timeline object is a scriptlet, which differs from the COM objects in that it is written in HTML.</p>
+<p class=label>
+<b>Table 2. Timeline Programming Model </b></p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=25%><b>Property</b></td>
+<td class=label width=75%><b>Description</b></td>
+</tr>
+<tr valign=top>
+<td width=25%><b>Period</b></td>
+<td width=75%>Period of time represented by the horizontal width of the display in a date/time numerical format.</td>
+</tr>
+<tr valign=top>
+<td width=25%><b>Start</b></td>
+<td width=75%>Date/time at the display origin (left side of display)</td>
+</tr>
+<tr valign=top>
+<td width=25%><b>MaxValue</b></td>
+<td width=75%>Quantity for maximum value scale</td>
+</tr>
+<tr valign=top>
+<td width=25%><b>MinValue</b></td>
+<td width=75%>Quantity for minimum value scale</td>
+</tr>
+<tr valign=top>
+<td width=25%><b>DetailLevel</b></td>
+<td width=75%>Controls what subtotal traces are drawn</td>
+</tr>
+<tr valign=top>
+<td width=25%><b>TimeDiv</b></td>
+<td width=75%>Number of divisions along the time axis</td>
+</tr>
+<tr valign=top>
+<td width=25%><b>ValueDiv</b></td>
+<td width=75%>Number of divisions along the value axis</td>
+</tr>
+<tr valign=top>
+<td class=label width=25%><b>Method</b></td>
+<td class=label width=75%><b>Description</b></td>
+</tr>
+<tr valign=top>
+<td width=25%><b>PageFirst</b></td>
+<td width=75%>Displays the first page of the system history</td>
+</tr>
+<tr valign=top>
+<td width=25%><b>PageBack</b></td>
+<td width=75%>Displays the previous page of the system history</td>
+</tr>
+<tr valign=top>
+<td width=25%><b>PageForward</b></td>
+<td width=75%>Displays the next page of the system history</td>
+</tr>
+<tr valign=top>
+<td width=25%><b>PageLast</b></td>
+<td width=75%>Displays the last page of the system history</td>
+</tr>
+<tr valign=top>
+<td width=25%><b>Refresh</b></td>
+<td width=75%>Refreshes the display</td>
+</tr>
+</table><br>
+<p>
+The following code, from monitor.htm, shows how the Timeline object is created from the scriptlet code in timeline.htm:</p>
+<pre><code>&lt;object id=oTimeLine TYPE="text/x-scriptlet"
+ &nbsp; style="height:85%;width:100%"&gt;
+ &nbsp; &lt;param name="url" value="timeline.htm"
+&lt;/object&gt;
+</code></pre>
+<p>
+When monitor.htm loads, the <b>Window_OnLoad()</b> script initializes the timeline to display request totals for the current day:</p>
+<pre><code>Sub Window_OnLoad()
+. . .
+' Display activity since midnight.
+dT = Now()
+DispStart = DatePart("m", dT) &amp; DateDiv &amp; _
+ &nbsp;&nbsp; DatePart("d", dT) &amp; DateDiv &amp; DatePart("yyyy", dT)
+' Set oTimeline properties and refresh display.
+oTimeline.Start = DispStart
+oTimeline.Period = Day
+oTimeline.Refresh
+End Sub</code></pre>
+<h4>Displaying and navigating the timeline</h4>
+<p>
+The navigation controls provide means to zoom and pan through time. The pan controls call the <b>PageFirst</b>, <b>PageBack</b>, <b>PageForward</b>, and <b>PageLast</b> methods, which work by manipulating the Start property, while the zoom control allows you to navigate by manipulating both the start date and period. All the navigation methods eventually call the Refresh method. The following Microsoft Visual Basic Scripting Edition (VBScript) code, from the Timeline scriptlet, shows that Refresh starts by preparing the data supply. It then draws the timeline background and finishes with the data traces:</p>
+<pre><code>Sub Public_Refresh()
+ODataSource.CompletePeriodData (m_Start, m_Period)
+DrawBackground()
+DrawTraces()
+End Sub
+</code></pre>
+<p>
+The client-side monitor component (HDMonCli) provides services that retrieve and cache snapshot data in order to service the monitor interface. The <b>CompletePeriodData</b> method prepares the HDMonCli.CMonData<b> </b>object data cache for the specified starting date/time and duration. As the following code segment shows, the procedure determines what data is not yet cached for the display period and retrieves that data:</p>
+<pre><code>Public Function CompletePeriodData(ByVal vStart, ByVal vDuration)
+. . . 
+' Resolve the display boundary dates.
+If CBoundDates(vStart, vDuration, dFirst, dLast) Then
+' Build the list of snapshots required for display.
+ &nbsp;&nbsp; If FillSnapList(dFirst, dLast) Then
+' Retrieve any uncached snapshots.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; If FillSnapCache(dFirst, dLast) Then
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CompletePeriodData = True
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; End If
+ &nbsp;&nbsp; End If
+End If
+End Function</code></pre>
+<h4>Discrete Graphics Objects</h4>
+<p>
+Timeline graphics consist of a background, which displays the axis divisions and labels, and at least one layer of data plotted over this background. The number of layers of data that are displayed is governed by the <b>DetailLevel</b> property of oTimeline, which provides one of the mechanisms for drilling into detailed data. I am building each of these graphics layers as a separate instance of the Structured Graphics Control so that each graphic layer will have distinct interactive behavior. The Structured Graphics Control provides hit detection by responding to mouse events over opaque areas only. Mouse events over transparent areas pass through to lower layers. (For more information about DirectAnimation and the Structured Graphics Control, see the "Multimedia" section of the Internet Client SDK.) </p>
+<p>
+Objects representing the graphic layers are maintained in the Traces collection on oHDMonCli. The next VBScript procedure, called from the oTimeline Refresh method, updates each of them:</p>
+<pre><code>Sub DrawTraces()
+. . .
+' Process each trace object.
+For each otr in m_oHDMonCli.Traces 
+' Get the point list for the trace.
+ &nbsp;&nbsp; SetPoints dat, otr.Level
+' Plot the data points.
+ &nbsp;&nbsp; PlotPline otr, dat
+Next
+. . .
+End Sub
+</code></pre>
+<p>
+The following VBScript code plots the points on the Structured Graphics Object:</p>
+<pre><code>Sub PlotPline(oTrace, plst)
+. . .
+' Get the drawing surface interface from Structured Graphics Objecset ds = oTrace.SGObject.DrawSurface
+' Clear the drawing surface and set the drawing attributes.
+ds.clearor
+ds.LineColor oTrace.ColorBehavior
+ds.LineWidth oTrace.LineWidth
+' Draw the point list as a polyline.
+ds.polyline(plst)
+' Display the drawing surface on the Structured Graphics Object.
+oTrace.SGObject.DrawSurface = ds
+. . .
+End Sub
+</code></pre>
+<h4>Drilling Down for Detail</h4>
+<p>
+When the user moves the mouse over a trace, the trace is highlighted and the title of the trace is displayed as a tool tip. If the user right-clicks a data trace, an option menu is displayed. The option menu allows several steps of drill down, from expanding detail by attributes to displaying a complete detail report listing the appropriate requests. (The detail reports employ data-bound tables. For more information on DHTML data binding see <a href="msdn_dhtmltec.htm">"DHTML, Data Binding, and a HelpDesk Technician Client."</a>)</p>
+<p>
+Mouse events over Structured Graphics Controls are passed to the following procedure. By consolidating the interface for all mouse events at this point, I am able to localize the effect of event handling discontinuities between Structured Graphics Controls and the document (see the sample for details):</p>
+<pre><code>Sub TranslateSGEvent(ByVal SGId, ByVal EventType)
+…
+Select Case EventType
+ &nbsp;&nbsp; Case MouseOver
+' Highlight trace under mouse
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; HighlightTraces SGId
+ &nbsp;&nbsp; Case MouseOut
+' Unhighlight trace
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; HighlightTraces vbNullChar
+ &nbsp;&nbsp; Case MouseDown_Right
+' Display drill down menu
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DisplayDetailMenu SGId
+…
+End Select
+End Sub
+</code></pre>
+<p>
+Although the traces can be highlighted as any other DHTML element by using a visual filter, DirectAnimation provides a more efficient highlighting method by specifying the line color of the trace as a ModifiableBehavior. One of the basic concepts in DirectAnimation is to specify attributes such as color and position as behaviors that vary over time. A ModifiableBehavior extends this concept so that the behavior can be specified at run time rather than at development time. The following procedure highlights the specified trace by modifying its color behavior:</p>
+<pre><code>Sub HighlightTraces (ByVal SGId)
+…
+For each otr in m-oHDMonCli.Traces
+ &nbsp;&nbsp; Set lib = otr.SGObject.Library
+ &nbsp;&nbsp; If otr.SGObject.Id = SGId Then
+' Switch ColorBehavior to highlight color.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; otr.ColorBehavior.SwitchTo(lib.ColorRGB255(HLRed,HLGreen,HLBlue)
+ &nbsp;&nbsp; Else
+' Switch ColorBehavior to normal trace color.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; red = Otr.Red
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; green = Otr.Green
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; blue = Otr.Blue
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; otr.ColorBehavior.SwitchTo(lib.ColorRGB255(red,green,blue)
+ &nbsp;&nbsp; End If
+Next
+End Sub
+</code></pre>
+<p>
+<b><img src="helpmon3.gif" border=0></b></p>
+<p class=label>
+<b>Figure 3. Timeline display with status detail </b></p>
+<h3>Conclusion</h3>
+<p>
+The scriptlet objects presented here extend the object architecture of the HelpDesk system through to the windowless objects that represent the graph traces. The progression from general to specific is continuous from the fully reusable objects closest to the database in the business layer to the increasingly specific objects in the workflow and presentation layers. Those compiled components are joined here at the client by uncompiled scriptlet components. Scriptlets combine the organizing advantages that all components share with the small size, malleability, and superior multimedia capabilities of DHTML.</p>
+</BODY>
+</HTML>

@@ -1,0 +1,43 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Out-of-process Server Implementation Helpers</title>
+<link disabled rel=stylesheet href=../../backsdk3.css>
+<style type="text/css">
+@import url(../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h2><a name="_com_out_of_process_server_implementation_helpers"></a>Out-of-process Server Implementation Helpers</h2>
+<p>
+Four helper functions that can be called by out-of-process servers are now available to simplify the job of writing server code. COM clients and COM in-process servers typically would not call them. These functions are designed to help prevent race conditions in server activation when the servers have multiple apartments or multiple class objects. They can also, however, as easily be used for single-threaded and single class object servers. The functions are as follows:
+<ul>
+<li>
+<a href="api1_4s6r.htm"><b>CoAddRefServerProcess</b></a> </li>
+<li>
+<a href="api1_1s1f.htm"><b>CoReleaseServerProcess</b></a> </li>
+<li>
+<a href="api1_4ohf.htm"><b>CoSuspendClassObjects</b></a> </li>
+<li>
+<a href="api1_2fsj.htm"><b>CoResumeClassObjects</b></a> </li>
+</ul>
+<p>
+To shut down properly, a COM server must keep track of how many object instances it has instantiated and how many times its <a href="if_a2e_38vm.htm"><b>IClassFactory::LockServer</b></a><b> </b>method has been called. Only when both of these counts reach zero, can a server shut down. In single-threaded COM servers, the decision to shut down was coordinated with incoming activation requests by the fact that the requests were serialized by the message queue. The server, upon receiving a <b>Release</b> on it's final object instance and deciding to shut down, would revoke its class objects before any more activation requests were dispatched. If an activation request did come in after this point, COM would recognize that the class objects were revoked, and would return an error to the SCM, which would then cause a new instance of the local server process to be run.</p>
+<p>
+However, in an apartment model server, in which different class objects are registered on different apartments, and in all free-threaded servers, this decision to shut down must be co-ordinated with activation requests across multiple threads, so one thread of the server does not decide to shut down while another thread of the server is busy handing out class objects or object instances. One classical but cumbersome approach to solving this is to have the server, after it has revoked its class objects, recheck its instance count and stay alive until all instances have been released.</p>
+<p>
+To make it easier for server writers to handle these types of race conditions, COM provides two new reference counting functions. <b>CoAddRefServerProcess</b> increments a global per-process reference count. <a href="api1_1s1f.htm"><b>CoReleaseServerProcess</b></a> decrements the global per-process reference count. When the global per-process reference count reaches zero, COM automatically does a <a href="api1_4ohf.htm"><b>CoSuspendClassObjects</b></a>, which prevents any new activation requests from coming in. The server can then deregister its various class objects from its various threads at leisure without worry that another activation request may come in. All new activation requests are henceforth handled by the SCM launching a new instance of the local server process.</p>
+<p>
+The simplest way for a local server application to make use of these APIs is to call <a href="api1_4s6r.htm"><b>CoAddRefServerProcess</b></a> in the constructor for each of its instance objects, and in each of its <b>IClassFactory::LockServer</b> methods when the <i>fLock</i> parameter is TRUE. The server application should also call <b>CoReleaseServerProcess</b> in the destructor of each of its instance objects, and in each of its <b>IClassFactory::LockServer</b> methods when the <i>fLock</i> parameter is FALSE.</p>
+<p>
+Finally, the server application should pay attention to the return code from <b>CoReleaseServerProcess</b> and if it returns 0, the server application should initiate its cleanup, which, for a server with multiple threads, typically means that it should signal it's various threads to exit their message loops and call <b>CoRevokeClassObject</b> and <b>CoUninitialize</b>. Note that if these functions are used at all, they must be used in both the object instances and the <b>LockServer</b> method, otherwise, the server application may be shut down prematurely.</p>
+<p>
+In the latest versions of Windows NT, when a <b>CoGetClassObject</b> request is made, COM contacts the server, marshals the <a href="if_a2e_9mk9.htm"><b>IClassFactory</b></a> interface of the class object, returns to the client process, unmarshals the <b>IClassFactory</b> interface, and returns this to the client. At this point, clients typically call <b>IClassFactory::LockServer</b>(TRUE) to prevent the server process from shutting down. However, there is a window of time between when the class object is marshaled and when the client calls <b>LockServer</b>, in which another client could connect to the same server, get an instance and <b>Release</b> that instance causing the server to shutdown and leaving the first client high and dry with a disconnected <b>IClassFactory</b> pointer. To prevent this race condition, COM adds an implicit <b>IClassFactory::LockServer</b>(TRUE) to the class object when it marshals the <b>IClassFactory</b> interface, and an implicit <b>IClassFactory::LockServer</b>(FALSE) when the client releases the <b>IClassFactory</b> interface. Because of this change, it is no longer necessary to remote <b>LockServer</b> calls back to the server, so the proxy for <b>IClassFactory::LockServer</b> simply returns S_OK without actually remoting the call.</p>
+<p>
+There is another activation-related race condition during initialization of an out-of-process server process. A COM server that registers multiple classes typically calls <a href="api1_6kz8.htm"><b>CoRegisterClassObject</b></a>(....REGCLS_LOCAL_SERVER) for each CLSID it supports. After it has done this for all classes, the server enters it's message loop. For a single-threaded COM server, all activation requests are blocked until the server enters the message loop. However, for an apartment model server that registers different class objects in different apartments, and for all free-threaded servers, activation requests can arrive earlier than this. In the case of apartment model servers, activation requests could arrive as soon as any one thread has entered its message loop. In the case of free-threaded servers, an activation request could arrive as soon as the first class object is registered. Since an activation can happen this early, it is also possible for the final <b>Release</b> to occur (and hence cause the server to begin shutting down) before the rest of the server has had a chance to finish initializing.</p>
+<p>
+To eliminate these race conditions and simplify the job of the server writer, any server that wants to register multiple class objects with COM should call <b>CoRegisterClassObject</b>(...., REGCLS_LOCAL_SERVER | REGCLS_SUSPENDED) for each different CLSID the server supports. After all classes have been registered and the server process is ready to accept incoming activation requests, the server should make one call to <a href="api1_2fsj.htm"><b>CoResumeClassObjects</b></a>. This API tells COM to inform the SCM about all the registered classes, and it begins letting activation requests into the server process. Using these APIs has serveral advantages. First, only one call is made to the SCM regardless of how many CLSIDs are registered, thus reducing the overall registration time (and hence startup time of the server application). The second advantage is that if the server has multiple apartments and different CLSIDs are registered in different apartments, or if the server is a free-threaded server, no activation requests will come in until the server calls <b>CoResumeClassObjects</b>, giving the server a chance to register all of its CLSIDs and get properly set up before having to deal with activation requests, and possible shut down requests. </p>
+<p>&nbsp;</p></body>
+</HTML>

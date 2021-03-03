@@ -1,0 +1,500 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Win32 Q &amp; A</title>
+
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF>
+
+<font face="verdana,arial,helvetica" size="2">
+<h1>
+Win32 Q &amp; A</h1>
+<p>
+Jeffrey Richter</p>
+<p>
+Jeffrey Richter wrote Advanced Windows, Third Edition (Microsoft Press, 1997) and Windows 95: A Developer’s Guide (M&amp;T Books, 1995). Jeff is a consultant and teaches Win32 programming courses (www.solsem.com). He can be reached at www.JeffreyRichter.com.</p>
+<p>
+In the May 1997 issue of <i>MSJ</i>, I printed a letter from <BR>&#09;Holly B. MacKechnie that explained how to get the full <BR>&#09;path name from a short path name (the reverse of calling the GetShortPathName function). Since that article was published, several readers wrote to me asking if the GetFullPathName function will do what Holly wanted.</p>
+<p>
+DWORD GetFullPathName(LPCTSTR lpFileName, </p>
+<p>
+                      DWORD nBufferLength,</p>
+<p>
+                      LPTSTR lpBuffer, <BR>                      LPTSTR *lpFilePart);</p>
+<p>
+The answer is no. GetFullPathName doesn’t actually convert a short path name to a full path name because it never touches a disk drive. All it does is merge the current drive and directory onto the specified file name.</p>
+<p>
+Another reader pointed out that there is a SHGetFileInfo function that does convert a short file name to its long file name equivalent:</p>
+<p>
+DWORD WINAPI SHGetFileInfo(LPCTSTR pszPath, </p>
+<p>
+              DWORD dwFileAttributes, SHFILEINFO *psfi,   </p>
+<p>
+              UINT cbFileInfo, UINT uFlags);</p>
+<p>
+This function is much easier to use than the procedure I showed in the article. To convert a short path name to its full path name equivalent, call the function as follows:</p>
+<p>
+char szShortPathname[_MAX_PATH];</p>
+<p>
+SHFILEINFO sfi;</p>
+<p>
+SHGetFileInfo(szShortPathname, 0, &amp;sfi, sizeof(sfi), </p>
+<p>
+              SHGFI_DISPLAYNAME);</p>
+<p>
+// The full path name is in sfi.szDisplayName</p>
+<p>
+QI want to write a simple utility that dumps the contents of a ListView control to the clipboard. The problem is that my utility is running in one process and the ListView control was created by another process. So, when I issue the following</p>
+<p>
+TCHAR szText[100];</p>
+<p>
+LV_ITEM lvi;</p>
+<p>
+lvi.mask = LVIF_TEXT;</p>
+<p>
+lvi.iItem = nIndex;</p>
+<p>
+lvi.iSubItem = 0; </p>
+<p>
+lvi.pszText = szText; </p>
+<p>
+lvi.cchTextMax = 100; </p>
+<p>
+ListView_GetItem(hwndLV, &amp;lvi);</p>
+<p>
+the addresses of the LV_ITEM structure and the szText buffer are relative to my process’s address space—not to the other process’s address space. This causes the process that created the ListView control to raise an access violation and terminate.</p>
+<p>
+When I discovered this, I modified my utility so that it copies strings from a ListBox to the clipboard. To get a string from the ListBox, I execute the following code:</p>
+<p>
+TCHAR szText[100];</p>
+<p>
+ListBox_GetText(hwndLB, nIndex, szText);</p>
+<p>
+To my astonishment this worked just fine, even though szText is still an address relative to my process!</p>
+<p>
+Why does my utility work for a ListBox control and fail for a ListView control? And how can I get my utility to work for a ListView control?</p>
+<p>
+AYou’re quite correct that the problem stems from the fact that your utility and the control creator application have different address spaces. Since you know why your utility doesn’t work for ListView controls, let’s first examine why your utility does work for ListBox controls.</p>
+<p>
+In 16-bit Windows&reg;, all applications ran in a single address space. This meant that an application could easily query data from any control regardless of which application created the control. In fact, in 16-bit Windows any application could easily modify the contents of any control as well. Many applications (mostly utilities) took advantage of this “feature,” so Microsoft maintained this backward compatibility for Win32-based applications. Otherwise, many 16-bit applications would have to be redesigned for Win32 instead of simply ported.</p>
+<p>
+If you look at the Windows.H header file for 16-bit Windows, you’ll see that the LB_GETTEXT is defined as:</p>
+<p>
+#define LB_GETTEXT        (WM_USER + 10)</p>
+<p>
+If you look at the 32-bit WinUser.H header file, you’ll see that LB_GETTEXT is defined as:</p>
+<p>
+#define LB_GETTEXT        0x0189</p>
+<p>
+In fact, all of the 16-bit Windows control messages that were WM_USER-relative have unique numbers that are below WM_USER (0x0400) in Win32. For backward compatibility, Microsoft redefined the message numbers for all the control-specific window messages. So, when a thread in your utility process sends an LB_GETTEXT message to a ListBox created by a thread in another process, the Send&shy;Message function looks explicitly for message number 0x0189 and copies the string from one process’s address space to the other process’s address space.</p>
+<p>
+Your utility works for ListBox controls because Microsoft did all of this additional work. But this is a lot of work for the control-specific messages. And don’t forget that there are a lot of controls: static, edit, button, list box, and combo box. Your utility doesn’t work for ListView controls because Microsoft didn’t do all of this additional work to marshal the data across process boundaries. This, of course, was not a problem for people porting their applications from 16-bit Windows to Win32 because ListView controls and all the common controls were new for Win32—16-bit Windows applications could never create them or work with them.</p>
+<p>
+For your utility to work properly with a ListView control, you must write the code to marshal the data across the process boundaries yourself. To demonstrate how to do this, I have written a utility called LV2Clip (see Figure 1) that demonstrates how to copy any ListView control’s contents to the clipboard. I will not explain how the entire utility works, but I will discuss how the marshalling of the control window message data is done. Let’s turn to the LV2Clip_On&shy;LButtonUp function.</p>
+<p>
+Figure 1  LV2Clip</p>
+<p>
+LV2Clip.cpp</p>
+<p>
+/******************************************************************************</p>
+<p>
+Module name: LV2Clip.cpp</p>
+<p>
+Written by:  Jeffrey Richter</p>
+<p>
+Purpose:     Utilty to copy ListView control strings to the clipboard.</p>
+<p>
+******************************************************************************/</p>
+<p>
+#define STRICT</p>
+<p>
+#define UNICODE</p>
+<p>
+#define _UNICODE</p>
+<p>
+#include &lt;Windows.h&gt;</p>
+<p>
+#include &lt;WindowsX.h&gt;</p>
+<p>
+#include &lt;commctrl.h&gt;</p>
+<p>
+#include &lt;tchar.h&gt;</p>
+<p>
+#include &lt;stdio.h&gt;</p>
+<p>
+#include &quot;Resource.h&quot;</p>
+<p>
+///////////////////////////////////////////////////////////////////////////////</p>
+<p>
+// For message box captions</p>
+<p>
+TCHAR g_szAppName[] = __TEXT(&quot;ListView to Clipboard&quot;);</p>
+<p>
+///////////////////////////////////////////////////////////////////////////////</p>
+<p>
+// Returns HWND of ListView control under a screen coordinate</p>
+<p>
+HWND LV2Clip_GetLVFromPoint(HWND hwnd, int x, int y) {</p>
+<p>
+   POINT pt = { x, y };</p>
+<p>
+   // Convert the (x, y) from client to screen coordinates</p>
+<p>
+   ClientToScreen(hwnd, &amp;pt);</p>
+<p>
+   // Get the top-level window that is under the mouse cursor</p>
+<p>
+   HWND hwndLV = WindowFromPoint(pt);</p>
+<p>
+   // Convert (x, y) from screen to parent window's client coordinates</p>
+<p>
+   ScreenToClient(hwndLV, &amp;pt);</p>
+<p>
+   // Determine which child window (if any) is under the mouse cursor</p>
+<p>
+   hwndLV = ChildWindowFromPoint(hwndLV, pt); </p>
+<p>
+   if (hwndLV != NULL) {</p>
+<p>
+      // Check to see if the child window is a ListView control</p>
+<p>
+      TCHAR sz[100];</p>
+<p>
+      GetClassName(hwndLV, sz, 100);</p>
+<p>
+      if (lstrcmpi(sz, WC_LISTVIEW) != 0) </p>
+<p>
+         hwndLV = NULL; // Not a ListView control</p>
+<p>
+   }</p>
+<p>
+   // Update the finder tool's status to indicate whether the cursor</p>
+<p>
+   // is over a ListView control or not.</p>
+<p>
+   SetDlgItemText(hwnd, IDC_FINDERSTATUS, </p>
+<p>
+                  (hwndLV != NULL) ? </p>
+<p>
+                  __TEXT(&quot;The Finder is over a ListView control&quot;) : </p>
+<p>
+                  __TEXT(&quot;The Finder is NOT over a ListView control&quot;));</p>
+<p>
+   return(hwndLV);   // Returns NULL if not a ListView control</p>
+<p>
+}</p>
+<p>
+///////////////////////////////////////////////////////////////////////////////</p>
+<p>
+void LV2Clip_OnMouseMove(HWND hwnd, int x, int y, UINT keyFlags) {</p>
+<p>
+   // If we didn't have capture set, we have nothing to do.</p>
+<p>
+   if (GetCapture() == hwnd) {</p>
+<p>
+      // Update the Finder Tool's status</p>
+<p>
+      LV2Clip_GetLVFromPoint(hwnd, x, y);</p>
+<p>
+   }</p>
+<p>
+}</p>
+<p>
+///////////////////////////////////////////////////////////////////////////////</p>
+<p>
+void LV2Clip_OnLButtonUp(HWND hwnd, int x, int y, UINT keyFlags) {</p>
+<p>
+   // If we didn't have capture set, we have nothing to do.</p>
+<p>
+   if (GetCapture() != hwnd) return;</p>
+<p>
+   ReleaseCapture();</p>
+<p>
+   // Restore the Finder Tool icon</p>
+<p>
+   Static_SetIcon(GetDlgItem(hwnd, IDC_FINDERTOOL), </p>
+<p>
+      LoadIcon(GetWindowInstance(hwnd), MAKEINTRESOURCE(IDI_DOCKEDFINDER)));</p>
+<p>
+   // Get the HWND of the ListView under the mouse cursor</p>
+<p>
+   HWND hwndLV = LV2Clip_GetLVFromPoint(hwnd, x, y);</p>
+<p>
+   // If the window under the cursor isn't a ListView, we have nothing to do.</p>
+<p>
+   if (hwndLV == NULL) return;</p>
+<p>
+   // Get the count of items in the ListView control</p>
+<p>
+   int nCount = ListView_GetItemCount(hwndLV);</p>
+<p>
+   // Open a handle to the remote process's kernel object</p>
+<p>
+   DWORD dwProcessId;</p>
+<p>
+   GetWindowThreadProcessId(hwndLV, &amp;dwProcessId);</p>
+<p>
+   HANDLE hProcess = OpenProcess(</p>
+<p>
+      PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE, </p>
+<p>
+      FALSE, dwProcessId);</p>
+<p>
+   if (hProcess == NULL) {</p>
+<p>
+      MessageBox(hwnd, __TEXT(&quot;Could not communicate with process&quot;), </p>
+<p>
+         g_szAppName, MB_OK | MB_ICONWARNING);</p>
+<p>
+      return;</p>
+<p>
+   }</p>
+<p>
+   // Prepare a buffer to hold the ListView's data.</p>
+<p>
+   // Note: Hardcoded maximum of 10240 chars for clipboard data.</p>
+<p>
+   // Note: Clipboard only accepts data that is in a block allocated with </p>
+<p>
+   //       GlobalAlloc using the GMEM_MOVEABLE and GMEM_DDESHARE flags.</p>
+<p>
+   HGLOBAL hClipData = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, </p>
+<p>
+      sizeof(TCHAR) * 10240);</p>
+<p>
+   LPTSTR pClipData = (LPTSTR) GlobalLock(hClipData);</p>
+<p>
+   pClipData[0] = 0;</p>
+<p>
+   // Allocate memory in the remote process's address space</p>
+<p>
+   LV_ITEM* plvi = (LV_ITEM*) VirtualAllocEx(hProcess, </p>
+<p>
+      NULL, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);</p>
+<p>
+   // Get each ListView item's text data</p>
+<p>
+   for (int nIndex = 0; nIndex &lt; nCount; nIndex++) {</p>
+<p>
+      // Initialize a local LV_ITEM structure</p>
+<p>
+      LV_ITEM lvi;</p>
+<p>
+      lvi.mask = LVIF_TEXT;</p>
+<p>
+      lvi.iItem = nIndex;</p>
+<p>
+      lvi.iSubItem = 0; </p>
+<p>
+      // NOTE: The text data immediately follows the LV_ITEM structure</p>
+<p>
+      //       in the memory block allocated in the remote process.</p>
+<p>
+      lvi.pszText = (LPTSTR) (plvi + 1); </p>
+<p>
+      lvi.cchTextMax = 100; </p>
+<p>
+      // Write the local LV_ITEM structure to the remote memory block</p>
+<p>
+      WriteProcessMemory(hProcess, plvi, &amp;lvi, sizeof(lvi), NULL);</p>
+<p>
+      // Tell the ListView control to fill the remote LV_ITEM structure</p>
+<p>
+      ListView_GetItem(hwndLV, plvi);</p>
+<p>
+      // If this is not the first item, add a carriage-return/linefeed</p>
+<p>
+      if (nIndex &gt; 0) lstrcat(pClipData, __TEXT(&quot;\r\n&quot;));</p>
+<p>
+      // Read the remote text string into the end of our clipboard buffer</p>
+<p>
+      ReadProcessMemory(hProcess, plvi + 1, </p>
+<p>
+         &amp;pClipData[lstrlen(pClipData)], 1024, NULL);</p>
+<p>
+   }</p>
+<p>
+   // Free the memory in the remote process's address space</p>
+<p>
+   VirtualFreeEx(hProcess, plvi, 0, MEM_RELEASE);</p>
+<p>
+   // Cleanup and put our results on the clipboard</p>
+<p>
+   CloseHandle(hProcess);</p>
+<p>
+   OpenClipboard(hwnd);</p>
+<p>
+   EmptyClipboard();</p>
+<p>
+#ifdef UNICODE</p>
+<p>
+   BOOL fOk = (SetClipboardData(CF_UNICODETEXT, hClipData) == hClipData);</p>
+<p>
+#else</p>
+<p>
+   BOOL fOk = (SetClipboardData(CF_TEXT, hClipData) == hClipData);</p>
+<p>
+#endif</p>
+<p>
+   CloseClipboard();</p>
+<p>
+   if (!fOk) {</p>
+<p>
+      GlobalFree(hClipData);</p>
+<p>
+      MessageBox(hwnd, __TEXT(&quot;Error putting text on the clipboard&quot;), </p>
+<p>
+&#09;       g_szAppName, MB_OK | MB_ICONINFORMATION);</p>
+<p>
+   }</p>
+<p>
+}</p>
+<p>
+///////////////////////////////////////////////////////////////////////////////</p>
+<p>
+void LV2Clip_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {</p>
+<p>
+   switch (id) {</p>
+<p>
+   case IDCANCEL: </p>
+<p>
+      EndDialog(hwnd, 0); </p>
+<p>
+      break;</p>
+<p>
+   case IDC_FINDERTOOL:</p>
+<p>
+      switch (codeNotify) {</p>
+<p>
+      case STN_CLICKED:</p>
+<p>
+         SetCapture(hwnd);</p>
+<p>
+         Static_SetIcon(hwndCtl, LoadIcon(GetWindowInstance(hwnd), </p>
+<p>
+                        MAKEINTRESOURCE(IDI_FLOATINGFINDER)));</p>
+<p>
+         SetCursor(LoadCursor(GetWindowInstance(hwnd), </p>
+<p>
+                   MAKEINTRESOURCE(IDC_FINDER)));</p>
+<p>
+         break;</p>
+<p>
+      }</p>
+<p>
+      break;</p>
+<p>
+   }</p>
+<p>
+}</p>
+<p>
+///////////////////////////////////////////////////////////////////////////////</p>
+<p>
+BOOL WINAPI LV2Clip_WndProc(HWND hwnd, UINT uMsg, </p>
+<p>
+   WPARAM wParam, LPARAM lParam) {</p>
+<p>
+   switch (uMsg) {</p>
+<p>
+      HANDLE_MSG(hwnd, WM_COMMAND,    LV2Clip_OnCommand);</p>
+<p>
+      HANDLE_MSG(hwnd, WM_MOUSEMOVE,  LV2Clip_OnMouseMove);</p>
+<p>
+      HANDLE_MSG(hwnd, WM_LBUTTONUP,  LV2Clip_OnLButtonUp);</p>
+<p>
+   }</p>
+<p>
+   return(FALSE);</p>
+<p>
+}</p>
+<p>
+///////////////////////////////////////////////////////////////////////////////</p>
+<p>
+int WINAPI WinMain(HINSTANCE hinstExe, </p>
+<p>
+   HINSTANCE hinstExePrev, LPSTR pszCmdLine, int nCmdLine) {</p>
+<p>
+   return(DialogBox(hinstExe, MAKEINTRESOURCE(IDD_LV2CLIP), </p>
+<p>
+                    NULL, LV2Clip_WndProc));</p>
+<p>
+}</p>
+<p>
+///////////////////////////////// End of File /////////////////////////////////</p>
+<p>
+This function starts out by calling LV2Clip_GetLV&shy;FromPoint, which returns the handle of the ListView control whose data you wish to copy to the clipboard. Then ListView_GetItemCount is called to retrieve the number of items in the ListView control. This message doesn’t send any memory addresses to the control and will therefore always work; no special marshalling of data across process boundaries needs to be done.</p>
+<p>
+Next, GetWindowThreadProcessId is called to determine which process owns the thread that created the ListView control. This process ID is then passed to OpenProcess so that you can get a handle to the remote process’s kernel object. This handle requires PROCESS_VM_OPERATION, PROCESS_VM_READ, and PROCESS_VM_WRITE access so that you can read and write to the remote process’s virtual memory.</p>
+<p>
+To make this work, the ListView control must always be sent messages with memory addresses that are relative to the process that created the control. The message can be sent from your utility process, but the memory addresses must always be local to the control processing the message. Your utility program must allocate some memory in the remote process’s address space, initialize an LV_ITEM data structure in this memory, and then call ListView_Get&shy;Item, passing the address of the remote LV_ITEM structure. After ListView_GetItem returns, your utility can get the contents of the remote LV_ITEM structure and put it in the clipboard or do whatever it wants to with the data.</p>
+<p>
+For Windows NT&reg; 4.0, Microsoft added two new functions, VirtualAllocEx and VirtualFreeEx, that make it really easy to allocate and free storage in a remote process. Inside LV2Clip_OnLButtonUp, you can see that I call Virtual&shy;AllocEx to allocate the remote storage and I cast the returned pointer to an LV_ITEM*. Then I iterate through a loop that initializes a local LV_ITEM structure properly to get the ListView data that I’m interested in. Of course, I can’t send the address of this LV_ITEM structure to the ListView control, so before I call ListView_GetItem I call WriteProcessMemory, which copies the contents of the local LV_ITEM structure to the remote memory block. Now I can call ListView_GetItem, passing the address of the remote memory block. </p>
+<p>
+The LV_ITEM structure contains a pszText member that’s a pointer to a buffer to be filled with the ListView item’s string. This pointer must also be relative to the remote process or the ListView’s code will raise an access violation. Before calling WriteProcessMemory, I have initialized this pointer to the byte in the remotely allocated memory block just after the LV_ITEM structure. Once List&shy;View_GetItem returns, I know that the ListView control has filled the string buffer in the remote address space. Now all I have to do is get it by calling Read&shy;Process&shy;Memory. </p>
+<p>
+I perform the same set of actions described above for every item in the ListView control. After I’ve gotten the strings of all the items, I clean up by calling VirtualFreeEx to free the remotely allocated memory and call CloseHandle to close the handle to the process kernel object. The only thing left to do is place the data on the clipboard.</p>
+<p>
+There are two important issues I’d like to mention. First, VirtualAllocEx and VirtualFreeEx are not implemented on Windows 95. This, of course, means that my utility will not work on Windows 95. You can make this utility work on Windows 95, but you’d have to do much more. You’d have to create a DLL that gets injected into the remote process’s address space. This DLL can allocate its own memory, send messages to the ListView control, and then send the results back to the utility using some form of interprocess communication such as a memory-mapped file or the WM_COPY&shy;DATA message.</p>
+<p>
+The second issue is performance. WriteProcessMemory and ReadProcessMemory are not the speediest functions in the world. They were added to the Win32 API so that debuggers could easily get and set data in a debuggee’s address space. In a utility such as LV2Clip, I have no problem with the performance of these functions. Depending on what you’re doing, you might want a mechanism that works more efficiently. For better performance, use the library injection technique with the memory-mapped files I just mentioned.</p>
+<p>
+QI have a process with five threads running in it. I know that four of them are currently waiting for an event kernel object to be signaled. While the threads are waiting, the fifth thread executes the following:</p>
+<p>
+OutputDebugString(&quot;About to pulse the event.\n&quot;);</p>
+<p>
+PulseEvent(hEvent);</p>
+<p>
+This, of course, allows the four waiting threads to wake up as expected. When I run the same process under a debugger, the waiting threads are not released. Maybe this is a side effect of the debugger processing the OutputDebugString function. I did notice that if I put a call to Sleep(0) between OutputDebugString and PulseEvent the waiting threads wake up and everything works well. What is going on here? It concerns me that the debugger seems to affect the behavior of my process.</p>
+<p>
+AUnfortunately, the debugger is getting in the way here and affecting the way the debugged process runs. When a debugged process hits a breakpoint, the debugger suspends all of the threads inside the debuggee. It’s as if the debugger calls SuspendThread for all of the debuggee’s threads. When a thread calls WaitForSingleObject, that thread is placed on a list of threads waiting for objects. If that thread now gets suspended, the operating system takes the thread out of the waiting thread list and the thread enters the suspended thread list. When the debugger allows the debuggee to continue execution, it resumes the threads. This causes the debuggee’s threads to leave the suspend list and go back to whatever they were doing before they got suspended. In your case, this means that the threads move back onto the list where they are waiting for the event kernel object to become signaled. Moving the threads from list to list happens on each and every debug event.</p>
+<p>
+Moving a thread from one list to another list takes some time; if you pulse your event kernel object before the threads are back waiting for the event, the threads will not notice that the event was pulsed. This is why the call to Sleep(0) fixes the problem. By having your fifth thread sleep, the other four threads get a chance to reenter their wait state so that they do catch the pulsing of the event. Unfortunately, there is nothing you can do in the debugger to compensate for this—all you can do is be aware of it.</p>
+<p>
+QI have an application that loads a bitmap resource and attempts to modify the resource. When I execute the code that modifies the bitmap, the debugger displays the following message in its output window: </p>
+<p>
+First-Chance Exception in MyApp.exe: 0xC0000005: Access Violation</p>
+<p>
+If I instruct the debugger to pass the exception on to the application, the exception is handled and the bitmap resource is modified. I don’t understand what is going on here, especially since I don’t have any exception handlers in my application. Can you explain to me what is happening? By the way, the program also runs just fine when not being debugged. I’ve enclosed a small program that reproduces what I’m talking about (see Figure 2).</p>
+<dl>
+<dt>
+Figure 2  MyApp Exception</dt>
+<dd>
+int WINAPI WinMain(HINSTANCE hinstExe, HINSTANCE hinstExePrev, <p>
+                   LPSTR pszCmdLine, int nCmdShow) {</p>
+<p>
+   HRSRC hrsrc = FindResource(hinstExe, MAKEINTRESOURCE(IDB_SOMEBITMAP), </p>
+<p>
+                              RT_BITMAP);</p>
+<p>
+   HGLOBAL hglbl = LoadResource(hinstExe, hrsrc);</p>
+<p>
+   PBYTE pb = (PBYTE) GlobalLock(hglbl);</p>
+<p>
+   BYTE b = *pb;  // This does not generate an access violation</p>
+<p>
+   *pb = 5;       // This does generate an access violation</p>
+<p>
+   return(0);</p>
+<p>
+}</p>
+</dd>
+</dl>
+<p>
+AWindows has always considered resources to be read-only objects. Developers have frequently ignored this rule. Over the years, many applications have been written that read resources into memory and then modify the resource’s data. This is especially true of bitmaps. In the 16-bit Windows architecture, this was not a problem because an executable module was loaded from disk into memory or a paging file, and then the system has no need to access the file on the disk ever again. If the application modifies a resource, the bytes in memory or the paging file are changed and nothing is written back to the file on the disk.</p>
+<p>
+In Windows NT and Windows 95, the architecture is very different. In these 32-bit environments, the system memory maps an executable file from the disk into memory. When the system needs part of the executable file, it goes back to the original disk file and reloads whatever portions are needed. When you read a resource’s data, the system loads the resource’s data bytes from the original file into memory. If you write to these bytes, the system needs a place to write the modified data. The system doesn’t want to write the data back out to the disk file because that would corrupt the file for other instances of the same application or would change the resource when the application was run again. </p>
+<p>
+To prevent the file’s data from changing, Windows NT and Windows 95 mark the resource data as read-only. This way, if a thread attempts to write to it, an access violation is raised that normally terminates your application. As Microsoft was developing Windows NT, they soon discovered that many applications were violating the Windows rule that resources should be read-only. They were forced to modify the operating system so that these applications could continue to run like they did under 16-bit Windows.</p>
+<p>
+The fix comes in the form of an exception handler. When a thread raises an exception that is not handled by any exception handlers in your code, a built-in system exception handler is called. This exception handler looks specifically for access violations. If the handler sees that an access violation is raised and that this exception is an attempted write to a resource in an EXE or DLL, the system’s exception handler and the system fix the problem. The exception handler changes the page protection to PAGE_READ&shy;WRITE. It then returns EXCEPTION_CONTINUE_EXE&shy;CUTION so the instruction that forced the exception is re-executed. The system allocates read/write storage on-the-fly from the paging file. Then it copies the resource’s original data bytes to the newly allocated storage, and finally it maps the new storage to the same virtual address occupied by the resource. This new storage is marked as read/write so any future attempts of the application to modify the resource are successful and more access violations are not raised.</p>
+<p>
+When you run your application under the debugger, the system notifies the debugger when a thread in the application attempts to modify the resource. This is what causes the debugger to display the First-Chance Exception message you mention in your question. Using the debugger, you could start debugging your application at this point to determine which function is writing to the resource. Or, if you tell the debugger to pass the exception on to the application, the built-in system exception handler doesn’t do what I’ve just described and the application continues running fine. If you are not running the application under the debugger, the process mentioned above still occurs, but it all happens silently.                                                         u</p>
+<p>
+To obtain complete source code listings, see page 5.</p>
+<p>
+Have a question about programming in Win32? Contact Jeffrey Richter at http://www.JeffreyRichter.com</p>
+</font></font></body>
+</HTML>

@@ -1,0 +1,610 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Under the Hood</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF">
+<font face="verdana,arial,helvetica" size="2">
+<H1>Under the Hood</H1><P>Matt Pietrek</P>
+<P>Matt Pietrek is the author of Windows 95 System Programming Secrets (IDG Books, 1995). He works at NuMega Technologies Inc., and can be reached at mpietrek@tiac.com or at http://www.tiac.com/users/mpietrek.</P>
+<P>This column came about in an unusual way. Months ago, while adding support for Windows NT&reg; 4.0 to one of NuMega's products, I stumbled across a new window message—WM_MOUSEWHEEL. At first, I didn't understand what the message represented. The Win32&reg; SDK documentation said: "The WM_MOUSEWHEEL message is sent to the focus window when the mouse wheel is rotated." My question was, what mouse wheel? The December 1996 MSJ had not yet arrived from the printer, so I was unable to learn about the message from the Editor's Note.</P>
+<P>Eventually, I put two and two together and figured out that this new window message was put into Windows NT 4.0 to support the Microsoft IntelliMouse&trade;. IntelliMouse looks like a standard Microsoft mouse, but with the rim of a small rubber wheel sticking up between the two buttons. After more investigation I learned that support for the IntelliMouse is built into Microsoft Office 97, Internet Explorer 3.0, and a handful of other apps. With this limited support, I didn't figure it was worth tracking one of these mice down, installing it, and getting used to a new way of doing things. Boy, was I wrong!</P>
+<P>Shortly thereafter, an IntelliMouse arrived at my doorstep and I decided to give it a try. I was pleasantly surprised to find that it really made browsing in Internet Explorer much less tedious. As an added bonus, most of the common controls and dialogs from the Windows NT 4.0 COMDLG32.DLL and COMCTL32.DLL work with the IntelliMouse too, regardless of the application you're using. Even better, the mouse wheel can be used as a third mouse button. The software that comes with the IntelliMouse lets you assign default actions to this button. On my system, I set up a click on the mouse wheel to act like a left-button double-click. I'm normally not one to gush, but put all this together and you've got one really slick package! Once you get into the swing of it, the IntelliMouse is one of the few hardware accessories that every serious Windows-based programmer should have.</P>
+<P>In the midst of my excitement over this new mouse (do I need a life, or what?), two dark clouds appeared. First, simply installing the IntelliMouse driver and popping into SoftIce for Windows NT would render my keyboard useless. Faced with the prospect of giving up either my IntelliMouse or my beloved SoftIce for Windows NT, there was only one thing I could do: I made a nuisance of myself with the SoftIce team. Not only did the SoftIce people make the two parties peacefully cohabitate, they added explicit support for the mouse wheel. In the latest versions of SoftIce, you can scroll the code, data, and variable windows with the mouse wheel.</P>
+<P>My remaining frustration was that I couldn't use my mouse wheel in more applications. I wanted to use it in programs such as CodeWright (my editor), the Visual C++&reg; 4.2 IDE, and the INFOVIEW online help viewer. Rather than pestering software vendors for upgrades such as Visual Studio&trade; 97, I worked in reverse and retrofitted the mouse wheel to existing programs. Now, I just load my mouse wheel support program from the startup group and forget about whether an application explicitly supports the IntelliMouse.</P>
+<P>The trick to making existing programs respond to the mouse wheel message is to convert the messages into something to which the program can respond. The WM_MOUSEWHEEL message is for scrolling. You may recall that there are already two predefined window messages that relate to scrolling: WM_VSCROLL (vertical scroll) and WM_HSCROLL (horizontal scroll). The WM_MOUSEWHEEL message is usually used to scroll a window's contents up and down, so it's roughly equivalent to the WM_VSCROLL message. By converting WM_MOUSEWHEEL messages to the appropriate WM_VSCROLL message, it should be possible to retrofit any application that responds to WM_VSCROLL. Alternatively, instead of converting messages, you should be able to post an equivalent WM_VSCROLL message when a WM_MOUSEWHEEL message goes by. The WM_MOUSEWHEEL messages will typically be silently dropped on the floor in these programs.</P>
+<P>The tough question is, how can I see WM_MOUSEWHEEL messages in other programs in order to translate them to WM_VSCROLL messages? The easiest solution is to set a systemwide WH_GETMESSAGE hook. You can then see mouse wheel messages in other processes and post the equivalent WM_VSCROLL message to the appropriate window. That's the simple version of the story, though. As you'll see from this month's code, there are several twists and turns that weren't obvious when I set out to write it.</P>
+<P></P>
+<H2><A NAME="sec0"></A>Design Considerations</H2><P>There were a few considerations to contend with before I started slashing away at the code. To begin with, the code for a systemwide hook must be in a DLL because Windows will load the DLL into the appropriate address space before calling the hook callback function for the first time. Put another way, whenever Windows is about to call a hook callback, it checks to see if the callback is in a DLL that's not currently loaded. If so, Windows loads the DLL. In fact, using hooks is one way of getting an arbitrary chunk of code to execute in the context of another process.</P>
+<P>Since this DLL will be loaded in the process address space of every process, I needed it to have as little effect as possible on the system. Since the WH_GETMESSAGE hook procedure is called every time a process calls GetMessage or PeekMessage, I made the hook procedure bail out very quickly if it wasn't going to be translating WM_MOUSEWHEEL messages. Second, since nearly every process will load the hook DLL, I made it consume as little memory as possible. More on this later.</P>
+<P>Beyond just making my hooking DLL and procedure small and fast, I also didn't want my code to adversely affect existing programs. For that reason, I chose to make the  hook procedure perform mouse wheel message translation only in programs that the user explicitly asks it to support. If I didn't do this, the hook DLL could end up posting WM_VSCROLL messages to applications that already respond to the WM_MOUSEWHEEL message. Likewise, I didn't want to blindly post WM_VSCROLL messages to applications that don't respond to that message or that don't respond properly. The tradeoff of the approach I took is that users have to specify each executable file for which they want mouse wheel support.</P>
+<P>At this point, since I was already committed to keeping track of which processes would be affected, it wasn't much more work to customize the behavior for each process. For example, in some applications you might want the mouse wheel to scroll in page increments rather than line increments. Or instead of scrolling a single line, you might want the application to scroll several lines at once. I chose to keep these per-program preferences in a registry value that has the same name as the affected application. If the application isn't affected, its name won't appear as a registry value. Otherwise, the corresponding registry value stores a DWORD that encodes whether line or page scrolling should be used for that program. In addition, the value also encodes how many lines or pages should be scrolled. When the hook DLL loads in each process, it retrieves the name of the process, checks the registry for that process name, and stores away whether the application should be mouse wheel-enabled and, if so, how it should work.</P>
+<P>That's pretty much it for the design of the hook DLL. However, the DLL by itself is useless without a sponsor program that installs the systemwide hook in the first place. In addition, the sponsor program will be the first to bring the hook DLL into memory, thereby allowing the DLL to do some one-time initialization. Since I wanted my program to be easy to use yet still keep the DLL small, it also made sense to make the sponsor program contain the UI for adding new programs to the list of supported programs. (The UI in the sponsor program collects the information about the program to be supported and adds it to the appropriate spot in the registry.)</P>
+<P></P>
+<H2><A NAME="sec1"></A>The Mouse Wheel Code</H2><P>With these design issues resolved, let's look at the code that implements them. It's called MouseWheel.DLL, and the code is shown in Figure 1. Starting at the top, note that I've split the global data into two sections in the executable file. The first section (.shared) is a shared section, meaning that the physical RAM for this data is shared among all processes that use the DLL. I put information into this section that shouldn't change between processes: the HHOOK I get back from calling SetWindowsHookEx and the WM_MOUSEWHEEL message number. I put variables that each process needs its own copy of in the traditional data section: whether WM_VSCROLL message should be emitted, page scrolling versus line scrolling, and so on.</P>
+<P>Figure 1  MouseWheel.DLL</P>
+<P></P>
+<P>MouseWheel.mak</P>
+
+<PRE>PROJ = MouseWheel
+OBJS = $(PROJ).OBJ
+
+CFLAGS = $(CFLAGS) /W3 /O1 /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x400
+LFLAGS =/DLL /MERGE:.idata=.data /MERGE:.rdata=.text /SECTION:.shared,RWS \
+        /EXPORT:DoNothing /BASE:0x20000000
+LIBS =  /OUT:$(PROJ).DLL kernel32.lib user32.lib advapi32.lib
+
+!if "$(DEBUG)" == "1"
+CFLAGS = $(CFLAGS) /YX /Fp"$(PROJ).PCH" /D_DEBUG /Zi  /Fd"$(PROJ).PDB"
+LFLAGS = $(LFLAGS) /DEBUG /DEBUGTYPE:CV 
+!else
+CFLAGS = $(CFLAGS) /DNDEBUG
+!endif
+
+$(PROJ).DLL: $(OBJS)
+    echo &gt;NUL @&lt;&lt;$(PROJ).CRF
+$(LFLAGS) $(OBJS) $(LIBS)
+&lt;&lt;
+    link @$(PROJ).CRF
+
+.cpp.obj:
+    CL $(CFLAGS) /c $&lt;
+</PRE>
+<P></P>
+<P>MouseWheel.h</P>
+
+<PRE>#define MW_SCROLL_INCREMENT_MASK     0x0000FFFF
+#define MW_SCROLL_PAGE               0x00010000
+
+// Dummy routine in MouseWheel.DLL to allow implicit importing
+extern "C" void DoNothing(void);
+</PRE>
+<P></P>
+<P>MouseWheel.cpp</P>
+
+<PRE>//==========================================
+// Matt Pietrek
+// Microsoft Systems Journal, June 1997
+//==========================================
+#include &lt;windows.h&gt;
+#include "mousewheel.h"
+
+//=============================================================================
+// Data
+//=============================================================================
+
+// Shared Data
+#pragma data_seg(".shared")     // Make a new section that we'll make shared
+HHOOK g_hHook=0;                // HHOOK from SetWindowsHook
+UINT  g_WM_MOUSEWHEEL = 0;      // Window message for mousewheel scrolling
+                                // Back to regular, nonshared data
+char g_szRegPath[] = "Software\\WheatyProductions\\MouseWheel";
+#pragma data_seg()
+
+// Per process data
+BOOL g_IsHookingProcess = FALSE;
+BOOL g_okToAct = FALSE;
+BOOL g_pageIncrements = FALSE;
+unsigned g_incrementAmount = 1;
+
+//=============================================================================
+// Start of code
+//=============================================================================
+
+LRESULT CALLBACK GetMsgProc(
+    int code,        // hook code
+    WPARAM wParam,   // removal flag
+    LPARAM lParam)   // address of structure with message
+{
+    LRESULT retValue = 0;
+
+    // Be a good citizen, and call the other hooks
+    retValue = CallNextHookEx( g_hHook, code, wParam, lParam );
+
+    if ( FALSE == g_okToAct )      // Bail out if this process isn't one that
+        return retValue;           // we care about
+
+    LPMSG pMsg = (LPMSG)lParam;    // Make a ptr to the MSG structure for exam
+
+    // If it's not a MOUSEWHEEL message, or if the app is just PEEK'ing,
+    // bail out now.
+
+    if ( g_WM_MOUSEWHEEL != pMsg-&gt;message || (wParam == PM_NOREMOVE) )
+        return retValue;
+
+    // By this point, we know a WM_MOUSEWHEEL message will be delivered.
+    // Synthesize the appropriate WM_VSCROLL message(s) and post them
+
+    WPARAM upDown;
+
+    if ( g_pageIncrements )
+        upDown = (short)HIWORD(pMsg-&gt;wParam) &gt; 0 ? SB_PAGEUP : SB_PAGEDOWN;
+    else
+        upDown = (short)HIWORD(pMsg-&gt;wParam) &gt; 0 ? SB_LINEUP : SB_LINEDOWN;
+
+    for ( unsigned i = 0; i &lt; g_incrementAmount; i++ )
+        PostMessage(pMsg-&gt;hwnd, WM_VSCROLL, upDown,    0 );
+
+    return 1;
+}
+
+UINT GetMouseWheelMsg( void )
+{
+    OSVERSIONINFO osvi;
+
+    osvi.dwOSVersionInfoSize = sizeof(osvi);
+
+    if ( !GetVersionEx(&amp;osvi) )
+        return WM_MOUSEWHEEL;            // Got a better idea?
+
+    // NT 4 and later supports WM_MOUSEWHEEL
+    if ( VER_PLATFORM_WIN32_NT == osvi.dwPlatformId )
+        if ( osvi.dwMajorVersion &gt;= 4 )
+            return WM_MOUSEWHEEL;
+
+    // Future Win32 versions ( &gt;= 5.0 ) should support WM_MOUSEWHEEL
+    if ( osvi.dwMajorVersion &gt;= 5 )
+        return WM_MOUSEWHEEL;
+
+    // Hmmm... an older version.  The mouse driver support app should
+    // have registered a window message for it.  By registering the
+    // same message, we should get back the same message number.
+    // Note that "MSWHEEL_ROLLMSG" below is a #define taken from ZMOUSE.H,
+    // which is from the "Intellimouse SDK".
+    
+    return RegisterWindowMessage( "MSWHEEL_ROLLMSG" );
+}
+
+
+BOOL WINAPI DllMain(
+    HINSTANCE hinstDLL,    // handle to DLL module 
+    DWORD fdwReason,       // reason for calling function 
+    LPVOID lpvReserved)    // reserved 
+{
+    //=========================================================================
+    // DLL Process attach
+    //=========================================================================
+
+    if ( fdwReason == DLL_PROCESS_ATTACH )
+    {
+        // We don't need thread notifications for what we're doing.  Thus, get
+        // rid of them, thereby eliminating some of the overhead of this DLL,
+        // which will end up in nearly every GUI process anyhow.
+        DisableThreadLibraryCalls( hinstDLL );
+
+        if ( lpvReserved )   // Is this main process that sets the hook and
+        {                    // loads this DLL initially ???
+
+            if ( g_hHook )        // If we've already hooked, fail the DllMain
+                return FALSE;
+
+            g_IsHookingProcess = TRUE;
+
+            // Set a global GetMessage hook 
+            g_hHook = SetWindowsHookEx( WH_GETMESSAGE, (HOOKPROC)GetMsgProc,
+                                        hinstDLL, 0 );
+
+            g_WM_MOUSEWHEEL = GetMouseWheelMsg();
+        }
+
+        // Get the name of the parent process EXE, and uppercase it
+        char szExeName[MAX_PATH];
+        GetModuleFileName( 0, szExeName, sizeof(szExeName) );
+        CharUpperBuff( szExeName, lstrlen(szExeName) );
+
+        //
+        // Determine if the parent process EXE's name is in the registry, under
+        // our special key.  If not, we won't bother translating mousewheel
+        // scroll messages into WM_VSCROLL messsages.
+        //
+
+        HKEY hKey;
+        if (ERROR_SUCCESS==RegOpenKey( HKEY_CURRENT_USER, g_szRegPath, &amp;hKey))
+        {
+            DWORD dwValue = 0;
+            DWORD dType, cbValue = sizeof(dwValue);
+
+            if ( ERROR_SUCCESS == RegQueryValueEx(  hKey, szExeName, 0, &amp;dType,
+                                                    (PBYTE)&amp;dwValue, &amp;cbValue))
+            {
+                g_incrementAmount = dwValue &amp; MW_SCROLL_INCREMENT_MASK;
+                g_pageIncrements = dwValue &amp; MW_SCROLL_PAGE ? TRUE : FALSE;
+
+                g_okToAct = TRUE;
+            }
+
+            RegCloseKey( hKey );
+        }
+
+        // else.... This process's EXE wasn't under our key.  Do nothing.
+    }
+
+    //=========================================================================
+    // DLL Process detach
+    //=========================================================================
+
+    else if ( fdwReason == DLL_PROCESS_DETACH )
+    {
+        if ( g_IsHookingProcess &amp;&amp; g_hHook )    // The main EXE that loaded 
+        {                                       // this DLL is shutting down,
+            UnhookWindowsHookEx( g_hHook );     // so remove the hook
+            g_hHook = 0;
+        }
+    }
+
+    return TRUE;
+}
+
+//-------------------------------------------------------------
+// Dummy startup routine that does nothing except call DllMain
+// This cuts out all of the standard startup code crud that
+// bloats the DLL, and makes it take longer to load
+//-------------------------------------------------------------
+extern "C" BOOL __stdcall _DllMainCRTStartup( 
+    HINSTANCE hinstDLL,     // handle to DLL module 
+    DWORD fdwReason,        // reason for calling function 
+    LPVOID lpvReserved)     // reserved 
+{
+    return DllMain( hinstDLL, fdwReason, lpvReserved );
+}
+
+//----------------------------------------------------------------------------
+// Dummy routine that allows the main EXE to have an implicit import of
+// this DLL.
+//----------------------------------------------------------------------------
+void DoNothing(void)
+{
+}</PRE>
+<P></P>
+<P>The first function in MouseWheel.CPP is GetMsgProc, which is the WH_GETMESSAGE hook callback function. This function first attempts to be a good citizen by calling CallNextHookEx, which chains on to any other installed hooks. Next, GetMsgProc does its best to bail out quickly if possible. If the variable g_okToAct is false in the current process, the function exits. Then, GetMsgProc checks to see if the retrieved window message is a mouse wheel message. If not, the function quickly exits.</P>
+<P>If the function hasn't exited after these two tests, it knows that the message is a mouse wheel scrolling message and that WM_VSCROLL messages will need to be posted. Since the mouse wheel can be scrolled forward or back, GetMsgProc needs to decide what to use as the WPARAM for the WM_VSCROLL message. If line scrolling is in ef-fect, WPARAM becomes SB_LINEUP or SB_LINEDOWN. For page scrolling, the WPARAM becomes SB_PAGEUP or SB_PAGEDOWN. Finally, GetMsgProc enters a for loop, posting the specified number of WM_VSCROLL messages to the window that will be receiving the mouse wheel messages. </P>
+<P>Skipping the GetMouseWheelMsg function for the moment, look at the DllMain function in MouseWheel.CPP. The actions of the DLL_PROCESS_ATTACH code in DllMain depend on which process context it's running in. If run from the sponsor program, it needs to install the systemwide WH_GETMESSAGE hook and save the associated HHOOK for use by the GetMsgProc callback. In addition, the DLL_PROCESS_ATTACH code calls the GetMouseWheelMsg function to figure out and save away the mouse wheel message number.</P>
+<P>If you're wondering how DllMain knows which process it's running in, it uses the semi-sleazy hack of looking at the lpReserved parameter. If it's nonzero, the DLL was brought into memory via an implicit link to the DLL from another executable module. If lpReserved is zero, the DLL was loaded after the process started, most likely via LoadLibrary. In the case of MouseWheel.DLL, I assume that the DLL was loaded by the operating system as part of calling the WH_GETMESSAGE hook if lpReserved is zero. If lpReserved is nonzero, I assume that the DLL was loaded by the sponsor program.</P>
+<P>If DllMain isn't running in the sponsoring process's context, DllMain's job is to determine if and how mouse wheel messages should be translated for the process into which the DLL was loaded. The first subtask here is to find the name of the current process. A call to GetModuleFileName with an HMODULE parameter of zero quickly gives the required path to the EXE. Next, the names of all processes that MouseWheel.DLL will affect are stored as values under the registry key</P>
+<P></P>
+
+<PRE>HKEY_CURRENT_USER\Software\WheatyProductions\MouseWheel</PRE>
+<P></P>
+<P>DllMain queries the appropriate value and, if found, sets the global variables that describe how mouse wheel messages should be translated.</P>
+<P>The DLL_PROCESS_DETACH code in DllMain is much simpler. Its only job is to remove the systemwide hook by calling UnhookWindowsEx. It only does this if the current process set the hook in the first place (that is, the sponsor process).</P>
+<P>Now let's check out the GetMouseWheelMsg function. Isn't the mouse wheel message defined to be WM_MOUSEWHEEL in WINNT.H with a value of 0&nbsp;<SPAN>¥</SPAN>&nbsp;20A? Yes and no. It turns out that Windows NT 4.0 was the first version of the Win32 system to directly support the WM_MOUSEWHEEL message; Windows 95 has no explicit support for this message. In its place, the IntelliMouse software registers a window message by calling RegisterWindowMessage. Programs that want to support the IntelliMouse under Windows 95 need to figure out what the registered message number is and use that rather than the WM_MOUSEWHEEL #define. The GetMouseWheelMsg function is my attempt to isolate the rest of the MouseWheel.CPP code from this oddity.</P>
+<P>How does GetMouseWheelMsg know the name of the registered message that it should look for? Believe it or not, there's an IntelliMouse SDK on the Microsoft Web site (http://www.microsoft.com/products/hardware/intellimouse/sdkhome.html). You'll want to download the file ZMOUSE.H, which contains a whole bunch of #defines and comments about programming for the IntelliMouse. I didn't use it in my MouseWheel.CPP code because I didn't want to distribute Microsoft header files. Instead, I plucked out the relevant text string (MSWHEEL_ROLLMSG) and included it in the GetMouseWheelMsg function.</P>
+<P>As a final note on the MouseWheel.CPP code, I was able to cut its memory footprint down quite a bit by not using any C++ runtime library functions. This in turn let me write my own _DllMainCRTStartup function, which is just a wrapper around a call to DllMain. Put another way, I was able to strip out all of the startup code and runtime library overhead from a traditional DLL. I also merged several of the sections using the linker /MERGE switch. The resulting MouseWheel.DLL is only 4KB in size and uses just three pages of RAM.</P>
+<P>The sponsor program is written in MFC (see Figure 2). It's mostly boilerplate MFC code, so I won't dwell on it too much. The implicit link between the sponsor program and MouseWheel.DLL occurs in CMWApp::InitInstance. The majority of the nonboilerplate code is found in CMWDlg::OnInitDialog,CMWDlg::OnAddProgram, CMWDlg::Refresh Program Listbox, and CMWDlg::OnDeleteProgram. These methods implement the UI for adding, deleting, and displaying the list of programs that MouseWheel.DLL supports.</P>
+<P>Figure 2  MW.EXE</P>
+<P></P>
+<P>AddProgram.cpp</P>
+
+<PRE>// AddProgram.cpp : implementation file
+//
+
+·
+·
+·
+
+/////////////////////////////////////////////////////////////////////////////
+// CAddProgram message handlers
+
+void CAddProgram::OnBrowseButton() 
+{
+    // TODO: Add your control notification handler code here
+    CFileDialog dlg( TRUE, "EXE", "*.EXE", OFN_FILEMUSTEXIST, 0, this );
+    
+    if ( IDOK != dlg.DoModal() )
+        return;
+
+    ((CWnd*)GetDlgItem(IDC_NEW_PROGRAM_NAME))-&gt;SetWindowText(dlg.GetPathName());
+}
+
+
+BOOL CAddProgram::OnInitDialog() 
+{
+    CDialog::OnInitDialog();
+    
+    // TODO: Add extra initialization here
+    
+    CSpinButtonCtrl * pSpinButton = (CSpinButtonCtrl *)GetDlgItem( IDC_SPIN1 );
+    pSpinButton-&gt;SetBuddy( GetDlgItem(IDC_EDIT_INCREMENT_AMOUNT) );
+    pSpinButton-&gt;SetRange( 1, 100 );
+
+    // Set the line scrolling BOOL to TRUE (by default), and check
+    // the "line scrolling" checkbox to reflect this
+    m_fLineScrolling = TRUE;
+    ((CButton *)GetDlgItem(IDC_RADIO_LINE))-&gt;SetCheck( 1 );
+
+    return TRUE;  // return TRUE unless you set the focus to a control
+                  // EXCEPTION: OCX Property Pages should return FALSE
+}
+
+void CAddProgram::OnRadioLine() 
+{
+    // TODO: Add your control notification handler code here
+    m_fLineScrolling = TRUE;
+}
+
+void CAddProgram::OnRadioPage() 
+{
+    // TODO: Add your control notification handler code here
+    m_fLineScrolling = FALSE;    
+}
+
+void CAddProgram::OnOK() 
+{
+    // TODO: Add extra validation here
+    CEdit * pEdit = (CEdit *)GetDlgItem( IDC_NEW_PROGRAM_NAME );
+
+    if ( 0 == pEdit-&gt;GetWindowTextLength() )
+    {
+        MessageBox( "Must specify a program name" );
+        return;
+    }
+
+    CDialog::OnOK();
+}
+</PRE>
+<P></P>
+<P>MWDlg.cpp</P>
+
+<PRE>// MWDlg.cpp : implementation file
+//
+·
+·
+·
+
+/////////////////////////////////////////////////////////////////////////////
+// CMWDlg message handlers
+
+BOOL CMWDlg::OnInitDialog()
+{
+    CDialog::OnInitDialog();
+
+    CMenu* pSysMenu = GetSystemMenu(FALSE);
+
+    // Set the icon for this dialog.  The framework does this automatically
+    // when the application's main window is not a dialog
+    SetIcon(m_hIcon, TRUE);         // Set big icon
+    SetIcon(m_hIcon, FALSE);        // Set small icon
+
+    m_notifyIconData.cbSize = sizeof(m_notifyIconData);
+    m_notifyIconData.hWnd = this-&gt;m_hWnd;
+    m_notifyIconData.uID = WM_MY_TRAY_NOTIFICATION;
+    m_notifyIconData.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    m_notifyIconData.uCallbackMessage = WM_MY_TRAY_NOTIFICATION;
+    m_notifyIconData.hIcon = m_hIcon;
+    lstrcpy( m_notifyIconData.szTip, "MouseWheel" );
+    Shell_NotifyIcon( NIM_ADD, &amp;m_notifyIconData );
+
+    RefreshProgramListbox();
+
+    return TRUE;  // return TRUE  unless you set the focus to a control
+}
+
+//  If you add a minimize button to your dialog, you will need the code below
+//  to draw the icon.  For MFC applications using the document/view model,
+//  this is automatically done for you by the framework.
+
+void CMWDlg::OnPaint() 
+{
+    // If the user hasn't asked to see the dialog yet, hide it.  It would be
+    // better to not show the dialog in the first place, but MFC seems bound
+    // and determined to get that dialog on the screen!
+    if ( !m_okToShow )
+    {
+        ShowWindow( SW_HIDE );
+    }
+
+    if (IsIconic())
+    {
+        CPaintDC dc(this); // device context for painting
+
+        SendMessage(WM_ICONERASEBKGND, (WPARAM) dc.GetSafeHdc(), 0);
+
+        // Center icon in client rectangle
+        int cxIcon = GetSystemMetrics(SM_CXICON);
+        int cyIcon = GetSystemMetrics(SM_CYICON);
+        CRect rect;
+        GetClientRect(&amp;rect);
+        int x = (rect.Width() - cxIcon + 1) / 2;
+        int y = (rect.Height() - cyIcon + 1) / 2;
+
+        // Draw the icon
+        dc.DrawIcon(x, y, m_hIcon);
+    }
+    else
+    {
+        CDialog::OnPaint();
+    }
+}
+
+// The system calls this to obtain the cursor to display while the user drags
+// the minimized window.
+HCURSOR CMWDlg::OnQueryDragIcon()
+{
+    return (HCURSOR) m_hIcon;
+}
+
+void CMWDlg::OnAddProgram() 
+{
+    // TODO: Add your control notification handler code here
+    CAddProgram addDialog( this );
+    
+    if ( IDOK != addDialog.DoModal() )
+        return;
+
+    // Low WORD is the number of units to scroll
+    DWORD dwRegValue = addDialog.m_incrementAmount;
+
+    // High word is flags. Right now, the only flag is the "scroll by pages" flag
+
+    if ( FALSE == addDialog.m_fLineScrolling )
+        dwRegValue |= MW_SCROLL_PAGE;
+
+    HKEY hKey = ((CMWApp *)AfxGetApp())-&gt;GetRegKey();
+    if ( !hKey )
+        return;
+
+    if ( 0 == RegSetValueEx(hKey,
+                            addDialog.m_newProgramName,
+                            0,
+                            REG_DWORD,
+                            (PBYTE)&amp;dwRegValue,
+                            sizeof(dwRegValue) ) )
+    {
+        RefreshProgramListbox();
+        MessageBox("You must shut down and restart MW.EXE for this change to "
+                   "take affect");
+    }
+    else
+        MessageBox( "Error adding program to registry" );
+
+    RegCloseKey( hKey );
+}
+
+
+BOOL CMWDlg::RefreshProgramListbox( void )
+{
+    CListBox * pListBox = (CListBox *)GetDlgItem(IDC_PROGRAM_LIST);
+    
+    pListBox-&gt;ResetContent();    // Clear anything that's in there now
+
+    HKEY hKey = ((CMWApp *)AfxGetApp())-&gt;GetRegKey();
+    if ( !hKey )
+        return FALSE;
+
+    for ( unsigned i =0; ; i++ )
+    {
+        LONG hResult;
+        char szValueName[MAX_PATH];
+        DWORD dwValue;
+        DWORD type, cbValueName = sizeof(szValueName), cbValue = sizeof(dwValue);
+
+        hResult = RegEnumValue(    hKey, i, szValueName, &amp;cbValueName, 0,
+                                &amp;type, (PBYTE)&amp;dwValue, &amp;cbValue );
+
+        if ( ERROR_NO_MORE_ITEMS == hResult )
+            break;
+
+        char szLB_Line[ MAX_PATH + 32 ];
+        wsprintf( szLB_Line, "%s\t%s %u",
+                    szValueName,
+                    dwValue &amp; MW_SCROLL_PAGE ? "PAGE" : "LINE",
+                    dwValue &amp; MW_SCROLL_INCREMENT_MASK );
+
+        pListBox-&gt;AddString( szLB_Line );
+    }
+
+    RegCloseKey( hKey );
+
+    return TRUE;
+}
+
+
+void CMWDlg::OnDeleteProgram() 
+{
+    // TODO: Add your control notification handler code here
+    CListBox * pListBox = (CListBox *)GetDlgItem(IDC_PROGRAM_LIST);
+
+    int curSel = pListBox-&gt;GetCurSel();
+    if ( LB_ERR == curSel )
+    {
+        MessageBox( "Must select an program to delete" );
+        return;
+    }
+
+    CString cLBText;
+    
+    pListBox-&gt;GetText( curSel, cLBText );
+
+    CString cProgramName = cLBText.SpanExcluding( "\t" );
+
+    HKEY hKey = ((CMWApp *)AfxGetApp())-&gt;GetRegKey();
+    if ( !hKey )
+        return;
+
+    RegDeleteValue( hKey, cProgramName );
+
+    RegCloseKey( hKey );
+
+    RefreshProgramListbox();
+}
+
+void CMWDlg::OnOK() 
+{
+    // Default OK behavior should hide the dialog, not terminate the app
+    ShowWindow( SW_HIDE );
+}
+
+
+void CMWDlg::OnClose() 
+{
+    // TODO: Add your message handler code here and/or call default
+    
+    m_notifyIconData.uFlags = NIF_ICON;
+    Shell_NotifyIcon( NIM_DELETE, &amp;m_notifyIconData );
+
+    CDialog::OnClose();
+}
+
+
+//////////////////
+// Handle notification from tray icon: display a message.
+//
+LRESULT CMWDlg::OnTrayNotification(WPARAM uID, LPARAM lEvent)
+{
+    if ( lEvent == WM_LBUTTONDBLCLK )
+    {
+        m_okToShow = TRUE;    // Allow the dialog to be shown
+
+        if ( !IsWindowVisible() )
+            ShowWindow( SW_SHOW );
+
+        if ( IsIconic() )
+            ShowWindow( SW_RESTORE );
+    }
+
+    #if 1
+    else if ( lEvent == WM_RBUTTONUP )
+    {
+        CMenu * pSysMenu = GetSystemMenu( FALSE );
+        if ( pSysMenu )
+        {
+            CPoint mouse;
+            GetCursorPos(&amp;mouse);
+            pSysMenu-&gt;TrackPopupMenu( TPM_CENTERALIGN, mouse.x, mouse.y, this );
+            // delete pSysMenu;
+        }
+    }
+    #endif
+
+    return 0;
+}
+
+
+
+BOOL CMWDlg::OnCmdMsg(UINT nID, int nCode, void* pExtra, AFX_CMDHANDLERINFO* pHandlerInfo) 
+{
+    // If it's the WM_SYSCOMMAND SC_CLOSE message, repost it as a WM_CLOSE message
+    // so that our normal WM_CLOSE handler will handle it.
+    if ( SC_CLOSE == nID )
+        PostMessage( WM_CLOSE );
+
+    return CDialog::OnCmdMsg(nID, nCode, pExtra, pHandlerInfo);
+}</PRE>
+<P></P>
+<P></P>
+<H2><A NAME="sec2"></A>Using MouseWheel</H2><P>I initially implemented the sponsor program (MW.EXE) as a simple dialog. However, the need for GUI code for letting the user add additional programs to the supported list led me to write my first nontrivial MFC program. While I didn't have much trouble getting the UI functionality into place, I spent way too much time battling MFC to keep the program off the taskbar, where it sucks up space and is obtrusive. All I wanted was a simple, small icon in the status area near the clock. After many hours, I got fairly close, but it's still not perfect. </P>
+<P>Normally, the sponsor program resides quietly as an icon in the taskbar status area. Right-clicking the icon brings up a system menu that lets you close down the program and remove the systemwide hook. More important, double-clicking on the status icon brings up the main dialog (see Figure 3).</P>
+<P><img src="hood3.gif"></P>
+<P>Figure 3  Mouse Wheel main dialog</P>
+<P>The Add button brings up another dialog where you can enter or browse for the name of an executable (see<I> </I>Figure 4). In this same dialog, you specify whether the new program should have line scrolling or page scrolling, and how many lines or pages should be scrolled. You won't see an immediate effect if you add the name of an executable that's already running. Why? It's likely that the specified executable has already loaded MouseWheel.DLL (via the systemwide hook), so its version of the global variables in MouseWheel.DLL are in the do-nothing state. You'll need to force MouseWheel.DLL to reload by shutting down MW.EXE and then restarting it.</P>
+<P><img src="hood4.gif"></P>
+<P>Figure 4  Select dialog</P>
+<P>Back in the main dialog, the Delete button removes the currently selected program from MouseWheel's list of registered programs. As with the add button, simply changing the contents of the registry <BR>won't have any effect on currently running programs. You'll want to shut down and restart MW.EXE. </P>
+<P>The OK button has a slightly weird behavior at first glance. Normally, an OK button in a dialog-based program would dismiss the dialog, thereby causing the program to end. That's not the desired behavior here. It's important to keep the support program around. Therefore, I made the OK button merely hide the dialog window. If you want to actually terminate the program, you can click on the close button at the upper-right corner when the main dialog is visible. Alternatively, you can right-click on the taskbar status area icon and select Close.</P>
+<P></P>
+<H2><A NAME="sec3"></A>Some Caveats and Final Words</H2><P>If you find that MouseWheel isn't working for you, there are a couple of things to check. First, make sure that the application path for the program that you want to support is correctly specified. Remember, MouseWheel only affects programs that you explicitly tell it to support. </P>
+<P>Another possible reason that MouseWheel won't work is that the particular program doesn't respond to the WM_VSCROLL message. I've found this to be the case with several programs, including those from Microsoft Office 95. At this time, I don't know of any generic solution that would work for these programs.</P>
+<P>On a final note, while writing MouseWheel I paid special attention to what effect my DLL was having on the processes it loaded into. I noticed that the IntelliMouse software also uses a systemwide hook in a DLL called POINT32.DLL. Looking at the module dependencies for POINT32 (using the DEPENDS program from my column in the February 1997 issue of <I>MSJ</I>), I found that it references SHELL32.DLL and WINMM.DLL. Right off the bat, two extra DLLs are loaded into the address space of every GUI process. Even worse, when WINMM.DLL loads it may load additional DLLs for sound board support.</P>
+<P>Programs like the windows calculator aren't going to use any sound capabilities, so these extra DLLs are just wasted RAM. My point is, if you're going to force your DLL into every process context, go easy on what you bring in. More specifically, don't link to DLLs that aren't absolutely critical to the operation of your DLL. </P>
+<P>Have a question about programming in Windows? Send it to Matt at mpietrek@tiac.com or http://www.tiac.com/users/mpietrek.</P>
+<P><I>This article is reproduced from Microsoft Systems Journal. Copyright &copy; 1997 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S. and Canada, or (303) 678-0439 in all other countries. For other inquiries, call (415) 905-2200.</P>
+<P></P></font></body></HTML>

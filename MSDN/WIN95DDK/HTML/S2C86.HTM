@@ -1,0 +1,234 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Polling the Joystick</TITLE><META HTTP-EQUIV="CONTENT-TYPE" CONTENT="text/html; charset= iso-8859-1"><style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD><BODY BGCOLOR="#FFFFFF">
+<FONT FACE="verdana,arial,helvetica" SIZE="2">
+<H3>Polling the Joystick </H3><P>This section describes the procedure that IBMJOY.C follows when retrieving the button states and coordinate values for an IBM-compatible joystick. The procedure differs depending on which joystick is being polled and whether a three-dimensional joystick is being polled. </P>
+<H4><A NAME="sec0"></A>The Polling Routine </H4><P>The POLL.ASM assembly language file contains a single routine, Poll, that interrogates the joystick for button press and coordinate information. Poll sets four global variables, wXpos, wYpos, wZpos, and wButtons to the coordinate and button values. The Poll function either polls the <I>x</I> and <I>y</I> axes or polls the <I>z</I> axis; for a three-dimensional joystick, IBMJOY.C calls Poll twice. </P>
+<P>The Poll function is defined as follows: </P>
+<P><BR></P>
+<PRE>extern UINT PASCAL Poll(UINT id, int zOnly)
+</PRE>
+<P>The <I>id</I> parameter identifies the joystick number. The <I>zOnly</I> parameter identifies whether the <I>z</I> axis is being polled and if so, which axis of the second joystick interface is acting as the <I>z</I> axis. The <I>zOnly</I> parameter has one of the following values: </P>
+
+<TABLE COLS="2" BORDER="0" CELLPADDING="7"><COLGROUP><COL WIDTH="144pt" VALIGN="TOP"><COL WIDTH="204pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P><B>Value </B></P></TD><TD VALIGN="TOP"><P><B>Description </B></P></TD></TR><TR><TD VALIGN="TOP"><P> 0 </P></TD><TD VALIGN="TOP"><P>Poll <I>x</I> and <I>y</I> axes </P></TD></TR><TR><TD VALIGN="TOP"><P>-1 </P></TD><TD VALIGN="TOP"><P>Poll <I>z</I> axis using the <I>x</I> axis of the second joystick interface </P></TD></TR><TR><TD VALIGN="TOP"><P>1 </P></TD><TD VALIGN="TOP"><P>Poll <I>z</I> axis using the <I>y</I> axis of the second joystick interface </P></TD></TR></TBODY></TABLE>
+<P><BR></P><P></P>
+<H4><A NAME="sec1"></A>Calling Poll to Retrieve Button and Position Information </H4><P>In the following example, the <B>GetPos</B> function calls the <B>Poll</B> function to retrieve information about the joystick: </P>
+<P><BR></P>
+<PRE>UINT GetPos(UINT id, JOYINFO FAR * lpInfo)
+{
+    if(id &gt; 1) 
+            return JOYERR_PARMS;    // Error...bad parameter
+
+    lpInfo-&gt;wZpos = 0;
+
+    if(wcAxes == 3)                 // Poll 3-axis joystick?
+    {
+        if(id == 1)                 // If 3D, must be joystick 1
+            return JOYERR_UNPLUGGED;
+        else
+        {
+            if(!Poll(1, iZaxis))    // Poll z axis
+                return JOYERR_UNPLUGGED;
+            lpInfo-&gt;wZpos = wYpos;
+
+            if(!Poll(0, 0))         // Poll x and y axes
+                return JOYERR_UNPLUGGED;
+        }
+    }
+    else if(!Poll(id, 0))           // Poll 2-axis joystick
+        return JOYERR_UNPLUGGED;
+
+    lpInfo-&gt;wButtons = wButtons;
+    lpInfo-&gt;wXpos = wXpos;
+    lpInfo-&gt;wYpos = wYpos;
+
+    return JOYERR_NOERROR;
+}
+</PRE>
+<H4><A NAME="sec2"></A>Reading Button-Press Information </H4><P>The beginning of the <B>Poll</B> function retrieves status information for the joystick buttons. <B>Poll</B> retrieves the button status information by reading address 0x201. (For a description of address 0x201, see the table in "IBM Game Control Adapter Interface," earlier in this chapter.) The button state information is in bits 7 through 4. Poll inverts the bits and stores the resulting value in the wButtons global variable. </P>
+<P>The following example shows the portion of the <B>Poll</B> routine that retrieves the button status information : </P>
+<P><BR></P>
+<PRE>cProc Poll &lt;PUBLIC&gt; &lt;si, di&gt;
+
+    parmW   id
+    parmW   zOnly
+    localW  wClear
+
+    cBegin
+
+    mov     dx,JOYPORT      ; Set joystick port address
+    in      al,dx           ; Read the port
+
+    mov     cl,4            ; Shift at least four bits
+    cmp     id, 0           ; If second joystick, shift six bits
+    jz      @f
+    add     cl,2
+@@:
+    shr     al,cl           ; Shift flags
+    and     ax,3            ; Clear the other bits just in case
+    xor     ax,3            ; Invert the bits (port gives reverse logic)
+    mov     _wButtons,ax    ; Save flags in global variable
+    .
+    .                       ; Sample continued in next section
+    .
+</PRE>
+<H4><A NAME="sec3"></A>Reading Joystick Position Information </H4><P>The following example examines the section of <B>Poll</B> where the driver calculates the coordinate values. In this section, <B>Poll</B> performs the following tasks: </P>
+<UL><LI>     Clears the interrupt flag. </LI><LI>     Initializes the coordinate variables. It sets the position counter variables to a negative base value, since the first iteration of the polling loop occurs before the potentiometer timers are started. See the next section for more information on the first iteration of the polling loop. </LI><LI>     Records the delta calibration value for the coordinates in general-purpose registers. </LI><LI>     Establishes the bit masks used to check the resistive flags during the polling loop. </LI></UL><P></P>
+<P>The following code fragment continues where the previous fragment ended: </P>
+<P><BR></P>
+<PRE>pushf                           ; Push the flags register
+    cli                             ; No interrupts allowed!
+
+    mov     wClear, 1               ; Set stabilization loop flag
+
+Real_Poll:
+
+    mov     dx,JOYPORT              ; Set joystick port address
+    mov     si,offset _JoyCal       ; Point to first JOYCALIBRATE structure
+    
+    mov     bx,JOY1_XY_MASK         ; Place bit mask in bx
+    cmp     id,0                    ; Are we polling joystick 1?
+    jz      @f                      ;    If so, use first structure
+    cmp     zOnly, 0                ; Are we polling the z axis?
+    jnz     @f                      ;    If so, use first structure
+
+                                    ; Polling the second joystick
+    add     si,(size JOYCALIBRATE)  ; Use second JOYCALIBRATE structure
+    mov     bx,JOY2_XY_MASK         ; and bit mask
+
+@@:
+    ; Note zOnly values:
+    ;       0   if polling x and y
+    ;      -1   if z axis is on the second joystick's x potentiometer
+    ;       1   if z axis is on the second joystick's y potentiometer
+
+    cmp     zOnly, 0                ; Are we polling the z axis?
+    jz      poll_setxy              ;   No
+    jl      @f                      ;   Yes, on y potentiometer
+                                    ;   Yes, on x potentiometer
+    mov     ax,[si].jcal_wZbase     ; Set x-pos. counter to z base value
+    neg     ax                      ; Start off negative
+    cwd
+    mov     _wXpos,ax
+    mov     _wXpos_hi,dx            ; used to check for roll-over error
+
+    mov     cx,[si].jcal_wZdelta    ; Establish z delta value
+    mov     bx,JOY2_X_MASK          ; Put bit mask into dx
+    jmp     poll_timers             ; Start the timers!
+; Set up for z-axis poll, using joystick 2's y potentiometer
+
+@@: mov     ax,[si].jcal_wZbase     ; Set y-pos. counter to z base value
+    neg     ax
+    cwd
+    mov     _wYpos,ax
+    mov     _wYpos_Hi,dx            ; used to check for roll-over error
+    
+    mov     di,[si].jcal_wZdelta    ; Establish z delta value
+    mov     bx,JOY2_Y_MASK          ; Put bit mask into bx
+    jmp     poll_timers             ; Start the timers!
+
+    ; Set up for x- and y-axis poll
+
+poll_setxy:
+
+    mov     ax,[si].jcal_wXbase     ; Set x-pos. counter to x base value
+    neg     ax
+    cwd
+    mov     _wXpos,ax
+    mov     _wXpos_hi,dx            ; used to check for roll-over error
+
+    mov     ax,[si].jcal_wYbase     ; Set y-pos. counter to y base value
+    neg     ax                      ; Start off negative
+    cwd
+    mov     _wYpos,ax
+    mov     _wYpos_Hi,dx            ; used to check for roll-over error
+
+    mov     cx,[si].jcal_wXdelta    ; Establish x and y deltas
+    mov     di,[si].jcal_wYdelta
+    .
+    .                               ; Sample continued in next section
+    . 
+</PRE>
+<H4><A NAME="sec4"></A>The Polling Loop </H4><P>After setting up the required registers and global variables, Poll starts the polling loop. The first iteration of the polling loop occurs before the OUT to address 0x201; this is to ensure that the joystick's monostable vibrators have stabilized since the last poll. After the first iteration, Poll starts the timers by outputting a zero byte to address 0x201. </P>
+<P>Each iteration of the polling loop checks the resistive flags. If the flag for a given axis is still set, the timeout has not yet occurred. Poll adds the delta value for that axis to the appropriate position variable. When all the flags are clear, Poll exits the loop. The value returned by this process depends on CPU speed; a fast CPU will complete more polling loops during the timeout period and therefore return higher coordinate values. This is why the IBMJOY driver requires calibration. </P>
+<P>An unplugged joystick continually returns high bits for the position values. If a position counter exceeds a certain value (hard-coded as 0x30000 in POLL.ASM), assume the joystick is unplugged. Because the position value is dependent on CPU speed, the use of a constant ceiling value can present a problem with a very fast CPU (for example, a 50-MHz i486). </P>
+<P>The following code fragment continues where the previous fragment ended: </P>
+<P><BR></P>
+<PRE>; Start the timers!
+
+poll_timers:
+
+    mov     dx,JOYPORT              ; Set joystick port address
+    cmp     wClear, 1               ; Dummy loop?
+    je      poll_skipout
+    xor     ax,ax
+    out     dx,al
+
+poll_skipout:
+
+    mov     ah,bl                   ; bl contains x-position bit mask
+    or        ah,bh                   ; bh contains y-position bit mask
+
+poll_loop:
+    in      al,dx                   ; Get position info from joystick port
+    and     al,ah                   ; Only watch bits of interest
+
+    jz      poll_done               ; Counters cleared?
+
+poll_x_test:
+    test    al,bl                   ; If x bit is cleared, stop
+    jz        poll_y_test             ; incrementing the x counter.
+
+    add     _wXpos,cx               ; X still high, increment counter
+    adc     _wXpos_Hi,0
+
+    cmp     _wXpos_Hi,3             ; Check for overflow (unplugged)
+    jl      poll_y_test
+
+    xor     ax,ax                   ; Unplugged. Return 0 and exit loop
+    jz      poll_sti
+poll_y_test:
+    test    al,bh                   ; If y bit clear, stop incrementing
+    jz        poll_loop
+
+    add     _wYpos,di               ; Y still high, increment counter
+    adc     _wYpos_Hi,0
+    cmp     _wYpos_Hi,3             ; Check for overflow (unplugged)
+ 
+    jl      poll_loop               ; No overflow, loop again
+
+    xor     ax,ax                   ; Unplugged (return 0 and exit loop)
+    jz      poll_sti
+
+poll_done:
+    dec     wClear                  ; Loop again if this is the dummy poll
+    jnz     poll_sti
+    jmp     Real_Poll
+
+poll_sti:
+    pop bx                          ; Pop flags
+    test bx,200h                    ; Was interrupt flag already clear?
+    jz poll_fix_x                   ;    Yes; don't reset it
+    sti                             ;    No; reset interrupt flag
+
+poll_fix_x:                         ; Clean up final x position value
+    xor     bx,bx
+    cmp     _wXpos_Hi,bx            ; Check overflow variable
+    jz        poll_fix_y              ; If wXpos_Hi == 0, wXpos is OK
+    jl        @f                      ; If wXpos_Hi &lt; 0, set wXpos = 0
+    dec     bx                      ; If wXpos_Hi &gt; 0, set wXpos = 65535
+@@: mov     _wXpos,bx
+
+poll_fix_y:                         ; Clean up final y position value
+    xor     bx,bx
+    cmp     _wYpos_Hi,bx
+    jz        poll_fix_done
+    jl        @f
+    dec     bx
+@@: mov     _wYpos,bx
+
+poll_fix_done:
+    mov     al,ah                   ; ax =  0 for unplugged joystick
+    xor     ah,ah                   ; ax != 0 if good read
+
+    cEnd                            ; All done 
+</PRE></FONT></BODY></HTML>

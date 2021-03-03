@@ -1,0 +1,154 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Pivot.XLA</TITLE><META HTTP-EQUIV="CONTENT-TYPE" CONTENT="text/html; charset= iso-8859-1"><style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"><style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>	<BODY bgcolor="#FFFFFF" link=#003399 vlink=#996699>
+
+
+	<FONT FACE="Verdana, Arial, Helvetica" SIZE="2">
+
+	<!--TOOLBAR_START-->
+	<!--TOOLBAR_EXEMPT-->
+	<!--TOOLBAR_END-->
+
+<h3>Pivot.XLA</H3><p>OLE automation can only control one application from another if both applications "speak" the same language. PIVOT needs a Microsoft Excel add-in to supplement OLE automation because Microsoft Excel's PivotTableWizard method requires an argument of the Variant data type containing an array. Since Access Basic version 2 doesn't support this, you can't invoke Microsoft Excel's PivotTableWizard method from Access. </P>
+<p>My workaround for this problem was to create a Microsoft Excel add-in (Pivot.XLA). I explained in the previous section how to open the add-in from Access Basic. Here I cover how to create the add-in. (See the section titled "Sample Application: The WinAPI Add-In" in Chapter 9 of <I>Developing Applications with Microsoft Office</I> for more information on Microsoft Excel add-ins.)</P>
+<p>The easiest way to generate code for pivot tables is to start with Microsoft Excel's macro recorder. Before trying this with <I>any</I> external (non-Microsoft Excel) database, register that database with the ODBC driver manager. </P>
+<P>1.    After registering the database with the ODBC driver manager, start the macro recorder by choosing Record Macro from the Tools menu. Then choose Record New Macro. </P>
+<P>2.    Choose PivotTable&trade; from the Data menu. Microsoft Excel opens the PivotTable Wizard, which walks you through most of the steps below.</P>
+<P>3.    In Step 1 of the PivotTable Wizard, select the type of data source. (PIVOT uses an external data source.) </P>
+<P>4.    Step 2 of the PivotTable Wizard launches Microsoft Query when you click on the Get Data button. Select the ODBC data source that you want to query (I selected the PIVOT data source), and then click the Use button.</P>
+<P>5.    Add Pivot.MDB's three tables (Categories, Products, and Suppliers) to the Query window, then perform the query. I used three fields in PIVOT: Category Name from the Categories table, Zone from the Suppliers table, and a calculated field that multiplies the two fields Unit Price and Units in Stock from the Products Table. Type the following into a field in the Query window (or in the Add Column dialog box) to perform this calculation:</P>
+<UL><LI><B>[Unit Price]*[Units In Stock]</B></LI></UL><P>6.    Click the Return Data button to close Microsoft Query and return to Microsoft Excel. In Step 3 of the PivotTable Wizard, drag the fields to the place where you want them to appear in the pivot table. I positioned Category as the Row, Zone as the Column, and Sum of Expr1002. (Sum of Expr1002 is the calculated field, which I double-clicked on and renamed "Inventory Value.")</P>
+<P>7.    In the last step of the PivotTable Wizard, name the pivot table and indicate where to position it on the worksheet. </P>
+<P>8.    Click the Stop Macro button to stop recording.</P>
+<p>Microsoft Excel records code similar to the following:</P>
+<P CLASS="spacing"><BR></P>
+<pre><FONT FACE="Courier New" SIZE="3">Sub RecordPivotTable()
+  ActiveSheet.PivotTableWizard SourceType:=xlExternal, <BR>    SourceData:= Array("DSN=PIVOT;DBQ=C:\PIVOT\PIVOT.MDB;<BR>    DefaultDir=C:\PIVOT;Description=for Access-Microsoft Excel pivot table <BR>    example;FIL=MS Access;JetIniPath=msacc20.ini;<BR>    SystemDB=C:\ACCESS2\SYSTEM.MDA;UID=Admin;"<BR>    "SELECT Categories.`Category Name`, Suppliers.Zone, `Unit <BR>    Price`*`Units In Stock`FROM Categories Categories, Products <BR>    Products, Suppliers Suppliers WHERE Products.`Category ID` = <BR>    Categories.`Category ID` AND Suppliers.`Supplier ID` = <BR>    Products.`Supplier ID`"), TableDestination:="R1C1", <BR>    TableName:="PivotTable3"ActiveSheet.PivotTables("PivotTable3")<BR>    .AddFields RowFields:="Category Name", ColumnFields:="Zone"<BR>    ActiveSheet.PivotTables("PivotTable3").PivotFields("Inventory <BR>    Value").Orientation = xlDataField
+End Sub</font></pre>
+<H4> </A>From Macro Recorder to Finished Product</H4><p>Pivot.XLA's MakePivotTable subroutine, shown below, is quite similar to the recorded macro. I made three main changes to the macro-recorded code:</P>
+<P><ul><li>    The subroutine now reads the ODBC connection string from the Pivot.INI file. This works as follows: Pivot.MDB's CheckConnect routine reads the connection string from the INI file and determines whether it has the correct path for the database. If not, it deletes the connection string. If Pivot.XLA's MakePivotTable routine doesn't find a connection string in the INI file, it calls the SQLOpen function and passes it an empty string for the first argument and 3 for the last argument, which prompts users to select a database. Once users select a database, the routine records the connection string in the INI file for future use. </P>
+<P><li>    The SourceData argument for the PivotTableWizard method is now packaged as a string array (ArrayConnect) so that it's easier to read and manage. </P>
+<P><li>    I added an error trap.</P></ul>
+<p><B>Note  </B> Remember that you have to use the References command on the Tools menu to open XLODBC.XLA in order to use Microsoft Excel's ODBC functions.</P>
+<P CLASS="spacing"><BR></P>
+<pre><FONT FACE="Courier New" SIZE="3">Option Explicit
+Declare Function GetPrivateProfileString Lib "KERNEL" (ByVal _
+    lpSectionName As String, ByVal lpEntryName As String, ByVal _
+    lpDefault As String, ByVal lpReturnedString As String, ByVal _
+    nSize As Integer, ByVal lpFileName As String) As Integer
+Declare Function WritePrivateProfileString Lib "KERNEL" (ByVal _
+    lpSectionName As String, ByVal lpEntryName As String, ByVal _
+    lpString As String, ByVal lpFileName As String) As Integer
+
+
+Sub MakePivotTable()
+
+'ODBC connection string for PIVOT.MDB.
+    Dim strConnect As String
+    
+'Cell to receive whole connection string from SQLOpen function.
+    Dim objDummyCell As Object
+    
+'Connection ID returned by SQLOpen function.
+    Dim iConnID As Integer
+    
+'All-purpose integer variable to receive return values from
+'add-in and API functions.
+    Dim iRet As Integer
+    
+'Return value of GetPrivateProfileString.
+    Dim iLength As Integer
+    
+'Array argument for PivotTableWizard method.
+    Dim ArrayConnect() As String
+
+'Name of INI file.
+    Const strINIFile = "PIVOT.INI"
+    
+'Turn off screen updating.
+    Application.ScreenUpdating = False
+    
+'Get ODBC connection string from INI file.
+    strConnect = String$(256, 0)
+    iLength = GetPrivateProfileString("PivotTableWizardInfo", _
+        "ConnectionString", "", strConnect, Len(strConnect), _
+        strINIFile)
+
+GetConnection:
+    If iLength &lt;&gt; 0 Then
+        strConnect = Left$(strConnect, iLength)
+        
+'If there's no connection string in the INI file, get one by 
+'calling the SQLOpen function with an empty string as its first 
+'argument and 3 as its final argument. This function prompts users 
+'to select a database, and records the connection string in a 
+'cell. (The function doesn't let you store it in a variable 
+'directly). Read the connection string from the cell into 
+'strConnect, clear the cell, close the database connection via 
+'SQLClose, and record the connection string in the INI file for 
+'future use.
+    Else
+        Set objDummyCell = ActiveSheet.Range("A1")
+        iConnID = SQLOpen("", objDummyCell, 3)
+        strConnect = objDummyCell.Value
+        objDummyCell.Clear
+        iRet = SQLClose(iConnID)
+        iRet = WritePrivateProfileString("PivotTableWizardInfo", _
+            "ConnectionString", strConnect, strINIFile)
+    End If
+    
+    On Error GoTo PivotProblem
+    
+'Invoke the PivotTableWizard method for the active sheet.
+'The SourceType argument constant xlExternal indicates an external
+'database. The SourceData argument is an array--its first element
+'is the ODBC connection string, and the remaining elements are
+'the query for the pivot table data broken into chunks no longer
+'than 200 characters (which is what the PivotTableWizard method
+'requires). The Table Destination argument R1C1 places
+'the pivot table at the upper left corner of the active sheet.
+'The TableName argument assigns a name to the pivot table.
+    ReDim ArrayConnect(1 To 8)
+    ArrayConnect(1) = strConnect
+    ArrayConnect(2) = "SELECT DISTINCTROW Categories.[Category<BR>        Name], "
+    ArrayConnect(3) = "Suppliers.Zone, [Products]![Unit Price]*"
+    ArrayConnect(4) = "[Products]![Units In Stock] AS [Inventory<BR>        Value] "
+    ArrayConnect(5) = "FROM Categories INNER JOIN (Suppliers INNER<BR>        JOIN "
+    ArrayConnect(6) = "Products ON Suppliers.[Supplier ID] = "
+    ArrayConnect(7) = "Products.[Supplier ID]) ON Categories.<BR>        [Category ID]"
+    ArrayConnect(8) = " = Products.[Category ID];"
+    
+    ActiveSheet.PivotTableWizard SourceType:=xlExternal, _
+        SourceData:=ArrayConnect, TableDestination:="R1C1", _
+        TableName:="Inventory"
+    
+'Add fields to the pivot table. This table has a single row field,
+'"Category Name", and a single column field, "Zone"
+    ActiveSheet.PivotTables("Inventory").AddFields RowFields:= _
+        "Category Name", ColumnFields:="Zone"
+        
+'Designate "Inventory Value" as the data field, and display its
+'entries with the specified number format.
+    With ActiveSheet.PivotTables("Inventory").PivotFields _<BR>      ("Inventory Value")
+        .Orientation = xlDataField
+        .NumberFormat = "#,##0.00_);[Red](#,##0.00)"
+    End With
+    
+ExitPivot:
+'Turn screen updating on
+    Application.ScreenUpdating = True
+    Exit Sub
+    
+PivotProblem:
+'If the PivotTable Wizard method fails (Err = 1004), it
+'may be because the connection string was bad. Get a good one.
+    If Err = 1004 Then
+        Err = 0
+        iLength = 0
+        Resume GetConnection
+    Else
+        MsgBox Str$(Err) &amp; ": " &amp; Error$()
+        Exit Sub
+    End If
+    Resume ExitPivot
+End Sub</font></pre></BODY></HTML>

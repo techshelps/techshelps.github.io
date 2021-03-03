@@ -1,0 +1,1343 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Implementing the New Win32  Driver Model for Windows 98  and Windows NT 5.0</title>
+<style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000 dir=ltr>
+<Font face="verdana,arial,helvetica" size="2">
+<h1><a name="implementingnewwin32drivermodelforwindows98windowsnt50"></a>Implementing the New Win32  Driver Model for Windows 98  and Windows NT 5.0</h1>
+<p class=indent>
+by Walter Oney</p>
+<p>
+In the previous installment of this article, “Surveying the New Win32® Driver Model for Windows 98 and Windows NT® 5.0” (MSJ, November 1997), I described the basic architecture of the Win32 Driver Model (WDM) and showed the code you would use in DriverEntry and AddDevice functions to initialize a WDM driver. In this article, I’ll finish the introduction to WDM by describing how to handle Plug and Play (PNP) and power management I/O requests. I’ll also describe one technique whereby a Virtual Device Driver running in Windows® 98 can call a WDM driver.</p>
+<p>
+Before diving into new details, I want to mention a correction to one of last month’s details. Figure 1 is the complete listing of a test program that exercises the not-so-Simple driver example. The first portion of the test program, discussed last month, illustrates how to obtain and use the name of a device interface. The names of two of the functions used for that purpose are different in the current beta releases of Windows 98 and Windows NT 5.0. The revised listing shows how to code for the incompatibility by calling GetProcAddress.</p>
+<p>
+<b>Figure 1: Revised TEST.CPP</b></p>
+<pre><code>// TEST.CPP
+
+#include &lt;windows.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;winioctl.h&gt;
+#include &lt;setupapi.h&gt;
+#include "SimpleIoctl.h"
+
+#include &lt;initguid.h&gt;
+DEFINE_GUID(GUID_SIMPLE, 0x3d93c5c0, 0x0085, 0x11d1, 0x82, 0x1e, 0x00, 
+    0x80, 0xc8, 0x83, 0x27, 0xab);
+
+typedef struct _UNICODE_STRING {
+    WORD Length;
+    WORD MaximumLength;
+    LPWSTR  Buffer;
+} UNICODE_STRING;
+
+#define Not_VxD
+#include "myvxd.h"
+
+void main(int argc, char* argv[])
+    {                           // main
+    HMODULE hSetupapi = GetModuleHandle("SETUPAPI.DLL");
+    if (!hSetupapi)
+        {
+        puts("SETUPAPI.DLL not loaded!");
+        exit(1);
+        }
+
+    typedef BOOL (WINAPI* ENUM)(HDEVINFO, PSP_DEVINFO_DATA, LPGUID,
+        DWORD, PSP_INTERFACE_DEVICE_DATA);
+    typedef BOOL (WINAPI* GETDETAIL)(HDEVINFO, 
+        PSP_INTERFACE_DEVICE_DATA, PSP_INTERFACE_DEVICE_DETAIL_DATA,
+        DWORD, PDWORD, PSP_DEVINFO_DATA);
+
+    ENUM SetupDiEnumDeviceInterfaces;
+    GETDETAIL SetupDiGetDeviceInterfaceDetail;
+
+    SetupDiEnumDeviceInterfaces = (ENUM) GetProcAddress(hSetupapi,
+        "SetupDiEnumDeviceInterfaces"); // NT 5.0 beta 1 name
+    if (!SetupDiEnumDeviceInterfaces)
+        SetupDiEnumDeviceInterfaces = (ENUM) GetProcAddress(hSetupapi, 
+            "SetupDiEnumInterfaceDevice");  // Win98 beta 2 name
+    if (!SetupDiEnumDeviceInterfaces)
+        {
+        puts("Can't find SetupDiEnumDeviceInterfaces in SETUPAPI.DLL");
+        exit(1);
+        }
+
+    SetupDiGetDeviceInterfaceDetail = (GETDETAIL) 
+        GetProcAddress(hSetupapi, 
+            "SetupDiGetDeviceInterfaceDetailA");    // NT 5.0 beta 1 name
+    if (!SetupDiGetDeviceInterfaceDetail)
+        SetupDiGetDeviceInterfaceDetail = (GETDETAIL) 
+            GetProcAddress(hSetupapi, 
+                "SetupDiGetInterfaceDeviceDetailA");    // Win98 beta 2 name
+    if (!SetupDiGetDeviceInterfaceDetail)
+        {
+        printf("Can't find SetupDiGetDeviceInterfaceDetail in "
+               "SETUPAPI.DLL");
+        exit(1);
+        }
+    
+    HDEVINFO info = SetupDiGetClassDevs((LPGUID) &amp;GUID_SIMPLE, NULL, 
+                                        NULL, DIGCF_PRESENT | 
+                                        DIGCF_INTERFACEDEVICE);
+    if (info == INVALID_HANDLE_VALUE)
+        {
+        printf("Error %d trying to open enumeration handle for "
+            "GUID_SIMPLE\n", GetLastError());
+        exit(1);
+        }
+
+    SP_INTERFACE_DEVICE_DATA ifdata;
+    ifdata.cbSize = sizeof(ifdata);
+    if (!SetupDiEnumDeviceInterfaces(info, NULL, (LPGUID) &amp;GUID_SIMPLE,
+                                     0, &amp;ifdata))
+        {
+        printf("Error %d trying to enumerate interfaces\n", 
+            GetLastError());
+        SetupDiDestroyDeviceInfoList(info);
+        exit(1);
+        }
+
+    DWORD needed;
+    SetupDiGetDeviceInterfaceDetail(info, &amp;ifdata, NULL, 0, &amp;needed, 
+        NULL);
+    PSP_INTERFACE_DEVICE_DETAIL_DATA detail = 
+        (PSP_INTERFACE_DEVICE_DETAIL_DATA) malloc(needed);
+    if (!detail)
+        {
+        printf("Error %d trying to get memory for interface detail\n", 
+            GetLastError());
+        SetupDiDestroyDeviceInfoList(info);
+        exit(1);
+        }
+
+    detail-&gt;cbSize = sizeof(SP_INTERFACE_DEVICE_DETAIL_DATA);
+    if (!SetupDiGetDeviceInterfaceDetail(info, &amp;ifdata, detail, needed, 
+        NULL, NULL))
+        {
+        printf("Error %d getting interface detail\n", GetLastError());
+        free((PVOID) detail);
+        SetupDiDestroyDeviceInfoList(info);
+        exit(1);
+        }
+
+    char name[MAX_PATH];
+    strncpy(name, detail-&gt;DevicePath, sizeof(name));
+    free((PVOID) detail);
+    SetupDiDestroyDeviceInfoList(info);
+
+    HANDLE hfile = CreateFile(name, GENERIC_READ | GENERIC_WRITE, 0,
+        NULL, OPEN_EXISTING, 0, NULL);
+    if (hfile == INVALID_HANDLE_VALUE)
+        {
+        printf("Error %d trying to open %s\n", GetLastError(), name);
+        exit(1);
+        }
+
+    DWORD version;
+    DWORD junk;
+    DWORD testval = 42;
+
+    BOOL dowrite = argc &gt;= 2 &amp;&amp; strcmpi(argv[1], "-dowrite") == 0;
+
+    if (DeviceIoControl(hfile, IOCTL_SIMPLE_GETVER_BUFFERED, &amp;testval, 
+        sizeof(testval), &amp;version, sizeof(version), &amp;junk, NULL))
+        printf("Buffered IOCTL reports version %d.%2.2d\n", 
+            HIWORD(version), LOWORD(version));
+    else
+        printf("Buffered IOCTL failed with code %d\n", GetLastError());
+
+    if (DeviceIoControl(hfile, IOCTL_SIMPLE_GETVER_OUT_DIRECT, 
+        &amp;testval, sizeof(testval), &amp;version, sizeof(version), &amp;junk, NULL))
+        printf("Direct IOCTL reports version %d.%2.2d\n", 
+            HIWORD(version), LOWORD(version));
+    else
+        printf("Direct IOCTL failed with code %d\n", GetLastError());
+
+    if (DeviceIoControl(hfile, IOCTL_SIMPLE_GETVER_NEITHER, &amp;testval, 
+        sizeof(testval), &amp;version, sizeof(version), &amp;junk, NULL))
+        printf("User-mode IOCTL reports version %d.%2.2d\n", 
+            HIWORD(version), LOWORD(version));
+    else
+        printf("User-mode IOCTL failed with code %d\n", GetLastError());
+
+    if (dowrite)
+        {
+        DWORD nwritten;
+        if (WriteFile(hfile, "Hi!", 3, &amp;nwritten, NULL))
+            printf("WriteFile succeeded, sent %d bytes\n", nwritten);
+        else
+            printf("WriteFile failed with code %d\n", GetLastError());
+        }
+
+    HANDLE hvxd = CreateFile("\\\\.\\MYVXD.VXD", 0, 0, 0, 0, 
+        FILE_FLAG_DELETE_ON_CLOSE, NULL);
+    if (hvxd == INVALID_HANDLE_VALUE)
+        printf("Unable to dynamically load MYVXD\n");
+    else
+        {                       // test VxD interface
+        WCHAR fname[MAX_PATH] = L"\\DosDevices\\";
+        int offset = wcslen(fname);
+        MultiByteToWideChar(CP_OEMCP, 0, name+4, -1, fname+offset, 
+            MAX_PATH - offset);
+
+        OPENHANDLE_PARMS open = {
+            {wcslen(fname) * 2, sizeof(fname), fname},
+            GENERIC_READ | GENERIC_WRITE,
+            };
+
+        if (DeviceIoControl(hvxd, MYVXD_OPENHANDLE, &amp;open, 
+            sizeof(open), NULL, 0, NULL, NULL))
+            {                   // opened handle okay
+            IOCTL_PARMS ioctl = {
+                open.hDevice,
+                IOCTL_SIMPLE_GETVER_BUFFERED,
+                NULL,
+                0,
+                &amp;version,
+                sizeof(version),
+                };
+            
+            if (DeviceIoControl(hvxd, MYVXD_IOCTL, &amp;ioctl, 
+                sizeof(ioctl), NULL, 0, NULL, NULL))
+                printf("IOCTL_SIMPLE_GETVER_BUFFERED via VxD reports "
+                    "version number %d.%2.2d\n", HIWORD(version), 
+                    LOWORD(version));
+            else
+                printf("IOCTL_SIMPLE_GETVER_BUFFERED via VxD failed"
+                " with code %d\n", GetLastError());
+
+            CLOSEHANDLE_PARMS close = {open.hDevice};
+            if (DeviceIoControl(hvxd, MYVXD_CLOSEHANDLE, &amp;close, 
+                sizeof(close), NULL, 0, NULL, NULL))
+                printf("MYVXD_CLOSEHANDLE succeeded\n");
+            else
+                printf("MYVXD_CLOSEHANDLE failed with code %d\n", 
+                    GetLastError());
+            }                   // opened handle okay
+        else
+            printf("MYVXD_OPENHANDLE failed with code %d\n", 
+                GetLastError());
+        
+        CloseHandle(hvxd);
+        }                       // test VxD interface
+
+    CloseHandle(hfile);
+    }                           // main
+</code></pre>
+<p>
+Once Configuration Manager knows which resources to assign, it sends each device a PNP I/O Request Packet (IRP) indicating that the device should start. While creating an IRP, the I/O system is aware that several stacked drivers may take part in processing it, so it also creates a collection of IO_STACK_LOCATION structures, one for each driver on the stack. The first stack location contains many parameters that are crucial to understanding the details of the particular request being made. (If a driver needs to pass a request down the driver stack, it ordinarily needs to first replicate the stack entry it received for the next driver—more about this later.) Two of the fields in the stack location, MajorFunction and MinorFunction, identify the type of request. Typically, locating the current stack location and extracting these codes are among the very first things that a driver dispatch routine will do.</p>
+<p>
+For example, a WDM driver might handle PNP requests with a function like this:</p>
+<pre><code>NTSTATUS RequestPnp(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
+    {
+    PIO_STACK_LOCATION stack =
+        IoGetCurrentIrpStackLocation(Irp);
+    ASSERT(stack-&gt;MajorFunction == IRP_MJ_PNP);
+    ULONG fcn = stack-&gt;MinorFunction;
+    return (*fcntab[fcn])(fdo, Irp);
+    }
+</code></pre>
+<p>
+fcntab is an array of function pointers, one for each possible minor function. Each function must initiate a process that eventually ends when some driver in the stack calls the IoCompleteRequest routine to mark the request complete. Refer to the “Processing I/O Requests” sidebar for a summary of how drivers process and complete IRPs.</p>
+<p>
+A driver must pass each PNP request down the stack, whether or not it handles the request itself. Therefore, most of the entries in the function table in the RequestPnp function point to a default handler along the following lines:</p>
+<pre><code>NTSTATUS DefaultPnpHandler(IN PDEVICE_OBJECT fdo,
+                           IN PIRP Irp)
+    {
+    IoSkipCurrentIrpStackLocation(Irp);
+    PDEVICE_EXTENSION pdx = (PDEVICE_EXTENSION)
+        fdo-&gt;DeviceExtension;
+    return IoCallDriver(pdx-&gt;LowerDeviceObject, Irp);
+    }
+</code></pre>
+<p>
+This default handler simply forwards the IRP to the next driver in the stack, whose address was recorded originally in AddDevice. The lower driver is responsible for performing and completing the request. </p>
+<p>
+IoSkipCurrentIrpStackLocation is new with WDM; it uses trickery to make sure that the next driver receives the IRP with the right IO_STACK_LOCATION. The trick is to retard the I/O stack. IoCallDriver automatically advances the I/O stack. The net effect of the two stack operations is to give the next driver control with the exact same stack location as this driver is using. No harm arises from the fact that the IRP actually contains an additional stack location at the end that will never get used.</p>
+<p>
+When the minor function code is IRP_MN_START_ DEVICE, Configuration Manager is asking the driver to start the device. The stack location also contains information about the I/O resources that Configuration Manager has assigned to the device. The handler for this minor function is where all of the real initialization for an I/O device actually occurs in a WDM driver. It’s essential to allow lower-level drivers to deal with this request before proceeding, however. Passing an IRP down and waiting for lower layers to complete it is one of the more intricate things a kernel-mode driver ever needs to do, unfortunately. </p>
+<p>
+Figure 2 is the complete listing of a relatively simple WDM driver that handles IRP_MN_START_DEVICE. The HandleStartDevice function within PLUGPLAY.CPP uses a helper function named ForwardAndWait to send the request  down to the next layer and to wait for the lower layer to handle it completely. It then calls a StartDevice helper function to process the configuration information buried  in the current stack location. Finally, it uses yet another helper routine named CompleteRequest, located in DRIVERENTRY.CPP, to accomplish the mechanical operation of posting the PNP request.</p>
+<p>
+<b>Figure 2: A Simple WDM Driver</b></p>
+<p>
+<b>DRIVERENTRY.CPP</b></p>
+<pre><code>// DRIVERENTRY.CPP
+
+#define INITGUID                // define GUID_SIMPLE
+
+#include "driver.h"
+
+NTSTATUS AddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT pdo);
+VOID DriverUnload(IN PDRIVER_OBJECT fdo);
+
+extern "C" NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject,
+    IN PUNICODE_STRING RegistryPath)
+    {                           // DriverEntry
+    DriverObject-&gt;DriverUnload = DriverUnload;
+    DriverObject-&gt;DriverExtension-&gt;AddDevice = AddDevice;
+    DriverObject-&gt;MajorFunction[IRP_MJ_CREATE] = RequestCreate;
+    DriverObject-&gt;MajorFunction[IRP_MJ_CLOSE] = RequestClose;
+    DriverObject-&gt;MajorFunction[IRP_MJ_WRITE] = RequestWrite;
+    DriverObject-&gt;MajorFunction[IRP_MJ_DEVICE_CONTROL] = RequestControl;
+    DriverObject-&gt;MajorFunction[IRP_MJ_PNP] = RequestPnp;
+    DriverObject-&gt;MajorFunction[IRP_MJ_POWER] = RequestPower;
+    DriverObject-&gt;DriverStartIo = StartIo;
+
+    return STATUS_SUCCESS;
+    }                           // DriverEntry
+
+VOID DriverUnload(IN PDRIVER_OBJECT DriverObject)
+    {                           // DriverUnload
+    KdPrint(("simple - "
+        "Entering DriverUnload: DriverObject %8.8lX\n", DriverObject));
+    }                           // DriverUnload
+
+NTSTATUS AddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT pdo)
+    {                           // AddDevice
+    NTSTATUS status;
+    PDEVICE_OBJECT fdo;
+    status = IoCreateDevice(DriverObject, sizeof(DEVICE_EXTENSION), NULL,
+        FILE_DEVICE_UNKNOWN, 0, FALSE, &amp;fdo);
+    if (!NT_SUCCESS(status))
+        return status;
+    
+    PDEVICE_EXTENSION pdx = (PDEVICE_EXTENSION) fdo-&gt;DeviceExtension;
+    pdx-&gt;DeviceObject = fdo;
+    pdx-&gt;usage = 1;             // locked until RemoveDevice
+    KeInitializeEvent(&amp;pdx-&gt;evRemove, NotificationEvent, FALSE);
+
+    status = IoRegisterDeviceInterface(pdo, &amp;GUID_SIMPLE, NULL,
+        &amp;pdx-&gt;ifname);
+    if (!NT_SUCCESS(status))
+        {                       // unable to register interface
+        IoDeleteDevice(fdo);
+        return status;
+        }                       // unable to register interface
+    IoSetDeviceInterfaceState(&amp;pdx-&gt;ifname, TRUE);
+
+    pdx-&gt;LowerDeviceObject = IoAttachDeviceToDeviceStack(fdo, pdo);
+    fdo-&gt;Flags &amp;= ~DO_DEVICE_INITIALIZING;
+    IoInitializeDpcRequest(fdo, DpcForIsr);
+    fdo-&gt;Flags |= DO_BUFFERED_IO;
+    pdx-&gt;power = PowerDeviceD0; // device starts in full power state
+
+    pdx-&gt;idle = PoRegisterDeviceForIdleDetection(pdo, 
+        SIMPLE_IDLE_CONSERVATION, SIMPLE_IDLE_PERFORMANCE, PowerDeviceD3);
+
+    return STATUS_SUCCESS;
+    }                           // AddDevice
+
+NTSTATUS CompleteRequest(IN PIRP Irp, IN NTSTATUS status, IN ULONG info)
+    {                           // CompleteRequest
+    Irp-&gt;IoStatus.Status = status;
+    Irp-&gt;IoStatus.Information = info;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return status;
+    }                           // CompleteRequest
+
+NTSTATUS ForwardAndWait(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
+    {                           // ForwardAndWait
+    KEVENT event;
+    KeInitializeEvent(&amp;event, NotificationEvent, FALSE);
+
+    IoCopyCurrentIrpStackLocationToNext(Irp);
+    IoSetCompletionRoutine(Irp, (PIO_COMPLETION_ROUTINE) 
+        OnRequestComplete, (PVOID) &amp;event, TRUE, TRUE, TRUE);
+
+    PDEVICE_EXTENSION pdx = (PDEVICE_EXTENSION) fdo-&gt;DeviceExtension;
+    NTSTATUS status = IoCallDriver(pdx-&gt;LowerDeviceObject, Irp);
+    if (status == STATUS_PENDING)
+        {                       // wait for completion
+        KeWaitForSingleObject(&amp;event, Executive, KernelMode, FALSE, NULL);
+        status = Irp-&gt;IoStatus.Status;
+        }                       // wait for completion
+
+    return status;
+    }                           // ForwardAndWait
+
+BOOLEAN LockDevice(PDEVICE_EXTENSION pdx)
+    {                           // LockDevice
+    LONG usage = InterlockedIncrement(&amp;pdx-&gt;usage);
+
+    if (pdx-&gt;removing)
+        {                       // removing device
+        if (InterlockedDecrement(&amp;pdx-&gt;usage) == 0)
+            KeSetEvent(&amp;pdx-&gt;evRemove, 0, FALSE);
+        return FALSE;
+        }                       // removing device
+
+    return TRUE;
+    }                           // LockDevice
+
+BOOLEAN LockDevice(IN PDEVICE_OBJECT fdo)
+    {
+    return LockDevice((PDEVICE_EXTENSION) fdo-&gt;DeviceExtension);
+    }
+
+NTSTATUS OnRequestComplete(IN PDEVICE_OBJECT fdo, IN PIRP Irp,
+    IN PKEVENT pev)
+    {                           // OnRequestComplete
+    KeSetEvent(pev, 0, FALSE);
+    return STATUS_MORE_PROCESSING_REQUIRED;
+    }                           // OnRequestComplete
+
+VOID RemoveDevice(IN PDEVICE_OBJECT fdo)
+    {                           // RemoveDevice
+    PDEVICE_EXTENSION pdx = (PDEVICE_EXTENSION) fdo-&gt;DeviceExtension;
+    NTSTATUS status;
+
+    IoSetDeviceInterfaceState(&amp;pdx-&gt;ifname, FALSE);
+    if (pdx-&gt;ifname.Buffer)
+        ExFreePool((PVOID) pdx-&gt;ifname.Buffer);
+
+    if (pdx-&gt;LowerDeviceObject)
+        IoDetachDevice(pdx-&gt;LowerDeviceObject);
+
+    IoDeleteDevice(fdo);
+    }                           // RemoveDevice
+
+void UnlockDevice(PDEVICE_EXTENSION pdx)
+    {                           // UnlockDevice
+    LONG usage = InterlockedDecrement(&amp;pdx-&gt;usage);
+    if (usage == 0)
+        KeSetEvent(&amp;pdx-&gt;evRemove, 0, FALSE);
+    }                           // UnlockDevice
+
+void UnlockDevice(PDEVICE_OBJECT fdo)
+    {
+    UnlockDevice((PDEVICE_EXTENSION) fdo-&gt;DeviceExtension);
+    }
+</code></pre>
+<p>
+<b>PLUGPLAY.CPP</b></p>
+<pre><code>// PLUGPLAY.CPP
+
+#include "driver.h"
+
+NTSTATUS DefaultPnpHandler(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
+NTSTATUS HandleRemoveDevice(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
+NTSTATUS HandleStartDevice(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
+NTSTATUS HandleStopDevice(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
+VOID ShowResources(IN PCM_PARTIAL_RESOURCE_LIST list);
+
+NTSTATUS RequestPnp(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
+    {                           // RequestPnp
+    if (!LockDevice(fdo))
+        return CompleteRequest(Irp, STATUS_DELETE_PENDING, 0);
+
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
+
+    static NTSTATUS (*fcntab[])(IN PDEVICE_OBJECT fdo, IN PIRP Irp) = {
+        HandleStartDevice,      // IRP_MN_START_DEVICE
+        DefaultPnpHandler,      // IRP_MN_QUERY_REMOVE_DEVICE
+        HandleRemoveDevice,     // IRP_MN_REMOVE_DEVICE
+        DefaultPnpHandler,      // IRP_MN_CANCEL_REMOVE_DEVICE
+        HandleStopDevice,       // IRP_MN_STOP_DEVICE
+        DefaultPnpHandler,      // IRP_MN_QUERY_STOP_DEVICE
+        DefaultPnpHandler,      // IRP_MN_CANCEL_STOP_DEVICE
+        DefaultPnpHandler,      // IRP_MN_QUERY_DEVICE_RELATIONS
+        DefaultPnpHandler,      // IRP_MN_QUERY_INTERFACE
+        DefaultPnpHandler,      // IRP_MN_QUERY_CAPABILITIES
+        DefaultPnpHandler,      // IRP_MN_QUERY_RESOURCES
+        DefaultPnpHandler,      // IRP_MN_QUERY_RESOURCE_REQUIREMENTS
+        DefaultPnpHandler,      // IRP_MN_QUERY_DEVICE_TEXT
+        DefaultPnpHandler,      // 
+        DefaultPnpHandler,      // 
+        DefaultPnpHandler,      // IRP_MN_READ_CONFIG
+        DefaultPnpHandler,      // IRP_MN_WRITE_CONFIG
+        DefaultPnpHandler,      // IRP_MN_EJECT
+        DefaultPnpHandler,      // IRP_MN_SET_LOCK
+        DefaultPnpHandler,      // IRP_MN_QUERY_ID
+        DefaultPnpHandler,      // IRP_MN_PNP_DEVICE_STATE
+        };
+
+    ULONG fcn = stack-&gt;MinorFunction;
+    NTSTATUS status;
+    if (fcn &gt;= arraysize(fcntab))
+        {                       // unknown function
+        status = DefaultPnpHandler(fdo, Irp);
+        UnlockDevice(fdo);
+        return status;
+        }                       // unknown function
+
+    status = (*fcntab[fcn])(fdo, Irp);
+    if (fcn != IRP_MN_REMOVE_DEVICE)
+        UnlockDevice(fdo);
+    return status;
+    }                           // RequestPnp
+
+NTSTATUS DefaultPnpHandler(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
+    {                           // DefaultPnpHandler
+    IoSkipCurrentIrpStackLocation(Irp);
+    PDEVICE_EXTENSION pdx = (PDEVICE_EXTENSION) fdo-&gt;DeviceExtension;
+    return IoCallDriver(pdx-&gt;LowerDeviceObject, Irp);
+    }                           // DefaultPnpHandler
+
+NTSTATUS HandleRemoveDevice(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
+    {                           // HandleRemoveDevice
+
+    PDEVICE_EXTENSION pdx = (PDEVICE_EXTENSION) fdo-&gt;DeviceExtension;
+    pdx-&gt;removing = TRUE;
+    UnlockDevice(pdx);
+    UnlockDevice(pdx);
+    KeWaitForSingleObject(&amp;pdx-&gt;evRemove, Executive, KernelMode, FALSE,
+        NULL);
+
+    StopDevice(fdo);
+
+    NTSTATUS status = DefaultPnpHandler(fdo, Irp);
+
+    RemoveDevice(fdo);
+    return status;
+    }                           // HandleRemoveDevice
+
+NTSTATUS HandleStartDevice(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
+    {                           // HandleStartDevice
+    NTSTATUS status = ForwardAndWait(fdo, Irp);
+    if (!NT_SUCCESS(status))
+        return CompleteRequest(Irp, status, Irp-&gt;IoStatus.Information);
+
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
+
+    status = StartDevice(fdo, &amp;stack-&gt;Parameters.StartDevice.
+        AllocatedResourcesTranslated-&gt;List[0].PartialResourceList);
+
+    return CompleteRequest(Irp, status, 0);
+    }                           // HandleStartDevice
+
+NTSTATUS HandleStopDevice(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
+    {                           // HandleStopDevice
+    NTSTATUS status = DefaultPnpHandler(fdo, Irp);
+    StopDevice(fdo);
+    return status;
+    }                           // HandleStopDevice
+</code></pre>
+<p>
+<b>READWRITE.CPP</b></p>
+<pre><code>// READWRITE.CPP
+
+#include "driver.h"
+
+typedef struct POWER_STUFF {
+    PDEVICE_EXTENSION pdx;
+    DEVICE_POWER_STATE state;
+    } POWER_STUFF, *PPOWER_STUFF;
+
+BOOLEAN DisableDevice(IN PDEVICE_EXTENSION pdx);
+BOOLEAN EmpowerDevice(IN PPOWER_STUFF pps);
+BOOLEAN EnableDevice(IN PDEVICE_EXTENSION pdx);
+VOID OnCancel(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
+VOID OnCancelActiveIrp(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
+BOOLEAN OnInterrupt(IN PKINTERRUPT Interrupt, IN PDEVICE_EXTENSION fdo);
+BOOLEAN TransferNext(IN PDEVICE_EXTENSION pdx);
+
+BOOLEAN DisableDevice(IN PDEVICE_EXTENSION pdx)
+    {                           // DisableDevice
+    pdx-&gt;enabled = FALSE;
+    return TRUE;
+    }                           // DisableDevice
+
+VOID DpcForIsr(IN PKDPC Dpc, IN PDEVICE_OBJECT fdo, IN PIRP Irp,
+    IN PVOID Context)
+    {                           // DpcForIsr
+    PDEVICE_EXTENSION pdx = (PDEVICE_EXTENSION) fdo-&gt;DeviceExtension;
+    
+    KIRQL irql;
+    IoAcquireCancelSpinLock(&amp;irql);
+    BOOLEAN invalid = Irp != fdo-&gt;CurrentIrp;
+    if (!invalid)
+        IoSetCancelRoutine(Irp, NULL);
+    IoReleaseCancelSpinLock(irql);
+    
+    if (invalid || Irp-&gt;Cancel)
+        return;
+    
+    ULONG count = pdx-&gt;numxfer;
+    IoStartNextPacket(fdo, TRUE);
+    CompleteRequest(Irp, STATUS_SUCCESS, count);
+    UnlockDevice(pdx);
+    }                           // DpcForIsr
+
+BOOLEAN EmpowerDevice(IN PPOWER_STUFF pps)
+    {                           // EmpowerDevice
+    PDEVICE_EXTENSION pdx = pps-&gt;pdx;
+    DEVICE_POWER_STATE state = pps-&gt;state;
+    if (state == pdx-&gt;power)
+        return TRUE;
+
+    pdx-&gt;power = state;
+    if (state == PowerDeviceD0)
+        TransferNext(pdx);
+
+    return TRUE;
+    }                           // EmpowerDevice
+
+BOOLEAN EnableDevice(IN PDEVICE_EXTENSION pdx)
+    {                           // EnableDevice
+    pdx-&gt;enabled = TRUE;
+    return TRUE;
+    }                           // EnableDevice
+
+VOID OnCancel(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
+    {                           // OnCancel
+    if (fdo-&gt;CurrentIrp == Irp)
+        {                       // canceling current IRP
+        IoReleaseCancelSpinLock(Irp-&gt;CancelIrql);
+        IoStartNextPacket(fdo, TRUE);
+        }                       // canceling current IRP
+    else
+        {                       // canceling queued IRP
+        KeRemoveEntryDeviceQueue(&amp;fdo-&gt;DeviceQueue,
+            &amp;Irp-&gt;Tail.Overlay.DeviceQueueEntry);
+        IoReleaseCancelSpinLock(Irp-&gt;CancelIrql);
+        }                       // canceling queued IRP
+
+    CompleteRequest(Irp, STATUS_CANCELLED, 0);
+    UnlockDevice(fdo);
+    }                           // OnCancel
+
+VOID OnCancelActiveIrp(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
+    {                           // OnCancelActiveIrp
+    if (fdo-&gt;CurrentIrp == Irp)
+        {                       // canceling active IRP
+        IoReleaseCancelSpinLock(Irp-&gt;CancelIrql);
+        IoStartNextPacket(fdo, TRUE);
+        CompleteRequest(Irp, STATUS_CANCELLED, 0);
+        UnlockDevice(fdo);
+        }                       // canceling active IRP
+    else
+        IoReleaseCancelSpinLock(Irp-&gt;CancelIrql);
+    }                           // OnCancelActiveIrp
+
+BOOLEAN OnInterrupt(IN PKINTERRUPT Interrupt, IN PDEVICE_EXTENSION pdx)
+    {                           // OnInterrupt
+    return TransferNext(pdx);
+    }                           // OnInterrupt
+
+NTSTATUS RequestCreate(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
+    {                           // RequestCreate
+    return CompleteRequest(Irp, STATUS_SUCCESS, 0);
+    }                           // RequestCreate
+
+NTSTATUS RequestClose(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
+    {                           // RequestClose
+    return CompleteRequest(Irp, STATUS_SUCCESS, 0);
+    }                           // RequestClose
+
+NTSTATUS RequestWrite(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
+    {                           // RequestWrite
+    PDEVICE_EXTENSION pdx = (PDEVICE_EXTENSION) fdo-&gt;DeviceExtension;
+    if (!LockDevice(pdx))
+        return CompleteRequest(Irp, STATUS_DELETE_PENDING, 0);
+
+    if (pdx-&gt;power &gt; PowerDeviceD0)
+        {                       // restore power to device
+        NTSTATUS status = SendDeviceSetPower(fdo, PowerDeviceD0, 0);
+        if (!NT_SUCCESS(status))
+            return CompleteRequest(Irp, status, 0);
+        }                       // restore power to device
+
+    if (pdx-&gt;idle)
+        PoSetDeviceBusy(pdx-&gt;idle);
+
+    IoMarkIrpPending(Irp);
+    IoStartPacket(fdo, Irp, NULL, OnCancel);
+    return STATUS_PENDING;
+    }                           // RequestWrite
+
+VOID SetPowerState(IN PDEVICE_OBJECT fdo, IN DEVICE_POWER_STATE state)
+    {                           // SetPowerState
+    PDEVICE_EXTENSION pdx = (PDEVICE_EXTENSION) fdo-&gt;DeviceExtension;
+    POWER_STUFF ps = {pdx, state};
+    KeSynchronizeExecution(pdx-&gt;InterruptObject,
+        (PKSYNCHRONIZE_ROUTINE) EmpowerDevice, (PVOID) &amp;ps);
+    }                           // SetPowerState
+
+NTSTATUS StartDevice(PDEVICE_OBJECT fdo, PCM_PARTIAL_RESOURCE_LIST list)
+    {                           // StartDevice
+    NTSTATUS status;
+    PDEVICE_EXTENSION pdx = (PDEVICE_EXTENSION) fdo-&gt;DeviceExtension;
+
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR resource = list-&gt;PartialDescriptors;
+    ULONG nres = list-&gt;Count;
+    
+    BOOLEAN haveint = FALSE;    // TRUE if we find our interrupt
+    ULONG vector;               // interrupt vector
+    KIRQL irql;                 // interrupt level
+    KINTERRUPT_MODE mode;       // interrupt mode
+    KAFFINITY affinity;         // processor affinity for interrupt
+
+    BOOLEAN haveport = FALSE;   // TRUE if we find our port
+    PHYSICAL_ADDRESS port;      // port address
+    ULONG nports;               // number of ports
+    BOOLEAN needmap = FALSE;    // TRUE if we need to map port address
+
+    BOOLEAN error = FALSE;      // TRUE if there’s an error
+
+    for (ULONG i = 0; i &lt; nres; ++i, ++resource)
+        {                       // for each resource
+        switch (resource-&gt;Type)
+            {                   // switch on resource type
+
+        case CmResourceTypePort:
+            {                   // CmResourceTypePort
+            haveport = TRUE;
+            port = resource-&gt;u.Port.Start;
+            nports = resource-&gt;u.Port.Length;
+            needmap = (resource-&gt;Flags &amp; CM_RESOURCE_PORT_IO) ==0;
+            break;
+            }                   // CmResourceTypePort
+
+        case CmResourceTypeInterrupt:
+            {                   // CmResourceTypeInterrupt
+            haveint = TRUE;
+            irql = (KIRQL) resource-&gt;u.Interrupt.Level;
+            vector = resource-&gt;u.Interrupt.Vector;
+            affinity = resource-&gt;u.Interrupt.Affinity;
+            mode = (resource-&gt;Flags == CM_RESOURCE_INTERRUPT_LATCHED)
+                ? Latched : LevelSensitive;
+            break;
+            }                   // CmResourceTypeInterrupt
+        
+        case CmResourceTypeMemory:
+            {                   // CmResourceTypeMemory
+            haveport = FALSE;
+            port = resource-&gt;u.Memory.Start;
+            nports = resource-&gt;u.Memory.Length;
+            needmap = TRUE;
+            break;
+            }                   // CmResourceTypeMemory
+
+        default:
+            error = TRUE;
+            break;
+            }                   // switch on resource type
+        }                       // for each resource
+
+    if (error || !haveport || !haveint)
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+
+    pdx-&gt;iospace = haveport;
+    pdx-&gt;nports = nports;
+    if (needmap)
+        {                       // we have a memory-mapped register
+        pdx-&gt;base = (PUCHAR) MmMapIoSpace(port, nports, MmNonCached);
+        if (!pdx-&gt;base)
+            return STATUS_NO_MEMORY;
+        }                       // we have a memory-mapped register
+    else
+        pdx-&gt;base = (PUCHAR) port.LowPart;
+    pdx-&gt;mappedport = needmap;
+    pdx-&gt;iospace = haveport;
+
+    DisableDevice(pdx);
+
+    status = IoConnectInterrupt(&amp;pdx-&gt;InterruptObject,
+        (PKSERVICE_ROUTINE) OnInterrupt, (PVOID) pdx, NULL, vector,
+        irql, irql, mode, FALSE, affinity, FALSE);
+    if (!NT_SUCCESS(status))
+        {                       // unable to connect to interrupt
+        if (needmap)
+            MmUnmapIoSpace(pdx-&gt;base, nports);
+        return status;
+        }                       // unable to connect to interrupt
+
+    if (!KeSynchronizeExecution(pdx-&gt;InterruptObject, 
+        (PKSYNCHRONIZE_ROUTINE) EnableDevice, (PVOID) pdx))
+        {                       // can’t enable device
+        IoDisconnectInterrupt(pdx-&gt;InterruptObject);
+        MmUnmapIoSpace(pdx-&gt;base, nports);
+        return STATUS_INVALID_DEVICE_STATE;
+        }                       // can’t enable device
+
+    pdx-&gt;started = TRUE;
+    return STATUS_SUCCESS;
+    }                           // StartDevice
+
+VOID StartIo(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
+    {                           // StartIo
+    PDEVICE_EXTENSION pdx = (PDEVICE_EXTENSION) fdo-&gt;DeviceExtension;
+    KIRQL oldirql;
+
+    IoAcquireCancelSpinLock(&amp;oldirql);
+    if (Irp != fdo-&gt;CurrentIrp || Irp-&gt;Cancel)
+        {                       // request has been cancelled
+        IoReleaseCancelSpinLock(oldirql);
+        return;
+        }                       // request has been cancelled
+    else
+        {                       // switch cancel routines
+        IoSetCancelRoutine(Irp, OnCancelActiveIrp);
+        IoReleaseCancelSpinLock(oldirql);
+        }                       // switch cancel routines
+
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
+
+    pdx-&gt;buffer = (PUCHAR) Irp-&gt;AssociatedIrp.SystemBuffer;
+    pdx-&gt;nbytes = stack-&gt;Parameters.Write.Length;
+    pdx-&gt;numxfer = 0;
+
+    KeSynchronizeExecution(pdx-&gt;InterruptObject, 
+        (PKSYNCHRONIZE_ROUTINE) TransferNext, (PVOID) pdx);
+    }                           // StartIo
+
+VOID StopDevice(IN PDEVICE_OBJECT fdo)
+    {                           // StopDevice
+    PDEVICE_EXTENSION pdx = (PDEVICE_EXTENSION) fdo-&gt;DeviceExtension;
+    if (!pdx-&gt;started)
+        return; 
+    pdx-&gt;started = FALSE;
+
+    KeSynchronizeExecution(pdx-&gt;InterruptObject, 
+        (PKSYNCHRONIZE_ROUTINE) DisableDevice, (PVOID) pdx); 
+    IoDisconnectInterrupt(pdx-&gt;InterruptObject);
+    pdx-&gt;InterruptObject = NULL;
+
+    if (pdx-&gt;mappedport)
+        MmUnmapIoSpace((PVOID) pdx-&gt;base, pdx-&gt;nports);
+    }                           // StopDevice
+
+BOOLEAN TransferNext(IN PDEVICE_EXTENSION pdx)
+    {                           // TransferNext
+    PIRP Irp = pdx-&gt;DeviceObject-&gt;CurrentIrp;
+    if (!Irp)
+        return FALSE;           // no transfer pending
+    
+    if (!pdx-&gt;nbytes)
+        {                       // count exhausted
+        IoRequestDpc(pdx-&gt;DeviceObject, Irp, NULL);
+        return TRUE;
+        }                       // count exhausted
+
+    if (pdx-&gt;power &gt; PowerDeviceD0)
+        return TRUE;            // let IRP stall until power restored
+
+    if (pdx-&gt;iospace)
+        WRITE_PORT_UCHAR(pdx-&gt;base, *pdx-&gt;buffer);
+    else
+        WRITE_REGISTER_UCHAR(pdx-&gt;base, *pdx-&gt;buffer);
+
+    ++pdx-&gt;buffer;
+    —pdx-&gt;nbytes;
+    ++pdx-&gt;numxfer;
+
+    return TRUE;
+    }                           // TransferNext</code></pre>
+<p>
+There’s a lot going on in the ForwardAndWait function within DRIVERENTRY.CPP. Its first step is to create and initialize a kernel event object (KEVENT) by calling KeInitializeEvent. The event object itself must occupy non-paged storage. You’ll notice that I used an automatic variable for this object so that it occupies space on the program stack. A little-known fact is that the kernel stack used by WDM drivers can be paged if a driver issues a user-mode wait. Since this particular driver can’t be in a user-mode wait at the times the event object is actually used, no problem arises from putting the event object on the stack.</p>
+<p>
+ForwardAndWait uses IoCopyCurrentIrpStackLocationToNext to replicate the current stack location into the stack location for the next lower driver layer. The I/O system only initializes the topmost stack location, so it’s incumbent on each layer to copy this critical information as part of passing a request down. Previous releases of the DDK lacked a function to perform the copy, so programmers frequently wrote their own code to do so. One problem, however, is that you should not copy the completion routine address from your stack location to the next; you should either leave the address zero or install your own by calling IoSetCompletionRoutine. IoCopyCurrentIrpStackLocationToNext handles this detail correctly.</p>
+<p>
+Since you want to take control of this IRP after the lower layer is finished with it, call IoSetCompletionRoutine to install your own OnRequestComplete routine as the completion routine. The second argument to IoSetCompletionRoutine is an arbitrary context pointer argument that allows you to communicate indirectly with the completion routine; in this case it passes the event object’s address. Call IoCallDriver to actually pass the request down. If IoCallDriver returns STATUS_PENDING, it indicates that the lower layer queued the request and will complete it asynchronously, so use KeWaitForSingleObject to wait for someone to signal the kernel event. That someone will actually be your OnRequestComplete routine, which receives the address of the event object as its context pointer argument.</p>
+<p>
+OnRequestComplete must do two things. First, it must call KeSetEvent to set the event on which ForwardAndWait is waiting. It must also return the code STATUS_MORE_ PROCESSING_REQUIRED to indicate that you’re not done with this request yet. Many of the samples in the beta release of the WDM DDK do one additional step: they test the PendingReturned flag in the IRP and call IoMarkIrpPending if that flag is set. This step is unnecessary (though harmless) because ForwardAndWait will never return with the IRP still pending. The logic of some dispatch/completion routine pairs requires this step because the dispatch routine can’t know soon enough that it has to call IoMarkIrpPending and must delegate that job to the completion routine.</p>
+<p>
+StartDevice is where most of the action is as far as PNP is concerned. The crucial argument to StartDevice is a pointer to a CM_PARTIAL_RESOURCE_LIST list of the I/O resources assigned to the device. In previous versions of Windows NT you might have found such a list within an IoQueryDeviceDescription callback routine. The retrieved data structure would have contained bus-relative resource values, which you would have translated to system-wide values by calling routines in the hardware abstraction layer like HalGetInterruptVector. Luckily, WDM deals with all of this by giving you a translated list of resource descriptors. That translated list shows up as the second argument to my StartDevice function.</p>
+<h3>Starting the Device</h3>
+<p>
+What you do within StartDevice depends on the details of your device. As I did in last month’s article, I’ll discuss the details of a hypothetical microwave oven device. Suppose your microwave oven uses an interrupt and a set of I/O ports. Your StartDevice routine would need to determine the port addresses for later use and call IoConnectInterrupt to hook the hardware interrupt. Naturally, you expect to find information about your assigned interrupt and I/O ports in the translated resource list. My StartDevice example, which you’ll find in the READWRITE.CPP file, shows one method of extracting and using this information.</p>
+<p>
+The basic strategy of StartDevice is to loop through the translated resource descriptions (they can appear in any order) and extract information about the expected I/O resources into local variables. Having obtained and validated the resource information, StartDevice then uses various system calls to connect the driver to the actual hardware. When StartDevice is finished, the device is ready to be used by anyone else in the system. The data collection phase of StartDevice looks like the code shown in Figure 3.</p>
+<p>
+<b>Figure 3: StartDevice Data Collection</b></p>
+<pre><code>NTSTATUS StartDevice(PDEVICE_OBJECT fdo,
+                     PCM_PARTIAL_RESOURCE_LIST list)
+    {
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR resource = list-&gt;PartialDescriptors;
+    ULONG nres = list-&gt;Count;
+    BOOLEAN error = FALSE;
+    for (ULONG i = 0; i &lt; nres; ++i, ++resource)
+        switch (resource-&gt;type)
+            {
+        case CmResourceTypePort:
+·
+·
+·
+        case CmResourceTypeInterrupt:
+·
+·
+·
+        case CmResourceTypeMemory:
+·
+·
+·
+        case CmResourceTypeDma:
+·
+·
+·
+            }
+·
+·
+·
+    }
+</code></pre>
+<p>
+Beneath each of the case labels, you would have code to copy data about one type of  I/O resource from the resource descriptor into a local variable. Figure 4 indicates the resource descriptor fields that will be of interest for each type of resource. Describing how you use the resulting values in calls to MmMapIoSpace, IoConnectInterrupt, and HalGetAdapter is beyond the scope of this article. The SIMPLE example shows how to deal with simple port, memory, and interrupt resources. For these resource types you can get all the information you need to configure your device from the resource descriptors. For DMA, however, you need to know some additional things that the PNP protocols don’t give you, such as what kind of bus your device is attached to, whether the device is a bus master, and so on. </p>
+<p><img src="dwn04.gif">
+</p>
+<p>
+<b>Figure 4: Resource Descriptor Members</b></p>
+<h3>Removing the Device</h3>
+<p>
+The rest of the significant PNP processing occurs when Configuration Manager sends an IRP_MN_REMOVE_ DEVICE request. This request asks the driver to stop the device and clean up any data structures associated with  the device. The device might, for example, be a hot-pluggable appliance or PCMCIA card that’s just been removed from the computer. The sample driver in Figure 2 handles this request in the HandleRemoveDevice routine within PLUGPLAY.CPP:</p>
+<pre><code>NTSTATUS HandleRemoveDevice(IN PDEVICE_OBJECT fdo,
+                            IN PIRP Irp)
+    {
+    StopDevice(fdo);
+    NTSTATUS status = DefaultPnpHandler(fdo, Irp);
+    RemoveDevice(fdo);
+    return status;
+    }
+</code></pre>
+<p>
+StopDevice handles the PNP details of shutting down the device. This function, which appears in READWRITE.CPP, is considerably simpler than StartDevice because it doesn’t have to grovel around to locate resource assignments. Instead, it simply performs the reverse of the setup calls that StartDevice made once it knew what resources to use. For example, StartDevice called IoConnectInterrupt for the assigned IRQ, so StopDevice calls IoDisconnectInterrupt.</p>
+<p>
+But before it can discard all of the I/O resources, StopDevice has to be sure the device won’t generate any further interrupts. The local helper routine, DisableDevice, performs that function. Packaging the disable functionality in a subroutine (which is trivial for this sample device) is more than homage to modular design. In general, disabling a device requires access to device registers and data structures that might also be used while processing an interrupt from the device. Interrupts are handled at an elevated IRQL (that’s the whole point of the IRQL scheme, in fact). To prevent destructive collisions and race conditions, any code that needs to share a resource with the interrupt routine must run at the same elevated IRQL. On a multiprocessor system, that code must also use a kernel synchronization object known as a spin lock to be sure that no other processor accesses those resources. Both restrictions are conveniently managed by KeSynchronizeExecution, which requires that you supply the address of a function that it will call at the elevated IRQL of your interrupt routine and within the protection of a spin lock if one is needed.</p>
+<p>
+Once StopDevice shuts the device down, HandleRemoveDevice uses DefaultPnpHandler to pass the IRP_MN_ REMOVE_DEVICE request down the driver stack. (Remember that all PNP requests must be passed down.) Since you don’t care when or how the lower layers complete the request, DefaultPnpHandler is a convenient routine to use for this purpose.</p>
+<p>
+The last step performed by HandleRemoveDevice is to tear down the functional device that AddDevice originally created. Stripped of error handling, the steps involved in deleting the device are:</p>
+<pre><code>PDEVICE_EXTENSION pdx = (PDEVICE_EXTENSION)
+    fdo-&gt;DeviceExtension;
+IoSetDeviceInterfaceState(&amp;pdx-&gt;ifname, FALSE);
+IoDetachDevice(pdx-&gt;LowerDeviceObject);
+IoDeleteDevice(fdo);
+</code></pre>
+<p>
+There’s one significant complication to removing a device that I’ve left out until now to reduce confusion. PNP events are independent of other I/O activity on the computer. It’s possible for I/O requests to arrive at a device while it’s in the process of handling a REMOVE_DEVICE request. In addition, it’s possible for a REMOVE_DEVICE to arrive while one or more I/O requests are being handled by the device. It’s up to the device driver to prevent any problems that might arise from these race conditions. </p>
+<p>
+One method is shown in SIMPLE. The device extension contains a flag named removing that will be set when a REMOVE_DEVICE request is pending. It also contains a use counter named usage and an event object named evRemove. AddDevice initializes the use counter to 1 to signify that the device object is in use until a REMOVE_ DEVICE arrives. Each dispatch routine uses a helper function named LockDevice to establish a claim on the device object:</p>
+<pre><code>BOOLEAN LockDevice(IN PDEVICE_EXTENSION pdx)
+    {
+    InterlockedIncrement(&amp;pdx-&gt;usage);
+    if (pdx-&gt;removing)
+        {
+        if (InterlockedDecrement(&amp;pdx-&gt;usage) == 0)
+            KeSetEvent(&amp;pdx-&gt;evRemove, 0, FALSE);
+        return FALSE;
+        }
+     return TRUE;
+     }
+</code></pre>
+<p>
+LockDevice returns FALSE if the driver is in the process of removing the device, and the dispatch routine immediately completes the request with STATUS_DELETE_ PENDING. If LockDevice returns TRUE, the dispatch routine goes on to handle the request normally. When the driver eventually completes the request, it calls UnlockDevice:</p>
+<pre><code>void UnlockDevice(IN PDEVICE_EXTENSION pdx)
+    {
+    if (InterlockedDecrement(&amp;pdx-&gt;usage) == 0)
+        KeSetEvent(&amp;pdx-&gt;evRemove, 0, FALSE);
+    }
+</code></pre>
+<p>
+The full version of HandleRemoveDevice dovetails with LockDevice and UnlockDevice:</p>
+<pre><code>NTSTATUS HandleRemoveDevice(IN PDEVICE_OBJECT fdo,
+                            IN PIRP Irp)
+    {
+    PDEVICE_EXTENSION pdx = (PDEVICE_EXTENSION)
+        fdo-&gt;DeviceExtension;
+    pdx-&gt;removing = TRUE;
+    UnlockDevice(pdx);
+    UnlockDevice(pdx);
+    KeWaitForSingleObject(&amp;pdx-&gt;evRemove, Executive,
+                          KernelMode, FALSE, NULL);
+    StopDevice(fdo);
+    NTSTATUS status = DefaultPnpHandler(fdo, Irp);
+    RemoveDevice(fdo);
+    return status;
+    }
+</code></pre>
+<p>
+Setting the removing flag to TRUE alerts any subsequent caller of LockDevice that you’re about to remove the device object. The first call to UnlockDevice simply undoes the call to LockDevice that appears in RequestPnp. (You didn’t miss a step in the explanation earlier—you couldn’t have known until now that LockDevice was being called by RequestPnp unless you had looked at the full source code.) The second call to UnlockDevice will reduce the use counter to zero if no other requests are outstanding, and then will set the evRemove event. If other requests are outstanding, the second call to UnlockDevice will leave the use counter greater than zero and the evRemove event unsignaled. Some other thread will set the event when it calls UnlockDevice after completing the last pending request. HandleRemoveDevice stalls until someone sets the removal event.</p>
+<p>
+The thread and multiprocessor safety in this removal logic stems from the fact that InterlockedIncrement and InterlockedDecrement update the use count in a thread and multiprocessor-safe way, and they return the post-update value to their callers. It’s not possible for HandleRemoveDevice to proceed past the call to KeWaitForSingleObject until someone signals the event, which can only happen when someone decrements the use count to zero. </p>
+<p>
+It’s not possible for someone to decrement the use count to zero unless HandleRemoveDevice has already set the removing flag. Conversely, any thread that sees removing FALSE within LockDevice can be sure that the use count is too big to allow HandleRemoveDevice to proceed past the wait. (I’m assuming that the computer design doesn’t permit the memory store operation that sets the removing  flag to stall in some sort of caching limbo while another  CPU fetches the prestore value or while the usage variable gets incremented.)</p>
+<h3>Power Management</h3>
+<p>
+The power management features of WDM aim to support the ACPI specification and the Microsoft OnNow initiative. The overall goal of ACPI and OnNow is to improve the power consumption characteristics of personal computers and their peripherals. A good starting point for understanding ACPI and OnNow is the ACPI specification page at http://www.teleport.com/~acpi, which contains links to the ACPI specification itself and to other online resources. Most driver authors won’t need this much detail because the role of a device driver in power management is typically passive.</p>
+<p>
+With ACPI, devices will operate in up to four consumption modes ranging from fully on to fully off. ACPI-compliant drivers must be able to save and restore appropriate state information while directing their devices through the transition between power states. The power management packet provides the basic mechanism whereby the software managers of power policy communicate with WDM drivers.</p>
+<p>
+The four power states are called D0, D1, D2, and D3 (see Figure 5). D0 is the fully on state in which, according to the ACPI specification, the device “is completely active and responsive, and is expected to remember all relevant context continuously.” D3 is the fully off state in which the device has no power and remembers no context. Context in these definitions means the small amount of variable data that a device remembers about its state and the recent history of its interaction with the world. The device context for a microwave oven, for example, might include the time of day as well as user settings like power level and cooking time. All devices understand the D0 and D3 states. Different classes of device may interpret the D1 and D2 states differently, or may not support them at all. </p>
+<p><img src="dwn05.gif">
+</p>
+<p>
+<b>Figure 5: ACPI Power States</b></p>
+<p>
+OnNow defines six system power states (see Figure 6), including Working, three stages of Sleeping, Hibernate, and Shutdown. These states are similar to the device states in that they imply a range of power consumption and power-up latency. They apply to the system as a whole, however, rather than to any single device, and they relate more clearly to a global state as perceived by the user. When I suspend my laptop, for example, Windows places the computer into the PowerSystemSleeping1 state.</p>
+<p><img src="dwn06.gif">
+</p>
+<p>
+<b>Figure 6: OnNow Power States</b></p>
+<p>
+A key aspect of ACPI is that the operating system ought to exercise control over power resources. Centralizing control in the operating system allows applications, device drivers, screen savers, and other software components to work together harmoniously to achieve overall power management goals. The operating system implements a global power policy that determines when to put the computer to sleep and how deep a sleep state to enter. Other aspects of power policy are distributed throughout the system, with each WDM class driver acting as the policy owner for its class of device.</p>
+<p>
+The Power Manager component of WDM works with power policy owners and device drivers to implement the mechanics of intelligent power management. It provides a set of interfaces for policy owners and drivers to call (see Figure 7), and it originates IRP_MJ_POWER requests to implement the interfaces (see Figure 8).</p>
+<p><img src="dwn07.gif">
+</p>
+<p>
+<b>Figure 7: Power Management Interfaces</b></p>
+<p><img src="dwn08.gif">
+</p>
+<p>
+<b>Figure 8: Minor Function Codes for IRP_MJ_POWER</b></p>
+<p>
+Currently, the details of power management within Windows 98 and Windows NT 5.0 are still under development. Nonetheless, it’s worthwhile to discuss the few details that have already crystallized. The Power Manager uses an IRP_MJ_POWER request to instruct class and device drivers what to do. Each driver that receives one of these IRPs must do three things. First, it must use a special API named PoStartNextPowerIrp (instead of the standard IoStartNextPacket) to indicate readiness for the next power request. Second, it must forward the IRP to lower layers using a special PoCallDriver API (instead of IoCallDriver, which is used for all other IRPs). Finally, it must perform any device-specific functions required to honor the Power Manager’s requests.</p>
+<p>
+The following default handler for POWER requests illustrates the first two of these three driver tasks. The SIMPLE driver uses this function in the context of a dispatch function that selects a subroutine based on the minor function code in  a POWER request’s stack location. You could also use  this function as the IRP_MJ_POWER dispatch function if your driver doesn’t need to perform any device-specific operations.</p>
+<pre><code>NTSTATUS DefaultPowerHandler(IN PDEVICE_OBJECT fdo,
+                             IN PIRP Irp)
+    {
+    PoStartNextPowerIrp(Irp);
+    IoSkipCurrentIrpStackLocation(Irp);
+    PDEVICE_EXTENSION pdx = (PDEVICE_EXTENSION)
+        fdo-&gt;DeviceExtension;
+    return PoCallDriver(pdx-&gt;LowerDeviceObject, Irp);
+    }
+</code></pre>
+<p>
+The function first calls PoStartNextPowerIrp to inform the Power Manager that it’s ready to accept the next POWER request. The driver must perform this step while it owns the IRP—before calling PoCallDriver or inside a completion routine. Furthermore, if the driver omits this call the system will hang on the next power operation because it will think you’re not ready yet. This step may appear unusual to experienced kernel-mode developers because its counterpart for regular IRPs (IoStartNextPacket) would normally be performed only for IRPs you had queued via IoStartPacket, and only in conjunction with a call to IoCompleteRequest. Since the Power Manager automatically queues POWER requests using a separate queue, you need to use a special mechanism to notify Power Manager that it should release the next request from the queue.</p>
+<p>
+After releasing the next POWER request, the default handler then retards the request’s stack pointer in anticipation that PoCallDriver will immediately advance the pointer. The two stack operations cancel out and thereby provide the next driver with the same stack location your own driver received. The lower driver therefore sees an IRP_MJ_POWER request with the same minor function code and parameters. PoCallDriver, the special API for forwarding POWER requests, operates much like IoCallDriver, except that it may delay forwarding the IRP to avoid flooding the bus with current for several devices all at once.</p>
+<p>
+Of the four minor IRP types your POWER dispatch routine will see, the most important is IRP_ MN_SET_POWER, which directs drivers in the stack to put the device into a specific power state. The parameters for the request (specifically, the Parameters.Power structure within the associated stack location) contain Type and State fields. The Type field, which can be either SystemPowerState or DevicePowerState, indicates whether the IRP relates to the state of the system as a whole or just the state of this particular device. If Type is DevicePowerState, State.DeviceState indicates the desired new device state. Conversely, if Type is SystemPowerState, State.SystemState indicates the desired new system state. If the new state is PowerSystemWorking, the Power Manager is directing you into the D0 (full power) state; if it’s anything else, the Power Manager is directing you into the D3 (power off) state. The beginning of your SET_POWER handler might therefore look like this:</p>
+<pre><code>PIO_STACK_LOCATION stack = 
+    IoGetCurrentIrpStackLocation(Irp);
+POWER_STATE_TYPE type = stack-&gt;Parameters.Power.Type;
+POWER_STATE state = stack-&gt;Parameters.Power.State;
+DEVICE_POWER_STATE devstate = 
+    (type == SystemPowerState) ? 
+        (state.SystemState &lt;= PowerSystemWorking ?
+            PowerDeviceD0 : PowerDeviceD3)
+        : state.DeviceState;
+</code></pre>
+<p>
+The main result of these initial steps is to develop a new device power state (devstate). It would be nice if, knowing this value, you could just save or restore some device context and tell your device to enter the new power state. Your task isn’t nearly so simple, though, because of several factors. The first complicating factor is that you generally need to let lower levels restore power before you can restore power, whereas you generally need to reduce power to your device before you tell lower levels to do so. These sequencing rules are obvious once you think about it: to talk to your device, the pathway leading to it (which is managed by the lower layers in the device hierarchy) needs power. Therefore, when you’re switching your device to a higher power state, you’ll pass the request down and perform the device-specific parts of the operation in a completion routine. When you’re switching your device to a lower power state, you’ll perform the device-specific parts and then pass the request down.</p>
+<p>
+The second factor that complicates handling of SET_ POWER has to do with the way the Power Manager keeps track of the progress various drivers are making with power operations. You’re only supposed to change the power state of your device in response to an IRP that specifies a device power state. When you receive an IRP that specifies a system power level, you need to create and send yourself a corresponding device power IRP. The SIMPLE driver has a SendDevicePower function that illustrates how to perform this step (which is not much different than the way any kernel-mode driver would originate an internal IRP).</p>
+<p>
+The last complication of SET_POWER is that you must tell the Power Manager about your state transitions by using the special PoSetPowerState function. You call this function just after you enter a higher power state and just before you enter a lower power state. The function may take a long time to return, because the Power Manager may call various notification callback routines to alert other system components about your new state.</p>
+<p>
+Now that you know how to handle SET_POWER requests, you might be wondering who originates them in the first place. The operating system (and only the operating system) generates requests related to system power states. You, or the class driver you work with, ordinarily generate the requests related to device power states. One of the times you’ll create a device power request is when you process a system power request. You might also have some special IOCTL interface that an application or control panel applet uses to control your power state. </p>
+<p>
+There’s also an idle detection mechanism that allows the system to automatically put your device to sleep when it’s been inactive for a long time. To invoke this mechanism, you call a registration function:</p>
+<pre><code>PoRegisterDeviceForIdleDetection(pdo,TIME_CONSERVATION,
+                      TIME_PERFORMANCE, PowerDeviceDx);
+</code></pre>
+<p>
+You can theoretically put this function call almost anywhere in your driver, but I think the logical place is within the AddDevice routine. The first argument is the address of the PDO for your device. Don’t make the mistake of passing your own FDO of whatever device object happens to be immediately below you in the device stack (which might be some lower filter driver). Nothing bad will happen, but you’ll never get any idle notifications. The second and third parameters to PoRegisterDeviceForIdleDetection are timeout values expressed in seconds. The conservation value is an idle constant to use when the system is operating in power conservation mode, perhaps on battery power. The performance value is for use in a performance maximization mode, perhaps on AC power. The fourth parameter is a device power level. In the SIMPLE driver, I specified PowerDeviceD3 to avoid a bug in the beta release I was testing with, but you might want to specify one of the intermediate sleep values like D1 or D2.</p>
+<p>
+PoRegisterDeviceForIdleDetection will return to you with the address of a ULONG variable that the system will use as an idle counter. You want to remember this address in a convenient place, such as in your device extension. The system updates the counter once a second. When it reaches the timeout value for the current conservation mode, the Power Manager will send you a device power IRP directing you into whatever power level you specified in the registration call. The idle detection mechanism remains dormant thereafter until your device goes back to the D0 state.</p>
+<p>
+One requirement of power management is that you may end up holding onto I/O requests much longer than you thought you would. You’re not supposed to fail a request just because your device is in a low-power state. Instead, you should stall the request until power is restored or until someone cancels the request. An implication of this requirement is that you will need to provide a cancel routine for your active request. In previous versions of Windows NT you’d only have had a cancel routine for queued requests on the assumption that any request would be completed very quickly once the I/O Manager removed it from the queue and sent it to your StartIo routine.</p>
+<p>
+Power management will also affect how the rest of your driver relates to the idle detection scheme outlined earlier. Whenever you process a request that requires power, you’ll want to call PoSetDeviceBusy to reset the idle counter and forestall a low-power request. In addition, your dispatch routine for such a request should check to see if the device is in a low-power state and, if so, initiate a device power request to restore it to full operation. The RequestWrite function in READWRITE.CPP illustrates both of these features of a power-aware driver.</p>
+<h3>Other Power Requests</h3>
+<p>
+The system may send you three other kinds of IRP_ MJ_POWER request. IRP_MN_QUERY_POWER is very similar to IRP_MN_SET_POWER. In fact, it uses exactly the same parameters. There’s a major difference between QUERY_POWER and SET_POWER, however. You can fail a QUERY_POWER if there’s some reason why your device should not enter the specified state (you must obey a SET_POWER). That’s why it’s called QUERY_ POWER—the Power Manager is asking you if it would be OK to switch power states, and you’re allowed to say no by returning an error code like STATUS_UNSUCCESSFUL. If you return STATUS_ SUCCESS from a query, you’re saying that you won’t do anything incompatible if you later honor a SET_POWER request for the same state.</p>
+<p>
+By the way, you won’t always get a QUERY_POWER before a SET_POWER. Sometimes the system just tells you, “Enter this state,” without giving you any chance to demur.</p>
+<p>
+The IRP_MN_WAIT_WAKE and IRP_MN_POWER_ SEQUENCE requests differ from the other two in that you, and not the Power Manager, initiate them. With some devices, it’s relatively costly to enter or leave certain states, while a lower-level driver (such as the bus driver for a USB hub) might completely control power to your device. When switching state, therefore, your job will be to perform the context saving or restoring—which I’ve assumed to be costly—and then pass the request along to the bus driver, which will actually control the current flowing to your device. In such a case, the bus driver might ignore the instructions for reasons of its own so that the new state is never actually obtained. If the system later asks your driver to revert to the previous state (which it never actually left), you could save a lot of time by doing nothing if you knew what was going on. That’s where IRP_MN_POWER_ SEQUENCE comes into play.</p>
+<p>
+You send a POWER_SEQUENCE request down the stack to ask the bus driver to fill in a structure with a set of sequence numbers that indicates how many times each of the three low-power states were actually entered. When you’re asked to switch from D0 to D1, for example, you can first record the sequence number for D1. Then, when you’re asked later to switch from D1 back to D0, you can retrieve the sequence numbers again and see if the value for D1 actually changed. If not, you needn’t do anything except forward the request (you always forward the request). If you decide to use IRP_MN_POWER_SEQUENCE, be sure that its failure doesn’t lead you to fail the request you happen to be processing. Not only is it optional for you to  use this request, but it’s also optional for the lower layers in the stack.</p>
+<p>
+The WAIT_WAKE request fits into a scheme for system wakeup that’s harder to describe than to actually use. Some devices can wake the system up from a low-power state. A remote control with an On/Off button is an example of such a device, as is a modem that can listen for incoming calls while asleep. Such devices are wired into the system so that they cause the system to power up when the wakeup signal arrives. </p>
+<p>
+Your device driver, which knows all about your device’s wakeup capabilities, plays the central role in making wakeup work. Before you enter a low-power state, originate a WAIT_WAKE request and send it down the driver stack to the bus driver. The bus driver will do whatever is required by the actual bus and controller architecture to enable the hardware wakeup feature, and it will return STATUS_ PENDING to you. You’ll finish handling the SET_POWER request and return. Some time later, when your device asserts its wakeup signal, the bus driver will gain control and deduce that your device is the one that woke up. The bus driver then completes your WAIT_WAKE request, and the I/O Manager calls your completion routine. Within your completion routine, generate a device SET_POWER to restore power to your device. Then, because most wakeup signals are also tied with some sort of operational feature of the device (such as asserting the RI pin of an RS-232 interface), you’ll probably take some additional action related to a pending application request.</p>
+<p>
+To correctly support device wakeup, you must also handle the IRP_MN_QUERY_CAPABILITIES flavor of IRP_ MJ_PNP request. You process this request by first sending it down the device stack and, as the completed request travels back up the stack, by inspecting and modifying the DEVICE_CAPABILITIES structure associated with the request. There are three fields in the structure related to device wakeup:</p>
+<pre><code>DEVICE_POWER_STATE DeviceState[PowerSystemMaximum];
+SYSTEM_POWER_STATE SystemWake;
+DEVICE_POWER_STATE DeviceWake;
+</code></pre>
+<p>
+DeviceWake specifies the lowest power state from which your device can wake up. If, for example, your device can wake up from D1 or D2, but not from D3, this field would equal DevicePowerD2. SystemWake is the lowest system state from which your device can wake up. Finally, DeviceState specifies the highest power state your device can occupy when the system is in each possible power state.</p>
+<p>
+You don’t just set the power state values in the DEVICE_CAPABILITIES structure in your completion routine. Instead, you modify the values left there by the lower layers of the driver hierarchy to any more stringent values that apply to your device. For example, the lower layers may think they can wake up from D2, but you may know that your device can actually only wake up from D1. When your completion routine gets control of the QUERY_ CAPABILITIES request, you would see DeviceWake set to PowerDeviceD2 and change it to PowerDeviceD1.</p>
+<p>
+Microsoft wants hardware manufacturers to put wakeup functionality under user control. To make such control possible, your driver needs to do one more thing: you must honor the instructions contained in a special IRP_MJ_WMI request to enable and disable device wakeup. The details of this request, and of what you’re supposed to do when you get it, hadn’t been decided by press time, so all I can say is that you’ll need to watch out for the final specification of this interface.</p>
+<h3>Interfacing with Virtual Device Drivers</h3>
+<p>
+A frequently asked question about WDM is how you go about interfacing a WDM driver with a VxD. The NTKERN virtual device in Windows 98 will expose interfaces that other VxDs can use for this purpose. It’ll also be possible (but highly discouraged) for a WDM driver running in Windows 98 to call VxDs.</p>
+<p>
+Figure 9 lists the NTKERN services that are useful to a VxD writer who wants to communicate with a WDM device driver. NTKERN exports additional VxD services that aren’t relevant to this discussion. You use the services I’m about to describe the same way as corresponding kernel-mode ZwXxx functions. For example, to read data from a WDM device, you’d first call _NtKernCreateFile to open a handle, then you’d call _NtKernReadFile one or more times. Finally, you’d call _NtKernClose to close the handle. To learn how to make these calls, you peruse the documentation of the ZwCreateFile, ZwReadFile, and ZwClose functions in the Windows NT DDK. The sample shown in Figure 10, MYVXD.VXD, has helper functions named OpenHandle and CloseHandle that illustrate how to make the first and last of these calls.</p>
+<p><img src="dwn09.gif">
+</p>
+<p>
+<b>Figure 9: NTKERN.VXD Services for I/O Operations</b></p>
+<p>
+As you read the source for MYVXD, bear in mind three features of the beta Windows 98 DDK that I used. First, some early releases were missing a VXDWRAPS.CLB library needed to define the Microsoft wrappers for NTKERN calls. Consequently, I defined my own wrappers for some of those calls at the start of the MYVXD.C file. Second, the beta DDKs include a subdirectory (inc\memphis) with a new header file named NTKERN.H and with replacements for a few of the standard DDK header files. If you try to build MYVXD with a beta copy of the DDK, you’ll probably have to experiment with build settings to get all the right header files and libraries. You’ll be using standard (or as nearly standard as possible when you’re dealing with VxD programming) procedures with the DDK that’s eventually released as part of MSDN. Finally, the NTKERN services aren’t yet covered by any documentation, so I had to infer how to use them from clues in various places.</p>
+<p>
+The Ioctl helper function in MYVXD illustrates how to perform a control operation with a WDM device. From a VxD, you call _NtKernDeviceIoControl. This function corresponds to the private kernel-mode function ZwDeviceIoControlFile and has the following prototype:</p>
+<pre><code>NTSTATUS __stdcall _NtKernDeviceIoControl(
+    HANDLE FileHandle, HANDLE Event, 
+    PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
+    PIO_STATUS_BLOCK IoStatusBlock, 
+    ULONG IoControlCode, PVOID InputBuffer, 
+    ULONG InputBufferLength, PVOID OutputBuffer,
+    ULONG OutputBufferLength);
+</code></pre>
+<p>
+Like other NTKERN services, this one uses the __stdcall calling convention. (System VxDs in previous versions of Windows used either the __cdecl convention or an ad-hoc, register-oriented convention.) The FileHandle argument is a device handle of the kind returned by _NtKernCreateFile. Event, ApcRoutine, and ApcContext pertain to asynchronous operations and should normally be NULL. The remaining five arguments map in a fairly obvious way to the arguments for the Win32 DeviceIoControl API. IoControlCode is a standard Windows NT IOCTL code indicating what control operation you want to perform. InputBuffer and InputBufferLength describe the input data you’re sending to the WDM device. OutputBuffer and OutputBufferLength describe the output data you expect to get back.</p>
+<p>
+MYVXD attends to a messy detail that you will also have to worry about if you call WDM drivers. NTKERN entries return NTSTATUS error codes, which are numerically different from the Win32 error codes that applications and VxDs use. For example, if you call _NtKernCreateFile with the name of a file that doesn’t exist, it will return STATUS_ OBJECT_NAME_NOT_FOUND (0xC0000034). But the correct value to return from a VxD’s DeviceIoControl handler is the equivalent Win32 error code ERROR_FILE_NOT_ FOUND (2). Figure 10 includes a helper function named MapStatusToError that performs the translation. The mapping table is too long to print here, but is included in the source code for this article (available at http://www.microsoft.com/msj). I built the table from the information contained in KnowledgeBase article Q113996, which you can find in the NTDDK.MVB file on the Windows NT DDK.</p>
+<p>
+<b>Figure 10: MYVXD.VXD</b></p>
+<p>
+<b>MYVXD.C</b></p>
+<pre><code>// MYVXD.C
+
+#include "stdvxd.h"
+#pragma hdrstop
+#include "myvxd.h"
+
+DWORD OpenHandle(PUNICODE_STRING name, ACCESS_MASK DesiredAccess,
+    ULONG FileAttributes, ULONG ShareAccess, ULONG CreateDisposition,
+    ULONG CreateOptions, PHANDLE FileHandle);
+DWORD Ioctl(DWORD hDevice, ULONG IoControlCode, PVOID pInbuf,
+    ULONG cbInbuf, PVOID pOutbuf, ULONG cbOutbuf);
+DWORD CloseHandle(DWORD hDevice);
+DWORD MapStatusToError(NTSTATUS status);
+
+#pragma warning(disable:4035)
+
+#undef _NtKernCreateFile
+#undef _NtKernClose
+#undef _NtKernDeviceIoControl
+
+NTSTATUS __declspec(naked) __stdcall _NtKernCreateFile
+    (PHANDLE FileHandle,ACCESS_MASK DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes,PIO_STATUS_BLOCK IoStatusBlock,
+    PLARGE_INTEGER AllocationSize,ULONG FileAttributes,ULONG ShareAccess,
+    ULONG CreateDisposition,ULONG CreateOptions,PVOID EaBuffer,
+    ULONG EaLength)
+    {
+    VxDJmp(_NtKernCreateFile)
+    }
+
+NTSTATUS __declspec(naked) __stdcall _NtKernClose(HANDLE FileHandle)
+    {
+    VxDJmp(_NtKernClose)
+    }
+
+NTSTATUS __declspec(naked) __stdcall _NtKernDeviceIoControl
+    (HANDLE FileHandle,HANDLE Event,PIO_APC_ROUTINE ApcRoutine,
+    PVOID ApcContext,PIO_STATUS_BLOCK IoStatusBlock,
+    ULONG IoControlCode,PVOID InputBuffer,ULONG InputBufferLength,
+    PVOID OutputBuffer,ULONG OutputBufferLength)
+    {
+    VxDJmp(_NtKernDeviceIoControl)
+    }
+
+#pragma warning(default:4035)
+
+#pragma VxD_INIT_CODE_SEG
+
+SYSCTL BOOL OnSysDynamicDeviceInit(void)
+    {                           // OnSysDynamicDeviceInit
+    if (NTKERN_Get_Version() &lt; 0x40A)
+        return FALSE;           // don’t have Memphis level of NtKern
+    return TRUE;
+    }                           // OnSysDynamicDeviceInit
+
+#pragma VxD_PAGEABLE_CODE_SEG
+
+SYSCTL BOOL OnSysDynamicDeviceExit(void)
+    {                           // OnSysDynamicDeviceExit
+    return TRUE;
+    }                           // OnSysDynamicDeviceExit
+
+SYSCTL DWORD OnW32DeviceIoControl(PDIOCPARAMETERS p)
+    {                           // OnW32DeviceIoControl
+    switch (p-&gt;dwIoControlCode)
+        {                       // process control code
+
+    case DIOC_OPEN:
+    case DIOC_CLOSEHANDLE:
+        return 0;
+
+    case MYVXD_GETVERSION:      // function 1
+        if (p-&gt;cbOutBuffer &lt; sizeof(DWORD) || !p-&gt;lpvOutBuffer)
+            return ERROR_INVALID_PARAMETER;
+        *(PDWORD) p-&gt;lpvOutBuffer = 0x040A;
+        if (p-&gt;lpcbBytesReturned) // can be NULL!
+            *(PDWORD) p-&gt;lpcbBytesReturned = sizeof(DWORD);
+        return 0;
+
+    case MYVXD_OPENHANDLE:      // function 2
+        {                       // MYVXD_OPENHANDLE
+        OPENHANDLE_PARMS* parms = (OPENHANDLE_PARMS*) p-&gt;lpvInBuffer;
+        if (!parms || p-&gt;cbInBuffer &lt; sizeof(OPENHANDLE_PARMS))
+            return ERROR_INVALID_PARAMETER;
+        return OpenHandle(&amp;parms-&gt;name, parms-&gt;access,
+            parms-&gt;attributes, parms-&gt;share, parms-&gt;howcreate,
+            parms-&gt;options, (PHANDLE) &amp;parms-&gt;hDevice);
+        }                       // MYVXD_OPENHANDLE
+
+    case MYVXD_IOCTL:           // function 3
+        {                       // MYVXD_IOCTL
+        IOCTL_PARMS* parms = (IOCTL_PARMS*) p-&gt;lpvInBuffer;
+        if (!parms || p-&gt;cbInBuffer &lt; sizeof(IOCTL_PARMS))
+            return ERROR_INVALID_PARAMETER;
+        return Ioctl(parms-&gt;hDevice, parms-&gt;code, parms-&gt;inbuf,
+            parms-&gt;cbInbuf, parms-&gt;outbuf, parms-&gt;cbOutbuf);
+        }                       // MYVXD_IOCTL
+
+    case MYVXD_CLOSEHANDLE:     // function 4
+        {                       // MYVXD_CLOSEHANDLE
+        CLOSEHANDLE_PARMS* parms = (CLOSEHANDLE_PARMS*) p-&gt;lpvInBuffer;
+        if (!parms || p-&gt;cbInBuffer &lt; sizeof(CLOSEHANDLE_PARMS))
+            return ERROR_INVALID_PARAMETER;
+        return CloseHandle(parms-&gt;hDevice);
+        }                       // MYVXD_CLOSEHANDLE
+
+    default:
+        ASSERT(FALSE);
+        return ERROR_INVALID_FUNCTION;
+        }                       // process control code
+    }                           // OnW32DeviceIoControl
+
+DWORD OpenHandle(PUNICODE_STRING name, ACCESS_MASK DesiredAccess,
+    ULONG FileAttributes, ULONG ShareAccess, ULONG CreateDisposition,
+    ULONG CreateOptions, PHANDLE FileHandle)
+    {                           // OpenHandle
+    OBJECT_ATTRIBUTES ObjectAttributes = {
+        sizeof(OBJECT_ATTRIBUTES),          // Length
+        NULL,                               // RootDirectory
+        name,                               // ObjectName
+        0,                                  // Attributes
+        NULL,                               // SecurityDescriptor
+        NULL,                               // SecurityQualityOfService
+        };
+
+    IO_STATUS_BLOCK IoStatusBlock;
+
+    return MapStatusToError(_NtKernCreateFile(FileHandle, DesiredAccess,
+        &amp;ObjectAttributes, &amp;IoStatusBlock, NULL, FileAttributes,
+        ShareAccess, CreateDisposition, CreateOptions, NULL, 0));
+    }                           // OpenHandle
+
+DWORD Ioctl(DWORD hDevice, ULONG IoControlCode, PVOID pInbuf, ULONG cbInbuf, PVOID pOutbuf, ULONG cbOutbuf)
+    {                           // Ioctl
+    IO_STATUS_BLOCK IoStatusBlock;
+
+    return MapStatusToError(_NtKernDeviceIoControl((HANDLE) hDevice, NULL,
+        NULL, NULL, &amp;IoStatusBlock, IoControlCode, pInbuf, cbInbuf, 
+        pOutbuf, cbOutbuf));
+    }                           // Ioctl
+
+DWORD CloseHandle(DWORD hDevice)
+    {                           // CloseHandle
+    return MapStatusToError(_NtKernClose((HANDLE) hDevice));
+    }                           // CloseHandle
+
+DWORD MapStatusToError(NTSTATUS status)
+    {                           // MapStatusToError
+    
+    // Status code mapping taken from KB article Q113996:
+
+    static struct {NTSTATUS s; DWORD e;} statmap[] = {
+        {STATUS_DATATYPE_MISALIGNMENT, ERROR_NOACCESS},
+        {STATUS_ACCESS_VIOLATION, ERROR_NOACCESS},
+        // etc.
+        {STATUS_VERIFY_REQUIRED, ERROR_MEDIA_CHANGED},
+        };
+    int i;
+
+    if (NT_SUCCESS(status))
+        return 0;
+
+    for (i = 0; i &lt; arraysize(statmap); ++i)
+        if (status == statmap[i].s)
+            return statmap[i].e;
+    return ERROR_ACCESS_DENIED; // unknown error
+    }                           // MapStatusToError
+</code></pre>
+<p>
+<b>STDVXD.H</b></p>
+<pre><code>// STDVXD.H
+
+#ifndef STDVXD_H
+#define STDVXD_H
+
+#ifdef __cplusplus
+    extern "C" {
+    #define SYSCTL extern "C"
+#else // not __cplusplus
+    #define SYSCTL
+#endif // not __cplusplus
+
+#include &lt;wdm.h&gt;
+#define WANTVXDWRAPS
+#include &lt;basedef.h&gt;
+#undef NULL
+#define NULL ((void*) 0)
+#include &lt;vmm.h&gt;
+#include &lt;ntkern.h&gt;
+#include &lt;debug.h&gt;
+#include &lt;crs.h&gt;
+
+#include &lt;vwin32.h&gt;
+#include &lt;vxdwraps.h&gt;
+#include &lt;winerror.h&gt;
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
+        
+#include &lt;string.h&gt;
+#pragma intrinsic(memcmp, memcpy, memset, strcat, strcmp, strcpy, strlen)
+
+#ifdef DEBUG
+    #undef ASSERT
+    #define ASSERT(e) if(!(e)){Debug_Printf(“Assertion failure in " \
+        __FILE__ ", line %d: " #e "\r\n", __LINE__);\
+        _asm int 1\
+        }
+#else
+    #define ASSERT(e)
+#endif
+
+#ifndef MAKELONG
+    #define MAKELONG(low, high) ((LONG)(((WORD)(low)) | \
+        (((DWORD)((WORD)(high))) &lt;&lt; 16)))
+#endif
+
+#ifndef FIELDOFFSET
+    #define FIELDOFFSET(type, field) ((DWORD)(&amp;((type *)0)-&gt;field))
+#endif
+
+#ifndef arraysize
+    #define arraysize(p) (sizeof(p)/sizeof((p)[0]))
+#endif
+
+#ifndef NAKED
+    #define NAKED __declspec(NAKED)
+#endif
+
+#endif // STDVXD_H
+</code></pre>
+<p>
+It’s possible for a WDM driver to act like a VxD if it wants to. Doing so would be a pretty bad idea, because it would make the driver unportable to any platform other than Windows. If you have some particular requirements that dictate your WDM driver must issue regular VxD service calls, it’s probably best to isolate your VxD service calls in a separate source module from the rest of your driver. You probably don’t want the bulk of your driver to depend on header files from the Windows DDK. See the STDVXD.H file in Figure 10 for an illustration of the inclusion order that you need to use in this separate source module. Within your VxD interfacing module, just make VxD service calls the same way you would have in a standard C/C++ VxD. </p>
+<p>
+One reason you might be tempted to issue VxD service calls from a WDM driver is to communicate with an existing set of drivers. An alternative technique that avoids nonportable calls to VxD services is to create an interface VxD that provides the services you need to call in Windows 98. Have that interface VxD use _NtKernDeviceIoControl to send a table of function pointers to your WDM driver, and have the WDM driver call through those pointers. If you follow this plan, you’ll be able to write a kernel-mode driver that stands in the same place as your interface VxD on other platforms.</p>
+<p>
+Another method of communicating between a VxD and a WDM driver relies on using the PELDR services exported by VXDLDR.VXD. The PELDR part of VXDLDR has overall responsibility for loading image files in the PE file format, including WDM drivers. From within a VxD, use PELDR_GetModuleHandle to get a handle to a WDM driver whose name you know, then use PELDR_GetProcAddress to retrieve the address of a function you’ve exported from the WDM driver. When you’re done calling functions in the WDM driver, call PELDR_FreeModule to close the module handle and reduce the usage count on the driver. </p>
+<h3>Conclusion</h3>
+<p>
+The documentation and sample code accompanying the beta releases of the Windows 98 DDK were a bit incomplete concerning power management. I asked some Microsoft developers to clarify two of the ambiguities, and the text reflects the information I received.</p>
+<p>
+An ambiguity in the documentation concerns how and when to pass IRP_MJ_POWER IRPs down the driver stack. In one place the documentation correctly says that all POWER IRPs should be passed down. In another place, it incorrectly says that IRP_MN_QUERY_POWER should not be passed down. The former statement is correct.</p>
+<p>
+Some of the beta DDK samples incorrectly used IoCallDriver to forward POWER requests. As indicated in the text, you should always use PoCallDriver. Additionally, you should always call PoStartNextPowerIrp before returning from your dispatch routine.</p>
+<p>
+In this series of articles, I showed how the Win32 Driver Model promises to simplify your job as a driver author in several ways. For the first time, it will be possible to write a single collection of source code that operates on all the platforms where Windows 98 and Windows NT run. WDM makes it easy to configure devices and drivers while simultaneously making it easy for users to add and remove hardware from their systems. WDM also enables aggressive power management under overall control of smart applications and the operating system. By encouraging combinations of class drivers and minidrivers, WDM presages a day when most driver authors will finally be able to avoid learning the myriad details now necessary to handle hardware in a modern operating system.</p>
+<p>
+To obtain complete source code listings, see the MSJ Web site at  http://www.microsoft.com/msj.</p>
+</font></BODY>
+</HTML>

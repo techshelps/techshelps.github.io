@@ -1,0 +1,194 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Making the Database Self-Administering</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+<h1><a name="sqlembed_make"></a>Making the Database Self-Administering</h1>
+<p>
+This section covers methods you can use to make your application's database self-administering within your customer's environment. These operations are frequently performed in a SQL Server environment. However, the relevance, scope, and frequency of these operations depend on the needs of your application and customer's environment. By automating these operations, SQL Server performs more of the tasks usually performed by a database administrator or operator.</p>
+<h3>Creating SQL Server Alerts</h3>
+<p>
+The ability to generate Windows NT Performance Monitor alerts is a powerful SQL Server feature. Alerts can be configured to automate many activities that are performed by a system or database administrator. Alerts can be used to notify administrative personnel of crucial or unusual events. When the alert is triggered, it can send e-mail, page administrative staff, or run a program or batch file. As a result, an administrator can react immediately to the event and take that the appropriate action. Alerts can also be used to automate database administration duties. For example, an alert can be set to back up the database transaction log after it becomes full. The code examples demonstrate this concept:</p>
+<pre><code>exec msdb..sp_addalert @name = 'Tran log SPACE out of room',
+ &nbsp; @message_id = 1105,
+ &nbsp; @severity = 0,
+ &nbsp; @delay_between_responses = 15,
+ &nbsp; @task_name = 'On-demand log backup for SPACE'
+go
+
+exec msdb..sp_addtask 'On-demand log backup for SPACE',
+ &nbsp; @subsystem = 'TSQL',
+ &nbsp; @databasename = 'space',
+ &nbsp; @enabled = 1,
+ &nbsp; @freqtype = 2,
+ &nbsp; @activestartdate = 960101, @activeenddate = 99991231,
+ &nbsp; @activestarttimeofday = 0, @activeendtimeofday = 235959,
+ &nbsp; @loghistcompletionlevel = 2,
+ &nbsp; @emailcompletionlevel = 0,
+ &nbsp; @command = 'DUMP TRANSACTION space TO spaceDUMP WITH&nbsp; NOUNLOAD ,
+ &nbsp;&nbsp;&nbsp;&nbsp; STATS = 10,&nbsp; NOINIT ,&nbsp; NOSKIP'
+go
+</code></pre>
+<p>
+The code sample creates an alert called 'Tran log SPACE out of room'. This alert is configured to execute the task 'On-demand log back up for SPACE' whenever a SQL Server error number 1105 is encountered. The task is designed to back up the space database transaction log whenever an 1105 is encountered in that database. Backing up the transaction log forces inactive portions of the transaction log to be purged so that the space can be reused.</p>
+<p>
+For more information about Performance Monitor and alerts, see the <i>Microsoft Windows NT 3.5 Server System Guide</i>. For more information about SQL Server-related Performance Monitor counters, see the <i>Microsoft SQL Server Administrator's Companion.</i></p>
+<h4>Truncating the transaction log</h4>
+<p>
+SQL Server maintains a write-ahead transaction log for each database. The transaction log feature provides the ability to recover transactions and other data modifications in the event of a problem. The default configuration is to fill the transaction log until it is backed up to tape or another disk. This allows incremental backups and point-in-time recovery. However, some automated process or an administrator must perform these backups on a regular basis before the transaction log becomes full. If you do not need or want to take advantage of this SQL Server feature, you can use the trunc. log on chkpt. database option. This option forces SQL Server to flush the database transaction log at certain intervals and eliminates the need to back up the database transaction log and to deal with transaction log space management issues.</p>
+<p>
+For more information on transaction logs and the trunc. log on chkpt. database option, see the <i>Microsoft SQL Server Administrator's Companion.</i></p>
+<h4>Sizing the database and transaction log automatically</h4>
+<p>
+As the number of users accessing your application in the end user's environment grows, the database it references may need to grow with it. The database may need to grow because more data is being added to it. The transaction log many need to grow because there are more uncommitted transactions associated with the increase in users. Because SQL Server databases and transaction logs are not designed to automatically expand themselves, a database administrator or the application developer must perform this task. The following lists these sizing issues and presents a few ways to address them:
+<ul type=disc>
+<li>
+Database transaction log out of space<ul type=disc>
+<li>
+Use the SQL Server DUMP TRANSACTION statement with the WITH NO_LOG option to truncate the transaction log.<br><br></li>
+<li>
+Perform transaction log dumps frequently.<br><br></li>
+<li>
+Use the trunc. log on chkpt. option.</li>
+</ul>
+</li>
+<li>
+Database out of space<ul type=disc>
+<li>
+Use the SQL Server ALTER DATABASE statement to add space to the database.</li>
+</ul>
+</li>
+</ul>
+<p>
+You can perform these tasks using alerts or by adding functionality to the application itself. For example, the following stored procedure can be used to expand a database and can be called from within an application when needed. The stored procedure expands the database and its database devices for the dbname database passed to the stored procedure. Assuming the database resides on one device, the stored procedure calculates the new size needed to contain the expanded database and expands the database device. After this has been accomplished, the stored procedure then expands the database itself.</p>
+<pre><code>create proc dbexpand (@dbname sysname, @dbdevice sysname, @increment int)as
+// Turns off the message indicating number of rows an operation affected
+set nocount on
+// Variable used to store current database size
+declare @current_size int
+// Variable used to store new database size
+declare @new_size varchar(12)
+// Variable used to hold the ALTER DATABASE statement string
+declare @cmd varchar(100)
+
+/* Get the current size of the database device for this database from sysdevices system table in the master database; add @increment converted to pages. SQL Server stores data in page units so the number of pages to be added must be determined. */
+
+/* Get current database device size from the sysdevices master database table for the desired database. */
+select @current_size=high-low+1 from master..sysdevices where name = @dbdevice
+
+/* Determine the number of pages needed for the new database size. Convert this to megabytes units by multiplying the number of pages by 512. */
+select @new_size = convert(varchar, (@current_size + (@increment * 512)))
+
+/* Build the statement string to expand the database device and execute the command. */
+select @cmd='DISK RESIZE name = ' + @dbdevice + ', size = '+@new_size
+--select @cmd
+EXEC (@cmd)
+
+/* Build the statement string to expand the database and execute the command. */
+select @cmd='ALTER DATABASE '+ @dbname + ' ON '+ @dbdevice +' = ' + 
+convert(varchar, @increment)
+EXEC (@cmd)
+</code></pre>
+<p>
+The Monitor.exe sample application demonstrates a methodology for automatically sizing the database. Monitor.exe uses SQL Server's user-defined Windows NT Performance Monitor counters to monitor the database space utilization of a database called space. The following code segments taken from this sample application demonstrate this concept.</p>
+<p>
+The first code segment creates a new SQL Server message number 55555 with a severity level of 17 and 'Database SPACE out of room' as its message text. This is the message issued when Sqlalrtr.exe executes <b>isql</b> to execute the RAISERROR WITH LOG statement. </p>
+<pre><code>EXEC sp_addmessage 55555, 17, 'Database SPACE out of room', 'us_english', true
+go
+</code></pre>
+<p>
+The next code segment creates a SQL Server alert called 'Database SPACE out of room' that fires whenever a 55555 error is entered into the Windows NT Event Viewer application log.</p>
+<pre><code>exec msdb..sp_addalert @name = 'Database SPACE out of room',
+ &nbsp; @message_id = 55555,
+ &nbsp; @severity = 0,
+ &nbsp; @delay_between_responses = 60,
+ &nbsp; @task_name = 'SPACE db expansion'
+go
+</code></pre>
+<p>
+The last code segment creates a SQL Server task called 'SPACE DB Expansion' that is configured to execute on demand.</p>
+<pre><code>exec msdb..sp_addtask 'SPACE db expansion', 
+ &nbsp; @subsystem = 'TSQL', 
+ &nbsp; @databasename = 'master', 
+ &nbsp; @enabled = 1, 
+ &nbsp; @freqtype = 2,&nbsp; -- on demand task
+ &nbsp; @activestartdate = 960101, @activeenddate = 99991231,&nbsp; --starts today, never ends
+ &nbsp; @activestarttimeofday = 0, @activeendtimeofday = 235959,
+ &nbsp; @loghistcompletionlevel = 2, 
+ &nbsp; @emailcompletionlevel = 0, 
+ &nbsp; @command = 'exec dbexpand ''space'', ''spacedat'', 1'
+</code></pre>
+<p>
+Using Spacedb.pmw, the Windows NT Performance Monitor file, the space utilization of the space database is examined. Action is taken when its database utilization exceeds 80 percent. This is done by using the SQL User Counter 1 counter, defined as one of SQL Server's user-defined counters to call a stored procedure that returns the amount of space used in the space database. When this threshold has been exceeded, it can generate a Windows NT alert to run Sqlalrtr.exe to call <b>isql</b> and issue the RAISERROR(55555, 17, -1) WITH LOG statement to write this error in the Windows NT application event log. When the SQL Server Executive service encounters the 55555 message, it fires the 'Database SPACE out of room' alert to perform the 'SPACE db expansion' task. This task executes the <b>dbexpand</b> stored procedure, defined previously, to expand the database device and the space database. The master database should now be backed up to reflect the new database sizing information.</p>
+<p>
+The same concept can be used to expand the transaction log as well. You can easily adopt this strategy for use in your application. Using this strategy, your application can automatically expand the application's database and transaction log in the end user's environment without involving a database administrator. These concepts are fully scalable and can be used in any SQL Server environment. </p>
+<p>
+For more information on database devices and the DISK RESIZE statement, see the <i>Microsoft SQL Server Administrator's Companion.</i></p>
+<h4>Scheduling events</h4>
+<p>
+Many aspects of database administration can be automated using the scheduling capabilities of SQL Enterprise Manager and through the Windows NT scheduler. Ideal candidates for scheduling are those administration processes that need little or no interaction for execution. For example, the following administrative tasks can be automated using these scheduling services in most environments: database and transaction log backup and restore, DBCC statement execution, batch processes, and so on. By automating these processes, your application system becomes easier to use. </p>
+<h4>Application dependent batches or other operations</h4>
+<p>
+Based on the architecture and constraints of your application's and customer's environment, you may need to execute batch processing programs or other operational procedures beyond the scope of your base application. In many environments, an operator or system administrator executes these programs and/or procedures. As with the other items discussed in this section, many of these batches and/or procedures can be automated through one of the following options:
+<ul type=disc>
+<li>
+Create a task to perform the batch or procedure and schedule it for execution using the SQL Server Scheduler service.<br><br></li>
+<li>
+Use the Windows NT scheduler to execute the program and/or batch using the <b>isql</b> command-line utility.</li>
+</ul>
+<p>
+Either one of these options can be used to schedule and perform your batches or procedures effectively. The output from these options can be routed to a file for verification purposes. If the SQLExecutive service scheduler is used, you can be notified of errors or problems through e-mail or paging. </p>
+<h4>Database Maintenance Plan Wizard</h4>
+<p>
+SQL Server provides the Database Maintenance Plan Wizard, which can be used to automatically schedule daily or weekly routine database maintenance tasks, including database and transaction log back ups, database consistency checks, index rebuilds, and statistics updates. The Maintenance Wizard can be run from SQL Server Enterprise Manager or the Sqlmaint.exe utility that ships with Microsoft SQL Server. Using the Maintenance Wizard you can easily create and schedule a maintenance plan for your database that is tailored to the operational needs of your application and the end user's environment. </p>
+<p>
+For more information about the Database Maintenance Plan Wizard, see the <i>Microsoft SQL Server Administrator's Companion.</i></p>
+<h3>Responding to Severe SQL Server Errors Quickly</h3>
+<p>
+A DBA is responsible monitoring the server and resolving SQL Server errors as quickly as possible. SQL Server provides several tools to help the DBA capture these errors and begin to resolve them. This section presents several options and actions for automating the server monitoring and observation process so that a DBA is not needed to perform this task at the end user's installation.</p>
+<h4>Error severity levels</h4>
+<p>
+Microsoft SQL Server assigns a severity level to each error. Severity levels 0 and 10 are informational messages about mistakes in information that is entered. Severity levels 11 through 16 errors are generated by the user and can be corrected by the user who encounters them. Severity levels 17 through 19 indicate hardware or software errors. With these errors you can continue working but may not be able to execute some statements. Severity level 20 through 25 errors are fatal errors that indicate system problems. These fatal errors terminate the process that encountered them and often require immediate attention. </p>
+<h4>Setting alerts for high severity errors</h4>
+<p>
+Typically, the database administrator is responsible for monitoring the system for these errors, resolving them as they occur. Microsoft SQL Server provides an alert facility that allows you to completely automate this monitoring process. Alerts can also be set on SQL Server events. If the proper SQL Server options are set, SQL Server events are written to the Windows NT application event log. The SQL Server SQLExecutive service constantly monitors the Windows NT application log, waiting for events from SQL Server. When an event occurs, SQLExecutive compares the event details against the alerts that have been defined. If it finds a match, SQLExecutive carries out the defined response. For each alert, the response can be either or both of these:
+<ul type=disc>
+<li>
+Execute a task. This task can be a Transact-SQL command batch or a Windows NT program.<br><br></li>
+<li>
+Send e-mail and/or pager notifications to one or more people.</li>
+</ul>
+<p>
+Paging is implemented using e-mail. In order to use paging facilities, you must be running Microsoft Mail or Microsoft Exchange. These must be configured to send an e-mail that results in a page being sent. E-mail interfaces to pagers are required to route e-mails to a post office at the pager provider's site. </p>
+<p>
+This code demonstrates how alerts can be used to automate the system monitoring process. This alert is designed to fire a task whenever a SQL Server severity level 17 error message has occurred.</p>
+<p>
+The first code segment creates a task called 'CRITICAL SQL SERVER ERROR NOTIFICATION'. This task sends the message 'CRITICAL SQL SERVER SEVERITY 17 ERROR ENCOUNTERED ON PRODSQL' to the administrator's computer ADMIN, using the Windows NT NET SEND command, indicating that a severity level 17 error has occurred. </p>
+<pre><code>exec msdb..sp_addtask 'CRITICAL SQL SERVER ERROR NOTIFICATION',
+ &nbsp; @subsystem = 'CmdExec',
+ &nbsp; @databasename = 'master',
+ &nbsp; @enabled = 1,
+ &nbsp; @freqtype = 2,
+ &nbsp; @activestartdate = 970101, @activeenddate = 99991231,
+ &nbsp; @activestarttimeofday = 0, @activeendtimeofday = 235959,
+ &nbsp; @loghistcompletionlevel = 2,
+ &nbsp; @emailcompletionlevel = 0,
+@command = 'NET SEND ADMIN "CRITICAL SQL SERVER SEVERITY 17 ERROR ENCOUNTERED ON PRODSQL" '
+go
+</code></pre>
+<p>
+The second code segment creates an alert called 'CRITICAL SQL SERVER SEVERITY 17 ERROR' that executes the preceding task every time a severity level 17 is encountered. The same code can be used to perform similar tasks for severity level 18 through 25 errors as well. The SQL Server alert facility is flexible and provides an efficient mechanism for automating your system monitoring capabilities.</p>
+<pre><code>exec msdb..sp_addalert @name = 'CRITICAL SQL SERVER SEVERITY 17 ERROR',
+ &nbsp; @severity = 17,
+ &nbsp; @delay_between_responses = 10, 
+ &nbsp; @task_name = 'CRITICAL SQL SERVER ERROR NOTIFICATION'
+go
+</code></pre>
+<p>
+For more information about SQL Server error severity levels and alerts, see the <i>Microsoft SQL Server Administrator's Companion </i>and various articles in the Microsoft Knowledge Base.</p>
+</BODY>
+</HTML>

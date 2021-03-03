@@ -1,0 +1,238 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>StartProtocol Sample</title>
+<link disabled rel=stylesheet href=../../backsdk3.css>
+<style type="text/css">
+@import url(../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h1><a name="_mpr_startprotocol_sample"></a>StartProtocol Sample</h1>
+<p>
+<span style=color:#FF0000>[This is preliminary documentation and subject to change.]</span> </p>
+<pre><code>DWORD
+APIENTRY
+StartProtocol(
+    IN HANDLE               hMgrNotifyEvent,
+    IN PSUPPORT_FUNCTIONS   pSupportFunctions,
+    IN PVOID                pvConfig
+    )
+/*++
+  Routine Description
+      After the protocol has been registered, the IP Router Manager
+      calls this function to tell the protocol to start. Most of the
+      startup code is executed here.
+      
+  Arguments
+      hMgrNotifyEvent   Event to Set if the IP Router Manager needs to
+                        be notified to take any action on our behalf
+      pSupportFunctions Some functions exported by IP Router Manager
+      pvConfig          Our global configuration which was setup by our
+                        setup/admin DLL
+
+  Return Value
+      NO_ERROR
+
+--*/
+{
+    WSADATA wsaData;
+    DWORD   dwResult, dwThread;
+    HANDLE  hThread;
+    BOOL    bWinsockLoaded;
+    
+    PSAMPLE_PROTOCOL_GLOBAL_INFO    pGlobalInfo;
+    
+    EnterProtocolApi();
+    
+    TraceEnter("StartProtocol");
+
+    if(pvConfig == NULL)
+    {
+        Trace0(ERR,
+               "StartProtocol: Called with NULL config");
+
+        TraceLeave("StartProtocol");
+    
+        ExitProtocolApi();
+    
+        return ERROR_INVALID_PARAMETER;
+    }
+    
+    pGlobalInfo = (PSAMPLE_PROTOCOL_GLOBAL_INFO)pvConfig;
+    
+    if(!ValidateGlobalInfo(pGlobalInfo))
+    {
+        TraceLeave("StartProtocol");
+    
+        ExitProtocolApi();
+    
+        return ERROR_INVALID_DATA;
+    }
+
+    g_hPrivateHeap       = NULL;
+    g_hRtmEvent          = NULL;
+    g_hMgrNotifyEvent    = NULL;
+    g_hRtmHandle         = NULL;
+    g_hStopProtocolEvent = NULL;
+    g_hSocketEvent       = NULL;
+    g_pmmStopMsg         = NULL;
+    bWinsockLoaded       = FALSE;
+
+
+    g_psfnSupportFunctions = pSupportFunctions;
+    
+    do
+    {
+        InitializeCriticalSections();
+
+        
+        //
+        // We need Winsock2.0 or better
+        //
+
+        dwResult = (DWORD)WSAStartup(MAKEWORD(2,0), &amp;wsaData);
+
+        if(dwResult != 0)
+        {
+        
+            Trace1(ERR,
+                   "StartProtocol: Error %d starting WinSock.", dwResult);
+
+            LogErr0(WINSOCK_FAIL,
+                    dwResult);
+            break;
+        }
+
+        bWinsockLoaded = TRUE;
+
+        dwResult = CreateHeaps();
+
+        if(dwResult != NO_ERROR)
+        {
+            break;
+        }
+
+        dwResult = CreateEvents();
+
+        if(dwResult != NO_ERROR)
+        {
+            break;
+        }
+
+
+
+        //
+        // The message that will be used to notify the stopping
+        // of this protocol. If we cant create this, we wont be
+        // able to stop
+        //
+        
+        g_pmmStopMsg = HeapAlloc(g_hPrivateHeap,
+                                 0,
+                                 sizeof(MGR_MSG));
+
+
+        if(g_pmmStopMsg == NULL)
+        {
+            dwResult = GetLastError();
+            
+            Trace1(ERR,
+                   "StartProtocol: Couldnt allocate stop message. Error %d",
+                   dwResult);
+
+            break;
+        }
+
+        
+        //
+        // Register as an RTM client. We will not keep multiple routes
+        // to one destination so we set the flags to denote this
+        //
+    
+        g_hRtmHandle = RtmRegisterClient(RTM_PROTOCOL_FAMILY_IP,
+                                         SAMPLE_PROTOCOL_ROUTE_ID,
+                                         g_hRtmEvent,
+                                         RTM_PROTOCOL_SINGLE_ROUTE);
+
+        if(g_hRtmHandle == NULL)
+        {
+            dwResult = GetLastError();
+
+            Trace1(ERR,
+                   "StartProtocol: Error %d registering with RTM",
+                   dwResult);
+            
+            LogErr0(RTM_REGISTER_FAILED,
+                    dwResult);
+
+            break;
+        }
+
+        //
+        // Create the main thread. This executes the MainThread()
+        // function
+        //
+        
+        hThread = CreateThread(NULL, 0,
+                               MainThread,
+                               NULL,
+                               0,
+                               &amp;dwThread);
+
+        if (hThread == NULL)
+        {
+            dwResult = GetLastError();
+            
+            Trace1(ERR,
+                   "StartProtocol: Error %d starting main thread",
+                   dwResult);
+            
+            LogErr0(CREATE_THREAD_FAILED,
+                    dwResult);
+
+            break;
+        }
+
+        //
+        // We will never refer to the thread using the handle
+        // so close it and avoid a leak
+        //
+        
+        CloseHandle(hThread);
+        
+    }while(FALSE);
+
+    if(dwResult != NO_ERROR)
+    {
+        //
+        // Something bad happened
+        //
+
+        if(g_pmmStopMsg)
+        {
+            HeapFree(g_hPrivateHeap,
+                     0,
+                     g_pmmStopMsg);
+        }
+        
+        CleanupProtocol(bWinsockLoaded);
+
+    }
+    else
+    {
+        g_hMgrNotifyEvent = hMgrNotifyEvent;
+        
+        g_dwProtocolState = PROTOCOL_STATE_RUNNING;
+    }
+
+    TraceLeave("StartProtocol");
+    
+    ExitProtocolApi();
+    
+    return NO_ERROR;
+}</code></pre>
+<p>&nbsp;</p></body>
+</HTML>

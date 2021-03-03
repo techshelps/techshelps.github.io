@@ -1,0 +1,167 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Client-Side Pipe Implementation</title>
+<link disabled rel=stylesheet href=../../../backsdk3.css>
+<style type="text/css">
+@import url(../../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h1><a name="_rpc_client_side_pipe_implementation"></a>Client-Side Pipe Implementation</h1>
+<p>
+The client application must implement the following procedures, which the client stub will call during data transfer:
+<ul>
+<li>
+A <i>pull</i> procedure (for an input pipe).</li>
+<li>
+A <i>push</i> procedure (for an output pipe). </li>
+<li>
+An <i>alloc</i> procedure to allocate a buffer for the transfer data. </li>
+</ul>
+<p>
+All of these procedures must use the arguments specified by the MIDL-generated header file. </p>
+<p>
+In addition, the client application must have a state variable to keep track of where to locate or place data.</p>
+<p>
+The state variable can be as simple as a file handle, if you are transferring data from one file to another, or an integer that points to an element in an array, as shown in our example below. Or you can define a fairly complex state structure to perform additional tasks, such as coordinating the <i>push</i> and <i>pull</i> routines on an [<b>in</b>, <b>out</b>] parameter.</p>
+<p>
+The <i>alloc</i> procedure can also be as simple or as complex as your application requires. For example, it can return a pointer to the same buffer every time every time the stub calls the function, or it can allocate a different amount of memory each time. If your data is already in the proper form (an array of pipe elements, for example) you can coordinate the <i>alloc</i> procedure with the <i>pull</i> procedure to allocate a buffer that already has the data in it. In that case, your <i>pull</i> procedure could be an empty routine. </p>
+<p>
+Note that the the buffer allocation must be in bytes. The <i>push</i> and <i>pull</i> procedures, on the other hand, manipulate elements, whose size in bytes depends on how they were defined. </p>
+<p>
+The <i>pull</i> procedure must find the data to be transferred, read the data into the buffer, and set the number of elements to send. When there is no more data to send, the procedure sets this argument to zero. When all the data is sent the <i>pull</i> procedure should do any needed cleanup before returning. For a parameter that is an <b>in</b>, <b>out</b> pipe, the <i>pull</i> procedure must reset the state variable after all the data has been transmitted, so that the <i>push</i> procedure can use it to receive data.</p>
+<p>
+The <i>push</i> procedure takes a pointer to a buffer and an element count from the client stub and, if the element count is greater than 0, processes the data. For example, it could copy the data from the stub's buffer to its own own memory. When the element count equals zero, the <i>push</i> procedure completes any needed cleanup tasks before returning.</p>
+<p>
+In the following example, the client functions SendLongs and ReceiveLongs each allocate a pipe structure and a global memory buffer, initialize the structure, make the remote procedure call and free the memory.</p>
+<h4>Example</h4>
+<pre><code>//file: client.c (fragment)
+#include "pipedemo.h"
+long *  global_pipe_data;
+long    global_buffer[BUF_SIZE];
+ 
+ulong   pipe_data_index; /* state variable */
+ 
+void SendLongs()
+{
+ LONG_PIPE   in_pipe;
+ int        i;
+ global_pipe_data =
+        (long *)malloc( sizeof(long) * PIPE_SIZE );
+ 
+ for (i=0; i&lt;PIPE_SIZE; i++)
+     global_pipe_data[i] = IN_VALUE;
+ 
+ pipe_data_index = 0;
+ in_pipe.state =  (rpc_ss_pipe_state_t )&amp;pipe_data_index;
+ in_pipe.pull  = PipePull;
+ in_pipe.alloc = PipeAlloc;
+ 
+ InPipe( in_pipe ); /* Make the rpc */
+ 
+ free( (void *)global_pipe_data );
+
+ return;
+}//end SendLongs
+ 
+void PipeAlloc( rpc_ss_pipe_state_t state_info,
+                     ulong requested_size,
+                     long **allocated_buf,
+                     ulong *allocated_size )
+{ 
+ ulong *state = (ulong *)state_info;
+if ( requested_size &gt; (BUF_SIZE*sizeof(long)) )
+   *allocated_size = BUF_SIZE * sizeof(long);
+ else
+   *allocated_size = requested_size;
+ *allocated_buf = global_buffer; 
+return;
+}//end PipeAlloc
+ 
+void PipePull( rpc_ss_pipe_state_t state_info,
+                    long *input_buffer,
+                    ulong max_buf_size,
+                    ulong *size_to_send )
+{
+ ulong   current_index;
+ ulong        i;
+ ulong        elements_to_read;
+ ulong *state = (ulong *)state_info;
+
+ current_index = *state;
+ if (*state &gt;=  PIPE_SIZE )
+    {
+     *size_to_send = 0; /* end of pipe data */
+     *state = 0; /* Reset the state = global index */
+     return;
+    }
+ 
+ if ( current_index + max_buf_size &gt; PIPE_SIZE )
+    elements_to_read = PIPE_SIZE - current_index;
+ else
+    elements_to_read = max_buf_size;
+ 
+ for (i=0; i &lt; elements_to_read; i++)
+     /*client sends data */
+     input_buffer[i] = global_pipe_data[i + current_index];
+ 
+ *state +=   elements_to_read;
+ *size_to_send = elements_to_read;
+ 
+ return;
+}//end PipePull
+    
+ 
+void ReceiveLongs()
+{
+ LONG_PIPE    *out_pipe;
+ idl_long_int    i;
+ 
+ global_pipe_data =
+        (long *)malloc( sizeof(long) * PIPE_SIZE );
+    
+    pipe_data_index = 0;
+    out_pipe.state =  (rpc_ss_pipe_state_t )&amp;pipe_data_index;
+    out_pipe.push  = PipePush;
+    out_pipe.alloc = PipeAlloc;
+ 
+    OutPipe( &amp;out_pipe ); /* Make the rpc */
+ 
+    free( (void *)global_pipe_data );
+ 
+    return;
+}//end ReceiveLongs()
+ 
+void PipePush( rpc_ss_pipe_state_t state_info,
+                    long *buffer,
+                    ulong num_elts )
+{
+ ulong   elts_to_copy, i;
+ ulong *state = (ulong *)state_info;
+
+ if (num_elts == 0)/* end of data */
+    {
+     *state = 0; /* Reset the state = global index */
+     return;
+    }
+ if (*state + num_elts &gt; PIPE_SIZE)
+     elts_to_copy = PIPE_SIZE - *state;
+ else
+     elts_to_copy = num_elts;
+ 
+ for (i=0; i &lt;elts_to_copy; i++)
+     { /*client receives data */
+     global_pipe_data[*state] = buffer[i];
+     (*state)++;
+     }
+ return;
+}//end PipePush
+ </code></pre>
+<h4>See Also</h4>
+<p>
+<a href="mi-laref_3b39.htm"><b>pipe</b></a>, <a href="mi-cmdln_08bt.htm">/<b>Oi</b></a></p>
+<p>&nbsp;</p></body>
+</HTML>

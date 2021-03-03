@@ -1,0 +1,167 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Sample code</TITLE><META HTTP-EQUIV="CONTENT-TYPE" CONTENT="text/html; charset= iso-8859-1"><style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD><BODY BGCOLOR="#FFFFFF">
+<FONT FACE="verdana,arial,helvetica" SIZE="2">
+<H3>Sample code </H3><P>In this example, the provider handles one dynamic key, under which there are 2 values. This provider will handle both values. The provider is keeping track of the value lengths instead of the registry. Note there is a static number (2) of values under this dynamic key. If the number of values under a dynamic key will change, then the key must be deleted and readded in order to do so. </P>
+<P>The path of the dynamic key in this example is HKEY_DYN_DATA\Keyname1\Keyname2. There are two values under this key. One value is called "First Valuename", and the other is called "Second Valuename". </P>
+<P><BR></P>
+<PRE>  /*****************************************************************************
+  *
+  *   (C) Copyright MICROSOFT Corp., 1994-1995
+  *
+  *****************************************************************************/
+ 
+ #include &lt;vmm.h&gt;
+ #include &lt;vxdwraps.h&gt;
+ #include &lt;vmmreg.h&gt;
+ 
+ #define MODULE_NAME "Dynamic Keys example"
+ #define LEN 100
+ #define DYNKEY_PATH        "Keyname1\\Keyname2"
+ // This path is passed to RegCreateDynKey.
+ // The registry will create Keyname1 (if it does not exist) and Keyname2; the provider
+ // will only be queried for values under Keyname2.
+ 
+ #define REGVAL_DATA1  "First Valuename"
+ #define REGVAL_DATA2  "Second Valuename"
+ 
+ #pragma VxD_PAGEABLE_CODE_SEG
+ #pragma VxD_PAGEABLE_DATA_SEG
+ 
+ // Structure for registry value context pointers.
+ // This allows quick return of data for our dynamic registry key.
+ // NOTE: This structure is being used as the value context because this sample has values
+ // with varying lengths. If this were not the case,  
+ // PROVIDER_KEEPS_VALUE_LENGTH could be set, and the value pointer 
+ // itself used as the value context.
+ typedef struct
+ {
+     PVOID pData;    // Pointer to the data
+     PUINT pcbData;  // Pointer to the size of the data
+ } REGVAL_CONTEXT, *PREGVAL_CONTEXT;
+ 
+ DWORD fData1;
+ DWORD cbfData1 = sizeof(fData1);
+ char szData2[LEN + 1];
+ unsigned cbData2;
+ 
+ // Assign values to data1 and data2. These are of course not normally static 
+ // values - they would change dynamically. However, they are being set here in 
+ // order to complete this example.
+ fData1= 100;
+ szData2 = "This is the string for the second value";
+ 
+ // declarations used below
+ const REGVAL_CONTEXT rvcData1 = {&amp;fData1, &amp;cbfData1};
+ const REGVAL_CONTEXT rvcData2 = {szData2, &amp;cbData2};
+ 
+ // RegKeyHandler - The handler function that must be defined in your VxD
+ VMMREGRET __cdecl
+ RegKeyHandler(
+     PVOID pvKeyContext,
+     PVALCONTEXT pValueContext,
+     DWORD cValueContext,
+     PBYTE pbBuffer,
+     DWORD *pcbBuffer,
+     DWORD fFlags)
+ {
+     VMMREGRET status = 0;
+     PVALCONTEXT pvcCurrent;
+     DWORD cbBufRemaining;
+ 
+     // Save the input buffer size and initialize the return buffer size
+     assert(pcbBuffer != NULL);
+     cbBufRemaining = *pcbBuffer;
+     *pcbBuffer = 0;
+     
+     // Since this function handles only one key, the key context is unused
+     assert(pvKeyContext == NULL);
+ 
+     // Walk the list of requested values, filling them in the buffer if
+     // there's room.
+     for (pvcCurrent = pValueContext; 
+          cValueContext &gt; 0; 
+          pvcCurrent++, cValueContext--)
+     {
+         PREGVAL_CONTEXT prvcCurrent = pvcCurrent-&gt;value_context;
+         pvcCurrent-&gt;valuelen = *prvcCurrent-&gt;pcbData;
+ 
+ 
+         if (cbBufRemaining &gt;= (DWORD) pvcCurrent-&gt;valuelen)
+         { // value fits, copy it in
+             memcpy(pbBuffer, prvcCurrent-&gt;pData, pvcCurrent-&gt;valuelen);
+ 
+             *pcbBuffer += pvcCurrent-&gt;valuelen;
+             pvcCurrent-&gt;val_buff_ptr = pbBuffer;
+             
+             ((PBYTE) pbBuffer) += pvcCurrent-&gt;valuelen;
+             cbBufRemaining -= pvcCurrent-&gt;valuelen;
+         }
+         else
+         {
+             pvcCurrent-&gt;val_buff_ptr = NULL;
+             status = ERROR_MORE_DATA;
+         }
+     }    
+     
+     return status;
+ }  
+ 
+ // *** Init code and data is below here ***
+ #pragma VxD_INIT_CODE_SEG
+ #pragma VxD_INIT_DATA_SEG
+ 
+ // This structure is used as the 3rd parameter to RegCreateDynKey
+ struct provider_info RegKeyHandlerInfo = 
+ {
+     RegKeyHandler,   // pointer to the VxD handler function for query of one value
+     RegKeyHandler,   // pointer to the VxD handler function for query of multiple values
+     NULL,    // Should be NULL for Win95; reserved for future pointer to Win32 handler fn
+     NULL,    // Should be NULL for Win95; reserved for future pointer to Win32 handler fn
+     PROVIDER_KEEPS_VALUE_LENGTH,
+       // Provider will keep track of value lengths
+     NULL    // Key context; not used in this example since handler only manages 1 key
+ };
+ 
+ // A Pvalue struct that is passed as 4th parameter to RegCreateDynKey
+ PVALUE RegKeyValueInfo[] = 
+ {
+     {REGVAL_DATA1,    sizeof(DWORD),  (PVOID) &amp;rvcData1,   REG_BINARY},
+     {REGVAL_DATA2,   0, (PVOID) &amp;rvcData2,  REG_SZ}, 
+ };
+ 
+ #define RegKeyValueCount (sizeof(RegKeyValueInfo) / sizeof(*RegKeyValueInfo))
+                               
+ int __stdcall
+ CreateDynamicKey(void)
+ {
+ 
+     // Note:  We never delete the key
+     VMMHKEY hkeyDynamicConfig;
+     int uStatus;
+ 
+     cbData2 = strlen(szData2) + 1;
+     if (uStatus = _RegCreateDynKey(DYNKEY_PATH,
+                                    NULL,    // No key context is needed
+                                    &amp;RegKeyHandlerInfo,
+                                    RegKeyValueInfo,
+                                    RegKeyValueCount,
+                                    &amp;hkeyDynamicConfig))
+     {                                   
+ #ifdef DEBUG 
+         Out_Debug_String(MODULE_NAME 
+                          ": Cannot create dynamic registry key "
+                          DYNKEY_PATH
+                          "\r\n");
+ #endif                           
+ 
+         return uStatus;
+     }
+ 
+     // We're never going to use this key, so we can close it
+     // BUG - The dyn-key code relies on this being kept open, so we leave it open
+     //_RegCloseKey(hkeyDynamicConfig);
+ 
+     return 0;
+ }
+</PRE>
+</FONT></BODY></HTML>

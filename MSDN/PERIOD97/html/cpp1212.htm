@@ -1,0 +1,557 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>C++ Q &amp; A</title>
+<style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000 dir=ltr>
+<Font face="verdana,arial,helvetica" size="2">
+<h1><a name="cqa"></a>C++ Q &amp; A</h1>
+<p class=indent>
+by Paul DiLascia</p>
+<p>
+<b>Q.  </b>In the September 1997 issue you wrote that code like this is technically incorrect:</p>
+<pre><code>CMyDialog::SomeFn( ... )
+{   
+    CEdit* pEdit = (CEdit*)GetDlgItem(ID_EDIT1);&nbsp;//&nbsp;NOT!   
+    pEdit-&gt;GetSel( ... );
+}
+</code></pre>
+<p>
+But we’ve seen this type of code used in many books as a way to access a control. Is there a&nbsp;procedure&nbsp;that&nbsp;would&nbsp;make the above sample technically correct—that is, a procedure other than using DDX/DDV or subclassing the control (which I believe would create a permanent map entry)?</p>
+<p class=indent>
+<i>Doug Kehn and Ray Marshall</i></p>
+<p>
+<b>A.  </b>There is another way, but not one that avoids creating a permanent map entry. First, let me quickly remind those of you who didn’t read the September issue why the cast is incorrect. It’s because GetDlgItem returns a CWnd, not a CEdit. You can easily see this by using MFC runtime classes or C++ dynamic casting. I wrote a little program called EditCast (see Figure 1) that’s essentially a dialog with a button in it. When you press the button, EditCast executes the following code:</p>
+<pre><code>CWnd*  pWnd  = GetDlgItem(IDC_EDIT1);
+CEdit* pEdit = dynamic_cast&lt;CEdit*&gt;(pWnd);
+BOOL   bIsEdit = pWnd-&gt;IsKindOf(RUNTIME_CLASS(CEdit));
+</code></pre>
+<p>
+Then it prints the values of pWnd, pEdit, and bIsEdit in TRACE diagnostics. Figure 2 shows the output in my TraceWin utility. As you can see, doing a C++ dynamic cast to CEdit fails (the cast returns NULL); likewise, CObject::IsKindOf returns FALSE, indicating that the pointer does not point to a CEdit-derived object. And yet, following the above lines of code, EditCast next executes these lines, which work perfectly fine:</p>
+<pre><code>pEdit = (CEdit*)pWnd;
+pEdit-&gt;SetSel(0, -1);
+pEdit-&gt;ReplaceSel("");
+pEdit-&gt;SetFocus();
+</code></pre>
+<p>
+When you press the button, the code deletes whatever was in the edit control. So what gives? </p>
+<p>
+As I explained in September, the code works because the CEdit functions are merely thin wrappers that send messages to the window. For example, ReplaceSel sends an EM_REPLACESEL to the control:</p>
+<pre><code>// in afxwin2.inl
+inline void 
+CEdit::ReplaceSel(LPCTSTR lpsz, BOOL bCanUndo)
+{ 
+    ::SendMessage(m_hWnd, EM_REPLACESEL, 
+                  (WPARAM)bCanUndo, (LPARAM)lpsz); 
+}
+</code></pre>
+<p>
+Since the control really is an edit control, it responds to EM_<br>
+REPLACESEL by doing what you expect. The only reason it works is that CEdit contains no data members or virtual functions. If ReplaceSel had been a virtual function instead of inline, calling it would call the CWnd function, not the CEdit one, no matter how you cast. C++ would call through the function pointer in the vtable, which would be CWnd::ReplaceSel. And if ReplaceSel used some data member that was part of CEdit and not CWnd, the code would crash or do something unpredictable because the CWnd object would not have this data.</p>
+<p>
+<b>Figure 1: EditCast.cpp</b></p>
+<pre><code>////////////////////////////////////////////////////////////////
+// EditCast 1997 Microsoft Systems Journal. 
+// If this program works, it was written by Paul DiLascia.
+// If not, I don't know who wrote it.
+// EditCast illustrates why it’s not safe to cast the return from
+// CWnd::GetDlgItem to a CEdit or other kind of window class.
+
+#include &lt;afxwin.h&gt;         // MFC core and standard components
+#include &lt;afxext.h&gt;         // MFC extensions
+#include "resource.h"
+#include "TraceWin.h"
+
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#undef THIS_FILE
+static char THIS_FILE[] = __FILE__;
+#endif
+//////////////////
+// Dialog class that alters the TAB sequence and handles
+// the RETURN key.
+//
+class CMyDialog : public CDialog {
+public:
+    CMyDialog();
+    ~CMyDialog();
+    virtual BOOL OnInitDialog();
+    afx_msg void OnButton();
+    DECLARE_MESSAGE_MAP()
+};
+////////////////////////////////////////////////////////////////
+// Application class
+//
+class CApp : public CWinApp {
+public:
+    CApp() { }
+    virtual BOOL InitInstance();
+} theApp;
+
+/////////////////
+// Initialize: just run the dialog and quit.
+//
+BOOL CApp::InitInstance()
+{
+    CMyDialog dlg;
+    dlg.DoModal();
+    return FALSE;
+}
+////////////////////////////////////////////////////////////////
+// CMyDialog
+//
+BEGIN_MESSAGE_MAP(CMyDialog, CDialog)
+    ON_BN_CLICKED(IDC_BUTTON1, OnButton)
+END_MESSAGE_MAP()
+
+//////////////////
+// Construct dialog: set everything to zero or NULL.
+//
+CMyDialog::CMyDialog() : CDialog(IDD_DIALOG1)
+{
+}
+
+CMyDialog::~CMyDialog()
+{
+}
+/////////////////
+// Initialize dialog: load accelerators and set initial focus.
+//
+BOOL CMyDialog::OnInitDialog()
+{
+    return CDialog::OnInitDialog();
+}
+/////////////////
+// Button handler: do demo stuff
+//
+void CMyDialog::OnButton()
+{
+    // Get the window
+    CWnd*     pWnd  = GetDlgItem(IDC_EDIT1);
+    ASSERT(pWnd);
+    // Demonstrate that pWnd is not an edit control.
+    CEdit*    pEdit = dynamic_cast&lt;CEdit*&gt;(pWnd);
+    BOOL      bIsEdit = pWnd-&gt;IsKindOf(RUNTIME_CLASS(CEdit));
+    TRACE("GetDlgItem(IDC_EDIT1) returns CWnd = %p\n", pWnd);
+    TRACE("dynamic_cast to CEdit* = %p\n", pEdit);
+    TRACE("pWnd-&gt;IsKindOf(RUNTIME_CLASS(CEdit)) returns %d\n", bIsEdit);
+    
+    // But you can treat it as one! (Do this at your own risk)
+    pEdit = (CEdit*)pWnd;
+    pEdit-&gt;SetSel(0, -1);
+    pEdit-&gt;ReplaceSel("");
+    pEdit-&gt;SetFocus();
+}
+</code></pre>
+<p>
+<img src="cpp1212_fig02.gif" border=0></p>
+<p>
+<b>Figure 2: TraceWin Utility</b></p>
+<p>
+So what’s the correct way to avoid the cast? As you point out, the normal thing to do is put a CEdit object in your dialog and then subclass it:</p>
+<pre><code>class CMyDialog : public CDialog {
+    CEdit m_edit;
+    virtual BOOL OnInitDialog() {
+        m_edit.SubclassDlgItem(IDC_EDIT, this);
+        return CDialog::OnInitDialog();
+    }</code></pre>
+<p>
+·</p>
+<p>
+·</p>
+<p>
+·</p>
+<pre><code>};
+</code></pre>
+<p>
+Now if you call GetDlgItem, you get a CEdit object since m_edit is in the permanent map. Remember, CWnd::GetDlgItem only creates a CWnd on-the-fly if it can’t find one in the permanent map. Using a dialog object is the preferred way to access controls, but there are times when this may not be feasible. Say you’re writing some library code and didn’t create the edit control, but had it passed to you. In that case, you can access the edit control like so:</p>
+<pre><code>CMyDialog::SomeFn( ... )
+{
+    CEdit edit;
+        edit.Attach(::GetDlgItem(m_hWnd, IDC_EDIT));
+        edit.SetSel( ... );</code></pre>
+<p>
+·</p>
+<p>
+·</p>
+<p>
+·</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;edit.Detach();
+}
+</code></pre>
+<p>
+In this example, ::GetDlgItem (the Windows API function, not the CWnd function) returns the HWND of the control and I attach it to a local CEdit object. CWnd::Attach adds the CEdit object to the permanent map and sets CEdit.m_hWnd to the HWND of the edit control. Just make sure you don’t forget to Detach the control when you’re done—otherwise the CWnd destructor will destroy the actual control. Of course, this trick will fail if the control is already attached to a CWnd-derived object. </p>
+<p>
+If you want to be absolutely safe, you could write something like this:</p>
+<pre><code>HWND hwnd = GetDlgItem(IDC_EDIT);
+CEdit* pEdit =  
+     CWnd::FromHandlePermanent(hwnd);
+BOOL bMine;
+if (pEdit) {
+    ASSERT_KINDOF(CEdit, pEdit);
+} else {
+    pEdit = new CEdit;
+    pEdit-&gt;Attach(hwnd);
+    bMine = TRUE;
+}</code></pre>
+<p>
+·</p>
+<p>
+·</p>
+<p>
+·</p>
+<pre><code>if (bMine) {
+    pEdit-&gt;Detach();
+    delete pEdit;
+}
+</code></pre>
+<p>
+CWnd::FromHandlePermanent only returns a CWnd pointer if the window has a permanent object attached to it. If not, I create a CEdit and attach it. In general, this technique can be used whenever you’re given an HWND from somewhere that you know is an edit control (or static, or button) and you want to treat it as such. </p>
+<p>
+I often use the local variable technique to program GDI. For example, there are many messages and callbacks where Windows® gives you a device context in the form of an HDC. To access it with MFC, you can write:</p>
+<pre><code>&nbsp;CDC dc;
+ dc.Attach(hdc);
+ dc.SelectObject(...);</code></pre>
+<p>
+&nbsp;·</p>
+<p>
+&nbsp;·</p>
+<p>
+&nbsp;·</p>
+<pre><code>&nbsp;dc.Detach();
+</code></pre>
+<p>
+This is the equivalent of writing:</p>
+<pre><code>CDC&amp; dc = *CDC::FromHandle(hdc);
+</code></pre>
+<p>
+The difference is that you save a memory allocation since the CDC object is a stack variable. On the other hand, if you use FromHandle you don’t have to worry about detaching since MFC takes care of detaching and destroying the temporary CDC object during its idle processing. In general, it’s probably safer to use FromHandle since it returns the permanent object if there is one. This applies to all MFC objects—windows, device contexts, brushes, and so on.</p>
+<p>
+<b>Q.  </b>I’m writing an MFC app with an About dialog that shows the logo, name, address, and URL of my company. I thought it would be a neat feature to make the URL a hotlink so the user can click on it and the dialog would launch the browser and go to that page. I figured out how to get the name of the default browser from the system registry by looking up the file association for .htm or .html, but it seems like a lot of work. Plus, the browser always starts a new instance instead of using the current one if the browser is already open. There has to be some easy way to do this, but I’ve looked through all the manuals and I can’t find anything. Please help!</p>
+<p class=indent>
+<i>Lloyd Kemske</i></p>
+<p>
+<b>A.  </b>You’d think that with all the Web hype and hysteria, and with Microsoft touting Windows 98 and its new browser desktop model, and with practically every app under the sun having some kind of Internet function, there’d be some obvious API function like OpenThisHereURLForMeNowPlease. Well, there is, but it’s not obvious which function you’ll want to use. As far as I can tell, there’s no mention anywhere in the documentation that this incredibly useful function, which can open any file on your desktop, can also be used to open Internet URLs. The only reference I could find was an obscure note in the Microsoft® Access KnowledgeBase. </p>
+<p>
+The magic function is ShellExecute, the replacement for WinExec. You can feed it the name of any file and ShellExecute will figure out how to open it. For example, this code opens the file liza.bmp (oo-la-la) in your default bitmap editor, which might be Microsoft Paint, Adobe Photoshop, or Corel PhotoPaint:</p>
+<pre><code>ShellExecute(NULL, "open", "liza.bmp", NULL, NULL, 
+             SW_SHOWNORMAL);
+</code></pre>
+<p>
+I won’t bore you by describing all the arguments; you can read the documentation yourself. The important thing is that ShellExecute lets you open any file you want. It even knows how to open desktop (.lnk) and URL (.url) shortcuts. ShellExecute parses all the registry gobbledygook in HKEY_<br>
+CLASSES_ROOT to figure out what app to run and whether to fire up a new instance or feed the file name to an already open instance using DDE. Either way, ShellExecute returns the HINSTANCE of the app that opened the file.</p>
+<p>
+But the neat thing is that ShellExecute doesn’t just open files on your computer, it opens files on the Internet too.</p>
+<pre><code>ShellExecute(NULL, "open", "http://nbc.com",
+             NULL, NULL, SW_SHOWNORMAL);
+</code></pre>
+<p>
+This code takes you to the NBC home page, where you can find out all about “Homicide” episodes. When ShellExecute sees http: at the front of the file name, it scratches its head and says, “Gee, I think maybe this is a Web file,” and branches off into some code to launch Microsoft Internet Explorer or Netscape Navigator or whatever browser you’re using to open the file. ShellExecute recognizes other protocols too, like FTP and gopher. (Does anyone ever use gopher?) It even recognizes mailto, so if you feed it the file name mailto:askpd@pobox.com, it’ll fire up your mail program and open a new message addressed to yours truly. In short, ShellExecute provides one-stop shopping to open any file on a disk or the Internet. It will use any means necessary to try to open whatever string you give it. You can also use it to print files or explore a folder—just pass print or explore as the command. There’s also a ShellExecuteEx variant with so many parameters it has a special struct to hold them all. For more information, read the docs.</p>
+<p>
+By the way, I should point out that the Windows 95 START command has the same capability. START lets you start any file—including URLs—from an MS-DOS® prompt:</p>
+<pre><code>start foo.bmp
+start http://nbc.com
+</code></pre>
+<p>
+START is useful for old command-line hackers like me who still like to write batch files that call awk and sed. </p>
+<p>
+In any case, once you know the secret of ShellExecute, it’s fairly easy to add a link to your About dialog. In fact, I wrote a class, CStaticLink (see Figure 3), that makes it trivial. CStaticLink converts any static control into a hyperlink. To use it, all you have to do is create a static control in your dialog, then hook it up to your dialog by calling SubclassDlgItem from your dialog’s InitDialog function, just as you would to subclass any other kind of control. </p>
+<pre><code>class CMyDialog : public CDialog {
+    CStaticLink m_link;
+    virtual BOOL OnInitDialog() {
+        m_link.SubclassDlgItem(IDC_MYURL, this);
+        return CDialog::OnInitDialog();
+    }</code></pre>
+<p>
+·</p>
+<p>
+·</p>
+<p>
+·</p>
+<pre><code>};
+</code></pre>
+<p>
+Figure 4 shows a program I wrote that uses CStaticLink to implement the About dialog in Figure 5. The dialog has two links: clicking on my URL takes you to my home page; clicking the <i>MSJ</i> icon takes you to the <i>MSJ </i>Web site.</p>
+<p>
+<b>Figure 3: StatLink</b></p>
+<p>
+<b>StatLink.h</b></p>
+<pre><code>////////////////////////////////////////////////////////////////// 
+// CStaticLink 1997 Microsoft Systems Journal. 
+// If this program works, it was written by Paul DiLascia.
+// If not, I don't know who wrote it.
+////////////////
+// CStaticLink implements a static control that's a hyperlink
+// to any file on your desktop or web. You can use it in dialog boxes
+// to create hyperlinks to web sites. When clicked, opens the file/URL
+//
+class CStaticLink : public CStatic {
+public:
+    CStaticLink();
+
+    // you can change these any time:
+    COLORREF     m_colorUnvisited;         // color for unvisited
+    COLORREF     m_colorVisited;           // color for visited
+    BOOL         m_bVisited;               // whether visited or not
+
+    // URL/filename for non-text controls (e.g., icon, bitmap) or when link is
+    // different from window text. If you don't set this, CStaticIcon will
+    // use GetWindowText to get the link.
+    CString     m_link;
+
+protected:
+    DECLARE_DYNAMIC(CStaticLink)
+    CFont         m_font;                  // underline font for text control
+
+    // message handlers
+    afx_msg HBRUSH CtlColor(CDC* pDC, UINT nCtlColor);
+    afx_msg void    OnClicked();
+    DECLARE_MESSAGE_MAP()
+};
+</code></pre>
+<p>
+<b>StatLink.cpp</b></p>
+<pre><code>////////////////////////////////////////////////////////////////// 
+// CStaticLink 1997 Microsoft Systems Journal. 
+// If this program works, it was written by Paul DiLascia.
+// If not, I don't know who wrote it.
+// CStaticLink implements a static control that's a hyperlink
+// to any file on your desktop or web. You can use it in dialog boxes
+// to create hyperlinks to web sites. When clicked, opens the file/URL
+//
+#include "StdAfx.h"
+#include "StatLink.h"
+
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#undef THIS_FILE
+static char THIS_FILE[] = __FILE__;
+#endif
+
+IMPLEMENT_DYNAMIC(CStaticLink, CStatic)
+
+BEGIN_MESSAGE_MAP(CStaticLink, CStatic)
+    ON_WM_CTLCOLOR_REFLECT()
+    ON_CONTROL_REFLECT(STN_CLICKED, OnClicked)
+END_MESSAGE_MAP()
+///////////////////
+// Constructor sets default colors = blue/purple.
+//
+CStaticLink::CStaticLink()
+{
+    m_colorUnvisited = RGB(0,0,255);       // blue
+    m_colorVisited   = RGB(128,0,128);     // purple
+    m_bVisited       = FALSE;              // not visited yet
+}
+//////////////////// Handle reflected WM_CTLCOLOR to set custom control color.
+// For a text control, use visited/unvisited colors and underline font.
+// For non-text controls, do nothing. Also ensures SS_NOTIFY is on.
+//
+HBRUSH CStaticLink::CtlColor(CDC* pDC, UINT nCtlColor)
+{
+    ASSERT(nCtlColor == CTLCOLOR_STATIC);
+    DWORD dwStyle = GetStyle();
+    if (!(dwStyle &amp; SS_NOTIFY)) {
+        // Turn on notify flag to get mouse messages and STN_CLICKED.
+        // Otherwise, I'll never get any mouse clicks!
+        ::SetWindowLong(m_hWnd, GWL_STYLE, dwStyle | SS_NOTIFY);
+    }
+    
+    HBRUSH hbr = NULL;
+    if ((dwStyle &amp; 0xFF) &lt;= SS_RIGHT) {
+
+        // this is a text control: set up font and colors
+        if (!(HFONT)m_font) {
+            // first time init: create font
+            LOGFONT lf;
+            GetFont()-&gt;GetObject(sizeof(lf), &amp;lf);
+            lf.lfUnderline = TRUE;
+            m_font.CreateFontIndirect(&amp;lf);
+        }
+
+        // use underline font and visited/unvisited colors
+        pDC-&gt;SelectObject(&amp;m_font);
+        pDC-&gt;SetTextColor(m_bVisited ? m_colorVisited : m_colorUnvisited);
+        pDC-&gt;SetBkMode(TRANSPARENT);
+
+        // return hollow brush to preserve parent background color
+        hbr = (HBRUSH)::GetStockObject(HOLLOW_BRUSH);
+    }
+    return hbr;
+}
+/////////////////
+// Handle mouse click: open URL/file.
+//
+void CStaticLink::OnClicked()
+{
+    if (m_link.IsEmpty())         // if URL/filename not set..
+        GetWindowText(m_link);    // ..get it from window text
+
+    // Call ShellExecute to run the file.
+    // For an URL, this means opening it in the browser.
+    //
+    HINSTANCE h = ShellExecute(NULL, "open", m_link, NULL, NULL, SW_SHOWNORMAL);
+    if ((UINT)h &gt; 32) {
+        m_bVisited = TRUE;       // (not really--might not have found link)
+        Invalidate();            // repaint to show visited color
+    } else {
+        MessageBeep(0);          // unable to execute file!
+        TRACE(_T("*** WARNING: CStaticLink: unable to execute file %s\n"),
+              (LPCTSTR)m_link);
+    }
+}</code></pre>
+<p>
+<b>Figure 4: AboutDlg.cpp</b></p>
+<pre><code>////////////////////////////////////////////////////////////////
+// ABOUTDLG 1997 Microsoft Systems Journal. 
+// If this program works, it was written by Paul DiLascia.
+// If not, I don't know who wrote it.
+// ABOUTDLG illustrates how to use CStaticLink to implement an About
+// dialog with a web link in it.
+
+#include "StdAfx.h"
+#include "Resource.h"
+#include "StatLink.h"
+
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#undef THIS_FILE
+static char THIS_FILE[] = __FILE__;
+#endif
+//////////////////
+// Standard main frame class
+class CMainFrame : public CFrameWnd {
+protected:
+    DECLARE_DYNAMIC(CMainFrame)
+    CStatusBar  m_wndStatusBar;
+    CToolBar    m_wndToolBar;
+    afx_msg int OnCreate(LPCREATESTRUCT lpCreateStruct);
+    DECLARE_MESSAGE_MAP()
+};
+/////////////////
+// Standard app class
+class CMyApp : public CWinApp {
+public:
+    CMyApp();
+protected:
+    DECLARE_DYNAMIC(CMyApp)
+    virtual BOOL InitInstance();
+    afx_msg void OnAppAbout();
+    DECLARE_MESSAGE_MAP()
+};
+////////////////////////////////////////////////////////////////
+// CMyApp implementation
+CMyApp theApp;
+
+IMPLEMENT_DYNAMIC(CMyApp, CWinApp)
+
+BEGIN_MESSAGE_MAP(CMyApp, CWinApp)
+    ON_COMMAND(ID_APP_ABOUT, OnAppAbout)
+END_MESSAGE_MAP()
+
+CMyApp::CMyApp()
+{
+}
+//////////////////
+// Standard InitInstance
+BOOL CMyApp::InitInstance()
+{
+   // Create main frame window (don't use doc/view stuff)
+   // 
+   CMainFrame* pMainFrame = new CMainFrame;
+   if (!pMainFrame-&gt;LoadFrame(IDR_MAINFRAME))
+      return FALSE;
+   pMainFrame-&gt;ShowWindow(m_nCmdShow);
+   pMainFrame-&gt;UpdateWindow();
+   m_pMainWnd = pMainFrame;
+
+    return TRUE;
+}
+//////////////////
+// Custom about dialog uses CStaticLink for hyperlinks.
+//    * for text control, URL is specified as text in dialog editor
+//    * for icon control, URL is specified by setting m_iconLink.m_link
+class CAboutDlg : public CDialog {
+public:
+    CAboutDlg() : CDialog(IDD_ABOUTBOX) { }
+protected:
+    CStaticLink m_textLink;        // static text
+    CStaticLink m_iconLink;        // static icon
+
+    //////////////////
+    // Initialize dialog: subclass static controls
+    virtual BOOL OnInitDialog() {
+        m_textLink.SubclassDlgItem(IDC_URLTEXT, this);
+        m_iconLink.SubclassDlgItem(IDC_URLICON, this);
+        m_iconLink.m_link = _T("http://www.microsoft.com/msj");
+        return CDialog::OnInitDialog();
+    }
+};
+//////////////////
+// Handle Help | About : run the About dialog
+void CMyApp::OnAppAbout()
+{
+    CAboutDlg().DoModal();
+}
+////////////////////////////////////////////////////////////////
+// CMainFrame implementation
+IMPLEMENT_DYNAMIC(CMainFrame, CFrameWnd)
+
+BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
+    ON_WM_CREATE()
+END_MESSAGE_MAP()
+
+static UINT BASED_CODE indicators[] = {
+    ID_SEPARATOR,       // status line indicator
+    ID_INDICATOR_CAPS,
+    ID_INDICATOR_NUM,
+    ID_INDICATOR_SCRL,
+};
+
+int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
+{
+    if (CFrameWnd::OnCreate(lpCreateStruct) == -1)
+        return -1;
+
+    if (!m_wndToolBar.Create(this) ||
+        !m_wndToolBar.LoadToolBar(IDR_MAINFRAME))    {
+        TRACE0("Failed to create toolbar\n");
+        return -1;      // fail to create
+    }
+
+    if (!m_wndStatusBar.Create(this) ||
+        !m_wndStatusBar.SetIndicators(indicators,
+          sizeof(indicators)/sizeof(UINT))) {
+        TRACE("Failed to create status bar\n");
+        return -1;      // fail to create
+    }
+
+    m_wndToolBar.SetBarStyle(m_wndToolBar.GetBarStyle() |
+        CBRS_TOOLTIPS | CBRS_FLYBY | CBRS_SIZE_DYNAMIC);
+
+    return 0;
+}
+</code></pre>
+<p>
+<img src="cpp1212_fig05.gif" border=0></p>
+<p>
+<b>Figure 5: About Dialog</b></p>
+<p>
+A static control can be either text or graphic, and I wrote CStaticIcon to work in either case. For text controls, CStaticLink gets the URL from the window text (GetWindowText); for graphic controls you have to set the public CString member m_link to the URL you want to link to. You can also use m_link with a text control if you want the displayed text to be different from the hyperlink. For example, you might want the text to read “Email: ziggy@godthaab.com”, but the URL would be “mailto:ziggy@godthaab.com”.</p>
+<p>
+As an added touch, CStaticLink draws the text using an underline font in blue (unvisited) or purple (visited) in <br>
+the case of a text control, as per the browser’s GUI guidelines. To change the font and text color, CStaticLink uses MFC message reflection to handle its own WM_CTLCOLOR message. Naturally, you can choose other colors if you like—just change m_colorVisited and m_colorUnvisited. </p>
+<p>
+OnCtlColor also makes sure the control has the SS_NOTIFY style. </p>
+<p>
+Normally, static controls don’t get mouse messages like WM_LBUTTONDOWN. That’s because the Windows default window proc for static controls returns HTTRANSPARENT in response to WM_NCHITTEST, which makes the control transparent to mouse events; if you click the mouse on a static control, Windows feeds the message to the parent, not the control. You can write a WM_LBUTTONDOWN handler for a static control and sit there all day waiting for someone to call it because Windows sure won’t—that is, not unless you set SS_NOTIFY. I figure it’s too much asking programmers to check some obscure style option&nbsp;in the control properties dialog—especially when your mind is racing with the excitement of adding this cool new feature to your About dialog—so I made CStaticLink extra programmer-friendly by turning the style bit on for you in case you forget. You’re welcome.</p>
+<p>
+Once SS_NOTIFY is set, the control receives WM_LBUTTONDOWN messages. You could handle them directly, but the official way to handle a mouse click in a static control is to handle the new-for-Win32® STN_CLICKED notification. In typical Windows fashion, static controls send this notification to the parent window—not the control—but CStaticLink again uses MFC message reflection to handle its own STN_CLICKED. When the user clicks the control, CStaticLink::OnClicked calls the magic ShellExecute function to open the URL and send the user to Webland. Amazing.</p>
+<p>
+To obtain complete source code listings, see the MSJ Web site at http://www.microsoft.com/msj.</p>
+<p>
+Have a question about programming in C or C++? Send it to Paul DiLascia at askpd@pobox.com</p>
+</font></BODY>
+</HTML>

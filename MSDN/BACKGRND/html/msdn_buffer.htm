@@ -1,0 +1,615 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Multiuser and Data Buffering Issues in Visual FoxPro</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><a name="msdn_buffer"></a>Multiuser and Data Buffering Issues in Visual FoxPro</h1>
+<p>
+October 1997</p>
+<p>
+Doug Hennig, Partner</p>
+<p>
+<i>Stonefield Systems Group Inc.</i><br>
+<i>2055 Albert Street, Suite 420</i><br>
+<i>Regina, SK Canada S4P 2T8</i> </p>
+<p>
+<i>Phone: (306) 586-3341</i><br>
+<i>Fax: (306) 586-5080</i><br>
+<i>CompuServe: 75156,2326</i><br>
+<i>Email: dhennig@stonefield.com</i><br>
+<i>World Wide Web: www.stonefield.com</i> </p>
+<h2>Overview </h2>
+<p>
+In FoxPro 2.x, developers edited records using <code>scatter memvar</code>, editing the memory variables, and <code>gather memvar</code>. The purpose of this indirect editing of fields was to protect the record by buffering it. With Visual FoxPro, data buffering is built in, so fields can be edited directly. This session will discuss how data buffering works and explores strategies for selecting which buffering mechanism to use and how to handle multiuser conflicts.</p>
+<h2>Introduction </h2>
+<p>
+If you've spent any time at all working with Visual FoxPro®, one of the things you've probably learned is that while you can continue to do things the "old" way if you wish, Visual FoxPro provides you with a better way to perform the same task. How records are edited in forms is a perfect example of this.</p>
+<p>
+Here's the "old" way I used to write code to edit a record in a data entry screen: 
+<ul type=disc>
+<li>
+The screen has <code>get</code> objects for memory variables with the same names as the table's fields (for example, M.CUST_ID and M.NAME).<br><br></li>
+<li>
+When the user positions the table to a particular record (for example, using the "Next" button), use <code>scatter memvar</code> to transfer the record to the memory variables and <code>show gets</code> to refresh the values shown on the screen. The user cannot edit the variables (they're either disabled or have <code>when</code> clauses that evaluate to .F.) because the user is currently in "view" mode.<br><br></li>
+<li>
+When the user chooses the "Edit" button, try to lock the record; display an appropriate message if we can't. Check the value of each field against its memory variable—if they don't match, another user must have edited and saved the record since we first displayed it. In that case, display an appropriate message and use <code>scatter memvar</code> and <code>show gets</code> again so the user sees the current contents of the record.<br><br></li>
+<li>
+If the fields and memory variables match, either enable the <code>get</code> objects or make their <code>when</code> clauses evaluate to .T. so the user can edit the variables.<br><br></li>
+<li>
+When the user chooses the "Save" button, do some validation to ensure everything was entered according to our rules, then <code>gather memvar</code> to update the record from the memory variables and unlock the record. Disable the <code>get</code> objects or make their <code>when</code> clauses evaluate to .F. so the user is once again in "view" mode. </li>
+</ul>
+<p>
+Notice in this scheme that we don't do a direct <code>read</code> against the record. Instead, we allow the user to edit memory variables and only write those memory variables back to the record if everything went OK. The reason for using this method is it protects the table; we don't allow any data to be stored unless it passes all the rules. Also notice the record is locked while the user is editing the memory variables. This prevents another user from editing the same record at the same time. It does, however, suffer from the "out to lunch" syndrome—if the user starts the edit, then goes for lunch, the record stays locked, unavailable to other users for editing.</p>
+<p>
+This isn't the only way to edit records, of course. You could do the lock just before saving the record instead of when the edit mode starts. This minimizes the time the record is locked, allowing other users access to it. This has its own drawback, though: if the user edits the variables and clicks on "Save," what happens if some other user edited the record in the meantime? Do you overwrite their changes? Do you prevent the record from being saved? This is a design issue you must handle on a case-by-case basis.</p>
+<p>
+The whole purpose of all this effort is to protect the data. If you were writing an application that only you would ever use, you'd probably make it a lot simpler—just <code>read</code> against the fields in the record directly. This makes the screen act like the "form" equivalent of a <code>browse</code>, since everything you type goes directly into the record. However, since we can't trust those pesky users to know what they can and can't enter, we have to protect the data by building a "firewall" between the user and the table. Creating this "firewall" in FoxPro 2.x took a significant amount of coding.</p>
+<p>
+Visual FoxPro provides a built-in "firewall" mechanism that gives us the best of both worlds: direct <code>read</code> against a record while only permitting the data to be written after it passes all the tests. This mechanism is <i>buffering</i>.</p>
+<h2>Buffering </h2>
+<p>
+Using memory variables to hold the contents of a record can be considered like creating a buffer of data. The data is transferred from the record to the "buffer" by using <code>scatter memvar</code> and from the "buffer" to the record with <code>gather memvar</code>.</p>
+<p>
+Not only can Visual FoxPro do this type of single record buffering (called <i>record</i> or <i>row buffering</i>) automatically, it also supports another type of buffering (called <i>table buffering</i>) in which multiple records are accessed through a buffer.</p>
+<p>
+Record buffering is normally used when you want to access or update single records at a time. This is common in data entry mechanisms like that described above: the user can display or edit a single record in the form. Table buffering would be the choice for updating several records at a time. A common example of this is an invoice header-detail screen. By using table buffering for the invoice detail table, you can allow the user to edit detail lines as long as they wish, and then save or cancel all the detail records at once.</p>
+<p>
+In addition to two buffering mechanisms, there are two locking mechanisms. The "old" way I described earlier can be considered to be a <i>pessimistic</i> locking scheme—the record is locked as soon as the user chooses "Edit." and stays locked until they choose "Save." This ensures no one else can change the record while this user is doing so, which may or may not be a good thing, depending on your application. The other method I described earlier is an <i>optimistic</i> locking mechanism—the record is only locked for the brief amount of time it takes to write the record, and is immediately unlocked. This maximizes the availability of the record (this is also known as maximizing <i>concurrency</i>) but means we have to handle conflicts that occur if two users edit the record at the same time. As we'll see in a moment, this is actually easy to do in Visual FoxPro, so optimistic buffering will probably be the mechanism of choice for most applications.</p>
+<p>
+Since records can be automatically buffered, there's no longer a need to use the "manual buffer" mechanism. In other words, now we can <code>read</code> directly against the fields in the record and not worry about maintaining memory variables for each one. To save the changes, we simply tell Visual FoxPro to write the buffer to the table, and to cancel the changes, we tell it not to. We'll see how to do that in a moment.</p>
+<p>
+Visual FoxPro implements buffering by creating a "cursor" whenever a table is opened. The cursor is used to define properties for the table. In the case of local tables, the only property for the cursor is how buffering is performed; views and remote tables have additional properties beyond the scope of this session. These properties are set using the <b>cursorsetprop()</b> function and examined with <b>cursorgetprop()</b>. We'll see the use of these functions shortly.</p>
+<p>
+Table buffering has an interesting implementation regarding appended records: as records are added to the buffer, they're assigned a negative record number. <code>recno()</code> returns -1 for the first appended record, -2 for the second, and so on. You can use <code>go</code> with a negative number to position the buffer to the appropriate appended record. This has an implication for routines handling record numbers—instead of testing for <code>between(lnRecno, 1, reccount())</code> to ensure lnRecno is a valid record number, you'll now have to test for <code>between(lnRecno, 1, reccount()) or lnRecno &lt; 0</code>.</p>
+<h3>Using Buffering </h3>
+<p>
+Buffering is turned off by default, so Visual FoxPro acts just like FoxPro 2.x in terms of how updates are written to a table. To use buffering, you must specifically turn it on. Buffering is available for both free tables and those attached to a database. Buffering requires that you <code>set multilocks on</code> since by default it too is set off; you'll get an error message if you forget to do this. You can put <code>multilocks = on</code> in your CONFIG.FPW or use the <i>Options</i> function under the <i>Tools</i> pad to save this setting as the default.</p>
+<p>
+Buffering is controlled using <code>cursorsetprop('Buffering', &lt;n&gt;, &lt;Alias&gt;)</code>. You don't have to specify <code>&lt;Alias&gt;</code> if you're setting buffering for the current table. <code>&lt;n&gt;</code> is one of the following values depending on the buffering and locking method you wish to use:</p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=79%><b>Buffering/Locking Method</b></td>
+<td class=label width=21%><b>&lt;n&gt;</b></td>
+</tr>
+<tr valign=top>
+<td width=79%>no buffering</td>
+<td width=21%>1</td>
+</tr>
+<tr valign=top>
+<td width=79%>record, pessimistic</td>
+<td width=21%>2</td>
+</tr>
+<tr valign=top>
+<td width=79%>record, optimistic</td>
+<td width=21%>3</td>
+</tr>
+<tr valign=top>
+<td width=79%>table, pessimistic</td>
+<td width=21%>4</td>
+</tr>
+<tr valign=top>
+<td width=79%>table, optimistic</td>
+<td width=21%>5</td>
+</tr>
+</table><br>
+<p>
+For example, to enable optimistic record buffering, use <code>cursorsetprop('Buffering', 3)</code>. To determine what buffering is currently in use for a table, use <code>cursorgetprop('Buffering')</code>.</p>
+<p>
+To enable buffering in a form, you could specify <code>cursorsetprop()</code> for each table in the form's Load method, but the preferred approach is to set the form's BufferMode property to either optimistic or pessimistic (the default is "none"). The form will then automatically use table buffering for tables bound to grids and row buffering for all other tables. If you use a DataEnvironment for the form, you can override the form's BufferMode for a particular table by setting its BufferModeOverride property as desired.</p>
+<p>
+While the user is changing the data in the buffered record (they're in the middle of editing the record), you have access to not only the value they've entered into each field, but also the former value of each field and its current value (the value actually on disk). Two new functions, <code>oldval()</code> and <code>curval()</code>, were added for this purpose. Here's how you obtain the appropriate values:</p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=50%><b>To Get:</b></td>
+<td class=label width=50%><b>Use:</b></td>
+</tr>
+<tr valign=top>
+<td width=50%>the value the user entered (the value in the buffer)</td>
+<td width=50%><code>&lt;fieldname&gt;</code> or <code>&lt;alias.fieldname&gt;</code></td>
+</tr>
+<tr valign=top>
+<td width=50%>the value before the user changed anything</td>
+<td width=50%>oldval('&lt;fieldname&gt;')</td>
+</tr>
+<tr valign=top>
+<td width=50%>the current value in the record</td>
+<td width=50%>curval('&lt;fieldname&gt;')</td>
+</tr>
+</table><br>
+<p>
+<code>curval()</code> and <code>oldval()</code> can only be used with optimistic buffering.</p>
+<p>
+You may be wondering how the value returned by <code>curval()</code> would differ from the one returned by <code>oldval()</code>. It obviously wouldn't if only a single user is running the application. However, on a network and with optimistic locking, it's possible that after the user started editing the record, another user edited the same record and saved their changes. Here's an example:</p>
+<p>
+<i>Bob brings up record #2 in CONTACTS.DBF and clicks on the "Edit" button:</i></p>
+<table border=1 cellpadding=5 cols=4 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=25%><b>Field</b></td>
+<td class=label width=25%><b>Value</b></td>
+<td class=label width=25%><b>oldval()</b></td>
+<td class=label width=25%><b>curval()</b></td>
+</tr>
+<tr valign=top>
+<td width=25%>LAST_NAME</td>
+<td width=25%>Jones</td>
+<td width=25%>Jones</td>
+<td width=25%>Jones</td>
+</tr>
+<tr valign=top>
+<td width=25%>FIRST_NAME</td>
+<td width=25%>Bill</td>
+<td width=25%>Bill</td>
+<td width=25%>Bill</td>
+</tr>
+</table><br>
+<p>
+<i>Bob changes the first name to Sam but doesn't save the record yet:</i></p>
+<table border=1 cellpadding=5 cols=4 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=25%><b>Field</b></td>
+<td class=label width=25%><b>Value</b></td>
+<td class=label width=25%><b>oldval()</b></td>
+<td class=label width=25%><b>curval()</b></td>
+</tr>
+<tr valign=top>
+<td width=25%>LAST_NAME</td>
+<td width=25%>Jones</td>
+<td width=25%>Jones</td>
+<td width=25%>Jones</td>
+</tr>
+<tr valign=top>
+<td width=25%>FIRST_NAME</td>
+<td width=25%>Sam</td>
+<td width=25%>Bill</td>
+<td width=25%>Bill</td>
+</tr>
+</table><br>
+<p>
+<i>Mary brings up record #2 in CONTACTS.DBF, clicks on the "Edit" button, changes the first name to Eric, and saves. At Bill's machine:</i></p>
+<table border=1 cellpadding=5 cols=4 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=25%><b>Field</b></td>
+<td class=label width=25%><b>Value</b></td>
+<td class=label width=25%><b>oldval()</b></td>
+<td class=label width=25%><b>curval()</b></td>
+</tr>
+<tr valign=top>
+<td width=25%>LAST_NAME</td>
+<td width=25%>Jones</td>
+<td width=25%>Jones</td>
+<td width=25%>Jones</td>
+</tr>
+<tr valign=top>
+<td width=25%>FIRST_NAME</td>
+<td width=25%>Sam</td>
+<td width=25%>Bill</td>
+<td width=25%>Eric</td>
+</tr>
+</table><br>
+<p>
+Notice <code>FIRST_NAME</code>, <code>oldval('FIRST_NAME')</code>, and <code>curval('FIRST_NAME')</code> all return different values. By having access to the original value, the buffered value, and the current value for each field in a record, you can: 
+<ul type=disc>
+<li>
+determine which fields the user changed by comparing the buffered value to the original value; and<br><br></li>
+<li>
+detect whether other users on a network made changes to the same record after the edit had started by comparing the original value to the current value. </li>
+</ul>
+<p>
+If you don't care about the old and current values but only wish to detect if a field was edited by the user, use <b>getfldstate()</b>. This new function returns a numeric value indicating whether something about the current record has changed. <b>getfldstate()</b> is called as follows:</p>
+<pre><code>getfldstate(&lt;FieldName&gt; | &lt;FieldNumber&gt; [, &lt;Alias&gt; | &lt;WorkArea&gt;])
+</code></pre>
+<p>
+and returns one of the following values:</p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=25%><b>Value</b></td>
+<td class=label width=75%><b>Description</b></td>
+</tr>
+<tr valign=top>
+<td width=25%>1</td>
+<td width=75%>No change</td>
+</tr>
+<tr valign=top>
+<td width=25%>2</td>
+<td width=75%>The field was edited or the deletion status of the record was changed</td>
+</tr>
+<tr valign=top>
+<td width=25%>3</td>
+<td width=75%>A record was appended but the field was not edited and the deletion status was not changed.</td>
+</tr>
+<tr valign=top>
+<td width=25%>4</td>
+<td width=75%>A record was appended and the field was edited or the deletion status of the record was changed.</td>
+</tr>
+</table><br>
+<p>
+Changing the deletion status means either deleting or recalling the record. Note deleting and then immediately recalling the record will result in a value of 2 or 4 even though there's no net effect to the record.</p>
+<p>
+If you don't specify an alias or workarea, <b>getfldstate()</b> operates on the current table. Specify 0 for <code>&lt;FieldNumber&gt;</code> to return the append or deletion status of the current record. If you specify -1 for <code>&lt;FieldNumber&gt;</code>, the function will return a character string with the first digit representing the table status and one digit for the status of each field.</p>
+<p>
+In the example mentioned earlier, where Bill edits the second field, <b>getfldstate(</b>-1<b>)</b> would return "112." The first digit indicates the record was not appended or deleted, the second that the first field was unchanged, and the third that the second field was changed.</p>
+<h3>Writing a Buffered Record </h3>
+<p>
+Continuing with the previous example, now Bill clicks on the "Save" button. How do we tell Visual FoxPro to write the buffer to the record? With record buffering, the table is updated when you move the record pointer or issue the new <b>tableupdate()</b> function. With table buffering, moving the record pointer doesn't update the table (since the whole point of table buffering is that several records are buffered at once), so the usual way is to issue <b>tableupdate()</b>. It's best to use <b>tableupdate()</b> even for record buffering since you have more control over what happens when.</p>
+<p>
+<b>tableupdate()</b> returns .T. if the buffer was successfully written to the record. If the record buffer hasn't changed (the user didn't edit any fields, add a record, or change the deleted status for the record), <b>tableupdate()</b> returns .T. but actually does nothing.</p>
+<p>
+<b>tableupdate() </b>can take a few optional parameters:</p>
+<pre><code>tableupdate(&lt;AllRows&gt;, &lt;Forced&gt;, &lt;Alias&gt; | &lt;Workarea&gt;)
+</code></pre>
+<p>
+The first parameter indicates what records to update: .F. tells it to only update the current record, while .T. means update all records (only effective if table buffering is used). If the second parameter is .T., any changes by another user will be overwritten by the current user's changes. Unless the third parameter is specified, <b>tableupdate()</b> will update the current table.</p>
+<p>
+How do you cancel the changes the user made? With the memory variable approach, you'd just <code>scatter memvar</code> again to restore the memory variables to the values stored on disk. With buffering, use the <b>tablerevert()</b> function to do the same for the buffer.</p>
+<h3>Handling Errors </h3>
+<p>
+Continuing on with the "Bill and Mary" example, the code executed when Bill clicks the "Save" button uses the <b>tableupdate()</b> function to try to write the buffer to the record. Remember Mary edited the record and saved her changes as Bill was editing the same record. When Bill clicks on "Save", <b>tableupdate()</b> will return .F., meaning it didn't write the buffer. Why?</p>
+<p>
+Visual FoxPro will not write the buffer to the record under the following conditions: 
+<ul type=disc>
+<li>
+Another user changed and saved the record while this user was editing it (as happened in this example). Visual FoxPro automatically compares <code>oldval()</code> and <code>curval()</code> for each field. If it detects any differences, we have a conflict.<br><br></li>
+<li>
+The user entered a duplicate primary or candidate key value.<br><br></li>
+<li>
+A field or table rule was violated, or a field that doesn't support null values is null.<br><br></li>
+<li>
+A trigger failed.<br><br></li>
+<li>
+Another user has the record locked. This can be minimized by avoiding manually locking records with <b>rlock()</b> and using the same buffer locking mechanism for a table in all forms and programs that access it.<br><br></li>
+<li>
+Another user deleted the record. </li>
+</ul>
+<p>
+You must decide what to do when <b>tableupdate()</b> fails. Also, if your application allows the user to click on the "Next" or "Previous" buttons while editing a record and those functions don't issue a <b>tableupdate()</b>, you must handle the error that will occur when the automatic save is attempted. In both of these cases, the proper place to handle this is in an error trapping routine.</p>
+<p>
+Error handling has been improved in Visual FoxPro. The old way to set an error trap (which you can still use in Visual FoxPro) is to use the <code>on error</code> command to specify a procedure to execute when an error occurs. This error routine would typically look at <code>error()</code> and <code>message()</code> to determine what happened, and take the appropriate action.</p>
+<p>
+Visual FoxPro now provides an automatic error handling mechanism: the <i>Error</i> method. If an Error method exists for an object or form, it will automatically be executed when an error occurs without having to manually set the trap.<b> aerror() </b>is a new function that helps in figuring out what went wrong. You pass it an array name and it creates or updates the array with the following elements:</p>
+<table border=1 cellpadding=5 cols=3 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=24%><b>Element</b></td>
+<td class=label width=24%><b>Type</b></td>
+<td class=label width=52%><b>Description</b></td>
+</tr>
+<tr valign=top>
+<td width=24%>1</td>
+<td width=24%>Numeric</td>
+<td width=52%>The error number (same as <code>error()</code>).</td>
+</tr>
+<tr valign=top>
+<td width=24%>2</td>
+<td width=24%>Character</td>
+<td width=52%>The error message (same as <code>message()</code>).</td>
+</tr>
+<tr valign=top>
+<td width=24%>3</td>
+<td width=24%>Character</td>
+<td width=52%>The error parameter (for example, a field name) if the error has one (same as <code>sys(2018)</code>) or .NULL. if not.</td>
+</tr>
+<tr valign=top>
+<td width=24%>4</td>
+<td width=24%>Numeric or Character</td>
+<td width=52%>The work area in which the error occurred if appropriate, .NULL. otherwise.</td>
+</tr>
+<tr valign=top>
+<td width=24%>5</td>
+<td width=24%>Numeric or Character</td>
+<td width=52%>The trigger that failed (1 for insert, 2 for update, or 3 for delete) if a trigger failed (error 1539), or .NULL. if not.</td>
+</tr>
+<tr valign=top>
+<td width=24%>6</td>
+<td width=24%>Numeric or Character</td>
+<td width=52%>.NULL. (used for OLE and ODBC errors).</td>
+</tr>
+<tr valign=top>
+<td width=24%>7</td>
+<td width=24%>Numeric</td>
+<td width=52%>.NULL. (used for OLE errors).</td>
+</tr>
+</table><br>
+<p>
+For example, <b>aerror(</b><code>laERROR</code><b>)</b> will create or update an array called laERROR.</p>
+<p>
+Here are the common errors that may occur when Visual FoxPro attempts to write the buffer to the table:</p>
+<table border=1 cellpadding=5 cols=3 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=17%><b>Error #</b></td>
+<td class=label width=37%><b>Error Message</b></td>
+<td class=label width=46%><b>Comment</b></td>
+</tr>
+<tr valign=top>
+<td width=17%>109</td>
+<td width=37%>Record is in use by another</td>
+<td width=46%></td>
+</tr>
+<tr valign=top>
+<td width=17%>1539</td>
+<td width=37%>Trigger failed</td>
+<td width=46%>Check element 5 to determine which trigger failed.</td>
+</tr>
+<tr valign=top>
+<td width=17%>1581</td>
+<td width=37%>Field does not accept null values</td>
+<td width=46%>Check element 3 to determine which field was involved.</td>
+</tr>
+<tr valign=top>
+<td width=17%>1582</td>
+<td width=37%>Field validation rule is violated</td>
+<td width=46%>Check element 3 to determine which field was involved.</td>
+</tr>
+<tr valign=top>
+<td width=17%>1583</td>
+<td width=37%>Record validation rule is violated</td>
+<td width=46%></td>
+</tr>
+<tr valign=top>
+<td width=17%>1585</td>
+<td width=37%>Record has been modified by another</td>
+<td width=46%></td>
+</tr>
+<tr valign=top>
+<td width=17%>1884</td>
+<td width=37%>Uniqueness of index violated</td>
+<td width=46%>Check element 3 to determine which tag was involved.</td>
+</tr>
+</table><br>
+<p>
+Handling most of these errors is straightforward: tell the user the problem and leave them in edit mode to correct the problem or cancel. For error #1585 (record has been modified by another), there are several ways you could handle the error: 
+<ul type=disc>
+<li>
+You could tell them someone else modified the record and then cancel their edits using <b>tablerevert()</b>. I suspect most users wouldn't be too thrilled by this approach &lt;g&gt;.<br><br></li>
+<li>
+You can force the update of the record by using <code>tableupdate(.F., .T.)</code>. This causes the other user's changes to be overwritten by the current user's. This user might be happy, but the other user probably won't be.<br><br></li>
+<li>
+You can display the changes the other user made to the record in another copy of the same form (easy to do with Visual FoxPro's ability to create multiple instances of the same form). The user can then decide whether the changes the other user made should be kept or not, and you can either use <b>tableupdate(</b><code>.F., .T.</code><b>)</b> to force the update or <b>tablerevert()</b> to cancel.</li>
+</ul>
+<p>
+A more intelligent scheme involves determining if we have a "real" conflict or not. By "real," I mean did both users change the same field or not. If the fields they updated are different, we could tell Visual FoxPro to just update the field this user changed, leaving the other user's changes intact. An example might be in an order processing system. One user may have edited the description of a product while another user entered an order for the product, thereby decreasing the quantity on hand. These changes aren't mutually exclusive—if we make our table update less granular (that is, we don't update an entire record at a time, just the fields we changed), we can satisfy both users. </p>
+<p>
+Here's the logic of how that works: 
+<ul type=disc>
+<li>
+Find a field where <code>oldval()</code> is different than <code>curval()</code>, meaning this field was edited by another user. If the field's buffered value is the same as <code>oldval()</code>, this user didn't change the field, so we can prevent overwriting its new value by setting the buffered value to <code>curval()</code>.<br><br></li>
+<li>
+Find a field where the buffered value is different than <code>oldval()</code>. This is a field this user edited. If <code>oldval()</code> equals <code>curval()</code>, the other user didn't change this field, so we can safely overwrite it.<br><br></li>
+<li>
+If we find a field where the buffered value is different than <code>oldval()</code> but the same as <code>curval()</code>, both users made the same change. While this may seem unlikely, one example would be when someone sends a change of address notice to a company and somehow two users decide to update the record at the same time. Since the changes were identical, we might be able to overwrite the field. However, in the case of a quantity being updated by the same amount (for example, two orders for the same quantity were entered at the same time), you wouldn't want to overwrite the field, and would consider this to be a "real" conflict.<br><br></li>
+<li>
+If we have a case where the buffered value of a field is different than both <code>oldval()</code> and <code>curval()</code>, and <code>oldval()</code> and <code>curval()</code> aren't the same either, both users changed the same field but to different values. In this case, we have a "real" conflict. You have to decide how to handle the conflict. </li>
+</ul>
+<p>
+In the case of inventory quantity on hand or account balances, one possibility is to apply the same change the other user made to the buffered value. For example, if <code>oldval()</code> is 10 and <code>curval()</code> is 20, the other user increased the amount by 10. If the buffered value is 5, this user is decreasing the amount by 5. The new buffered value should therefore be <code>value + curval() - oldval()</code>, or 15.</p>
+<p>
+In the case of Date fields, business rules and common sense might help. For example, in a patient scheduling program with a field containing the date of a patient's next visit, the earlier of the two dates in conflict is probably the correct one to use, unless it's prior to the current date, in which case the later date is the correct one.</p>
+<p>
+Other types of fields, especially Character and Memo fields, often can't be resolved without asking the user to make a decision about overwriting the other user's changes or abandoning their own. Allowing the user to see the other user's changes (as mentioned earlier) can help them make this decision.</p>
+<p>
+Here's some code that will do this type of conflict resolution (this code assumes we've already determined the problem is error #1585, the record had been modified by another user):</p>
+<pre><code>* Check every field to see which ones have a conflict.
+llConflict = .F.
+for lnI = 1 to fcount()
+ &nbsp; lcField&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = field(lnI)
+ &nbsp; llOtherUser&nbsp; = oldval(lcField)&nbsp;&nbsp; &lt;&gt; curval(lcField)
+ &nbsp; llThisUser&nbsp;&nbsp; = evaluate(lcField) &lt;&gt; oldval(lcField)
+ &nbsp; llSameChange = evaluate(lcField) == curval(lcField)
+ &nbsp; do case
+* Another user edited this field but this user didn't, so grab the
+* new value.
+ &nbsp;&nbsp;&nbsp;&nbsp; case llOtherUser and not llThisUser
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; replace (lcField) with curval(lcField)
+* Another user didn't edit this field, or they both made the same
+* change, so we don't need to do anything.
+ &nbsp;&nbsp;&nbsp;&nbsp; case not llOtherUser or llSameChange
+* Uh-oh, both users changed this field, but to different values.
+ &nbsp;&nbsp;&nbsp;&nbsp; otherwise
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; llConflict = .T.
+ &nbsp; endcase
+next lnI
+* If we have a conflict, handle it.
+if llConflict
+ &nbsp; lnChoice = messagebox('Another user also changed this ' + ;
+ &nbsp;&nbsp;&nbsp;&nbsp; 'record. Do you want to overwrite their changes (Yes), ' + ;
+ &nbsp;&nbsp;&nbsp;&nbsp; 'not overwrite but see their changes (No), or cancel ' + ;
+ &nbsp;&nbsp;&nbsp;&nbsp; 'your changes (Cancel)?', 3 + 16, 'Problem Saving Record!')
+ &nbsp; do case
+* Overwrite their changes.
+ &nbsp;&nbsp;&nbsp;&nbsp; case lnChoice = 6
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = tableupdate(.F., .T.)
+* See the changes: bring up another instance of the form.
+ &nbsp;&nbsp;&nbsp;&nbsp; case lnChoice = 7
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; do form MYFORM name oName
+* Cancel the changes.
+ &nbsp;&nbsp;&nbsp;&nbsp; otherwise
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = tablerevert()
+ &nbsp; endcase
+* No conflict, so force the update.
+else
+ &nbsp; = tableupdate(.F., .T.)
+endif llConflict
+</code></pre>
+<h3>Writing a Buffered Table </h3>
+<p>
+As we saw earlier, <b>tableupdate(</b><code>.T.</code><b>)</b> attempts to write all records in a table buffer to disk. As with the row buffered version, it will return .F. if it couldn't update a record because another user changed it (among other reasons).</p>
+<p>
+The error trapping routine we saw earlier works fine for row buffering, since we're only concerned with a single record at a time. However, with table buffering, we have to look at each record one at a time. Since we might have a mixture of modified and unmodified records in the buffer, how do we know which records will be updated? To make matters more complicated, if <b>tableupdate(</b><code>.T.</code><b>)</b> fails, we don't know which record it failed on; some records may have been saved and there could be more than one record in conflict.</p>
+<p>
+The new <b>getnextmodified()</b> function will tell us exactly what we need to know: the record number for the next modified record. If it returns 0, there are no more modified records in the buffer. This function accepts two parameters: the first is the record number after which to search for the next modified records, and the second is the alias or workarea to search in. Initially, you should pass 0 as the first parameter so <b>getnextmodified()</b> finds the first modified record. To find the next one, pass the record number for the current record.</p>
+<p>
+Here's an example of the earlier conflict management routine, modified to handle table buffered changes when <b>tableupdate(</b><code>.T.</code><b>)</b> fails:</p>
+<pre><code>* Find the first modified record, then process each one we find.
+lnChanged = getnextmodified(0)
+do while lnChanged &lt;&gt; 0
+* Move to the record and try to lock it.
+ &nbsp; go lnChanged
+ &nbsp; if rlock()
+* Check every field to see which ones have a conflict.
+ &nbsp;&nbsp;&nbsp;&nbsp; llConflict = .F.
+ &nbsp;&nbsp;&nbsp;&nbsp; for lnI = 1 to fcount()
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lcField&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = field(lnI)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; llOtherUser&nbsp; = oldval(lcField)&nbsp;&nbsp; &lt;&gt; curval(lcField)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; llThisUser&nbsp;&nbsp; = evaluate(lcField) &lt;&gt; oldval(lcField)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; llSameChange = evaluate(lcField) == curval(lcField)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; do case
+* Another user edited this field but this user didn't, so grab the
+* new value.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case llOtherUser and not llThisUser
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; replace (lcField) with curval(lcField)
+* Another user didn't edit this field, or they both made the same
+* change, so we don't need to do anything.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case not llOtherUser or llSameChange
+* Uh-oh, both users changed this field, but to different values.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; otherwise
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; llConflict = .T.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; endcase
+ &nbsp;&nbsp;&nbsp;&nbsp; next lnI
+* If we have a conflict, handle it. If we don't, unlike the row buffering
+* case, we don't do anything now since all records will be written later.
+ &nbsp; if llConflict
+ &nbsp; lnChoice = messagebox('Another user also changed ' + ;
+ &nbsp;&nbsp;&nbsp; 'record ' + ltrim(str(lnChanged)) + '. Do you want to ' + ;
+ &nbsp;&nbsp;&nbsp; 'overwrite their changes (Yes), not overwrite but see ' + ;
+ &nbsp;&nbsp;&nbsp; 'their changes (No), or cancel your changes (Cancel)?', 3 + 16, ;
+ &nbsp;&nbsp;&nbsp; 'Problem Saving Record!')
+ &nbsp;&nbsp;&nbsp; do case
+* Overwrite their changes: we don't actually need to do anything because we'll
+* do them all later (this case is only here for clarity).
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case lnChoice = 6
+* See the changes: bring up another instance of the form.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case lnChoice = 7
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; do form MYFORM name oName
+* Cancel the changes in this record only.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; otherwise
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = tablerevert()
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; unlock record lnChanged
+ &nbsp;&nbsp;&nbsp;&nbsp; endcase
+ &nbsp; endif llConflict
+* We couldn't lock the record, so cancel the changes to this record only.
+ &nbsp; else
+ &nbsp;&nbsp; = messagebox("Sorry, we couldn't save record #" + ltrim(str(lnChanged)))
+ &nbsp;&nbsp; = tablerevert()
+ &nbsp; unlock record lnChanged
+ endif rlock()
+* Find the next modified record and process it.
+ &nbsp; lnChanged = getnextmodified(lnChanged)
+enddo while lnChanged &lt;&gt; 0
+
+* Since we reverted any changes where we found a conflict and the user wanted
+* to cancel their own changes, let's force the remainder of the updates.
+
+= tableupdate(.T., .T.)
+</code></pre>
+<p>
+If a table has changes in a table buffer that haven't been written out to disk and you attempt to close the table or change the buffering mode, you'll get an error (#1545): "Table buffer for alias &lt;Alias&gt; contains uncommitted changes."</p>
+<h3>Transactions </h3>
+<p>
+As we've seen, table buffering is a convenient way to buffer a number of changes to a table and then write or abandon those changes all at once. However, there's one flaw with this approach—what happens if one of the records in the buffer is locked or has been edited by another user? In this case, <b>tableupdate(</b><code>.T.</code><b>)</b> will return .F. and the error trapping routine can be called. The problem: some records were saved and some weren't. Now you have a fairly complicated mess on your hands if you need to back out those changes already made.</p>
+<p>
+Here's an example of such a problem: you go to the bank to transfer money from your savings account to your checking account. The account update program reduces your savings account balance by the appropriate amount, then tries to increase your checking account balance by the same amount. The program might look something like this:</p>
+<pre><code>seek M.ACCOUNT1
+replace BALANCE with BALANCE - M.AMOUNT
+seek M.ACCOUNT2
+replace BALANCE with BALANCE + M.AMOUNT
+llSuccess = tableupdate(.T.)
+if not llSuccess
+ &nbsp; do ERROR_ROUTINE
+endif not llSuccess
+</code></pre>
+<p>
+In the meantime, an automated check clearing program has been processing your checking account, and has reduced its balance by the total of several checks. The program detects the conflict and decides to abandon the update by issuing <b>tablerevert(</b><code>.T.</code><b>)</b>. However, since the savings account was successfully updated, its change is no longer in the buffer, and therefore it stays changed. Now the bank has an "out-of-balance" situation that will be difficult to track down, and one very angry customer when you get your bank statement at the end of the month.</p>
+<p>
+Fortunately, Visual FoxPro provides a mechanism that can resolve this problem: the <i>transaction</i>. A transaction is a specific group of changes that must either all be made at once or all abandoned. A transaction is started with the <code>begin transaction</code> command. Any table changes after this command has been issued, even those made with <b>tableupdate()</b>, are not written to the disk until an <code>end transaction</code> command is encountered. Think of a transaction as a "buffer's buffer." The transaction is held until you determine all changes could be made successfully and issue an <code>end transaction</code>. If the program crashes or the computer is rebooted before <code>end transaction</code> is encountered, or if your program issues a <code>rollback</code> command because one of the changes couldn't be made successfully, none of the changes are actually written to disk.</p>
+<p>
+Let's look at the bank update example but this time use a transaction as a "wrapper" for the update:</p>
+<pre><code>begin transaction
+seek M.ACCOUNT1
+replace BALANCE with BALANCE - M.AMOUNT
+seek M.ACCOUNT2
+replace BALANCE with BALANCE + M.AMOUNT
+llSuccess = tableupdate(.T.)
+if llSuccess
+ &nbsp; end transaction
+else
+ &nbsp; rollback
+endif llSuccess
+</code></pre>
+<p>
+If the first account balance was changed but the second couldn't be successfully, llSuccess will be .F., and the <code>rollback</code> command will prevent the first change from being written to disk. If everything went OK, <code>end transaction</code> will write out both changes at once.</p>
+<p>
+Here are some other concepts regarding transactions: 
+<ul type=disc>
+<li>
+Transactions can only be used with tables attached to databases; free tables need not apply.<br><br></li>
+<li>
+Transactions apply to memo (FPT) and index (CDX) files as well as to the DBF.<br><br></li>
+<li>
+Commands and functions that alter the database, the table, or the table's indexes cannot be used during a transaction. For example, issuing <code>alter table</code>, <code>delete tag</code>, <code>index on</code>, <b>tablerevert()</b>, or <code>close databases</code> during a transaction will generate an error. See the Visual FoxPro documentation for a complete list of restricted commands.<br><br></li>
+<li>
+You can nest transactions up to five levels deep ("The good news: you no longer have just five <code>read</code> levels. The bad news: ..." &lt;g&gt;). When an inner level transaction is completed, its changes are added to the cache of changes for the next transaction level rather than being written to disk. Only when the final <code>end transaction</code> is issued are all the changes written out. You can use the <b>txnlevel()</b> function to determine the current transaction level.<br><br></li>
+<li>
+Unlike other Visual FoxPro structured programming constructs (such as <code>for/next</code> or <code>scan/endscan</code>), <code>begin transaction</code>, <code>end transaction</code>, and <code>rollback</code> don't have to be located in the same program. You could, for example, have a common routine for starting transactions and another one for ending them. Transactions should be kept as short as possible, however, since any records being updated during a transaction are completely unavailable to other users, even just for reading.<br><br></li>
+<li>
+Records automatically locked by Visual FoxPro during a transaction are automatically unlocked when the transaction is complete. Any locks you set manually are not automatically unlocked; you are responsible for unlocking those records yourself. If you use <code>unlock</code> during a transaction, the record actually stays locked until the transaction is done, at which time all specified records are unlocked.<br><br></li>
+<li>
+Although transactions give you as much protection as they can, it's still possible a hardware failure or server crash during the <code>end transaction</code> disk writes could cause data to be lost.<br><br></li>
+<li>
+Transactions only apply to local tables. Transactions for remote tables are controlled using the <b>sqlsetprop()</b>, <b>sqlcommit()</b>, and <b>sqlrollback()</b> commands. Transaction processing with remote tables is beyond the scope of this session. </li>
+</ul>
+<p>
+Here's another look at the "save" routine and the error trapping routine (in the error routine, code in the <code>do while</code> loop isn't shown since it's the same as the previous version):</p>
+<pre><code>begin transaction
+if tableupdate(.T.)
+ &nbsp; end transaction
+else
+ &nbsp; rollback
+ &nbsp; do ERROR_ROUTINE
+endif tableupdate(.T.)
+procedure ERROR_ROUTINE
+* Do setup stuff here, including checking what happened. If we found error
+* #1585, do the following code.
+lnChanged = getnextmodified(0)
+do while lnChanged &lt;&gt; 0
+...
+enddo while lnChanged &lt;&gt; 0
+* Since we reverted any changes where we found a conflict and the user wanted
+* to cancel their own changes, let's force the remainder of the updates and
+* then unlock all the records we manually locked.
+begin transaction
+if tableupdate(.T., .T.)
+ &nbsp; end transaction
+* Some other error occurred now, so rollback the changes and display an
+* appropriate error message (you could also try to handle it here if you
+* wish).
+else
+ &nbsp; = aerror(laError)
+ &nbsp; rollback
+ &nbsp; = messagebox('Error #' + ltrim(str(laError[1])) + ': ' + laError[2] + ;
+ &nbsp;&nbsp;&nbsp;&nbsp; ' occurred while saving.')
+endif tableupdate(.T., .T.)
+</code></pre>
+<h3>Other Issues </h3>
+<p>
+As we saw earlier, <b>getfldstate()</b> can be used to determine if anything in the current record has changed. This allows you to create forms that no longer need a "edit" mode; the data in the form is always available for editing. Each field's InteractiveChange event could enable the "Save" and "Cancel" buttons only if the user actually changed something using code similar to:</p>
+<pre><code>if getfldstate(-1) = replicate('1', fcount() + 1)
+ &nbsp; * disable the buttons, since nothing's changed
+else
+ &nbsp; * enable the buttons
+endif getfldstate(-1) = replicate('1', fcount() + 1)
+</code></pre>
+<p>
+To create a form without an edit mode, you also need to have code that handles the case when the user closes the window, exits the application, or moves to another record (if row buffering is used). The QueryUnload event can help with the first two; this event occurs when the user clicks in the form's close box or quits the application. You could put code in this event that saves the record before closing the form. In the case of moving the record pointer, you'd modify your record navigation routines (first, last, next, previous, find, etc.) to check if any fields were changed (and if so, save the record) before moving the record pointer. You would likely have one common method in the form that does all this checking and saving, and call it whenever required.</p>
+<p>
+A related issue to this is that <b>getfldstate()</b> might erroneously indicate that nothing has changed when in fact the user changed the value in a field. This can happen if you provide a menu choice or tool bar button to save the record or move the record pointer. Visual FoxPro only copies the value in a control (such as a Textbox) to the record buffer when the control loses focus. If the user changes the value in a field and then clicks the Next button in the tool bar, the Textbox doesn't lose focus (since tool bars never receive focus), so the new value isn't copied to the record buffer and Visual FoxPro doesn't know the data has changed. The solution to this problem is to force the current control's value to be copied to the buffer before using <b>getfldstate()</b> using code similar to the following in the tool bar button's Click method:</p>
+<pre><code>with _screen.ActiveForm.ActiveControl
+ &nbsp; if type('.ControlSource') &lt;&gt; 'U' and not empty(.ControlSource) and ;
+ &nbsp;&nbsp;&nbsp;&nbsp; not evaluate(.ControlSource) == .Value
+ &nbsp;&nbsp;&nbsp;&nbsp; replace (.ControlSource) with .Value
+ &nbsp; endif type('.ControlSource') &lt;&gt; 'U' ...
+endwith</code></pre>
+</BODY>
+</HTML>

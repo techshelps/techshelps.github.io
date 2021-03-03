@@ -1,0 +1,547 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Surveying the New Win32  Driver Model for Windows 98  and Windows NT 5.0</title>
+<style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000 dir=ltr>
+<Font face="verdana,arial,helvetica" size="2">
+<h1><a name="surveyingnewwin32drivermodelforwindows98windowsnt50"></a>Surveying the New Win32  Driver Model for Windows 98  and Windows NT 5.0</h1>
+<p class=indent>
+By Walter Oney</p>
+<p>
+The Win32® Driver Model (WDM), a new feature planned for the upcoming  releases of Windows 98 (codenamed Memphis) and Windows NT® 5.0, encompasses four distinct areas of functionality. First, both operating systems have a new, common set of interfaces based on the Windows NT 4.0 driver model which allow binary compatibility between Windows 98 and Windows NT 5.0. Unfortunately, drivers for standard Windows-based devices must fit into an older architecture that’s incompatible with this new kernel-mode support. Keyboards, mice, displays, disk and tape drives, serial and parallel port devices, and multimedia devices fall into the standard category if they plug into an ISA, EISA, PCI, or MCA bus. But, if you have a specialized device for which you previously wrote both VxD and monolithic kernel-mode drivers, WDM will let you discard (or at least stop enhancing) the VxD.</p>
+<p>
+The second area of functionality encompassed by WDM  is Plug and Play. Before Windows NT 5.0, kernel-mode drivers needed to employ bus-specific methods to configure themselves and their hardware, while the Windows 95 Configuration Manager made it easy for VxD’s to learn which I/O resources to use. WDM levels this particular playing field by defining a new I/O request packet (IRP), called IRP_MJ_PNP, for both Windows 98 and Windows NT 5.0, which is used to communicate configuration events to kernel-mode drivers. One minor Plug and Play function (IRP_MN_START_DEVICE) announces that a device has been configured and instructs a WDM driver which resources were allocated. Other minor functions alert the driver that a device is being halted or removed and about other events affecting the configuration of its devices.</p>
+<p>
+Third, WDM provides a power-management IRP (IRP_MJ_POWER) to facilitate compliance with the Advanced Configuration and Power Interface (ACPI) standard and the Microsoft OnNow initiative. Intelligent management of power  consumption is important for extending the life of mobile computer batteries, minimizing the impact of computing on the environment, and fostering consumer acceptance of appliances based on PC technology. ACPI defines several states for devices and the system as a whole. These states provide gradations between full-power and no-power operation. OnNow and ACPI use somewhat different schemas for describing system states, but they agree on how to describe the state of individual devices.</p>
+<p>
+WDM reflects the fact that crafting a monolithic, kernel-mode driver for Windows NT can be challenging. Supporting the burgeoning population of hardware designed for the Universal Serial Bus and the IEEE 1394 bus with monolithic drivers would probably be impossible. Consequently, WDM expands on the driver/minidriver model that has proven so successful with SCSI and NDIS drivers. In this case, a developer who understands the issues surrounding a hardware bus or a class of device builds a class driver. Other developers (like you and me) write minidrivers that handle specific hardware. Microsoft has already written class drivers for DVD devices, imaging devices, human input devices (HID), and the broad class of devices that deal with streams of data. Knowing a little about kernel-mode programming and the interfaces exposed by one or two class drivers, you can quickly write minidrivers for your own devices.</p>
+<p>
+Before considering these four aspects of WDM, it’s important to understand what WDM doesn’t do. WDM won’t let you run every (or even many) existing Windows NT drivers on Windows 98. Only those drivers that don’t fit into previous architectures and that interact with a specific subset of kernel-mode functions should run in Windows 98. Furthermore, WDM won’t let you run a VxD under Windows NT. For one thing, Windows NT is a multiplatform operating system, whereas VxDs run only on Intel platforms. In addition, VxDs use an ad-hoc collection of system functions that can’t (and shouldn’t) be duplicated in Windows NT. WDM also won’t necessarily free you from having to write VxDs. If you have to write a VxD today to support a particular function or piece of hardware, you’ll probably have to write VxDs for the same function or hardware as long as Microsoft markets a product called Windows.</p>
+<p>
+In writing this article for publication in a magazine, I had to set some limits on what I would try to cover. Rather than explaining the minutiae of any particular class driver in enough detail to help someone write an actual driver, I elected to stick with a general description of the tasks any WDM driver must perform. Bear in mind that all of these tasks must be performed by either the class or the minidriver in any given class architecture, so knowing what work each driver must do will help you understand your responsibilities as the author of a minidriver.</p>
+<p>
+I assume that many readers will have a background in Windows-based VxD or DRV programming and might, therefore, be unfamiliar with how kernel-mode drivers work. I’ll explain some of the kernel-mode architecture issues here. WDM imposes additional requirements that are new even to experienced authors of kernel-mode drivers, so I’ll explain these new requirements in detail.</p>
+<p>
+This month I’ll cover how to build a WDM driver using the beta DDK and several of the preparatory steps you and the system take to get your device ready for use. In a future article I’ll provide more detail about how your device driver handles Plug and Play and power management requests.</p>
+<h3>Device and Driver Layering</h3>
+<p>
+WDM models the physical hardware attached to a computer as a tree of interrelated device objects. Figure 1 shows an abstract form of the hardware tree near a single device plugged into a bus. WDM associates two or more device objects with each of the hardware entities (see Figure 2). (I’m deliberately using a completely fictitious hardware arrangement because I don’t want to obscure the underlying design with details about real devices.) The physical device object (PDO) represents a hardware device attached to a bus. The functional device object (FDO) represents the same device as its device driver sees it. Not shown are the filter device objects that might exist either above or below the FDO.</p>
+<p><img src="wdm01.gif">
+</p>
+<p>
+<b>Figure 1: Hardware Tree</b></p>
+<p><img src="wdm02.gif">
+</p>
+<p>
+<b>Figure 2: Software Tree</b></p>
+<p>
+A software tree of device drivers parallels the hardware tree. Each device object is associated with a driver object. The driver object corresponds exactly to a driver image file. There might be several device objects that refer to the same driver. For example, a commercial kitchen could have several identical microwave ovens. Since it would be wasteful to load the same driver code multiple times, the system loads a single copy and relates it to each device managed by the driver.</p>
+<p>
+The purpose of device and driver layering becomes apparent when we consider how the system handles I/O requests. Most requests originate in an application with a call to one of the CreateFile, ReadFile, WriteFile, DeviceIoControl, or CloseHandle Win32 APIs. Mechanisms also exist whereby device drivers can issue requests to other device drivers. Whatever the source of a request, the I/O system creates an IRP data structure to describe the request. Through some magic I’ll describe later, the I/O system can easily identify the device object for which the IRP is destined. In my example, that object would be the FDO for a microwave oven. The I/O system then locates the driver object associated with this device. The driver object contains an array of pointers to so-called dispatch functions, one for each type of I/O request. The I/O system indexes into this array and calls the appropriate dispatch function.</p>
+<p>
+What happens inside a driver’s dispatch function is highly variable, depending on the device and the exact details of the I/O request. Generally, a dispatch function does one of three things: handle the request immediately, queue the request for later processing by other routines in the same driver, or pass the request along to a lower layer. Only the third—passing the request down the driver stack—is important right now. To pass the request down, the driver locates the device object for the next lower layer and uses an I/O system call to forward the request. The driver can gain control when the lower layer completes the request in order to inspect or modify the results of the requested operation or to perform additional processing on the request.</p>
+<p>
+The stack of drivers beneath a device’s function driver therefore comes into play only to handle metarequests that relate to non-data operations like configuration or power management. You might need to insert a filter driver into a device’s stack to perform some function not otherwise handled by the function driver. For example, you might create a volume-tracking filter driver for removable media disk drives. The filter would insure that the right volume was present before sending a data request along to the function driver. Filter drivers ordinarily pass all requests down to the next layer. </p>
+<p>
+WDM introduces the concept of a class driver that works with vendor-supplied minidrivers. The class driver abstracts the common features of a large class of similar devices, while the minidriver handles details specific to individual hardware devices. Devices like keyboards, mice, and joysticks have several features in common: they all provide input in the form of discrete input packets with a regular format that doesn’t vary for a given device. WDM therefore recognizes HIDs as a class, and it provides a class driver for the common features of all HIDs.</p>
+<p>
+The functional device driver that the I/O Manager knows about can either be a single (monolithic) driver, or it can be a combination of class drivers and minidrivers. The numerous responsibilities of the functional driver may therefore be split between the class driver and the minidriver in whatever way makes sense for a particular class of devices. In writing a driver, you must read the specifications for the class driver you’ll be working with to know how the designer of the class driver apportioned the work.</p>
+<p>
+The WDM layering model differs substantially from previous driver and device models. In Windows 95 you use one architecture for a serial port (a port driver working with VCOMM), a different architecture for a multimedia device (a 16-bit DLL running in ring 3), and still another architecture for a mouse (a mini-driver working with VMD.VXD). The Windows 95 I/O supervisor uses a single device object to represent each hardware disk or tape device; drivers attach themselves to one of these device objects in order to  manage I/O requests whose internal structure is vastly different than the Windows NT/WDM IRP. As if this  variety weren’t confusion enough, Windows 95 also supports a few Windows NT drivers directly, including SCSI and NDIS miniports.</p>
+<h3>Building a WDM Driver</h3>
+<p>
+WDM drivers are PE-format dynamic link libraries with a file extension of .SYS. In other words, they look just like Windows NT kernel-mode drivers and nothing at all like Windows virtual device drivers. Consequently, the tools you would use to build and debug WDM drivers are basically the same ones you would use to build and debug kernel-mode drivers, except that you should be able to use the same tools for both Windows 98 and Windows NT 5.0.</p>
+<p>
+When you install the beta WDM Device Driver Kit (DDK), you’ll end up with a program group that contains, among other things, two shortcuts to MS-DOS® command prompts. The Checked Build Environment shortcut gives you a command environment appropriate for building the checked version of your driver. The checked version should contain additional debugging code. The Free Build Environment shortcut gives you a command environment appropriate for building the free version of your driver, which lacks that debugging code. Both versions contain symbolic information that lets you inspect them from a kernel debugger, but the checked build is easier to use because it’s built without extensive code optimization.</p>
+<p>
+You launch one or the other of these command environments when you want to work on a driver. Using command-line utilities, you then create files named SOURCES, DIRS, and MAKEFILE that describe the unique aspects of your driver projects. Still within the checked or free command environment, run the BUILD utility from the DDK. If you’ve set everything up correctly, BUILD will execute NMAKE against a fairly complex MAKE script to compile and link one or more drivers and applications. BUILD leaves behind text files named BUILD.ERR and BUILD.WRN containing the errors and warnings that result from executing the build script.</p>
+<p>
+I prefer to use an IDE like Microsoft Developer Studio™ for driver development. I’ve seen several explanations of how you can tightly integrate a driver project with Developer Studio so you could easily browse the source code, add and remove files from the project, and so on. However, I see a danger in this approach: if Microsoft ever changes the options you need to use for a WDM driver (including the names or locations of header files and libraries), the change will only appear in the canned MAKE files and in the BUILD utility. If you’ve been using a Developer Studio-based project, your build script will still have the obsolete options. You might not even realize your script was obsolete until a problem developed far down the road.</p>
+<p>
+I think it’s better to avoid build-related problems by sticking with the official BUILD utility at least until Microsoft releases a DDK that uses a tool like Developer Studio. It’s pretty easy to do this from the Developer Studio environment. First, set the MSDEVDIR environment variable to the name of the directory where you installed Visual C++®. You don’t need to explicitly set this variable if you’re working in Windows NT because the Visual C++ install program will have modified the default environment settings to take care of it for you.</p>
+<p>
+When you want to commence work on a new driver, create a Developer Studio project using the Makefile wizard. Complete the settings dialog as shown in Figure 3. You end up with a minimal project containing two configurations. The Win32  Release configuration corresponds to your free build, while the Win32 Debug configuration corresponds to your checked build. Within this project, the Project Workspace window won’t give you any useful information, and you won’t be able to add or remove files from the project or to compile single files. You won’t be able to use Class Wizard to manage a C++ driver, but you wouldn’t have been able to anyway because Class Wizard only  understands the MFC library. There are plenty of other things you can do using Developer Studio, though, as I’ll explain further on.</p>
+<p>
+<img src="wdm1211_fig03.gif" border=0></p>
+<p>
+<b>Figure 3: Project Settings Dialog</b></p>
+<p>
+The key project setting is the one for the Build Command Line, where you specify “wdmbuild &lt;ddkpath&gt; &lt;project-path&gt;” followed by either checked or free. You should specify the string “-nmake /a” for the Rebuild all options setting. You can also specify the name of your driver file (for example, SIMPLE.SYS) so that various Developer Studio menus will have a sensible name in them. This small amount of typing is the total extra pain you’ll have to endure in using this approach to creating a project.</p>
+<p>
+The following is the WDMBUILD.BAT file I wrote and put into a directory that’s always in my path. </p>
+<pre><code>@echo off
+call %1\bin\setenv %1 %3
+cd %2
+build -b -w %4 %5 %6 %7 %8 %9
+</code></pre>
+<p>
+When you start a build from Developer Studio, a command like this one will be executed in a brand-new MS-DOS box:</p>
+<pre><code>wdmbuild c:\wdmddk c:\wdmddk\src\simple checked
+</code></pre>
+<p>
+The first parameter indicates where you installed the DDK, the second names your project directory, and the third indicates whether you’re doing a checked or free build. The batch file uses the first and third parameters to compose and execute this command:</p>
+<pre><code>c:\wdmddk\bin\setenv c:\wdmddk checked
+</code></pre>
+<p>
+This is the same as the command that gets executed when you select Checked Build Environment from the start menu, by the way. </p>
+<p>
+SETENV sets up all the right environment variables for using the Visual C++ compiler. This step depends on the MSDEVDIR environment variable, which is why you had to make sure it got set in the first place. In addition—and to my considerable annoyance—SETENV leaves you in the DDK directory rather than in the project directory where you started. The reason this is so annoying is that Windows doesn’t have a CURDIR environment variable that you can use in the batch file to learn your starting point, and it also doesn’t support the PUSHD and POPD batch commands to let you easily save and restore the current directory in Windows NT. That’s why WDMBUILD.BAT executes the second command to switch back to the project directory:</p>
+<pre><code>cd c:\wdmddk\src\simple
+</code></pre>
+<p>
+Finally, WDMBUILD invokes the regular BUILD utility with any additional arguments that might have been given to the batch file. As BUILD runs, compiler and linker messages show up in the output window. By using the -b and -w options for BUILD, WDMBUILD.BAT ensures that you’ll see the full text of any errors and warnings that might come up, thereby saving you from having to manually inspect the log files. To navigate to the point of a compilation error, you can do what you normally do in Developer Studio: either hit F4 to find the next error, or double-click a line in the output window.</p>
+<p>
+I’ve glossed over the contents of the important SOURCES and MAKEFILE files until now. I don’t want to present a treatise on all the things you could put into these files or what you can do with the DIRS file. For a full explanation, consult the DDK documentation on MSDN, or refer to Art Baker’s The Windows NT Device Driver Book (Prentice Hall, 1997). </p>
+<p>
+The following shows the contents of SOURCES for my SIMPLE driver. </p>
+<pre><code>TARGETNAME=SIMPLE
+TARGETTYPE=DRIVER
+TARGETPATH=$(BASEDIR)\LIB
+INCLUDES=$(BASEDIR)\INC
+C_DEFINES=-DDRIVER 
+BROWSER_INFO=1
+SOURCES= \
+    DriverEntry.cpp \
+    PlugPlay.cpp \
+    Control.cpp    \
+    Power.cpp \
+    ReadWrite.cpp
+NTTARGETFILES=STUFF
+</code></pre>
+<p>
+TARGETNAME specifies the name (without the file extension) of the driver file you’re building. TARGETTYPE=DRIVER indicates you’re building a kernel-mode driver, while C_DEFINES=-DDRIVER controls some conditional compilation in Microsoft® source files. TARGETPATH names the directory where you want the target file placed; BUILD appends additional subdirectory names like \I386\CHECKED to this string, allowing you to easily build drivers for multiple target platforms. INCLUDES specifies the location of the DDK include files. Finally, SOURCES specifies the source files that comprise your driver project. When you want to change the content of your project, you need to edit the SOURCES file by hand. Adding or removing a source file, for example, involves changing the SOURCES string.</p>
+<p>
+It’s useful to customize your build settings somewhat  to make it more convenient to manage and debug your project. Setting BROWSER_INFO to 1 in the SOURCES file causes the C compiler to generate browsing information that can later be combined into the browser file. The MAKEFILE.INC auxiliary file contains rules for building the browsing database, for creating a symbol file for the Nu-Mega Technologies Soft-Ice/W debugger, and for copying the completed driver file to the system directory where it needs to reside: </p>
+<pre><code>STUFF: $(TARGET)
+    c:\winice95\nmsym /translate:source,package,always\
+        $(TARGET)
+!if "$(OS)" =="Windows_NT"
+    copy $(TARGET) $(WINDIR)\system32\drivers
+!else
+    copy $(TARGET) $(WINDIR)\system
+!endif
+</code></pre>
+<p>
+You trigger the inclusion of MAKEFILE.INC and the subsequent interpretation of the rules it contains by defining a BUILD macro NTTARGETFILES in the SOURCES file.</p>
+<h3>Finding and Loading Device Drivers</h3>
+<p>
+Plug and Play includes both a hardware architecture that allows devices to identify themselves to the operating system and a software architecture that allows the system to locate and configure device drivers. The Plug and Play features in WDM make it easy for device drivers to discover which devices they’re supposed to administer and which  I/O resources they should use. Even a legacy device, which has no electronic way of identifying itself or its resource requirements, can and should be managed by a Plug and Play device driver. Drivers that use Plug and Play as fully as their devices permit make it easier for the operating system to harmonize all of the hardware in the system without troubling the user. </p>
+<p>
+A system component known as the Configuration Manager administers the software side of Plug and Play by means of two additions to the kernel-mode repertoire: an AddDevice function within the driver, and the IRP_MJ_PNP I/O request.</p>
+<p>
+A WDM driver learns about its own devices through AddDevice. A bus enumerator uses bus-specific methods to determine what hardware is plugged into the bus, and it creates a physical device object for each device it identifies. In Figure 2, bus enumeration is one of the functions performed by the bus driver, and the microwave oven is one of the device objects that results from the enumeration process. The Configuration Manager consults the registry database to find and load the device driver. </p>
+<p>
+When the system loads a WDM driver, it calls whatever function has been identified by the linkage editor as the main entry point. Conventionally, you call this function DriverEntry. Its calling sequence and operation matches this skeleton:</p>
+<pre><code>NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject,
+                     IN PUNICODE_STRING RegistryPath)
+    {
+    return &lt;something&gt;;
+    }
+</code></pre>
+<p>
+DriverEntry uses the __stdcall calling convention, a requirement enforced by use of the -Gz option to the Microsoft C compiler. It returns a kernel status code, with STATUS_ SUCCESS denoting successful initialization. Its purpose in WDM is to fill in several function pointers within the supplied driver object, as detailed in Figure 4. In previous versions of Windows NT, the DriverEntry routine also had the responsibility of locating and configuring all the devices managed by the driver, a task now performed by the Configuration Manager. Consequently, by the time DriverEntry returns, all that’s been accomplished is setting up a bunch of function pointers that the I/O system can call later on. As an example, a fairly minimal driver might have the following DriverEntry routine:</p>
+<pre><code>NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject,
+                     IN PUNICODE_STRING RegistryPath)
+    {
+    DriverObject-&gt;DriverExtension-&gt;AddDevice = 
+        AddDevice;
+    DriverObject-&gt;MajorFunction[IRP_MJ_CREATE] = 
+        RequestCreate;
+    DriverObject-&gt;MajorFunction[IRP_MJ_CLOSE] = 
+        RequestClose;
+    DriverObject-&gt;MajorFunction[IRP_MJ_DEVICE_CONTROL]
+        = RequestControl;
+    DriverObject-&gt;MajorFunction[IRP_MJ_PNP] = 
+        RequestPnp;
+    DriverObject-&gt;MajorFunction[IRP_MJ_POWER] = 
+        RequestPower;
+    return STATUS_SUCCESS;
+    }
+</code></pre>
+<p>
+The Configuration Manager calls the oven driver’s AddDevice entry once for each oven it has found. The purpose of AddDevice is to create the FDO that represents an oven, and to define a symbolic name that will allow other software to access the device. Stripped of error handling, your AddDevice function might look like this:</p>
+<pre><code>NTSTATUS AddDevice(IN PDRIVER_OBJECT DriverObject,
+                   IN PDEVICE_OBJECT pdo)
+    {
+    PDEVICE_OBJECT fdo; // functional device object
+    IoCreateDevice(DriverObject, 
+                   sizeof(DEVICE_EXTENSION),NULL,     
+                   FILE_DEVICE_UNKNOWN, 0, FALSE,   
+                   &amp;fdo);
+    PDEVICE_EXTENSION pdx = (PDEVICE_EXTENSION) 
+        fdo-&gt;DeviceExtension;
+    IoRegisterDeviceInterface(pdo, &amp;GUID_SIMPLE, NULL,
+                              &amp;pdx-&gt;ifname);
+    IoSetDeviceInterfaceState(&amp;pdx-&gt;ifname, TRUE);
+    pdx-&gt;LowerDeviceObject =             IoAttachDeviceToDeviceStack(fdo, pdo);
+    fdo-&gt;Flags &amp;= ~DO_DEVICE_INITIALIZING;
+    return STATUS_SUCCESS;
+    }
+</code></pre>
+<p>
+Here, GUID_SIMPLE is a globally unique identifier (GUID) that represents the oven’s functional interface understood by our device driver. (I’ll have more to say about this GUID and the concept of device interfaces a little further on.) DEVICE_EXTENSION is a structure you will define to contain information that’s specific to an instance of one of your devices. It contains a field named LowerDeviceObject that points to the next-lower device object in the stack of objects for this particular device. You need to maintain that pointer in order to pass certain I/O requests down the stack. It also contains an ifname field whose purpose I’ll explain when I discuss device interfaces.</p>
+<p>
+<b>Figure 4: Function Pointers Supplied by DriverEntry</b></p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=blue width=296><b>Pointer Member (DriverObject-&gt;xxx)</b></td>
+<td class=blue width=296><b>Brief Description</b></td>
+</tr>
+<tr valign=top>
+<td width=296>DriverExtension-&gt;AddDevice</td>
+<td width=296>Initialize to handle a new device</td>
+</tr>
+<tr valign=top>
+<td width=296>DriverInit</td>
+<td width=296>Initialize driver</td>
+</tr>
+<tr valign=top>
+<td width=296>DriverStartIo</td>
+<td width=296>Begin processing the next queued request</td>
+</tr>
+<tr valign=top>
+<td width=296>DriverUnload</td>
+<td width=296>Cleanup when driver unloaded after all of its devices are removed</td>
+</tr>
+<tr valign=top>
+<td width=296>MajorFunction[IRP_MJ_xxx]</td>
+<td width=296>Handle I/O request of type xxx</td>
+</tr>
+</table><br>
+<p>
+Don’t write a driver function that doesn’t check for errors and act on them. I removed error handling from the previous fragment so you could see the main flow of control. A more realistic version of the function would look like this: </p>
+<pre><code>NTSTATUS AddDevice(IN PDRIVER_OBJECT DriverObject,
+                   IN PDEVICE_OBJECT pdo)
+    {
+    PDEVICE_OBJECT fdo; // functional device object
+    NSTATUS status;
+    status = IoCreateDevice(DriverObject,
+                            sizeof(DEVICE_EXTENSION),   
+                            NULL, FILE_DEVICE_UNKNOWN,
+                            0, FALSE, &amp;fdo);
+    if (!NT_SUCCESS(status))
+        return status;
+    PDEVICE_EXTENSION pdx = (PDEVICE_EXTENSION) 
+        fdo-&gt;DeviceExtension;
+    status = IoRegisterDeviceInterface(pdo,   
+                                       &amp;GUID_SIMPLE,      
+                                       NULL, 
+                                       &amp;pdx-&gt;ifname);
+    if (!NT_SUCCESS(status))
+        {
+        IoDeleteDevice(fdo);
+        return status;
+        }
+    [etc.]
+    }
+</code></pre>
+<p>
+The complete listing of AddDevice, along with the DRIVER.H file on which it depends, appears in Figure 5. AddDevice is just one of several routines I packaged in a file named DRIVERENTRY.CPP.</p>
+<p>
+<b>Figure 5: Driver.H and AddDevice</b></p>
+<p>
+<b>&nbsp;DRIVER.H</b></p>
+<pre><code>#ifndef DRIVER_H
+#define DRIVER_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include &lt;wdm.h&gt;
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
+
+#define arraysize(p) (sizeof(p)/sizeof((p)[0]))
+
+typedef struct tagDEVICE_EXTENSION {
+    PDEVICE_OBJECT DeviceObject;            
+    PDEVICE_OBJECT LowerDeviceObject;       
+    UNICODE_STRING ifname;                  
+    LONG usage;                             
+    KEVENT evRemove;                        
+    PULONG idle;                            
+    BOOLEAN started;                        
+    BOOLEAN enabled;                        
+    BOOLEAN iospace;                        
+    BOOLEAN mappedport;                     
+    BOOLEAN removing;                       
+    DEVICE_POWER_STATE power;               
+    ULONG nports;                           
+    PUCHAR base;                            
+    PKINTERRUPT InterruptObject;            
+    PUCHAR buffer;                          
+    ULONG nbytes;                           
+    ULONG numxfer;                          
+    } DEVICE_EXTENSION, *PDEVICE_EXTENSION;
+
+#define SIMPLE_IDLE_CONSERVATION    30
+#define SIMPLE_IDLE_PERFORMANCE     600
+
+NTSTATUS CompleteRequest(IN PIRP Irp, IN NTSTATUS status, IN ULONG info);
+VOID DpcForIsr(IN PKDPC Dpc, IN PDEVICE_OBJECT fdo, IN PIRP Irp, 
+    IN PVOID Context);
+NTSTATUS ForwardAndWait(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
+BOOLEAN LockDevice(IN PDEVICE_EXTENSION pdx);
+BOOLEAN LockDevice(IN PDEVICE_OBJECT fdo);
+NTSTATUS OnRequestComplete(IN PDEVICE_OBJECT fdo, IN PIRP Irp, 
+    IN PKEVENT pev);
+NTSTATUS SendDeviceSetPower(IN PDEVICE_OBJECT fdo, 
+    IN DEVICE_POWER_STATE state, ULONG context);
+VOID SetPowerState(IN PDEVICE_OBJECT fdo, IN DEVICE_POWER_STATE state);
+VOID RemoveDevice(IN PDEVICE_OBJECT fdo);
+NTSTATUS StartDevice(PDEVICE_OBJECT fdo, PCM_PARTIAL_RESOURCE_LIST list);
+VOID StopDevice(PDEVICE_OBJECT fdo);
+VOID StartIo(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
+void UnlockDevice(IN PDEVICE_EXTENSION pdx);
+void UnlockDevice(IN PDEVICE_OBJECT fdo);
+
+// I/O request handlers
+
+NTSTATUS RequestCreate(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp);
+NTSTATUS RequestClose(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp);
+NTSTATUS RequestControl(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp);
+NTSTATUS RequestPnp(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp);
+NTSTATUS RequestPower(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp);
+NTSTATUS RequestWrite(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp);
+
+// {3d93c5c0-0085-11d1-821e-0080c88327ab}
+
+#ifndef FAR
+#define FAR
+#endif 
+
+DEFINE_GUID(GUID_SIMPLE, 0x3d93c5c0, 0x0085, 0x11d1, 0x82, 0x1e, 0x00,
+    0x80, 0xc8, 0x83, 0x27, 0xab);
+
+#endif // DRIVER_H
+</code></pre>
+<p>
+<b>DRIVERENTRY.CPP (Excerpt)</b></p>
+<pre><code>NTSTATUS AddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT pdo)
+    {                           // AddDevice
+    NTSTATUS status;
+    PDEVICE_OBJECT fdo;
+    status = IoCreateDevice(DriverObject, sizeof(DEVICE_EXTENSION), NULL,
+        FILE_DEVICE_UNKNOWN, 0, FALSE, &amp;fdo);
+    if (!NT_SUCCESS(status))
+        return status;
+    
+    PDEVICE_EXTENSION pdx = (PDEVICE_EXTENSION) fdo-&gt;DeviceExtension;
+    pdx-&gt;DeviceObject = fdo;
+    pdx-&gt;usage = 1;             // locked until RemoveDevice
+    KeInitializeEvent(&amp;pdx-&gt;evRemove, NotificationEvent, FALSE);
+
+    status = IoRegisterDeviceInterface(pdo, &amp;GUID_SIMPLE, NULL,
+        &amp;pdx-&gt;ifname);
+    if (!NT_SUCCESS(status))
+        {                       // unable to register interface
+        IoDeleteDevice(fdo);
+        return status;
+        }                       // unable to register interface
+    IoSetDeviceInterfaceState(&amp;pdx-&gt;ifname, TRUE);
+
+    pdx-&gt;LowerDeviceObject = IoAttachDeviceToDeviceStack(fdo, pdo);
+    fdo-&gt;Flags &amp;= ~DO_DEVICE_INITIALIZING;
+    IoInitializeDpcRequest(fdo, DpcForIsr);
+    fdo-&gt;Flags |= DO_BUFFERED_IO;
+    pdx-&gt;power = PowerDeviceD0; // device starts in full power state
+
+    pdx-&gt;idle = PoRegisterDeviceForIdleDetection(pdo, 
+        SIMPLE_IDLE_CONSERVATION, SIMPLE_IDLE_PERFORMANCE, PowerDeviceD3);
+
+    return STATUS_SUCCESS;
+    }                           // AddDevice
+</code></pre>
+<p>
+AddDevice works like this: it calls IoCreateDevice to create a new device object. All device objects are created equal, but this particular object plays the role of the FDO for a single microwave oven. This object provides a hook from which the I/O system can hang I/O requests. Your DEVICE_EXTENSION will end up containing pointers to interrupt objects, memory windows, I/O ports, and so on that other parts of your driver will use to implement the  I/O requests. But AddDevice isn’t the place to worry about those entities. You’ll worry about them much later when you receive an IRP_MN_START_DEVICE I/O request.</p>
+<p>
+AddDevice calls IoAttachDeviceToDeviceStack to place the new FDO at the top of the stack containing the physical device. This function call also effectively creates the parallel stack of drivers, since each of the device objects in the stack points to its associated driver.</p>
+<p>
+Finally, AddDevice clears the DO_DEVICE_INITIALIZING flag. IoCreateDevice initially sets this flag. When you create device objects during DriverEntry, the system automatically clears the flag. When you create device objects later on, however, the flag will be left set unless you clear it yourself.</p>
+<p>
+Time will now pass while Configuration Manager, working with all the enumerators, determines the entire hardware population of the computer and the demands of all devices for I/O resources like interrupts, I/O ports, DMA channels, memory windows, and so on. Once this population is known, Configuration Manager sorts through all of the resource requirements in order to meet the needs of all the devices. Suppose, for example, you had a soft-configurable network card that needed an IRQ and was physically capable of using either IRQ 5 or 10. Suppose you also had a sound card that had to use IRQ 5. By giving IRQ 5 to the sound card and IRQ 10 to the network card, Configuration Manager can ensure that both devices will work.</p>
+<h3>Device Interfaces</h3>
+<p>
+WDM introduces the concept of a device interface as a way for applications to find the devices they work with. Imagine a baking application that wants to control an oven device, and the hardware vendors had created several different classes of devices, including microwave ovens, conventional ovens, toaster ovens, and so on, that can be used for baking as well as other purposes: the microwave oven has a clock, and the conventional oven doubles as a broiler. You can have multipurpose devices that export more than one programmatic interface for use by applications, as illustrated in Figure 6.</p>
+<p><img src="wdm06.gif">
+</p>
+<p>
+<b>Figure 6: Application and Device Interfaces</b></p>
+<p>
+Given the proliferation of applications, device types, and drivers, it would be nice if there were a uniform and extensible way for the operating system to act as a matchmaker between applications and devices. Applications shouldn’t, for example, rely on simple ASCII names like OVEN when they’re looking for ovens. Imagine a birthday-cake application that goes tragically awry in Germany looking for a GIFT interface (gift means poison in German). Applications shouldn’t have to know where to find magic lists of symbolic link names in INI files or the registry, either.</p>
+<p>
+WDM device interfaces provide the necessary uniformity and extensibility: someone designs a programmatic interface for oven-type devices; the interface specification describes how ovens react to READ, WRITE, and IOCTL requests. The interface designer also runs the SDK utility named UUIDGEN, which generates a 128-bit GUID that unambiguously refers to the oven interface under Windows 98 and Windows NT. Conventionally, the designer would publish the GUID in a header file using the DEFINE_GUID macro. For example, when I ran UUIDGEN to prepare the SIMPLE example for this article, I received the GUID {3d93c5c0-0085-11d1-821e-0080c88327ab}. I included the following statement in my DRIVER.H file:</p>
+<pre><code>DEFINE_GUID(GUID_SIMPLE, 0x3d93c5c0, 0x0085, 0x11d1,         0x82,0x1e, 0x00, 0x80, 0xc8, 0x83, 0x27, 0xab);
+</code></pre>
+<p>
+This macro call defines GUID_SIMPLE as the symbolic name for a storage location containing the 128 bits that form the assigned identifier.</p>
+<p>
+The AddDevice function for any driver that exports a particular interface uses the GUID as one of the arguments to IoRegisterDeviceInterface, as follows:</p>
+<pre><code>#define INITGUID
+DEFINE_GUID(GUID_SIMPLE, &lt;etc&gt;);
+·
+·
+·
+UNICODE_STRING linkname = {0};
+status = IoRegisterDeviceInterface(pdo, &amp;GUID_SIMPLE,                                        NULL, &amp;linkname);
+</code></pre>
+<p>
+The first argument to IoRegisterDeviceInterface is the address of the physical device object. Don’t supply the address of your own functional device object by mistake. The second argument is the address of a memory block containing the GUID for an interface class. The DDK’s DEFINE_GUID macro reserves storage for the GUID when you define INITGUID beforehand. The third argument is an optional “reference string” that you can use (if you’re especially brave) to create a name hierarchy below your device; Microsoft uses this capability internally but recommends that you don’t, which is why they don’t explain the purpose of this argument any further.</p>
+<p>
+The fourth argument specifies a UNICODE_STRING object to receive an automatically-generated symbolic link name by which an application can access your device. Although you reserve storage for the UNICODE_STRING object, the I/O Manager will allocate storage for the actual name and set the Buffer member of your structure. You are responsible for eventually calling ExFreePool to release the memory used by the string. (Note that the SIMPLE example places this structure in the device extension so it will be available when the device is eventually removed.)</p>
+<p>
+Once you register the interface, you’ll also want to enable it by making this function call:</p>
+<pre><code>IoSetDeviceInterfaceState(&amp;linkname, TRUE);
+</code></pre>
+<p>
+You’ll do the reverse step of disabling the interface when you shut your device down.</p>
+<p>
+Later, the user may launch an application that wants to talk to your device. The application would employ the following basic strategy: first, it finds all of the devices that export the interface it needs (GUID_SIMPLE, for example). If there are no such devices, it generates an error. If there’s only one, the app prepares to use it. If there’s more than one, the app interacts with the user to decide which one to use.</p>
+<p>
+An application uses several APIs from the DDK Setup toolkit to enumerate appropriate devices. Figure 7 shows an excerpt from a test program that exercises the SIMPLE.SYS driver. The first step in interface enumeration is to open a device information set by calling SetupDiGetClassDevs:</p>
+<pre><code>HDEVINFO info = SetupDiGetClassDevs(&amp;GUID_SIMPLE, NULL,    
+          NULL, DIGCF_PRESENT | DIGCF_INTERFACEDEVICE);
+</code></pre>
+<p>
+The first argument identifies the interface you’re looking for, and the flag bits in the last argument indicate that you’re looking for interfaces exported by devices actually present on the system.</p>
+<p>
+Once you have a handle to the device information set, you perform an enumeration of all devices that export the particular interface you’re interested in:</p>
+<pre><code>for (DWORD i = 0; ; ++i)
+    {
+    SP_INTERFACE_DEVICE ifdata;
+    ifdata.cbSize = sizeof(ifdata);
+    if (!SetupDiEnumInterfaceDevice(info, NULL,  
+                                    &amp;GUID_SIMPLE, i, 
+                                    &amp;ifdata))
+        {
+        if (GetLastError() == ERROR_NO_MORE_ITEMS)
+            break; // no more interfaces
+        [handle an error]
+        }
+    [deal with current device]
+    }
+</code></pre>
+<p>
+In my actual test program, I don’t use a loop for this step because I’m only expecting to find one device. In general, you’d use a loop like the one shown here. Inside the loop, you use the values in the SP_INTERFACE_DEVICE structure to locate a device that exports a specific interface. One of the things you’re likely to do is call SetupDiGetInterfaceDeviceDetail to fill in an SP_INTERFACE_DEVICE_DETAIL_ DATA structure with detailed information about the device. The only member of the resulting structure you’re interested in is called DevicePath; it gives the symbolic link name you’ll eventually use in a call to CreateFile. </p>
+<p>
+<b>Figure 7: Test Program for SIMPLE.SYS</b></p>
+<pre><code>// TEST.CPP
+
+#include &lt;windows.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;winioctl.h&gt;
+#include &lt;setupapi.h&gt;
+#include "SimpleIoctl.h"
+
+// {3d93c5c0-0085-11d1-821e-0080c88327ab}
+#include &lt;initguid.h&gt;
+DEFINE_GUID(GUID_SIMPLE, 0x3d93c5c0, 0x0085, 0x11d1, 0x82, 0x1e, 0x00,
+            0x80, 0xc8, 0x83, 0x27, 0xab);
+
+#define Not_VxD
+#include "myvxd.h"
+
+void main(int argc, char* argv[])
+    {                           // main
+    HDEVINFO info = SetupDiGetClassDevs((LPGUID) &amp;GUID_SIMPLE, NULL, NULL, 
+                                        DIGCF_PRESENT | DIGCF_INTERFACEDEVICE);
+    if (info == INVALID_HANDLE_VALUE)
+        {
+        printf("Error %d trying to open enumeration handle for " "GUID_SIMPLE\n", 
+               GetLastError());
+        exit(1);
+        }
+
+    SP_INTERFACE_DEVICE_DATA ifdata;
+    ifdata.cbSize = sizeof(ifdata);
+    if (!SetupDiEnumInterfaceDevice(info, NULL, (LPGUID) &amp;GUID_SIMPLE,
+                                    0, &amp;ifdata))
+        {
+        printf("Error %d trying to enumerate interfaces\n",
+               GetLastError());
+        SetupDiDestroyDeviceInfoList(info);
+        exit(1);
+        }
+
+    DWORD needed;
+    SetupDiGetInterfaceDeviceDetail(info, &amp;ifdata, NULL, 0, &amp;needed, NULL);
+    PSP_INTERFACE_DEVICE_DETAIL_DATA detail = 
+        (PSP_INTERFACE_DEVICE_DETAIL_DATA) malloc(needed);
+    if (!detail)
+        {
+        printf("Error %d trying to get memory for interface detail\n",
+               GetLastError());
+        SetupDiDestroyDeviceInfoList(info);
+        exit(1);
+        }
+
+    detail-&gt;cbSize = sizeof(SP_INTERFACE_DEVICE_DETAIL_DATA);
+    if (!SetupDiGetInterfaceDeviceDetail(info, &amp;ifdata, detail, needed,
+                                         NULL, NULL))
+        {
+        printf("Error %d getting interface detail\n", GetLastError());
+        free((PVOID) detail);
+        SetupDiDestroyDeviceInfoList(info);
+        exit(1);
+        }
+
+    char name[MAX_PATH];
+    strncpy(name, detail-&gt;DevicePath, sizeof(name));
+    free((PVOID) detail);
+    SetupDiDestroyDeviceInfoList(info);
+
+    HANDLE hfile = CreateFile(name, GENERIC_READ | GENERIC_WRITE, 0, NULL, 
+                              OPEN_EXISTING, 0, NULL);
+    if (hfile == INVALID_HANDLE_VALUE)
+        {
+        printf("Error %d trying to open %s\n", GetLastError(), name);
+        exit(1);
+        }
+
+        //The code above is a partial listing of Test.cpp.  The complete
+        //listing will be published in the second article of this two part
+        //series.  In addition the entire listing is available on the MSJ
+        //web site, http://microsoft.com/msj .
+
+    }
+</code></pre>
+<p>
+Since the detailed information has variable length, you’ll actually make two calls to SetupDiGetInterfaceDeviceDetail, one to get the required size and another to actually fill in some allocated storage:</p>
+<pre><code>DWORD needed;
+SetupDiGetInterfaceDeviceDetail(info, &amp;ifdata, NULL, 0,
+                                &amp;needed, NULL);
+PSP_INTERFACE_DEVICE_DETAIL detail =
+    (PSP_INTERFACE_DEVICE_DETAIL) malloc(needed);
+detail-&gt;cbSize = sizeof(SP_INTERFACE_DEVICE_DETAIL);
+SetupDiGetInterfaceDeviceDetail(info, &amp;ifdata, detail,
+                                needed, NULL, NULL);
+</code></pre>
+<p>
+Note that you set the cbSize member of your SP_INTERFACE_DEVICE_DETAIL structure to the size of the base structure rather than to the number of bytes you actually allocated. The API uses this member as a version stamp rather than as an indicator of how much storage you actually reserved for the structure.</p>
+<p>
+At this point in your program, detail-&gt;DevicePath is a symbolic link name that you can use to access the device. It will be an essentially unreadable string: </p>
+<pre><code>\\.\0000000000000004#{3d93c5c0-0085-11d1-821e-0080c88327ab} 
+</code></pre>
+<p>
+You don’t want to expose unsuspecting users to names like this. A friendly name, and perhaps some other information about each device, is preferable. </p>
+<p>
+The system provides a registry key that’s tailor-made for this purpose. From an application, call SetupDiOpenInterfaceDeviceRegKey to open the key for a particular device for which you have an SP_INTERFACE_DEVICE. From a WDM driver, use IoOpenDeviceInterfaceRegistryKey. Either function opens a registry key that you then use with regular user or kernel-mode registry APIs. You might arrange in your setup program, for example, to insert a FriendlyName value that would appear in any user interface you provide.</p>
+<p>
+When your application is all done collecting and saving information, you need to clean up by releasing any device detail structures you may have allocated, and by calling SetupDiDestroyDeviceInfoList.</p>
+<p>
+If you rely on a device interface to let an application know about your device, you don’t need to create your own symbolic link as you would have in previous versions of Windows NT. In fact, you don’t even give your device object a name when you call IoCreateDevice. (I supplied NULL for the device name parameter in the earlier fragment.) You can, of course, use the older method if you wish. That is, in your AddDevice function, you’d create two UNICODE_ STRING objects, one containing a device name like \Device\SIMPLE0 and the other containing a symbolic link name like \DosDevices\SimpleDevice. You’d pass the device name to IoCreateDevice, and you’d call IoCreateSymbolicLink to associate the link name with the device name. An application could then use \\.\SimpleDevice as the name argument to CreateFile. Since this older method permits appreciably simpler application coding, you might prefer it for proprietary devices and applications.</p>
+<h3>Conclusion</h3>
+<p>
+So far I’ve described the basic topology of WDM device objects and drivers. I also explained how you can use available tools to build drivers with the beta DDK. You’ve seen the very simple DriverEntry that a WDM driver contains, and how you can use an AddDevice function to initialize your driver to handle a new device. Part of that initialization involves registering an interface name that applications can use to find your devices.</p>
+<p>
+In a future article I’ll finish this introduction to WDM driver programming by explaining in detail how to handle IRP_MJ_PNP and IRP_MJ_POWER I/O requests. The system uses these requests to alert you to configuration and power events, respectively. Finally, I'll show you one method that allows you to interface your legacy Windows 95 virtual device driver with a WDM driver.</p>
+<p>
+To obtain complete source code listings, see the MSJ Web site at  http://www.microsoft.com/msj.</p>
+</font></BODY>
+</HTML>

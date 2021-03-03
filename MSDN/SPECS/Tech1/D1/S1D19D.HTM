@@ -1,0 +1,57 @@
+<HTML><HEAD><META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252"><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Architecture of Custom Object Marshaling</TITLE><style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY BGCOLOR="#FFFFFF">
+
+</OBJECT></FORM>
+<H2>Architecture of Custom Object Marshaling</H2>  </P>
+<A NAME="PT3"></A>Imagine that we are presently in a piece of code whose job it is to marshal an interface pointer that it has in hand. For clarity, in what follows we'll refer to this piece of code as the <I>original marshaling stub. </I>The general case is that the original marshaling stub does not <I>statically</I><font class="MissingLink" meta="aslch07_FNThree">3.</font> know the particular interface identifier (IID) to which the pointer conforms; the IID may be passed to this code as a second parameter. This is a common paradigm in the Component Object Model. Extant examples of this paradigm include:</P>
+  </P>
+<BR></P>
+<pre><code>IUnknown::QueryInterface(REFIID riid, void** ppvObject);
+IOleItemContainer::GetObject(..., REFIID riid, void** ppvObject);
+IClassFactory::CreateInstance(..., REFIID riid, void** ppvNewlyCreatedObject);</code></pre>
+  </P>
+Let us assume the slightly less general case where the marshaling stub in fact does know a little bit about the IID: that the interface in fact derives from IUnknown. This is a requirement for remoting: it is not possible to remote interfaces which are not derived from IUnknown.</P>
+To find out whether the object to which it has an interface supports custom marshaling, the original marshaling stub simply does a QueryInterface() for the interface IMarshal. That is, an object signifies that it wishes to do custom marshaling simply by implementing the IMarshal interface. IMarshal is defined as follows:</P>
+  </P>
+<BR></P>
+<pre><code>[
+    local,
+    object,
+    uuid(00000003-0000-0000-C000-000000000046)
+]
+interface IMarshal : IUnknown {
+   HRESULT GetUnmarshalClass ( [in] REFIID riid, [in, unique] void *pv, 
+      [in] DWORD dwDestContext, [in, unique] void *pvDestContext,
+      [in] DWORD mshlflags, [out] CLSID *pCid);
+   HRESULT GetMarshalSizeMax ([in] REFIID riid, [in, unique] void *pv,
+      [in] DWORD dwDestContext, [in, unique] void *pvDestContext,
+       [in] DWORD mshlflags, [out] DWORD *pSize);
+   HRESULT MarshalInterface ([in, unique] IStream *pStm, [in] REFIID riid, [in, unique] void *pv,
+      [in] DWORD dwDestContext, [in, unique] void *pvDestContext, [in] DWORD mshlflags);
+   HRESULT UnmarshalInterface ( [in, unique] IStream *pStm, [in] REFIID riid, [out] void **ppv);
+   HRESULT ReleaseMarshalData ( [in, unique] IStream *pStm);
+   HRESULT DisconnectObject ( [in] DWORD dwReserved);
+}</code></pre>
+  </P>
+The idea is that if the object says "Yes, I do want to do custom marshaling" that the original marshaling stub will use this interface in order to carry out the task. The sequence of steps that carry this out is:</P>
+<SPAN CLASS="list"><OL><LI>Using GetUnmarshalClass, the original marshaling stub asks the object which kind of (such as which class of) proxy object it would like to have created on its behalf in the client process.</LI><LI><A NAME="PT4"></A>(optional on the part of the marshaling stub) Using GetMarshalSizeMax, the stub asks the object how big of a marshaling packet it will need. When asked, the object <I>will </I>return an upper bound on the amount of space it will need.<font class="MissingLink" meta="aslch07_FNFour">4.</font></LI><LI>The marshaling stub allocates a marshaling packet of appropriate size, then creates an IStream* which points into the buffer. Unless in the previous step the marshaling stub asked the object for an upper bound on the space needed, the IStream* must be able to grow its underlying buffer dynamically as IStream::Write calls are made.</LI><LI>The original marshaling stub asks the object to marshal its data using MarshalInterface.</LI></OL></SPAN>We will discuss the methods of this interface in detail later in this chapter.</P>
+At this point, the contents of the memory buffer pointed to by the IStream* together with the class tag returned in step 1 comprises all the information necessary in order to be able to create the proxy object in the client process. It is the nature of remoting and marshaling that original marshaling stubs such as we have been discussing know how to communicate with the client process; recall that we are assuming that an initial connection between the two processes had already been established. </P>
+The marshaling stub now communicates to the client process, by whatever means is appropriate, the class tag and the contents of the memory that contains the marshaled interface pointer. In the client process, the proxy object is created as an instance of the indicated class using the standard COM instance creation paradigm. IMarshal is used as the initialization interface; the initialization method is IMarshal::UnmarshalInterface(). The unmarshaling process looks something like the following:</P>
+  </P>
+<BR></P>
+<pre><code>void <B>ExampleUnmarshal</B>(CLSID&amp; clsidProxyObject, IStream* pstm, IID&amp; iidOriginallyMarshalled, void** ppvReturn)
+{
+IClassFactory* pcf;
+IMarshal* pmsh;
+CoGetClassObject(clsidProxyObject, CLSCTX_INPROC_HANDLER,  NULL, IID_IClassFactory, (void**)&amp;pcf);
+pcf-&gt;CreateInstance(NULL, IID_IMarshal, (void**)pmsh);
+pmsh-&gt;UnmarshalInterface(pstm, iidOriginallyMarshalled, ppvReturn);
+pmsh-&gt;ReleaseMarshalData(pstm)
+pmsh-&gt;Release();
+pcf-&gt;Release();
+}</code></pre>
+  </P>
+There are several important reasons why an object may choose to do custom marshaling.</P>
+<SPAN CLASS="list"><UL><LI>It permits the server implementation, transparently to the client, to be in complete control of the nature of the invocations that actually transition across the network. In designing component architectures, one often runs into a design tension between the interface which for simplicity and elegance one wishes to exhibit to client programmers and the interface that is necessary to achieve efficient invocations across the network. The former, for example, might naturally want to operate in terms of small-grained simple queries and responses, whereas the latter might want to batch requests for efficient retrieval. The client and the network interfaces are in design tension; custom marshaling is the crucial hook that allows us to have our cake and eat it too by giving the server implementor the ability to tune the network interface without affecting the interface seen by its client.
+When the object does custom marshaling, the client loses any "COM provided" communication to the original object. If the proxy wants to "keep in touch," it has to connect through some other means (RPC, Named pipe . . . ) to the original object. Custom Object Marshaling can not be done on a per interface basic, because object identity is lost! Custom Object Marshaling is a sophisticated way for an object to pass a copy of an existing instance of itself into another execution context.</P></LI><LI>Some objects are of the nature that once they have been created, they are immutable: their internal state does not subsequently change. Many monikers are an example of such objects. These sorts of objects can be efficiently remoted by making independent copies of themselves in client processes. Custom marshaling is the mechanism by which they can do that, yet have no other party be the wiser for it.</LI><LI>Objects which already are proxy objects can use custom marshaling to avoid creating proxies to proxies; new proxies are instead short-circuited back to the original server. This is both an important efficiency and an important robustness consideration.</LI><LI>Object implementations whose whole state is kept in shared memory can often be remoted to other process on the same computer by creating an object in the client that talks directly to the shared memory rather than back to the original object. This can be a significant performance improvement, since access to the remoted object does not result in context switches. The present Microsoft Compound File implementation is an example of objects using this kind of custom marshaling.</LI></UL></SPAN></P>
+ </P></BODY></HTML>

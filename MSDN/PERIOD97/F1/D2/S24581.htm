@@ -1,0 +1,546 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>C++ Q &amp; A</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF">
+<font face="verdana,arial,helvetica" size="2">
+<H1>C++ Q &amp; A</H1><P>Paul DiLascia</P>
+<P>Paul DiLascia is a freelance software consultant specializing in training and software development in C++ and Windows. He is the author of Windows++: Writing Reusable Code in C++ (Addison-Wesley, 1992)</P>
+<P>This month I digress from the usual Q&amp;A format to bring you up to date on a program called TRACEWIN that I first described in my October 1995 column. TRACEWIN displays MFC diagnostic output in a window instead of the debugger, just like the Windows&reg; 3.1 program DEBUGWIN used to do. Figure 1 shows TRACEWIN in action. If you didn't read the October issue, don't worry, I'll review the essentials. </P>
+<P><img src="cqa1.gif"></P>
+<P>Figure 1  TRACEWIN in action</P>
+<P>The basic idea behind TRACEWIN is to change the data member m_pFile in the MFC global variable afxDump. CDumpContext is an MFC class for displaying diagnostics; afxDump is MFC's global instance of this class, sort of like stderr in C or cerr in C++. The TRACE macro and its siblings—TRACE0, TRACE1, and company—all invoke ::AfxTrace, which writes to afxDump, as do all the virtual CObject::Dump functions. Everything eventually goes through a single function, CDumpContext::OutputString, that looks roughly like this.</P>
+<P></P>
+
+<PRE>// Simplified from ..\mfc\src\dumpcont.cpp
+void CDumpContext::OutputString(LPCTSTR lpsz)
+{
+  if (m_pFile == NULL)    {
+    ::OutputDebugString(lpsz);
+  } else
+    m_pFile-&gt;Write(lpsz, strlen(lpsz));
+}
+</PRE>
+<P>That is, CDumpContext calls the Win32&reg; function ::OutputDebugString, which writes the string to the debugger unless m_pFile is set, in which case it writes the string to the file by calling m_pFile-&gt;Write(). Normally, afxDump.m_pFile is NULL, but apps using TRACEWIN change it by calling MfxTraceInit.</P>
+
+<PRE>// In MfxTrace.h
+BOOL MfxTraceInit()
+{
+    afxDump.m_pFile = new CFileTrace;
+}
+</PRE>
+<P>CFileTrace is a special file class whose Write function sends the string to the TRACEWIN applet via a WM_COPYDATA&nbsp;message.&nbsp;CFileTrace&nbsp;and&nbsp;MfxTraceInit&nbsp;are&nbsp;defined&nbsp;in&nbsp;a&nbsp;header&nbsp;file,&nbsp;MfxTrace.h.&nbsp;All&nbsp;apps&nbsp;using&nbsp;TRACEWIN must #include MfxTrace.h and call MfxTraceInit, usually from the app's InitInstance function. So there are actually two components to TRACEWIN: the TRACEWIN applet that sits around waiting for WM_COPYDATA messages and displays the text when it receives them, and the MfxTrace.h header file that apps using TRACEWIN must #include so they can call MfxTraceInit.</P>
+<P>In my October 1995 column, I tried to eliminate the need for MfxTraceInit by instantiating a static _trInit object in MfxTrace.h, whose constructor did the initialization. That way the only thing programmers would have to do is #include MfxTrace.h. My idea failed because C++ called my static _trInit object's constructor <I>before</I> the one for afxDump, so when my constructor set </P>
+
+<PRE>m_pFile = new CFileTrace;
+</PRE>
+<P>CDumpContext::CDumpContext would set it back to NULL. C++ makes no guarantees about the order in which it will initialize static objects from different modules. It just happened that afxDump was initialized after my _trInit object; hence, the need to call MfxTraceInit from InitInstance, which MFC doesn't call until the program is running. At that point all static objects, including afxDump, are guaranteed to be initialized.</P>
+<P>This brings me to my reason for revisiting TRACEWIN. I never liked having to require that programmers #include a file and call an init function to use TRACEWIN. Ideally, TRACEWIN should operate invisibly to the app. You should be able to just start TRACEWIN, and all TRACE output from any old MFC program should magically appear in its window as long as the program was compiled with _DEBUG. No #include files, no init function.</P>
+<P>Well, believe it or not, while I was toiling away recently in my software dungeon, hard at work building a file viewer for my arch-nemesis the Maximum Leader of Acme Corporation, I thought of a way to do it. My solution only works for apps that link MFC as a DLL, not a static library, but fortunately most apps do.</P>
+<P>The crux of the idea is beautifully simple: first, write a DLL that sets afxDump.m_pFile = new CFileTrace when it loads. Then, get every app to load this DLL. Like I said, simple. </P>
+<P>Unfortunately, as with everything in Windows and MFC, what looks easy from nine miles up turns out to be more like the inside of a space shuttle engine up close. The easiest way I can explain it is to retrace my own journey along the road to enlightenment, starting with MfxTraceInit.</P>
+<P>Whenever Windows loads a DLL into a new process, it calls the DLL's DllMain function with a code, DLL_PROCESS_ATTACH. I had the idea of writing a DLL, TrWinDll.dll, with a DllMain that does the initialization</P>
+
+<PRE>BOOL DllMain(...DWORD dwReason...)
+{
+      if (dwReason == DLL_PROCESS_ATTACH) {
+      MfxTraceInit();
+    .
+    .
+    .
+   }
+}
+</PRE>
+<P>In MFC apps, you don't have to write DllMain; instead, you override CWinApp::InitInstance. </P>
+
+<PRE>// In TrWinDll.cpp
+BOOL CTraceWinDLL::InitInstance()
+{
+    MfxTraceInit();
+    return TRUE;
+}
+</PRE>
+<P>Now, instead of the app having to #include MfxTrace.h and call MfxTraceInit, TrWinDll does it. When Windows unloads TrWinDll, it calls DllMain with DLL_PROCESS_DETACH, which MFC's DllMain translates to a call to your DLL's ExitInstance function.</P>
+
+<PRE>// In TrWinDll.cpp
+int CTraceWinDLL::ExitInstance()
+{
+    MfxTraceTerm();
+    return CWinApp::ExitInstance();
+}
+</PRE>
+<P>In the old, non-DLL version of TRACEWIN, there was no need for a termination function. I simply let afxDump.m_pFile point to the CFileTrace object forever (that is, for the entire lifetime of the process). But now that I've moved MfxTrace.h to where the CFileTrace code lives in my DLL, I can't leave afxDump.m_pFile pointing to my CFileTrace object after the DLL is unloaded because MFC might still call afxDump.m_pFile-&gt;Write(). MFC would be trying to call code that doesn't exist, something sure to awaken the exception demon and generate a nasty little dialog with something about an "access violation" to tell you your program was naughty. So CTraceWinDLL::ExitInstance calls a new function, MfxTraceTerm, to set everything straight.</P>
+
+<PRE>// In MfxTrace.h
+void MfxTraceTerm()
+{
+    afxDump.m_pFile = NULL; // restore
+}
+</PRE>
+<P>So far, so good. TrWinDll turns tracing on as soon as it's loaded, and then turns it off again when it's unloaded. Now my problem becomes, how do I get TrWinDll loaded into every process? Under Windows NT, it's easy. Just add TrWinDll.dll to the AppInit_DLLs value in your system registry. This value holds a semicolon-delimited list of DLLs that you want Windows NT&reg; to load with every app.</P>
+<P>Unfortunately, there's no AppInit_DLLs for Windows 95, so you have to be more clever. For that, I turned to my pal Jeff Richter for help. In a May 1994 <I>MSJ</I> article, he described ways to "inject" a DLL into another process's address space. Jeff actually describes several ways; for TRACEWIN I chose to use a system-wide hook. This technique is also described in article Q134655 of the Win32 SDK Knowledge Base (albeit less clearly). For details, consult one of these articles. I only present the two-bit summary here.</P>
+<P>A windows hook is a callback function you can ask Windows to call when something interesting happens. For example, a WH_GETMESSAGE hook traps every call to ::GetMessage, whereas a WH_CBT (Computer Based Training) hook traps only certain events, like window creation, destruction, and activation, among others. A hook can be thread-specific or system-wide. For injecting DLLs, a system-wide hook is just the ticket. The basic idea is to write a hook procedure, put it in a DLL, and then write an applet that installs your DLL proc as a hook. Since all code, including hooks, must execute within the current running process's address space, Windows has to load the hook before it can call it. Say you installed a WH_CBT hook. Consider now what happens when XYZ app creates a window. Windows loads your DLL into XYZ's process space (if it isn't loaded already), then calls your hook procedure. The upshot is, setting a system-wide hook is a kludgy way to get Windows to inject a DLL into every running app. </P>
+<P>If you understand all that, you can understand how my new and improved TRACEWIN works. TRACEWIN installs a system-wide WH_CBT hook using a hook procedure in TrWinDll. The hook procedure doesn't do anything; it's just there to make Windows load my DLL. Since window activation is one of the events trapped by a CBT hook, as soon as I activate any window on my desktop, Windows loads TrWinDll into that app's process space before calling the hook. As TrWinDll loads, it initializes tracing by setting afxDump.m_pFile. Mission accomplished. If the app isn't an MFC app, no harm done.</P>
+<P>Being a big C++ fan and realizing that injecting DLLs is useful for other things besides TRACEWIN, I naturally encapsulated all the messy hook voodoo in a little class for all of you to steal. CInjectDll is an easy-to-use class that injects any DLL system-wide. It doesn't require MFC, so you can use it in non-MFC apps (Borland fans take note!). Figure 2 shows the full code for TrWinDll, including CInjectDll. Figure 3 shows only the startup code from the TRACEWIN applet that calls TrWinDll.</P>
+<P>Figure 2  TrWin.Dll</P>
+<P></P>
+<P>InjectDll.h</P>
+
+<PRE>////////////////////////////////////////////////////////////////
+// InjectDLL 1997 Microsoft Systems Journal. 
+// If this program works, it was written by Paul DiLascia.
+// If not, I don't know who wrote it.
+//
+// CInjectDll makes it easy to inject a DLL into Windows 95 processes, by
+// hiding all the mechanics of windows message hooks. To use it:
+//
+// * Derive a new class from CInjectDLL and override OnInject to do something
+//   the first time your DLL is injected into a new process. Advanced: you
+//   can also override OnHookProc to do stuff every time the hook is called.
+//
+// * Instantiate a CInjectDll object mydll in your DLL. If you're using MFC,
+//   you can multiply derive your DLL app object from CWinApp *and* CInjectDll.
+//
+// * Write exportable functions MyDllInit and MyDllTerm that call
+//   mydll.Inject() and mydll.Remove().
+//
+// * Add the following line to your DLL's module definition (.DEF) file:
+//                      SECTIONS .InjectDll READ WRITE SHARED
+//   This creates the shared data segment "InjectDll" CInjectDll uses.
+//
+// * Write a "starter app" that calls MyDllInit when it starts up;
+//   MyDllTerm when it shuts down.
+//
+class CInjectDll {
+private:
+    static CInjectDll* g_pThis;    // global CInjectDll ptr: one per process
+    static HHOOK g_hHook;                  // systemwide global shared by all processes
+    static LRESULT CALLBACK    HookProc(int nCode, WPARAM wp, LPARAM lp);
+protected:
+    virtual LRESULT OnHookProc(int nCode, WPARAM wp, LPARAM lp);
+    virtual void OnInject();
+public:
+    CInjectDll();
+    ~CInjectDll();
+    enum { E_ALREADY_INJECTED=1, E_INJECT_FAILED };
+    int  Inject(HINSTANCE hInstance, int nHookType);
+    BOOL Remove();
+};</PRE>
+<P></P>
+<P>InjectDll.cpp</P>
+
+<PRE>////////////////////////////////////////////////////////////////
+// 1997 Microsoft Systems Journal. 
+// If this program works, it was written by Paul DiLascia.
+// If not, I don't know who wrote it.
+//
+// Implementation of CInjectDll handles mechanics of injecting DLL
+// using windows hooks. See InjectDll.h for info how to use.
+//
+#include "StdAfx.h"
+#include "InjectDll.h"
+
+////////////////
+// Make sure global HHOOK is in shared data segment, so all instances
+// of the DLL (processes) refer to the same HHOOK (not one per process,
+// which is normally the case). You must define this segment, and
+// define it as SHARED, you your DLL's module-definition (.DEF) file.
+//
+#pragma data_seg (".InjectDll")      // you must define as SHARED in .def
+HHOOK CInjectDll::g_hHook = NULL;    // one instance for all processes
+#pragma data_seg ()
+
+// Global ptr to one-and-only CInjectDll object. One per process
+//
+CInjectDll* CInjectDll::g_pThis = NULL;
+
+CInjectDll::CInjectDll()
+{
+    ASSERT(g_pThis==NULL);    // should only be one
+    g_pThis = this;                    // set global ptr
+}
+
+CInjectDll::~CInjectDll()
+{
+    g_pThis = NULL;
+}
+
+//////////////////
+// Inject the DLL. I do it by creating a system-wide hook.
+// You must pass the DLL's HINSTANCE and what kind of hook to use.
+// If you're using MFC, you can get the HINSTANCE from the DLL's
+// CWinApp::m_hInstance.
+//
+// You should call Inject only once, via a DllInit function, from the
+// applet that actually injects the DLL.
+//
+int CInjectDll::Inject(HINSTANCE hInstance, int nHookType)
+{
+    if (g_hHook)
+             return E_ALREADY_INJECTED;
+        
+    ASSERT(hInstance);
+    ASSERT(WH_MINHOOK&lt;=nHookType &amp;&amp; nHookType&lt;=WH_MAXHOOK);
+
+    g_hHook = SetWindowsHookEx(nHookType,    // type of hook
+            HookProc,
+    // hook callback fn
+            hInstance,
+    // HINSTANCE of DLL
+            0);
+    // 0 = system-wide hook
+
+    return g_hHook ? NOERROR : E_INJECT_FAILED;
+}
+
+//////////////////
+// Un-inject the DLL. I.e., remove the hook. The DLL could remain mapped in
+// any process that's still using it, e.g., if the module count is &gt; 0.
+//
+BOOL CInjectDll::Remove()
+{
+    BOOL bRet = UnhookWindowsHookEx(g_hHook);
+    g_hHook = NULL;
+    return bRet;
+}
+
+//////////////////
+// Internal HOOKPROC just passes the buck to virtual function.
+//
+LRESULT CALLBACK CInjectDll::HookProc(int nCode, WPARAM wp, LPARAM lp)
+{
+    ASSERT(g_pThis);                            // check valid object and
+    return g_pThis-&gt;OnHookProc(nCode, wp, lp);
+}
+
+//////////////////
+// Virtual OnHookProc. You should override to do stuff whenever
+// the hook is called. For example, you might trap WM_CREATE messages to
+// subclass windows when they are created. Default calls OnInject the first
+// time the new hook is called.
+//
+LRESULT CInjectDll::OnHookProc(int nCode, WPARAM wp, LPARAM lp)
+{
+    static bInjected = FALSE;    // one per process/DLL instance
+    if (!bInjected) {            // if this is the first time called:
+        g_pThis-&gt;OnInject();     // do first-time init..
+        bInjected = TRUE;        // ..but not again
+    }
+    return nCode &lt; 0 ? CallNextHookEx(g_hHook, nCode, wp, lp) : 0;
+}
+
+//////////////////
+// Default when-injected function does nothing. You should override to
+// do stuff when your DLL is first injected. For example, to subclass
+// window procs.
+//
+void CInjectDll::OnInject()
+{
+}</PRE>
+<P> </P>
+<P>MfxTrace.h</P>
+
+<PRE>////////////////////////////////////////////////////////////////
+// TRACEWIN 1995-1997 Microsoft Systems Journal. 
+// If this program works, it was written by Paul DiLascia.
+// If not, I don't know who wrote it.
+//
+// TRACEWIN is a tool that displays MFC diagnostic (afxDump, TRACE) output
+// in the window of the TRACEWIN applet.
+//
+// * For apps linked with MFC.DLL, you don't need to do anything,
+//   just run the TRACEWIN applet.
+//
+// * For apps static-linked with MFC.LIB, you must #include this file in
+//   your main program file (typically where you implement your CWinApp).
+//   You must also call MfxTraceInit from your app's InitInstance function.
+//   Since this file contains code, you should #include it in only one place.
+//
+// Modification history
+// 4-1-95:   Created
+// 10-12-95: Use WM_COPYDATA instead of atoms. Also note the name of this 
+//           file is changed to TRACEWIN.H.
+// 11-10-95: Added "Keep Window on Top" feature and fixed a bug 
+//           relating to saved window pos.
+// 11-15-95: Save/Restore position with CWindowPlacement.
+// 12-05-95: Implemented tracer object with "new" instead of static, so
+//           it remains around for reporting memory leaks, if any.
+// 8-27-96:  Made unicode compatible (I hope!)
+// 9-14-96:  Added font UI
+// 1-1-97:   New DLL scheme. TraceWin.h and MfxTraceInit no longer required
+//           for apps that use DLL MFC.
+// 
+
+// Window class name used by the main window of the TRACEWIN applet.
+#define TRACEWND_CLASSNAME "MfxTraceWindow"
+
+// ID sent as COPYDATASRUCT::dwData to identify the WM_COPYDATA message
+// as coming from an app using TRACEWIN.
+#define ID_COPYDATA_TRACEMSG MAKELONG(MAKEWORD('t','w'),MAKEWORD('i','n'))
+
+#ifdef _DEBUG
+
+//////////////////
+// CFileTrace is a CFile, but "writes" to the trace window
+//
+class CFileTrace : public CFile {
+   DECLARE_DYNAMIC(CFileTrace)
+   CFileTrace() { m_strFileName = "Mfx File Tracer"; }
+   friend BOOL MfxTraceInit();
+public:
+   virtual void Write(const void* lpBuf, UINT nCount);
+};
+IMPLEMENT_DYNAMIC(CFileTrace, CFile)
+
+//////////////////
+// Override to write to TRACEWIN applet instead of file.
+//
+void CFileTrace::Write(const void* lpBuf, UINT nCount)
+{
+   if (!afxTraceEnabled)
+      return;  // MFC tracing not enabled
+
+   HWND hTraceWnd = ::FindWindow(TRACEWND_CLASSNAME, NULL);
+   if (hTraceWnd) {
+      // Found Trace window: send string with WM_COPYDATA
+      // Must copy to make me the owner of the string; otherwise
+      // barfs when called from MFC with traceMultiApp on
+      //
+      static char mybuf[1024];
+      memcpy(mybuf, lpBuf, nCount);
+      COPYDATASTRUCT cds;
+      cds.dwData = ID_COPYDATA_TRACEMSG;
+      cds.cbData = nCount;
+      cds.lpData = mybuf;
+      CWinApp* pApp = AfxGetApp();
+      HWND hWnd = pApp ? pApp-&gt;m_pMainWnd-&gt;GetSafeHwnd() : NULL;
+      SendMessage(hTraceWnd, WM_COPYDATA, (WPARAM)hWnd, (LPARAM)&amp;cds);
+
+   } else {
+      // No trace window: do normal debug thing
+      ::OutputDebugString((LPCTSTR)lpBuf);
+   }
+}
+
+/////////////////
+// Initialize tracing. Replace global afxDump.m_pFile with me.
+//
+BOOL MfxTraceInit()
+{
+   if (::FindWindow(TRACEWND_CLASSNAME, NULL) &amp;&amp; afxDump.m_pFile==NULL) {
+      // Initialize tracing: replace afxDump.m_pFile w/my own CFile object
+      //
+      // It's important to allocate with "new" here, not a static object,
+      // because CFileTrace is virtual--i.e., called through a pointer in
+      // the object's vtbl--and the compiler will zero out the virtual
+      // function table with a NOP function when the when a static object
+      // goes out of scope. But I want my CFileTrace to stay around to
+      // display memory leak diagnostics even after all static objects
+      // have been destructed. So I allocate the object with new and
+      // never delete it. I don't want this allocation to itself generate
+      // a reported memory leak, so I turn off memory tracking before I
+      // allocate, then on again after.
+      //
+      BOOL bEnable = AfxEnableMemoryTracking(FALSE);
+      afxDump.m_pFile = new CFileTrace;
+      AfxEnableMemoryTracking(bEnable);
+      return TRUE;
+   }
+   return FALSE;
+}
+
+////////////////
+// Terminate tracing: restore afxDum file ptr
+//
+void MfxTraceTerm()
+{
+   if (afxDump.m_pFile &amp;&amp;
+       afxDump.m_pFile-&gt;IsKindOf(RUNTIME_CLASS(CFileTrace)))
+   afxDump.m_pFile = NULL;
+}
+
+#else
+
+// For non-debug build, define MfxTraceInit as a no-op
+#define MfxTraceInit()
+#define MfxTraceTerm()
+
+#endif // _DEBUG</PRE>
+<P></P>
+<P>TrWinDll.def</P>
+
+<PRE>LIBRARY      "TRWINDLL"
+DESCRIPTION  'TRWINDLL DLL by Paul DiLascia'
+SECTIONS     .InjectDll READ WRITE SHARED</PRE>
+<P></P>
+<P>TrWinDll.cpp</P>
+
+<PRE>////////////////////////////////////////////////////////////////
+// 1997 Microsoft Systems Journal. 
+// If this program works, it was written by Paul DiLascia.
+// If not, I don't know who wrote it.
+//
+// TRACEWIN support DLL. Uses CInjectDll to inject itself into every process,
+// to "hook" afxDump and map all afxDump output to the TRACEWIN applet. If the
+// process is not an MFC app, hooking afxDump has no effect and is harmless.
+// You never need to call/use this DLL in your app. The TRACEWIN applet loads
+// and initializes TrWinDll.
+//
+#include "StdAfx.h"
+#include "InjectDLL.h"
+#include "MfxTrace.h"
+
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#undef THIS_FILE
+static char THIS_FILE[] = __FILE__;
+#endif
+
+#ifndef _DEBUG
+// Since TrWinDll is used to trap axfDump, which is only defined when
+// debugging is on, it makes no sense to compile this file w/o _DEBUG
+#error "TRWINDLL Must be compiled with debugging on."
+#endif
+
+//////////////////
+// App object for this TRWINDLL
+//
+class CTraceWinDLL : public CWinApp, public CInjectDll {
+public:
+   CTraceWinDLL()  { }
+   ~CTraceWinDLL() { }
+   virtual BOOL InitInstance();
+   virtual int  ExitInstance();
+} theDLL;   // one-and-only, normal (per-process) static global
+
+//////////////////
+// DLL has been loaded into a new process: initialize tracing
+//
+BOOL CTraceWinDLL::InitInstance()
+{
+   MfxTraceInit();
+   return TRUE;
+}
+
+//////////////////
+// DLL is unloading (DLL_PROCESS_DETACH): Restore afxDump.
+// Otherwise, afxDump.m_pFile will point to code that doesn't exist!
+//
+int CTraceWinDLL::ExitInstance()
+{
+   MfxTraceTerm();
+   return CWinApp::ExitInstance();
+}
+
+//////////////////
+// Init/Term functions turn tracing on/off. Called from TRACEWIN applet only.
+//
+__declspec(dllexport) int MfxTraceDllInit()
+{
+   // I use a CBT (Computer Based Training) hook, which Windows calls
+   // whenever a window is created/destroyed/activated (among other things).
+   // This means that tracing may not work for some apps that don't create
+   // windows. You could fix this by using a WH_GETMESSAGE hook, instead,
+   // but that will incur a slight performance hit EVERY time the app calls
+   // GetMessage, and still only work for apps that have a message loop.
+   // The CBT is less intrusive.
+   //
+   // If you have a bizarre app that neither creates window nor has a
+   // message loop, youu can always #include "MfxTrace.h" and call
+   // MfxTraceInit yourself, in lieu of the whole DLL scheme.
+   //
+   return theDLL.Inject(theDLL.m_hInstance, WH_CBT);
+}
+
+__declspec(dllexport) BOOL MfxTraceDllTerm()
+{
+   return theDLL.Remove();
+}</PRE>
+<P><B>Figure 3  TraceWin.cpp</B></P>
+
+<PRE>////////////////////////////////////////////////////////////////
+// TRACEWIN 1995-1997 Microsoft Systems Journal. 
+//</PRE>
+<P>.</P>
+<P>.</P>
+<P>.</P>
+
+<PRE>//////////////////
+// TRACEWIN applet starting up.
+//
+BOOL CTraceWinApp::InitInstance()
+{</PRE>
+<P>.</P>
+<P>.</P>
+<P>.</P>
+
+<PRE>   // Inject TrWinDll into all processes
+   int nErr = MfxTraceDllInit();
+   if (nErr) {
+      AfxMessageBox(nErr==1? "Can't run multiple instances of TRACEWIN."
+         : "Error injecting DLL. Tracing not enabled.",
+         MB_OK|MB_ICONEXCLAMATION);
+   }
+   return (nErr!=1);
+}</PRE>
+<P></P>
+<P>To use CInjectDll, you first must instantiate one—and only one—instance of it in your DLL. The easiest way to do it in an MFC app is to derive your app object from CWinApp and CInjectDll via multiple inheritance.</P>
+
+<PRE>// multiple inheritance
+class CTraceWinDLL : public CWinApp, 
+  public CInjectDll {
+.
+.
+.
+                     } theDLL; // one-and-only
+</PRE>
+<P>This reinforces the idea that "injectability" is a feature of the DLL, and also makes it easy to override CInjectDll virtual functions. Since CInjectDll is not derived from CObject, you don't have any of the ugly problems usually associated with multiple inheritance in MFC. In a non-MFC app, you'd write something like</P>
+
+<PRE>CInjectDLL theDLL; // one-and-only
+</PRE>
+<P>Once&nbsp;you&nbsp;have&nbsp;a CInjectDll object, you can call handy functions to inject and remove your DLL. Since the TRACEWIN applet is the program that actually does the injecting and removing, I wrote wrapper functions MfxTraceDllInit and MfxTraceDllTerm that in turn call the CInjectDll member functions.</P>
+
+<PRE>// In TrWindDll.cpp
+int MfxTraceDllInit()
+{
+    return theDLL.Inject(theDLL.m_hInstance,WH_CBT);
+}
+
+BOOL MfxTraceDllTerm()
+{
+    return theDLL.Remove();
+}
+</PRE>
+<P>CInjectDLL::Inject requires the instance handle of the DLL and the WH_XXX code for the kind of hook you want to use. In MFC, the instance handle is stored in the DLL's CWinApp::m_hInstance (actually in CWinThread); in a non-MFC DLL, you get the DLL's HINSTANCE from Windows as an argument to your DllMain function. It's important to use the HINSTANCE for the DLL and not the app calling it; GetModuleHandle(NULL) won't work.</P>
+<P>To see how it all works, consider what happens when TRACEWIN starts up. It calls MfxTraceDllInit, which in turn calls theDLL.Inject, which sets a system-wide CBT hook using a static member function, CInjectDll:: HookProc, as the callback procedure. This function doesn't actually do anything, it's just there to force Windows to load the DLL. When TRACEWIN exits, it calls MfxTraceDllTerm, which calls theDLL.Remove to destroy the system-wide hook. End of story. The great thing about it is that apps don't have to do anything to make tracing work! </P>
+<P>Well, almost. There is one requirement. TRACEWIN only works for apps that use the dynamically linked version of MFC (MFCxx.DLL), not the static library. Why? Because when TrWinDll sets afxDump.m_pFile, it sets the afxDump variable in MFCxx.DLL. There's no way it could access a statically linked variable without itself being statically linked. If you want to use TRACEWIN to see output from statically linked MFC apps, you have to do it the old way, by #including MfxTrace.h and calling MfxTraceInit. Sorry.</P>
+<P>Before&nbsp;leaving&nbsp;TRACEWIN, there are a couple of points I'd like to highlight. First is this issue of afxDump. afxDump is a static variable that's part of MFC—that is, it lives in MFCxx.DLL. Under Win32, DLL data is by default non-shared. While multiple processes all share the same DLL code (and shared code is what makes DLLs so great), each process gets its own copy of DLL data. If application 1 and application 2 both use MFC42.DLL, they each get their own copy of afxDump (see Figure 4). This protects processes from one another, and it's why TrWinDll must set afxDump.m_pFile every time it loads—because each process has its own afxDump.</P>
+<P><img src="cqa4.gif"></P>
+<P>Figure 4  Each App Gets Its Own Copy of afxDump</P>
+<P>It is possible to let processes share DLL data. When data is shared, all processes access the same physical bytes in memory. You can imagine how this might be useful for constant data. If the data can't change, why create a copy for every process? But there are other times shared data is useful as well, and in fact, CInjectDll needs it. When CInjectDll::Inject calls SetWindowsHookEx to set its hook, Windows returns a handle to the hook (HHOOK), which the hook proc must pass back to Windows to call the next hook:</P>
+
+<PRE>// "virtualized" hook proc
+LRESULT CInjectDll::OnHookProc(int nCode, WPARAM&nbsp;wp,                                      LPARAM lp)
+{
+  return nCode &lt; 0 ? 
+    CallNextHookEx(g_hHook, nCode, wp, lp) : 0;
+}
+</PRE>
+<P>CInjectDll::g_hHook is a static global that must be shared! Why? Because while you want every process to have its own copy of afxDump, theDLL, and most other variables, there's only one hook for the entire system. TRACEWIN is the only process that ever calls MfxTraceDllInit to set the hook. Once the hook is set, every process uses the same HHOOK value to call CallNextHookEx. So every process must share the same g_hHook.</P>
+<P>If you look in InjectDll.cpp, you'll see that g_hHook is enclosed in #pragma statements:</P>
+
+<PRE>// you must define as SHARED in .def
+#pragma data_seg (".InjectDll")        
+// one instance for all processes
+HHOOK CInjectDll::g_hHook = NULL;    
+#pragma data_seg ()
+</PRE>
+<P>This is Microsoft&reg; mumbo-jumbo to tell the compiler to put the variable g_hHook in the data segment called "InjectDll". (Other compilers have different syntax—check your manual.) The module definition file TrWinDll.def contains the following line</P>
+
+<PRE>SECTIONS .InjectDll READ WRITE SHARED
+</PRE>
+<P>Note the SHARED keyword. I point this out because if you decide to use CInjectDll to inject your own DLL, you must add the above line to your DLL's module definition file, or you'll get a nasty message from the linker complaining about undefined segments. </P>
+<P>I mentioned that CInjectDll's hook procedure doesn't actually do anything. This isn't quite true; it does map the callback to a CInjectDLL virtual function, CInjectDll::OnHook. There's also an OnInject virtual function that CInjectDLL calls the first time OnHook is called. TRACEWIN doesn't use either of these, but you might use OnHook if you wanted to actually do stuff when the hook events happen. For example, you could watch for WM_CREATE messages and subclass new windows as they're created.</P>
+<P>The improved TRACEWIN is really cool. Just run it to see TRACE output from any debug-build MFC app that uses MFCxx.DLL. You can even start TRACEWIN after the app is already running! </P>
+<P>Have a question about programming in C or C++? Send it to Paul DiLascia at 72400.2702@compuserve.com</P>
+<P><I>This article is reproduced from Microsoft Systems Journal. Copyright &copy; 1997 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S. and Canada, or (303) 678-0439 in all other countries. For other inquiries, call (415) 905-2200.</P></font></body></HTML>

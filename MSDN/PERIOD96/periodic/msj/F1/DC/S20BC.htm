@@ -1,0 +1,269 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>ActiveX/COM Q &amp; A</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  ActiveX/COM Q &amp; A</H1><P>Don Box</P>
+<P>Don Box has been working in networking and distributed object systems since 1989. He is currently chronicling the COM lifestyle in book form for Addison Wesley, and gives seminars on OLE and COM across the globe. Don can be reached at dbox@braintrust.com.</P>
+<P><font size="6" face="verdana,arial,helvetica">Q</font>I'm finally getting into the habit of using the Interface Definition Language (IDL) to define all of my COM interfaces. When I pass parameters by value, I am pretty confident that I understand what I am doing. When I pass arrays or strings, I find that I am simply adding parameter attributes such as string, size_is, and length_is until the generated proxy/stub DLL doesn't crash. What exactly do these attributes do?</P>
+<P><font size="6" face="verdana,arial,helvetica">A</font>It is completely understandable that you might be confused by the plethora of IDL attributes that pertain to pointer and array parameters, as the problems that they address are not found in normal C or C++ programming. First, a brief explanation of the problem.</P>
+<P>C and C++ support defining function prototypes in header files. These prototypes are used by the compiler to ensure that, when a procedure is called, the stack and registers are properly initialized with the appropriate call state. This call state consists largely of parameters from the caller to the callee/function, as well as pointers to variables that the method implementation will fill in on output. For example, the following C function prototype</P>
+<P><BR></P>
+<PRE> void FooBar(long arg0, long *arg2);</PRE>
+<P>tells the compiler to pass the 4-byte value of arg0 on the stack, followed by a pointer to some other 4 bytes (which may or may not be located on the stack) to give the callee access to at least one long integer managed by the caller. The reason that this pointer parameter may represent more than one long integer comes from the unfortunate C language feature that allows array variable names to be treated as if they were pointers. This relationship between C pointers and arrays makes this client code</P>
+<P><BR></P>
+<PRE> void f(void) {
+  long arg2 = 100;
+  FooBar(20, &amp;arg2);
+}</PRE>
+<P>no less valid than this usage that passes an array:</P>
+<P><BR></P>
+<PRE> void f(void) {
+  long arg2[] = { 100, 200, 300 };
+  FooBar(20, arg2);
+}</PRE>
+<P>This capability may have seemed useful in C, but inheritance in C++ means this feature causes as many problems as it solves. Since passing arrays as pointer values is common, it needs to be accommodated under COM to support existing programming styles. </P>
+<P>The ability to pass pointers from the caller to the method implementation is not a problem in traditional C and C++, as the language assumes the function will execute in the same address space as the caller, and any memory referred to by pointer parameters is visible to both the caller and the callee. This is what allows the array/pointer trick to work. When moving to an RPC-based system such as COM, procedures must be able to transparently pass control to servers in different address spaces. To achieve location transparency, the calling environment of the caller must be emulated in the calling environment in the server. This is done by transmitting messages that contain portions of the calling environment to and from the server. It is the job of the marshaling layer to corral the arbitrarily complex call stack into the request and response messages used to invoke COM methods. The request message is sent from the client to the server and contains any call state that must be communicated to the method implementation. The response packet contains any results from the method and is sent from the server to the client to indicate that the method has completed execution. Both messages can potentially contain the marshaled call state.</P>
+<P>Prior to sending a request or response message, the marshaler first calculates how much space is required for each parameter that must be sent. For primitive data types that are passed by value, this is a simple calculation performed at compile time. Once the aggregate size of all parameters is known, a transmission buffer is allocated from the communications channel and the parameters are marshaled into the transmission buffer. For primitive data types, the only special processing that must take place is ensuring that each parameter in the buffer is properly aligned on natural boundaries. Potential platform-dependencies, including byte-ordering and floating point formats, are taken care of at the unmarshaling side before the message is read.</P>
+<P>By default, pointer parameters are assumed to be pointers to single instances, not arrays. To pass an array as a parameter, you can either use the C array syntax or special IDL attributes to indicate various array dimension information. The simplest technique for passing arrays is to specify the dimensions at compile time:</P>
+<P><BR></P>
+<PRE> HRESULT Method1([in] short rgs[8]);</PRE>
+<P>This is known as a fixed array, and is both the simplest to express in IDL and the simplest and most compact representation at runtime. For the array above, the marshaler in the client-side proxy will allocate 16 bytes in the transmission buffer (8 * sizeof(short)), and then will copy all 8 elements into the buffer. Once the message is received by the server, the unmarshaler in the server-side stub will then use the received buffer directly as an argument to the function as shown in <B>Figure 1</B>. Because the size of the array is fixed and all of the elements in the array are already in the received buffer, the stub is smart enough to just use the received buffer as an argument.</P>
+<P><img src="actxqa1.gif"></P>
+<P><B> Figure 1  Arrays Aplenty</B></P>
+<P>The method declared above is useful if the only reasonable array length is 8 in all cases. It allows the caller to pass any array of shorts, provided the array has only 8 elements:</P>
+<P><BR></P>
+<PRE> void f(IFoo *pFoo) {
+   short rgs[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+   pFoo-&gt;Method1(rgs);
+}</PRE>
+<P>Guessing the appropriate array length in practice is virtually impossible; guessing too small means not enough elements will be transmitted, and guessing too large will cause the transmitted message to be too big. Moreover, if the array consists of complex data types, marshaling elements beyond the actual array size could be extremely expensive or could cause marshaling errors.</P>
+<P>To allow arrays to be dimensioned at runtime, IDL (and the underlying wire protocol, NDR) allows the caller to specify the capacity of the array at runtime. Arrays of this type are referred to as conformant arrays. The maximum legal index of a conformant array can be specified at either runtime or compile time, and the capacity (known as the array's conformance) is transmitted prior to the actual elements (see <B>Figure 1</B>). Like fixed arrays, conformant arrays can be passed to the method implementation directly from the received buffer without any additional copying, as the space for the total capacity of the array is always present in the received message.</P>
+<P>IDL uses the size_is attribute to allow the caller to specify the conformance of an array</P>
+<P><BR></P>
+<PRE> HRESULT Method2([in] long cMax, 
+                [in, size_is(cMax)] short rgs[]);</PRE>
+<P>or</P>
+<P><BR></P>
+<PRE> HRESULT Method3([in] long cMax, 
+                [in, size_is(cMax)] short *rgs);</PRE>
+<P>These are equivalent. Both methods allow the caller to determine the appropriate array size as follows:</P>
+<P><BR></P>
+<PRE> void f(IFoo *pFoo) {
+   short rgs[] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+   pFoo-&gt;Method1(8, rgs);
+}</PRE>
+<P>When used as a parameter attribute as shown above, the expression used by the size_is attribute can use any other parameters to the same method, and can use arithmetic, logical, and conditional operators. For example, the following IDL is legal, if not easily understood:</P>
+<P><BR></P>
+<PRE> HRESULT Method4([in] long arg1, [in] long arg2,  
+    [in] long arg3,
+    [in, size_is(arg1==arg2?arg3+1:arg1&amp;arg2)] 
+         short *rgs);</PRE>
+<P>Calling functions or other constructs that might cause side-effects (such as the ++ and - - operators) are prohibited. </P>
+<P>When used to describe a conformant array that is embedded inside a struct, the size_is attribute can use any other members of the same struct</P>
+<P><BR></P>
+<PRE> typedef struct tagCOUNTED_SHORTS {
+    long cMax;
+    [size_is(cMax)] short rgs[];
+} COUNTED_SHORTS;
+HRESULT Method5([in] COUNTED_SHORTS *pcs);</PRE>
+<P>which assumes a caller-side usage as follows:</P>
+<P><BR></P>
+<PRE> void f(IFoo* pFoo) {
+    short rgs[] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    COUNTED_SHORTS cs;
+    cs.cMax = 8; memcpy(cs.rgs, rgs);
+    pFoo-&gt;Method5(&amp;cs);
+}</PRE>
+<P>IDL also supports the max_is attribute, which is a stylistic variation on size_is. The size_is attribute indicates the number of elements an array can contain; the max_is attribute indicates the maximum legal index in an array (which is one less than the number of elements an array can contain). This means that the following two declarations are identical:</P>
+<P><BR></P>
+<PRE> HRESULT Method6([in, size_is(10)] short *rgs);
+HRESULT Method7([in, max_is(9)] short *rgs);</PRE>
+<P>If the contents of arrays were only passed from the caller to the method implementation, the conformant array would be sufficient for almost all uses. There are many cases, however, where the caller wishes to pass a potentially empty array to the caller and have it filled with useful values upon return. It is possible to use conformant arrays as output parameters,</P>
+<P><BR></P>
+<PRE> HRESULT Method8([in] long cMax, <BR>                [out, size_is(cMax)] short *rgs);</PRE>
+<P>which implies the following caller-side usage</P>
+<P><BR></P>
+<PRE> void f(IFoo *pFoo) {
+  short rgs[100];
+  pFoo-&gt;Method8(100, rgs);
+}</PRE>
+<P>and the following server-side implementation</P>
+<P><BR></P>
+<PRE> HRESULT CFoo::Method8(long cMax, short *rgs) {
+  for (long n = 0; n &lt; cMax; n++)
+    rgs[n] = n * n;
+  return S_OK;
+}</PRE>
+<P>But what if the method implementation has only half as many elements to fill into the array? In the code fragment above, even if the method only initializes the first cMax/2 elements of the array, the server-side stub will still transmit the entire array of cMax elements. This is clearly inefficient, and to address this IDL and NDR provide a third type of array, the varying array.</P>
+<P>A varying array may contain fewer valid elements than the overall capacity of the array. In IDL and NDR, a single contiguous subset of an array's contents can be sent using the length_is attribute. Unlike the size_is attribute, which describes the capacity of the array, the length_is attribute describes the actual contents of the array. Consider the following IDL:</P>
+<P><BR></P>
+<PRE> HRESULT Method9([in] long cActual, 
+       [in, length_is(cActual)] short *rgs[1024]);</PRE>
+<P>When transmitted, the value of cActual (which is known as the variance of the array) will precede the transmitted values. To allow the transmitted region to appear anywhere within the array, not just at the beginning, IDL and NDR also support the first_is attribute, which indicates where the transmitted region begins. This offset value will also be transmitted with the array contents so that the unmarshaler will know which subset of the array is being initialized. Just as size_is has the stylistic variant max_is, length_is has the variant last_is, which uses an index in lieu of a count. The following two definitions are equivalent:</P>
+<P><BR></P>
+<PRE> HRESULT Method10([in, first_is(2), length_is(5)] <BR>                  short rgs[8]);
+HRESULT Method11([in, first_is(2), last_is(6)] <BR>                  short rgs[8]);</PRE>
+<P>Both methods instruct the marshaler to only transmit five array elements, but room for eight elements is allocated at the unmarshal side and the incoming values are copied to the appropriate locations.</P>
+<P>Varying arrays can result in reduced network traffic, as only the required elements are transmitted. However, as shown in <B>Figure 1</B>, varying arrays are less efficient than conformant arrays in terms of memory bandwidth. The array that is passed to the method implementation by the server-side stub is allocated as a distinct block of memory on the heap and the contents of the received buffer are copied into it. This means one additional pass over the bytes, which for large arrays can hurt performance. </P>
+<P>Like fixed arrays, varying arrays as described above tend to be fairly useless since it's difficult in practice to guess the correct buffer size. Fortunately, IDL and NDR allow both the capacity (conformance) and contents (variance) to be specified for a given array by combining the size_is and length_is attributes. When both attributes are used, the array is known as a conformant varying array, or open array. To specify open array, simply provide the caller with a way of specifying both the capacity and the contents via parameters:</P>
+<P><BR></P>
+<PRE> HRESULT Method12([in] cMax, [in] cActual,
+                 [in, 
+                  size_is(cMax), 
+                  length_is(cActual)] short *rgs);</PRE>
+<P>This implies a client-side usage as follows:</P>
+<P><BR></P>
+<PRE> void f(IFoo *pFoo) {
+  short rgs[8];
+  rgs[0] = 1; rgs[1] = 2;
+  pFoo-&gt;Method12(8, 2, rgs);</PRE>
+<P>As shown in <B>Figure 1</B>, when transmitting an open array, the marshaler will first write out the capacity of the array in addition to the offset and length of the actual contents. As with the varying array, the elements received in the incoming buffer cannot be passed directly to the caller, so a second block of memory is used, increasing memory overhead.</P>
+<P>Conformant arrays are the most useful type of array for input parameters. Open arrays are most useful for output or input/output parameters, as they allow the caller to allocate an arbitrarily sized buffer and yet only the number of elements actually used will be transmitted. To allow this type of usage, the IDL typically looks something like this:</P>
+<P><BR></P>
+<PRE> HRESULT Method13(
+   [in] long cMax, 
+   [out] long *pcActual,
+   [out, size_is(cMax),      length_is(*pcActual)]
+            short *rgs);</PRE>
+<P>This implies the following client-side usage</P>
+<P><BR></P>
+<PRE> void f(IFoo *pFoo) {
+  short rgs[8];
+  long cActual;
+  pFoo-&gt;Method13(8, &amp;cActual, rgs);
+  // .. process first cActual elements of rgs
+}</PRE>
+<P>and a server-side implementation something like this:</P>
+<P><BR></P>
+<PRE> HRESULT CFoo::Method13(long cMax, long *pcActual,
+                       short *rgs) {
+  *pcActual = min(cMax,5); //only write 1st 5 elems
+  for (long n = 0; n &lt; *pcActual; n++)
+    rgs[n] = n * n;
+  return S_OK;
+}</PRE>
+<P>This allows the caller to control the buffer sizing, but the method of implementation controls the actual number of elements transmitted. </P>
+<P>So far, the examples have all dealt with one-dimensional arrays. Consider the following C prototype:</P>
+<P><BR></P>
+<PRE> void g(short **arg1);</PRE>
+<P>This can mean any number of things in C. Perhaps the function is expecting a pointer to a pointer to a single short:</P>
+<P><BR></P>
+<PRE> void g(short **arg1) { // return ptr to static
+  static short s;
+  *arg1 = &amp;s;
+}</PRE>
+<P>Or perhaps the function is expecting an array of 100 short pointers:</P>
+<P><BR></P>
+<PRE> void g(short **arg1) { // square 100 shorts byref
+  for (int n = 0; n &lt; 100; n++)
+    *(arg1[n]) *= *(arg1[n]);</PRE>
+<P>Or perhaps the function is expecting an pointer to a pointer to an array of shorts:</P>
+<P><BR></P>
+<PRE> void g(short **arg1) { // square 100 shorts
+  for (int n = 0; n &lt; 100; n++)
+    (*arg1)[n] *= (*arg1)[n];</PRE>
+<P>This nightmare is addressed in IDL by using a syntax that often sends novice IDL users running to the documentation. </P>
+<P>The IDL size_is and length_is attributes accept a variable number of comma-delimited arguments, one per level of indirection. If a parameter is missing, the current level of indirection is assumed to be a pointer and not an array. As is shown in <B>Figure 2</B>, to indicate that a parameter is a pointer to a pointer to a single instance, no additional attributes are needed:</P>
+<P><BR></P>
+<PRE> HRESULT Method14([in] short **pps);</PRE>
+<P>To indicate that a parameter is an array of pointers to instances, use this:</P>
+<P><BR></P>
+<PRE> HRESULT Method15([in, size_is(3,)] short **rgps);</PRE>
+<P>To indicate that a parameter is a pointer to an array of instances, the following IDL is correct:</P>
+<P><BR></P>
+<PRE> HRESULT Method16([in, size_is(,4)] short **pprgs);</PRE>
+<P>To indicate that a parameter is an array of pointers to arrays of instances, the following IDL is correct:</P>
+<P><BR></P>
+<PRE> HRESULT Method17([in,size_is(3,4)] short **rgrgs);</PRE>
+<P>While this syntax may leave something to be desired, it is nonetheless more flexible and less ambiguous than C.</P>
+<P><img src="actxqa2.gif"></P>
+<P><B> Figure 2  Multidemensional Arrays</B></P>
+<P>The values used by size_is, length_is, and other array dimensioning attributes cannot be based on function calls. This would make using strings whose variance is based on calls to wcslen or strlen difficult to marshal. It makes the following illegal :</P>
+<P><BR></P>
+<PRE> HRESULT Method18([in, size_is(wcslen(wsz) + 1)] 
+                 const wchar_t *wsz);</PRE>
+<P>Because of this limitation, IDL supports the string attribute, which tells the marshaling layer to call the appropriate <I>xxx</I>len function to calculate the conformance of an array. The following is the correct way to specify a string as an input parameter:</P>
+<P><BR></P>
+<PRE> HRESULT Method19([in, string] const wchar_t *wsz);</PRE>
+<P>When using strings as output or input/output parameters, it is almost always a good idea to specify the capacity of the caller's buffer explicitly to ensure that the server-side buffer is large enough. Consider the following buggy IDL:</P>
+<P><BR></P>
+<PRE> HRESULT Method20([in, out, string] wchar_t *wsz);</PRE>
+<P>If the caller invokes this method with some fairly short string:</P>
+<P><BR></P>
+<PRE> void f(IFoo *pFoo) {
+  wchar wsz[1024];
+  wcscpy(wcs, L"Hello");
+  pFoo-&gt;Method20(wsz);
+ // .. process updated string
+}</PRE>
+<P>then the capacity of the array allocated on the server-side will be calculated based on the length of the input string (which is 5). Consider the following server-side method implementation:</P>
+<P><BR></P>
+<PRE> HRESULT CFoo::Method20(wchar_t *wsz) {
+  printf(wsz);
+  wcscpy(wsz, L"Goodbye");
+  return S_OK;
+}</PRE>
+<P>Because the conformance of the array was based on wcslen(L"Hello"), when the method implementation overwrites the string with something longer, the tail end of the string will overwrite random bytes of memory, hopefully causing fatal errors before the software is released. Even though the caller had ample storage preallocated to hold the resultant string, the marshaling layer on the server-side was unaware of this seemingly extraneous memory and only allocated enough space to hold 12 bytes worth of Unicode string. The more correct IDL would have been:</P>
+<P><BR></P>
+<PRE> HRESULT Method21([in] long cMax,<BR>   [in, out, string, size_is(cMax)] wchar_t *wsz);</PRE>
+<P>The caller could have used it as follows:</P>
+<P><BR></P>
+<PRE> void f(IFoo *pFoo) {
+  wchar_t wsz[1024];
+  wcscpy(wcs, L"Hello");
+  pFoo-&gt;Method21(1024, wsz);
+ // .. process updated string
+}</PRE>
+<P>The most unfortunate aspect of the [in, out, string] example is that it works fine when the input string is longer than the output string. The errors related to this method will be intermittent and may never occur in the testing phase of a project.</P>
+<P>One problem with using client-sized buffers for returning variable-length data structures such as strings is that the method implementation may want to return more data than the caller has allocated buffer space to hold. This SDK code displays the text of an edit control:</P>
+<P><BR></P>
+<PRE> void Show(HWND hwndEdit) {
+    TCHAR sz[1024];
+    GetWindowText(hwndEdit, sz, 1024);
+    MessageBox(0, sz, __TEXT("Hi!"), MB_OK);
+}</PRE>
+<P>Notice that the implementor of Show guessed that the edit control would never contain more than 1024 characters. How did he or she know? Exactly. You might think that this implementation would be safer:</P>
+<P><BR></P>
+<PRE> void Show(HWND hwndEdit) {
+    int cch = GetWindowTextLength(hwndEdit);
+    TCHAR *psz = new TCHAR[cch + 1];
+    GetWindowText(hwndEdit, psz, cch);
+    MessageBox(0, sz, __TEXT("Hi!"), MB_OK);
+    delete[] psz;
+}</PRE>
+<P>How can the caller be certain that the user did not type in a character after the call to GetWindowTextLength but before the call to GetWindowText? The fact that the allocation is based on potentially stale information makes this susceptible to race conditions.</P>
+<P>Unlike HWNDs, COM objects are probably accessed by multiple parties. Also, the cost of making two method calls to perform one operation as shown above would cause performance to degrade very quickly, especially in a distributed environment. Because of these two factors, when variable-length data structures are passed from the server to the caller, a properly designed COM interface forces the method implementation to allocate space for the result using the task allocator. This is necessary because the actual size of the result can only be known inside the method implementation. This dynamically allocated buffer is returned to the caller of the method. When it is no longer needed, it is the caller's responsibility to free the buffer from the task allocator in the calling process. </P>
+<P>To express this idiom for a string parameter, the following IDL will work correctly</P>
+<P><BR></P>
+<PRE> HRESULT Method22([out, string] wchar **ppwsz);</PRE>
+<P>which implies the following server-side implementation:</P>
+<P><BR></P>
+<PRE> HRESULT CFoo::Method22(wchar **ppwsz) {
+  int cb = (strlen("Goodbye")+1)*sizeof(OLECHAR);
+  *ppwsz = (OLECHAR*)CoTaskMemAlloc(cb);
+  if (*ppwsz == 0) return E_OUTOFMEMORY;
+  wcscpy(*ppwsz, L"Goodbye");
+  return S_OK;
+}</PRE>
+<P>To properly use this method, the following client-side code is required:</P>
+<P><BR></P>
+<PRE> void f(IFoo *pFoo) {
+  wchar_t *pwsz = 0;
+  if SUCCEEDED(pFoo-&gt;Method22(&amp;pwsz)) {
+   // .. process updated string
+    CoTaskMemFree(pwsz);
+  }
+}</PRE>
+<P>While this usage may result in additional memory copying overhead, this must be weighed against the reduction in round trip cost and the guarantee that strings of any length can be returned without requiring the caller to tie up additional buffer space in anticipation of arbitrarily large strings. Based on the relative costs of memory copies and COM LocalServer roundtrips, callee-allocated buffers should outperform caller-allocated buffers for strings of at least 10,000 characters. For COM calls off-host (which cause roundtrip costs to increase), expect a much higher threshold. </P>
+<P>Does all this make you want to run out of the room screaming? Don't feel bad. This was the reaction of the OMG, which, when designing CORBA, stripped out all of the power and expressiveness of C by banning most pointer and C array types altogether, making C and C++ integration with legacy code sometimes problematic. </P>
+<P>It should not come as a surprise that marshaling arbitrarily complex data types correctly can be arbitrarily complex. Sometimes this complexity can come at a cost. For example, <B>Figure 3</B> shows the relative costs of the three most common types of arrays when used as input parameters. Note that the simplest array (the conformant array) outperforms the more complex open and string arrays. The relative performance difference decreases considerably for output parameters since it's always necessary to copy from the received buffer to the client's address space. </P>
+<P>When the stress induced by array processing in COM and IDL becomes unbearable, feel free to refer to <B>Figure 4</B>, which contains some suggestions and IDL fragments for the most common cases found in COM programming.</P>
+<P><B> Figure 4  IDL and Code Guide for Typical COM Situations</B></P>
+
+<TABLE COLS="4" BORDER="0"><COLGROUP><COL WIDTH="81pt" VALIGN="TOP"><COL WIDTH="175pt" VALIGN="TOP"><COL WIDTH="128pt" VALIGN="TOP"><COL WIDTH="190pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P><B> Scenario</B></P></TD><TD VALIGN="TOP"><P><B>IDL</B></P></TD><TD VALIGN="TOP"><P><B>Client</B></P></TD><TD VALIGN="TOP"><P><B>Method</B></P></TD></TR><TR><TD VALIGN="TOP"><P> String Input</P></TD><TD VALIGN="TOP"><P>HRESULT f([in, string] const OLECHAR*pwsz);</P></TD><TD VALIGN="TOP"><P>p-&gt;f(OLESTR("Hello"));</P></TD><TD VALIGN="TOP"><P>HRESULT f(const OLECHAR*wsz) {<BR>//…use string…<BR>}</P></TD></TR><TR><TD VALIGN="TOP"><P> String Output:<BR>CA</P></TD><TD VALIGN="TOP"><P>HRESULT f([out, string] OLECHAR *wsz, [in] long cchMax);</P></TD><TD VALIGN="TOP"><P>OLECHAR wsz[1024];<BR>p-&gt;f(wsz, 1024);</P></TD><TD VALIGN="TOP"><P>HRESULT f(OLECHAR *wsz, long cMax) {<BR>wcscpy(wsz, OLESTR("Bob"));<BR>return S_OK;<BR>}</P></TD></TR><TR><TD VALIGN="TOP"><P> String Output:<BR>OA</P></TD><TD VALIGN="TOP"><P>HRESULT f([out, string] OLECHAR **wsz);</P></TD><TD VALIGN="TOP"><P>OLECHAR *pwsz = 0;<BR>if (SUCCEEDED(p-&gt;f(&amp;pwsz)){<BR>//…use string…<BR>CoTaskMemFree(pwsz);</P>
+<P>}</P></TD><TD VALIGN="TOP"><P>HRESULT f(OLECHAR **ppwsz0 {<BR>int cb = (wcslen(OLESTR("Bob")) + 1);<BR>cb *=sizeof(OLECHAR);<BR>**ppwsz = (OLECHAR*)CoTaskMemAlloc(cb);<BR>if(*ppwsz ==0) return E_OUTOFMEMORY;<BR>wcscpy(*ppwsz, OLESTSR("Bob");<BR>retrun S_OK;<BR>}</P></TD></TR><TR><TD VALIGN="TOP"><P> Non-sring Array Input</P></TD><TD VALIGN="TOP"><P>HRESULT f([in, size_is(cMax)] short *rgs,<BR>[in] long cMax;</P></TD><TD VALIGN="TOP"><P>short rgs[] = { 1, 2, 3 };<BR>p-&gt;f(rgs, 3);</P></TD><TD VALIGN="TOP"><P>HRESULT f(short *rgs, long cMax) {<BR>for (long n = 0; n&lt; cMax; n++)<BR>total += rgs[n];<BR>return S_OK;<BR>}</P></TD></TR><TR><TD VALIGN="TOP"><P> Non-string Array Output: CA</P></TD><TD VALIGN="TOP"><P>HRESULT f([out, size_is(cMax);<BR>length_is(*pcActual)] short *rgs,<BR>[in] long Cmax,<BR>[out]long *pcActual);</P></TD><TD VALIGN="TOP"><P>short rgs[10];<BR>long cActual = 0;<BR>p-&gt;f(rgs, 10, &amp;cActual);</P></TD><TD VALIGN="TOP"><P>HRESULT f(short *rgs, long cMax,<BR>long *pcActual){<BR>*pcActual = min(cMax, 5);<BR>for (int n = 0; n &lt; *pcActual; n++)<BR>rgs[n] = n * n;<BR>return S_OK;<BR>}</P></TD></TR><TR><TD VALIGN="TOP"><P> Non-string Array Output: OA</P></TD><TD VALIGN="TOP"><P>HRESULT f([out, size_is(,*pcMax)] short **pprgs,<BR>[out] long *pcMax);</P></TD><TD VALIGN="TOP"><P>short *prgs = 0;<BR>long cMax = 0;<BR>hr = p-&gt;f(&amp;prgs, &amp;cMax);<BR>if(SUCCEEDED(hr)){<BR>//…use array…<BR>CoTaskMemFree(prgs);<BR>}</P></TD><TD VALIGN="TOP"><P>HRESULT f(short **pprgs, long *pcMax){<BR>*pcMax = 5;<BR>int cb = *pcMax *sizeof(**pprgs);<BR>*pprgs = (short*) CoTaskMemAlloc(cb);<BR>if(*pprgs == 0) return E_OUTOFMEMORY;<BR>for (int n = 0; n&lt; *pcMax; n++)<BR>(*pprgs)[n] = n * n;<BR>return S_OK;}</P></TD></TR><TR><TD COLSPAN="4" VALIGN="TOP"><P> <B>CA:  Caller Allocated Buffer<BR>OA:  Object Allocated Buffer (preferred)</B></P></TD></TR></TBODY></TABLE>
+<P><BR></P><P>Have a question about programming in ActiveX or COM? Send your questions via email to Don Box: dbox@braintrust.com.</P>
+<P><I>This article is reproduced from Microsoft Systems Journal. Copyright © 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</P>
+<P></P></font></body></HTML>

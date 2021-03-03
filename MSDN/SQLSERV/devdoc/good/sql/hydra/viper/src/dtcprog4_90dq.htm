@@ -1,0 +1,221 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>An ODBC-based Application</title>
+<link disabled rel=stylesheet href=../../../../../backsdk3.css>
+<style type="text/css">
+@import url(../../../../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h2><a name="_an_odbc.2d.based_application"></a>An ODBC-based Application</h2>
+<p>
+This example shows the steps that a C or C++ application takes to use ODBC to update two SQL Server databases within an MS DTC transaction. It shows the OLE transaction calls for initiating and committing MS DTC transactions as well as the ODBC call to propagate an MS DTC transaction from the application to SQL Server. Note that the complete ODBC example is not shown here but it can be found in the Microsoft SQL Server Programmer's Toolkit. </p>
+<p>
+These are the steps that the application performs: 
+<ol>
+<li>
+The application first declares variables and completes initialization. Note that it is not necessary for the application to call either <b>CoInitialize </b>or <b>OleInitialize</b>. MS DTC does not depend on these calls. </li>
+<li>
+The application connects to MS DTC and obtains an interface pointer to the transaction dispenser object by calling <b>DtcGetTransactionManager</b>. </li>
+<li>
+The application uses standard ODBC calls to connect to two databases under the control of different SQL Servers. </li>
+<li>
+The application begins an MS DTC transaction by calling the <b>ITransactionDispenser::BeginTransaction </b>method on the transaction dispenser object. <b>BeginTransaction</b> initiates a new transaction and returns a transaction object that represents the transaction. </li>
+<li>
+The application calls the ODBC <b>SQLSetConnectOption </b>function to associate the transaction with each of the ODBC database connections. All further work performed on the ODBC connections is performed within the MS DTC transaction. </li>
+<li>
+The application uses standard ODBC calls to associate a statement handle with each ODBC database connection. The application then updates each of the databases. </li>
+<li>
+The application calls <b>ITransaction::Commit </b>on the transaction object. MS DTC performs the two-phase commit protocol to commit the transaction. If any SQL Server database is unable to commit the transaction, the transaction is aborted, and the transaction's effects are undone from all databases that were modified. When the transaction completes, the application releases the transaction dispenser object.  <p>
+You cannot use the ODBC database connections until <b>ITransaction::Commit </b>completes and you call <b>SQLSetConnectOption </b>to enlist in a new MS DTC transaction. If you reuse the ODBC connection before doing this, an error will result. 
+<p>
+<b>Note</b>  If you have used an ODBC connection with an MS DTC transaction and you want to use the same ODBC connection with a local SQL Server transaction, you must first call <b>SQLSetConnectOption </b>and pass a NULL transaction. By passing a NULL transaction to the ODBC <b>SQLSetConnectOption </b>function, you instruct SQL Server to use local SQL Server transactions.
+</li>
+<li>
+When no more transactions are needed, the application releases the transaction dispenser object and closes all ODBC connections. <pre>void main(int argc, char **argv)
+{
+<b><i>  </i></b>
+ITransactionDispenser    *pTransactionDispenser;
+ITransaction                *pTransaction;
+HRESULT                    hr = S_OK ;
+BOOL                        tf = 0 ;
+TCHAR                    SqlStatement[STR_LEN*2];
+<b><i>  </i></b>
+<b><i>  </i></b>
+// Initialize globals &amp; validate command line arguments
+InitGlobals(argc,argv);
+<b><i>  </i></b>
+// Obtain the ITransactionDispenser Interface pointer
+// by calling DtcGetTransactionManager()
+hr = DtcGetTransactionManager(
+        NULL,                 // LPTSTR pszHost,
+        NULL,                // LPTSTR pszTmName,
+        IID_ITransactionDispenser,    // REFIID rid,
+        0,                    // DWORD dwReserved1,
+        0,                    // WORD wcbReserved2,
+        0,                    // void FAR * pvReserved2,
+        (void **)&amp;pTransactionDispenser     // void**    ppvObject) ;
+if (FAILED (hr))
+{
+printf("DtcGetTransactionManager failed: %x\n", hr);
+       exit (1);
+}
+<b><i>  </i></b>
+// Initialize the ODBC environment handle.
+if (SQL_NULL_HENV == gHenv)
+{
+ProcessRC("SQLAllocEnv",0,SQLAllocEnv(&amp;gHenv));
+}
+<b><i>  </i></b>
+// Establish connection to database on server#1
+LogonToDB(&amp;gSrv1);
+ 
+// Establish connection to database on server#2
+LogonToDB(&amp;gSrv2);
+<b><i>  </i></b>
+<b><i>  </i></b>
+// Loop performing distributed transactions
+for (INT i = 0; i &lt; 5; i++)
+{
+<b><i>  </i></b>
+// Initiate an MS DTC transaction
+hr = pTransactionDispenser-&gt;BeginTransaction(
+            NULL,                // IUnknown __RPC_FAR *punkOuter,
+            ISOLATIONLEVEL_ISOLATED,    // ISOLEVEL isoLevel,
+            ISOFLAG_RETAIN_DONTCARE,    // ULONG isoFlags,
+            NULL,                // ITransactionOptions *pOptions 
+            &amp;pTransaction        //  ITransaction **ppTransaction) ;
+
+if (FAILED (hr))
+{    
+printf("BeginTransaction failed: %x\n",hr);
+exit(1);
+}
+<b><i>  </i></b>
+// Enlist each of the data sources in the transaction
+Enlist(&amp;gSrv1,pTransaction);
+Enlist(&amp;gSrv2,pTransaction);
+<b><i>  </i></b>
+// Generate the SQL statement to execute on each 
+// of the databases
+sprintf(SqlStatement,
+  "update authors set address = '%s_%d' where au_id = '%s'",
+   gNewAddress,i,gAuthorID);
+
+// Perform updates on both of the DBs participating
+// in the transaction
+ExecuteStatement(&amp;gSrv1,SqlStatement);
+ExecuteStatement(&amp;gSrv2,SqlStatement);
+<b><i>  </i></b>
+// Commit the transaction 
+hr = pTransaction-&gt;Commit(0,0,0);
+if (FAILED(hr))
+{
+printf("pTransaction-&gt;Commit() failed: %x\n",hr);
+exit(1);
+}
+<b><i>  </i></b>
+// At end of each transaction, pTransaction-Release()
+// must be called.
+hr = pTransaction-&gt;Release();
+if (FAILED(hr))
+{
+printf("pTransaction-&gt;Release() failed: %x\n",hr);
+exit(1);
+}
+<b><i>  </i></b>
+printf("Successfully committed Transaction #%d\n",i);
+<b><i>  </i></b>
+} // for 
+<b><i>  </i></b>
+
+// release the transaction dispenser    
+pTransactionDispenser-&gt;Release();
+<b><i>  </i></b>
+// Free ODBC handles
+FreeODBCHandles(&amp;gSrv1);
+FreeODBCHandles(&amp;gSrv2);
+<b><i>  </i></b>
+// Free the global ODBC environment handle.
+SQLFreeEnv(gHenv);
+}
+<b><i>  </i></b>
+<b><i>  </i></b>
+void LogonToDB(DBCONN *ptr)
+{
+RETCODE rc = 0;
+<b><i>  </i></b>
+rc = SQLAllocConnect(gHenv, &amp;(ptr-&gt;hdbc) );
+<b><i>  </i></b>
+if (ProcessRC("SQLAllocConnect",ptr,rc))
+{
+rc = SQLConnect(ptr-&gt;hdbc, 
+(UCHAR *)(ptr-&gt;pszSrv),
+SQL_NTS,
+(UCHAR *)(ptr-&gt;pszUser),
+SQL_NTS,
+(UCHAR *)(ptr-&gt;pszPasswd),
+SQL_NTS
+);
+<b><i>  </i></b>
+ProcessRC("SQLConnect",ptr,rc);
+}
+}
+<b><i>  </i></b>
+<b><i>  </i></b>
+void Enlist(DBCONN *ptr, ITransaction *pTransaction)
+{
+RETCODE rc = 0;
+<b><i>  </i></b>
+// Enlist database in the transaction
+    rc = SQLSetConnectOption 
+(ptr-&gt;hdbc,
+SQL_COPT_SS_ENLIST_IN_DTC,
+(UDWORD)pTransaction);
+<b><i>  </i></b>
+ProcessRC("SQLSetConnectOption",ptr,rc);
+}
+<b><i>  </i></b>
+<b><i>  </i></b>
+void ExecuteStatement(DBCONN *ptr, LPTSTR pszBuf)
+{
+RETCODE rc = 0;
+<b><i>  </i></b>
+// Allocate a statement handle for use with SQLExecDirect
+rc = SQLAllocStmt(ptr-&gt;hdbc,&amp;(ptr-&gt;hstmt));
+
+ProcessRC("SQLAllocStmt",ptr,rc);
+<b><i>  </i></b>
+// Execute the passed string as a SQL statement
+    rc = SQLExecDirect(ptr-&gt;hstmt,(UCHAR *)pszBuf,SQL_NTS);
+
+ProcessRC("SQLExecDirect",ptr,rc);
+<b><i>  </i></b>
+// Free the statement handle 
+rc = SQLFreeStmt(ptr-&gt;hstmt, SQL_DROP);
+ptr-&gt;hstmt = SQL_NULL_HSTMT;
+<b><i>  </i></b>
+ProcessRC("SQLFreeStmt",ptr,rc);
+
+}
+<b><i>  </i></b>
+<b><i>  </i></b>
+void FreeODBCHandles(DBCONN *ptr)
+{
+SQLDisconnect(ptr-&gt;hdbc);
+
+SQLFreeConnect(ptr-&gt;hdbc);
+
+ptr-&gt;hdbc   = SQL_NULL_HDBC;
+ptr-&gt;hstmt  = SQL_NULL_HSTMT;
+}
+<b><i>  </i></b></pre>
+</li>
+</ol>
+<p>
+</p>
+<p>&nbsp;</p></body>
+</HTML>

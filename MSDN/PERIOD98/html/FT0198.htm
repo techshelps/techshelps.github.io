@@ -1,0 +1,171 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Transactions: Take the ACID Test </title>
+<style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000 dir=ltr>
+<Font face="verdana,arial,helvetica" size="2">
+<h1><a name="transactionstakeacidtest"></a>Transactions: Take the ACID Test</h1>
+<p class=indent>
+Gary DeWitt</p>
+<p>
+<b>Imagine going to the ATM to transfer money from your savings account to your checking account. Between the time the money comes out of savings and goes into checking, the computer crashes! Where’s your money? Don’t worry, transactions keep it safe. Gary explains how in the first of a series on transactions.</b></p>
+<p>
+Think very carefully about what goes on behind the scenes at your bank. You take for granted that nothing will happen to your money in the middle of making deposits, withdrawals, and transfers. Corporations, banks, and nations routinely transfer millions of dollars electronically. World financial markets would crumble if those funds weren’t secure.</p>
+<p>
+Let me construct a simple example to illustrate the importance of transactions. At the First National Bank of Dad, customers can deposit money into accounts at any time. They can also withdraw funds from their accounts, as long as the amount of the withdrawal is less than or equal to the balance in the account. Furthermore, customers with more than one account can transfer money from one to another.</p>
+<p>
+The FoxPro application used to manage accounts at the bank does so by means of an Account class. This class has two methods: Deposit() and Withdraw(). It’s possible for either of these methods to fail to update the database if some system failure, such as a power outage, were to occur prior to a deposit or withdrawal being completed. A withdrawal could also fail if the account has insufficient funds to cover the withdrawal.</p>
+<p>
+The real test of the system designer’s skill comes when funds are transferred between accounts. This requires a deposit into one account and a simultaneous withdrawal from another. Notice that I said simultaneous. The withdrawal and deposit can’t occur sequentially; they must occur simultaneously, as it’s absolutely unacceptable for the funds not to be in one account or the other. Either the deposit and the withdrawal both succeed, or they both fail, simultaneously. How do we do that?</p>
+<h3>The ACID test</h3>
+<p>
+A transaction is a protected group of database updates. All database changes made between the time a transaction begins and the time it ends are protected. Ideally, a transaction will be able to pass the ACID test of being Atomic, Consistent, Isolated, and Durable.</p>
+<p>
+In chemistry, an atom is the smallest indivisible unit that possesses all the characteristics of an element. Likewise, an <i>atomic</i> transaction is the smallest indivisible unit of acceptable change. In the transfer example, a completed transaction requires changes to two accounts. A change to only one account wouldn’t be acceptable.</p>
+<p>
+<i>Consistency</i> means that the transaction correctly transforms the system state. Either the funds leave one account and enter the other, or they stay put—the only two possible correct states. If the transfer state isn’t achieved, then the system reverts to the non-transfer state rather than stopping somewhere in between.</p>
+<p>
+<i>Isolation</i> ensures that no other transaction can see a transaction in an incomplete state. Although there’s actually a tiny fraction of a second when funds have been withdrawn from one account but not yet deposited into another, no other transaction in the system can know that.</p>
+<p>
+A <i>durable</i> transaction is one that’s capable of surviving system failures intact. A transaction should be able to survive all failures, including server, process, communication, and media failures.</p>
+<p>
+Well, that’s the ideal, at least.</p>
+<p>
+What can we as FoxPro developers do to provide transaction protection for our applications? Moreover, how can we do so in an efficient, productive manner? How can we integrate transaction protection into a variety of application architectures? In this series of articles, I’ll be taking a look at implementing transactions in robust, scalable, object-oriented applications. I’ll cover both local and remote data and take a look at new technologies in transaction processing.</p>
+<h3>VFP transaction basics</h3>
+<p>
+The first thing to remember about using transactions with local VFP data is that they don’t work with free tables. The tables in the transaction must belong to a database container (DBC). The second thing to remember is to keep transactions brief. Limit the time between the beginning and end of a transaction as much as possible, because other users will be prevented from accessing any records involved in the transaction for its duration.</p>
+<p>
+To protect a group of updates in a transaction, issue the BEGIN TRANSACTION command. Every change you make to the data will be part of the transaction until END TRANSACTION or ROLLBACK is issued. If you issue END TRANSACTION, then all changes will be committed. Issuing ROLLBACK will revert all changes and end the transaction. Here’s a simple example (this and the other examples in this article are contained in the Subscriber Downloads at www.pinpub.com/foxtalk):</p>
+<pre><code>CREATE DATABASE mydatabase
+SET DATABASE TO mydatabase
+CREATE TABLE mytable (myfield I)
+?"Record count = " + STR(RECCOUNT("mytable"))
+
+*-- First transaction
+BEGIN TRANSACTION
+  INSERT INTO mytable (myfield) VALUES (1)
+END TRANSACTION
+?"Record count = " + STR(RECCOUNT("mytable"))
+
+*-- Second transaction
+BEGIN TRANSACTION
+  INSERT INTO mytable (myfield) VALUES (2)
+ROLLBACK
+?"Record count = " + STR(RECCOUNT("mytable"))</code></pre>
+<p>
+In this example, a DBC is created and a table added to it. The table has one field with an integer data type. There are two transactions in this example. In the first transaction, a record is added to the table and the transaction is committed with END TRANSACTION. Notice that the record count, which is zero before the transaction, is one after the END TRANSACTION command.</p>
+<p>
+The second transaction is rolled back with the ROLLBACK command. Notice that the record count remains one after the ROLLBACK command, despite the insertion of a new record within the transaction. The change wasn’t committed, and the table reverted to its previous condition.</p>
+<p>
+If you’ve done any work with buffered tables or SQL views, then you’ve probably noticed that the use of a transaction in this example does nothing more than buffering. Combining buffering with transactions in sort of a double-buffering scheme will allow you to better diagnose and resolve errors in updates in ways that are impossible with buffering alone. Here’s an example:</p>
+<pre><code>USE mytable
+CURSORSETPROP("Buffering", 3)
+INSERT INTO mytable (myfield) VALUES (3)
+INSERT INTO mytable (myfield) VALUES (4)
+BEGIN TRANSACTION
+IF TABLEUPDATE(1, .F.)
+  END TRANSACTION
+ELSE
+  ROLLBACK
+ENDIF</code></pre>
+<p>
+In this example, the table is buffered and changes are made in the buffer prior to starting the transaction. Within the transaction, I attempt to update the table from the buffer with TABLEUPDATE(). The TABLEUPDATE() function specifies all rows, so it will succeed only if each individual updated row succeeds, in which case I’ll commit the transaction. TABLEUPDATE() will fail if any row update fails, in which case I’ll roll back the transaction. Rolling back the transaction doesn’t revert the buffered records. After rolling back, the buffered records still contain all the changes. I can then find out why the TABLEUPDATE() failed and attempt to address the problem. If I solve the problem, I can begin another transaction and attempt the update again.</p>
+<p>
+If you’ve done a lot of work with buffered tables, I’m sure you’ve noticed that you could have accomplished the same thing by issuing TABLEUPDATE() one row at a time rather than using this transaction business. The real power of transactions isn’t realized until you need to protect updates to multiple tables.</p>
+<pre><code>USE mytable IN 0
+USE yourtable IN 0
+CURSORSETPROP("Buffering", 3, "mytable")
+CURSORSETPROP("Buffering", 3, "yourtable")
+INSERT INTO mytable (myfield) VALUES (5)
+INSERT INTO yourtable (yourfield) VALUES (6)
+BEGIN TRANSACTION
+IF TABLEUPDATE(1, .F., "mytable")
+  IF TABLEUPDATE(1, .F., "yourtable")
+    END TRANSACTION
+  ELSE
+    ROLLBACK
+  ENDIF
+ELSE
+  ROLLBACK
+ENDIF</code></pre>
+<p>
+In this example, I’ve added records to two different buffered tables and then begun a transaction. If the update succeeds in the first table, I’ll attempt to update the second table. The transaction is committed only if both updates succeed. If only one update succeeds, or if both fail, then the entire transaction is rolled back. Now we’re getting somewhere. Protection to updates in multiple tables can only be provided with transactions.</p>
+<h3>Nesting transactions</h3>
+<p>
+Let’s go back to my First National Bank of Dad example. The goal is to create an account object that can manage deposits and withdrawals and a transfer object that can contain account objects for protected movement of money from one account to another. Managing a combination like this is made easier by FoxPro’s ability to nest transactions. VFP allows transactions to be nested up to five levels deep. Commits and rollbacks to all nested transactions are controlled by the outermost transactions (the very first BEGIN TRANSACTION).</p>
+<pre><code>USE mytable
+?"Transaction level = " + STR(TXNLEVEL()) + 
+  "  Record count = " + STR(RECCOUNT("mytable"))
+
+*-- Outer transaction
+BEGIN TRANSACTION
+?"Transaction level = " + STR(TXNLEVEL()) + 
+  "  Record count = " + STR(RECCOUNT("mytable"))
+
+*-- Inner transaction
+BEGIN TRANSACTION
+INSERT INTO mytable (myfield) VALUES (6)
+?"Transaction level = " + STR(TXNLEVEL()) + 
+  "  Record count = " + STR(RECCOUNT("mytable"))
+
+*-- Commit inner transaction
+END TRANSACTION
+?"Transaction level = " + STR(TXNLEVEL()) + 
+  "  Record count = " + STR(RECCOUNT("mytable"))
+
+*-- Roll back outer transaction
+ROLLBACK
+?"Transaction level = " + STR(TXNLEVEL()) + 
+  "  Record count = " + STR(RECCOUNT("mytable"))</code></pre>
+<p>
+This example nests two levels of transactions. At each step of the way, it displays the level of the transaction and the number of records in the table. The TXNLEVEL() function returns the level of transactions. After each BEGIN TRANSACTION command, TXNLEVEL() returns the next higher number. A record is inserted into the table in the inner transaction, and the transaction is committed with END TRANSACTION. Notice that TXNLEVEL() is decremented from two to one. Then the outermost transaction is rolled back. The record insertion performed in the inner transaction is rolled back by the outer transaction, and the table is returned to the condition it was in before any changes were made.</p>
+<h3>Summary</h3>
+<p>
+Nesting transactions is the key to solving the problem presented by the bank account transfer problem. The transfer object provides the outermost transaction, and the account objects reside in inner transaction levels. If both inner transactions succeed, then the outer transaction is committed. But if either of the inner transactions fails, the outer transaction is rolled back. Even if one of the inner transactions succeeds, thus committing its changes, the rollback of the outer transaction will undo any changes committed in the inner transactions.</p>
+<p>
+In the next article in this series, I’ll demonstrate how to incorporate transactions into an object-oriented design that effectively models the problems presented by the bank account transfer. I’ll also take a look at the issues involved in trying to achieve the same results with remote data.</p>
+<p class=indent>
+Download 01DEWITA.ZIP at www.pinpub.com/foxtalk </p>
+<form name="x">
+<object classid="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" name="iv" width=0 height=0>
+</object>
+</form>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Backgrounders Samples">
+<PARAM name="Item2" value="5187">
+</OBJECT><a href="javascript:sample1.Click()">
+Click here to open or copy the DEWITA sample object files</a></p>
+<p>
+<i>Gary DeWitt is senior software magician at Medsoft, Inc., a medical practice management software company in Tahoe City, CA. While Visual FoxPro is his favorite development tool, he also programs in C++, Java, and Visual Basic. Gary is a Microsoft Certified Professional and Microsoft MVP. 73512.57@compuserve.com, gdewitt@sierra.net.</i></p>
+<P align="center"><a
+href="http://www.pinpub.com/foxtalk/"><img src="Pinnacle.gif"
+border="0" width="216" height="72"></a></p>
+
+<P align="center"><strong>To find out more about
+FoxTalk and Pinnacle Publishing, visit their website at</strong> <br>
+<a href="http://www.pinpub.com/foxtalk/"><strong>http://www.pinppub.com/foxtalk/</strong></a><strong>.
+</strong></p>
+
+<P align="center"><font size="1">Note: This is not a
+Microsoft Corporation website. <br>
+Microsoft is not responsible for its content.</font></p>
+
+<P>This article is reproduced from the January 1998
+issue of FoxTalk. Copyright 1998, by Pinnacle Publishing, Inc.,
+unless otherwise noted. All rights are reserved. FoxTalk is an
+independently produced publication of Pinnacle Publishing, Inc.
+No part of this article may be used or reproduced in any fashion
+(except in brief quotations used in critical articles and
+reviews) without prior consent of Pinnacle Publishing, Inc. To
+contact Pinnacle Publishing, Inc., please call (800)788-1900 or
+(206)251-1900.</p>
+</font></BODY>
+</HTML>

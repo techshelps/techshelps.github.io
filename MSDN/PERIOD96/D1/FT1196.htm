@@ -1,0 +1,626 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Best Practices: Data Handling Issues (November)</title>
+
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000>
+
+<font face="verdana,arial,helvetica" size="2"><h1>Best Practices<BR>Data Handling Issues</h1>
+<p>
+Doug Hennig</p>
+<p>
+<i>The ability to handle multiple sets of data is a frequent requirement in business applications. So is the management of primary key values for tables. In the first section of this article, Doug takes on these issues and looks at the best way to deal with them. Next, he provides a solution to a common problem with field and table validation rules: While these rules protect your tables from invalid data, they also make data entry forms harder to use. Finally, Doug examines the use of multipurpose lookup tables, and discusses how to take advantage of new data dictionary features in VFP 5.0.</i></p>
+<p>
+FOXPRO is a database management system, so data handling is the thing it does best. However, many <BR>issues related to data handling can complicate even the simplest application. This article will look at common data handling issues. In the first section, we’ll explore some strategies for handling multiple sets of data (such as test and production versions) in FoxPro 2.x and Visual FoxPro (VFP), and look at several problems that come up when you use primary keys and how to solve these problems.</p>
+<h2>Handling multiple sets of data</h2>
+<p>
+The idea of multiple sets of data comes up frequently in database applications. For example, accounting applications usually allow the user to manage more than one company by having each company’s data stored in a separate set of tables. Even simpler applications benefit from having multiple data sets by providing test and production versions of the tables. This way, inexperienced users can learn how to use the system or new features can be tested against test data without worrying about ruining production data.</p>
+<p>
+&#09;Multiple data sets are handled in one of two ways: the tables exist in a single directory with different table names for different sets, or the tables in different sets have the same names but are located in different directories. An example of the former method is an accounting system that has table names such as GLACCT&lt;nn&gt; and ARCUST&lt;nn&gt;, where &lt;nn&gt; is a two-digit value representing a data set number. The disadvantage of this mechanism is that the directory will quickly accumulate a lot of files, which makes managing the files more complex and causes file searches (in DOS, anyway) to dramatically slow down. As a result, the latter mechanism is preferred.</p>
+<p>
+&#09;Working with multiple data sets is relatively easy. Usually you’ll have a set of tables common to the application regardless of the data set (for example, security or application configuration tables) and a set of tables specific to each data set. The common tables might be in the same directory as the application or perhaps in a DATA or COMMON subdirectory, while the data set tables will exist in one or more separate directories. In a simple case, such as test and production data, the directory names might be hard-coded in the application, such as DATA and PRODUCTION. In more complex applications, such as multi-company data sets, you might have a DATASET table (in the common set) with at least two fields: the name of the company and the directory where the company’s data set is located.</p>
+<p>
+Here’s how selecting a data set works:</p>
+<p>
+Close any currently open tables that aren’t in the common set.</p>
+<p>
+Decide which directory the desired data set is stored in. For example, you might have a menu item that switches between test and production data. For a multi-company application, the user might select a company to work with from a dialog box, and your program would look up the company name in the DATASET table to find the directory that company’s data set is stored in.</p>
+<p>
+Open the tables in that directory.</p>
+<p>
+In FoxPro 2.x, the specifics of opening the tables can be handled in a variety of ways. You can SET DEFAULT TO or SET PATH TO the specified directory and open the tables, your table-opening routine can accept a directory parameter and open the tables in that directory, or you can use a data-driven approach. Using SET DEFAULT TO and SET PATH TO probably aren’t the best ways to go unless your application is very simple, because it makes locating other pieces of the application more complex. You can easily create a table-opening routine that handles both common and data set tables. The following routine does just that (this example is for illustration purposes only; a real routine would include parameter and error checking):</p>
+<pre><font face="Courier New" size="3">parameters tcDirectory
+if tcDirectory = 'COMMON'
+&#09;use SECURITY in 0
+&#09;use USERS in 0
+&#09;use CONFIG in 0
+&#09;use DATASET order COMPANY in 0
+else
+&#09;if used('CUSTOMER')
+&#09;&#09;use in CUSTOMER
+&#09;endif used('CUSTOMER')
+&#09;use (tcDirectory + 'CUSTOMER') in 0
+&#09;if used('ORDERS')
+&#09;&#09;use (tcDirectory + 'ORDERS') in 0
+&#09;endif used('ORDERS')
+&#09;if used('ACCOUNTS')
+&#09;&#09;use (tcDirectory + 'ACCOUNTS') in 0
+&#09;endif used('ACCOUNTS')
+endif tcDirectory = 'COMMON'</font></pre>
+<p>
+A data-driven table-opening routine is a better idea. You create a table (perhaps called TABLMAST) containing the name of each table in your application and a flag indicating whether the table is common or not. The data-driven routine opens each table defined in TABLMAST rather than hard-coding the names of the tables to open. This routine, called OPENDBFS.PRG, is on the Developer’s Disk:</p>
+<pre><font face="Courier New" size="3">parameters tcDirectory
+private lcTable
+select TABLMAST
+scan
+  lcTable = trim(TABLMAST.TABLE)
+  do case
+    case tcDirectory = 'COMMON' and TABLMAST.COMMON
+      use (lcTable) in 0
+    case tcDirectory &lt;&gt; 'COMMON' and ;
+      not TABLMAST.COMMON
+      if used(lcTable)
+        use in (lcTable)
+      endif used(lcTable)
+      use (tcDirectory + trim(TABLMAST.TABLE)) in 0
+  endcase
+endscan</font></pre>
+<p>
+At application startup, your program would use the following code to open the common tables:</p>
+<pre><font face="Courier New" size="3">do OpenDBFS with 'COMMON'</font></pre>
+<p>
+If you allow the user to choose a company to work with, the following code would create an array of companies defined in DATASET:</p>
+<pre><font face="Courier New" size="3">select COMPANY ;
+&#09;from DATASET ;
+&#09;into array laCompany ;
+&#09;order by 1
+lcCompany = GetComp(@laCompany)
+if not empty(lcCompany)
+&#09;select DATASET
+&#09;seek upper(lcCompany)
+&#09;do OpenDBFS with trim(DIRECTORY)
+endif not empty(lcCompany)</font></pre>
+<p>
+Ask the user to choose one (using a routine called GETCOMP.PRG, which isn’t shown here) and then open the tables for the selected company.</p>
+<p>
+As usual, things aren’t quite as simple in Visual FoxPro. The problem is that the database container (DBC) contains a hard-coded directory reference to each table, and in each table the location of the DBC it belongs to is hard coded in its DBF header. This means you can’t have a single DBC for the tables in multiple data sets. While you might be tempted to use free tables in this case, you lose the advantages a DBC provides, including field and table validation, referential integrity, and transaction processing. Although you can write a program that changes the directory to a table in the DBC, that won’t work in a multi-user environment since when you do that you change the directory to a table for all users.</p>
+<p>
+The only realistic solution is to put a copy of the DBC and its tables in each data set directory and then open the appropriate DBC when you want to work with a data set. “What about common tables?” I’m sure you’re thinking. You’ll need to create at least two DBCs for the application: one for the common tables and one for the data set tables. The common DBC and its tables go in your common table location.</p>
+<p>
+Here’s a VFP version of OpenDBFS called OpenData. It uses a data-driven approach because you can get a list of the tables for each database using ADBOBJECTS() (this program is on the Developer’s Disk):</p>
+<pre><font face="Courier New" size="3">lparameters tcDirectory
+local lcDirectory, ;
+&#09;laTables[1], ;
+&#09;lnTables, ;
+&#09;lnI, ;
+&#09;lcTable
+if tcDirectory = 'COMMON'
+&#09;open database COMMON
+else
+&#09;if dbused('DATA')
+&#09;&#09;set database to DATA
+&#09;&#09;close database
+&#09;endif dbused('DATA')
+&#09;lcDirectory = alltrim(tcDirectory)
+&#09;lcDirectory = lcDirectory + ;
+&#09;&#09;iif(right(lcDirectory, 1) = '\', '', '\')
+&#09;open database (lcDirectory + 'DATA')
+endif tcDirectory = 'COMMON'
+lnTables = adbobjects(laTables, 'Table')
+for lnI = 1 to lnTables
+&#09;use (laTables[lnI]) in 0
+next lnI</font></pre>
+<p>
+See the README.TXT file on the Developer’s Disk for examples of using OpenData with the two data sets on the disk (in the COMPANY1 and COMPANY2 subdirectories).</p>
+<p>
+An additional complication with VFP is that the DataEnvironment of forms and reports has a hard-coded reference to the DBC that each table in the DataEnvironment belongs to. Fortunately, the Database property of each Cursor object in the DataEnvironment can be changed at runtime. The following code can be placed in the BeforeOpenTables method of the DataEnvironment. It assumes that the name of the directory for the database is stored in a global variable called gcDirectory and changes the location of the database for every table not in the COMMON database to that directory. Of course, to avoid using global variables you’d probably store the location of the current database in a property of your application class instead:</p>
+<pre><font face="Courier New" size="3">if type('gcDirectory') = 'C'
+  lnEnv = amembers(laEnv, This, 2)
+  for lnI = 1 to lnEnv
+    oObject = evaluate('This.' + laEnv[lnI])
+    if upper(oObject.BaseClass) = 'CURSOR' and ;
+      not 'COMMON' $ upper(oObject.Database)
+      lcDBC = oObject.Database
+      oObject.Database = fullpath(gcDirectory + ;
+        substr(lcDBC, rat('\', lcDBC)), curdir())
+    endif upper(oObject.BaseClass) = 'CURSOR' ...
+  next lnI
+endif type('gcDirectory') = 'C'</font></pre>
+<p>
+The Employee form on the Developer’s Disk shows an example of using this mechanism. To test this from the Command window, initialize gcDirectory to either COMPANY1 or COMPANY2 (the two subdirectories containing data sets), and DO FORM EMPLOYEE. You’ll see a different set of records for each directory.</p>
+<p>
+Several maintenance issues are more complicated when you provide multiple data sets to an application. For example, your “re-create indexes” routine needs to re-create indexes for all data sets. When you install a new version of an application that has database changes from the existing version, you need to update the DBC and table structures for each data set. These aren’t difficult issues, just ones you need to be prepared for.</p>
+<h2>Primary key issues in VFP</h2>
+<p>
+VFP automatically ensures that records have a unique key value. You simply define one of the tags as a primary index, and VFP will automatically prevent two records from having the same key value. Let’s look at some issues related to primary keys.</p>
+<p>
+The primary key for a table can be of any data type, but Integer and Character are the most common choices. I prefer Integer primary keys for the following reasons:</p>
+<p>
+They take only four bytes.</p>
+<p>
+You can have up to 2 billion keys (or 4 billion if you use negative values as well).</p>
+<p>
+No data conversion is required when incrementing the next available value.</p>
+<p>
+SQL SELECT statements that join two tables perform fastest using Integer keys.</p>
+<p>
+Character keys have two advantages over Integer:</p>
+<p>
+You can’t easily concatenate two Integer values when creating compound primary keys (a compound key is one that consists of more than one field). However, painful experience has led me to avoid using compound keys whenever possible, so this isn’t usually a concern.</p>
+<p>
+Combo boxes used to select a value from a related table are more complicated to work with when the primary key for the related table isn’t Character.</p>
+<p>
+There are two kinds of primary keys for a table: user-defined and system-defined (also known as “surrogate”). I prefer surrogate keys that the user never sees because they avoid all kinds of complications like cascading primary key changes (because the primary key never changes, there’s no need to cascade it), especially using the current Referential Integrity Builder, which doesn’t properly handle compound primary keys.</p>
+<p>
+A simple routine such as the following can be used to assign the next available value to the primary key for a table. This routine (called NEXT_ID.PRG on the Developer’s Disk) works with both Character and Integer (or other numeric) keys. It looks up the next available key value for the specified table in a table called NEXTID, which consists of two fieldsÑTABLE C(128) and ID I(4):</p>
+<pre><font face="Courier New" size="3">lparameters tcTable
+local lnCurrSelect, ;
+&#09;llUsed, ;
+&#09;lnCurrReprocess, ;
+&#09;luKey, ;
+&#09;lcKey, ;
+&#09;lcField
+
+* Save the current work area, open the NEXTID table
+* (if necessary), and find the desired table. If it
+* doesn't exist, create a record for it.
+
+lnCurrSelect = select()
+llUsed       = used('NEXTID')
+if llUsed
+&#09;select NEXTID
+&#09;set order to TABLE
+else
+&#09;select 0
+&#09;use NEXTID order TABLE again shared
+endif llUsed
+seek upper(tcTable)
+if not found()
+&#09;insert into NEXTID values (tcTable, 0)
+endif not found()
+
+* Increment the next available ID.
+
+lnCurrReprocess = set('REPROCESS')
+set reprocess to 10 seconds
+if rlock()
+&#09;replace ID with ID + 1
+&#09;luKey = ID
+&#09;unlock
+endif rlock()
+
+* Set the data type of the return value to match
+* the data type of the primary key for the table.
+
+lcKey = dbgetprop(tcTable, 'Table', 'PrimaryKey')
+if not empty(lcKey)
+&#09;lcField = key(tagno(lcKey, tcTable, tcTable), ;
+&#09;&#09;tcTable)
+&#09;if type(tcTable + '.' + lcField) = 'C'
+&#09;&#09;luKey = str(luKey, fsize(lcField, tcTable))
+&#09;endif type(tcTable + '.' + lcField) = 'C'
+endif not empty(lcKey)
+
+* Cleanup and return.
+
+set reprocess to lnCurrReprocess
+if not llUsed
+&#09;use
+endif not llUsed
+select (lnCurrSelect)
+return luKey</font></pre>
+<p>
+Where should the code in NEXT_ID go? The place that immediately comes to mind is in the stored procedures for the database. The advantage of putting the code there is that the database becomes self-contained; you don’t need to ship a separate PRG to someone in order to use your database. However, because NEXT_ID is likely to be used in every database you create, this raises a maintenance issue. What if you discover a bug in NEXT_ID or want to enhance its functionality? You’d have to change it in every database you ever created, including those at every client site. In addition, if you succumbed to the temptation to tweak the code slightly in different databases because you had different needs in each, you’d really have a tough time updating the code for each one. In my opinion, only database-specific code (such as validation and other business rules) belongs in the stored procedures of a database. Generic routines such as NEXT_ID belong in stand-alone PRGs or in a library of routines (whether procedural or in a class library).</p>
+<p>
+When should you call NEXT_ID to assign a surrogate key to a record? The obvious place is in the insert trigger for the table, but as you’ve probably discovered by now, VFP won’t allow you to change the contents of any field in the current table in trigger code. You could call it in the Save code for your form, but that breaks encapsulation for the databaseÑthe key value won’t be assigned properly when records are added any place other than the form. The correct place to assign the primary key is in the Default value for the primary key field; you do this by specifying NEXT_ID('&lt;table&gt;') as the expression, where &lt;table&gt; is the name of the table. Whenever a new record is added, VFP will call NEXT_ID to assign a default value to the primary key field.</p>
+<p>
+What happens if the user adds a new record to the table, then cancels the addition? Using buffering and TABLEREVERT(), you can easily discard the added record, but the KEY field in NEXTID.DBF is still incremented. If you’re using meaningless surrogate keys, this isn’t a problem, but if the primary key is a check or invoice number, you might not want to “waste” a primary key value. To prevent this, you can have your forms work on a view of the table. Only when TABLEUPDATE() is used to write the new view record to the table is NEXT_ID called; if the user discards the new view record, the table isn’t affected so the next available key value isn’t incremented.</p>
+<p>
+Many developers minimized the requirement to PACK a table in FoxPro 2.x applications by recycling deleted records. This simple yet powerful idea works as follows:</p>
+<p>
+When a record is deleted, blank the fields in the record (using BLANK in FoxPro 2.6 or replacing each field with a blank value in prior versions). This causes the record to “float” to the top when a tag is active.</p>
+<p>
+When a new record is needed, first SET DELETED OFF (so FoxPro can “see” deleted records), then GO TOP (or LOCATE) to move to the first record in index order and check to see if it’s deleted. If so, RECALL the record. If not, there are no deleted records to recycle, so use INSERT INTO or APPEND BLANK to create a new record.</p>
+<p>
+This mechanism doesn’t work in VFP for one simple reason: you can’t have two records with the same primary key value, even a blank value. Even deleted records are checked for primary key duplication, so as soon as you try to delete a record and blank its key value when another such record already exists, you’ll get the dreaded “Uniqueness of index is violated” error.</p>
+<p>
+There are two solutions to this problem. One, a technique pioneered by the late Tom Rettig, involves using a filter on the primary key of NOT DELETED(). With such a filter, VFP no longer checks deleted records for duplicate primary keys, so this mechanism works. Unfortunately, this filter can only be created visually using the Table Designer, not programmatically using INDEX ON or ALTER TABLE, so you can’t re-create this index at a client site if indexes need to be rebuilt. The other solution is to create a tag on DELETED() (which is a good idea anyway because it helps Rushmore do its job better) and use that tag to locate a deleted record to reuse. The logic behind this technique is now as follows:</p>
+<p>
+When a record is deleted, don’t blank the fields; just delete the record. This causes the record to “float” to the set of deleted records when the DELETED tag is active but keeps its primary key value so the record is unique.</p>
+<p>
+When a new record is needed, first SET DELETED OFF (so FoxPro can “see” deleted records), then set the order to the DELETED tag and go to the first record. If it’s deleted, RECALL it and assign a new primary key (if desired). If not, there are no deleted records to recycle, so use INSERT INTO or APPEND BLANK to create a new record.</p>
+<p>
+The following routine (NEW_REC.PRG on the Developer’s Disk) can be used to recycle deleted records:</p>
+<pre><font face="Courier New" size="3">local lcCurrDelete, ;
+&#09;lcCurrOrder, ;
+&#09;llDone, ;
+&#09;lcBlank, ;
+&#09;laFields[1], ;
+&#09;lnFields, ;
+&#09;lnI, ;
+&#09;lcField, ;
+&#09;lcDefault
+
+* Save the current DELETED setting and order and
+* set them as we require.
+
+lcCurrDelete = set('DELETED')
+lcCurrOrder  = order()
+set deleted off
+set order to DELETED descending
+
+* Go to the top of the file, which should be the
+* first deleted record if there are any. Then
+* process records until you get what you want.
+
+locate
+llDone = .F.
+do while not llDone
+&#09;do case
+
+* If this record is deleted and you can lock it, set
+* each field to its default value, blank any fields
+* you don't have a default for, and recall the
+* record.
+
+    case deleted() and rlock()
+      lcBlank  = ''
+      lnFields = afields(laFields)
+      for lnI = 1 to lnFields
+        lcField   = laFields(lnI, 1)
+        lcDefault = laFields(lnI, 9)
+        if empty(lcDefault)
+          lcBlank = iif(empty(lcBlank), 'fields ', ;
+            lcBlank + ',') + lcField
+        else
+          replace (lcField) with evaluate(lcDefault)
+        endif empty(lcDefault)
+      next lnI
+      blank &amp;lcBlank next 1
+      recall
+      llDone = .T.
+
+* If this record is deleted but you can't lock it,
+* try the next one.
+
+    case deleted()
+      skip
+
+* If this record isn't deleted, there aren't any
+* more, so just add a new one.
+
+    otherwise
+      append blank
+      llDone = rlock()
+  endcase
+enddo while not llDone
+
+* Clean up things you changed.
+
+if lcCurrDelete = 'ON'
+&#09;set deleted on
+endif lcCurrDelete = 'ON'
+set order to (lcCurrOrder)
+return</font></pre>
+<h2>Hassles with validation</h2>
+<p>
+In FoxPro 2.x, most developers used a data buffering scheme involving memory variables. The idea was to use SCATTER MEMVAR to create a set of memory variables with the same names as the fields in a table, use GETs to edit those memory variables in a screen, and then save the changes using GATHER MEMVAR only if the user chose the Save function. VFP’s built-in data buffering means you can now create forms that edit the fields in a table directly, and either save the changes using TABLEUPDATE() or cancel them using TABLEREVERT(). Unfortunately there’s one flaw in this new scheme: validation rules.</p>
+<p>
+&#09;Field and table validation rules act like soldiers guarding your data. VFP won’t allow any data that disobey these rules to be stored in your tables. However, these soldiers seem to be a bit overzealous: there’s no way to control when they fire, nor is there a way to trap the error that occurs when the rules fail. Even with table buffering turned on, VFP checks a field validation rule when the user tries to exit a control bound to that field, and a table validation rule when the user tries to move to another record. If the rule fails, VFP displays either the error message you defined in the database for the rule or a generic error message. In either case, you don’t have any control over the appearance of the error dialog box. You also can’t defer validation checking to a more convenient time. For example, if a user enters invalid information in a field, then clicks the Cancel button in a form, the user is still going to get an error message because there’s no way to suppress the validation checking.</p>
+<p>
+A less restrictive problem is system-assigned primary key values. Because VFP doesn’t allow you to assign a primary key value in a trigger (which is the logical place to do it), most developers do it in the Default property for the primary key field by specifying a function name. For example, the routine called NEXT_ID.PRG on the Developer’s Disk assigns the next ID for the specified table by incrementing the ID field in NEXTID.DBF. The default property for the CUST_ID field in the CUSTOMER table is NEXT_ID ('CUSTOMER'). When a new record is added to the CUSTOMER table, NEXT_ID is called by VFP to increment NEXTID.ID and assign the new value to CUST_ID. The only problem with this mechanism is that if the user decides not to add the record after all, NEXTID.ID has already been incremented. In the case of surrogate keys (keys that have no meaning other than to provide a unique value), this isn’t a problem, but if the key represents the next invoice or check number, you’ll have a “hole” in the numbering scheme.</p>
+<p>
+To see an example of how these problems can be a pain, DO the CUSTOMER1 form on the Developer’s Disk. This form uses row buffering with controls directly bound against the CUSTOMER table. Try to enter “NJ” into the Region field; the error dialog that appears is controlled by VFP, not the form. Try clicking the Cancel button. You’ll continue to get the same error message until you enter a valid value (blank, SK, CA, or NY) into the field. Click the Add button, then the Cancel button. Do this several times. Even though no new records have been added to the table, the next available value for CUST_ID keeps rising.</p>
+<p>
+The solution to these problems is to edit an updatable view rather than the table directly in a form. Because the view won’t have field validation rules (unless you explicitly define them, of course), users can enter whatever they like into any field. However, when they click the Save button, TABLEUPDATE() tries to write the view record to the table, at which time field and table rules are checked. If any rules fail, VFP doesn’t display an error message; instead, TABLEUPDATE() returns .F., in which case you can use AERROR() to determine which rule failed and handle it appropriately.</p>
+<p>
+To see an example of this, DO the CUSTOMER2 form. You’ll find that you can enter “NJ” into the Region field and won’t get an error message until you click the Save button. The error message that’s displayed is defined by the form, not VFP. You’ll also find that if you add and cancel several times, the next available CUST_ID isn’t incremented because NEXT_ID.PRG isn’t called until a new CUSTOMER record is inserted when you click the Save button.</p>
+<p>
+Here’s the code from the Click() method of the Save button; this code is simpler than you’d use in a “real” form but shows how field validation rule failure can be handled.</p>
+<pre><font face="Courier New" size="3">local lcAlias, ;
+&#09;laError[1], ;
+&#09;lcField, ;
+&#09;lcDBCField, ;
+&#09;lcMessage, ;
+&#09;lnI
+lcAlias = alias()
+if tableupdate()
+&#09;if cursorgetprop('SourceType') &lt;&gt; 3
+&#09;&#09;= requery()
+&#09;endif cursorgetprop('SourceType') &lt;&gt; 3
+&#09;Thisform.Refresh()
+else
+&#09;select (lcAlias)
+&#09;= aerror(laError)
+&#09;lnError = laError[1]
+&#09;do case
+
+* If the error was caused by a field validation
+* rule being violated, get the error message for<BR>* the field from the DBC (or use a generic message
+* if there isn't one) and display it. Find the<BR>* control for the field and set focus to it.
+
+case lnError = 1582
+  lcField    = alias() + '.' + laError[3]
+  lcDBCField = iif(cursorgetprop('SourceType') = 3, ;
+    lcField, dbgetprop(lcField, 'Field', 'UpdateName'))
+  lcDBCField = substr(lcDBCField, ;
+&#09;  at('!', lcDBCField) + 1)
+  lcMessage  = dbgetprop(lcDBCField, ;
+&#09;  'Field', 'RuleText')
+  lcMessage  = iif(empty(lcMessage), ;
+    'Improper value entered into ' + laError[3] + '.', ;
+    evaluate(lcMessage))
+  = messagebox(lcMessage, 0, Thisform.Caption)
+  for lnI = 1 to Thisform.ControlCount
+    if type('Thisform.Controls[lnI].ControlSource') ;
+&#09;    &lt;&gt; 'U' and ;
+    upper(Thisform.Controls[lnI].ControlSource) = lcField
+      Thisform.Controls[lnI].SetFocus()
+      exit
+    endif type('Thisform.Controls[lnI].ControlSource') ...
+  next lnI
+* Display VFP's error message.
+
+&#09;otherwise
+&#09;&#09;= messagebox('Error #' + ltrim(str(laError[1])) + ;
+&#09;&#09;chr(13) + laError[2], 0, Thisform.Caption)
+&#09;endcase
+endif tableupdate()</font></pre>
+<p>
+One thing about updatable views frequently catches developers: If the table the view is defined from is buffered, the TABLEUPDATE() for the view will write the view record into the table’s buffer, not directly to the disk. Also, if you forget to issue TABLEUPDATE() for the table, you’ll get an error message when VFP tries to close the table because there are uncommitted changes in the table’s buffer.</p>
+<h2>Lookup tables</h2>
+<p>
+All but the simplest applications use lookup tables. Because most lookup tables have the same structure (code and description), some developers like to use a “multi-lookup” table. A multi-lookup table combines many small lookup tables into one larger table. It usually has the same structure as an individual lookup table, but with the addition of a TYPE field. This field contains a value indicating what type of lookup each record is for. For example, <i>A</i> might represent customer type lookups, <i>B</i> customer sales regions, and <i>C</i> employee types. The primary key for this table is TYPE + CODE, so the CODE must be unique within each type. Here are some sample records:</p>
+<table>
+<tr valign=top>
+<td>
+<b>Type</b></td>
+<td>
+<b>Code</b></td>
+<td>
+<b>Description</b></td>
+</tr>
+<tr valign=top>
+<td>
+A</td>
+<td>
+PRO</td>
+<td>
+Prospect</td>
+</tr>
+<tr valign=top>
+<td>
+A</td>
+<td>
+REG</td>
+<td>
+Regular</td>
+</tr>
+<tr valign=top>
+<td>
+A</td>
+<td>
+SPE</td>
+<td>
+Special</td>
+</tr>
+<tr valign=top>
+<td>
+B</td>
+<td>
+NE</td>
+<td>
+Northeast</td>
+</tr>
+<tr valign=top>
+<td>
+B</td>
+<td>
+SW</td>
+<td>
+Southwest</td>
+</tr>
+<tr valign=top>
+<td>
+C</td>
+<td>
+FTP</td>
+<td>
+Full-time permanent</td>
+</tr>
+<tr valign=top>
+<td>
+C</td>
+<td>
+FTT</td>
+<td>
+Full-time temporary</td>
+</tr>
+<tr valign=top>
+<td>
+C</td>
+<td>
+PTP</td>
+<td>
+Part-time permanent</td>
+</tr>
+<tr valign=top>
+<td>
+C</td>
+<td>
+PTT</td>
+<td>
+Part-time temporary</td>
+</tr>
+</table><br>
+<p>
+The advantage of having a multi-lookup table is that there are fewer tables to open and maintain than when many smaller lookup tables are used. The disadvantage is that setting up the relationships is a little more complex because the type must be part of the relationship and a filter has to be set on the lookup table so the user can see only the codes matching the desired type. Here’s an example that opens CUSTOMER.DBF and two copies of LOOKUPS.DBF and sets up relationships for the customer type and customer sales region lookups:</p>
+<pre><font face="Courier New" size="3">select 0
+use LOOKUPS again alias CUST_TYPE order TYPECODE
+set filter to TYPE = 'A'
+select 0
+use LOOKUPS again alias CUST_REGION order TYPECODE
+set filter to TYPE = 'B'
+select 0
+use CUSTOMER
+set relation to 'A' + TYPE into CUST_TYPE, ;
+&#09;'B' + REGION into CUST_REGION</font></pre>
+<p>
+Working with multi-lookup tables is much easier in VFP because you can use views. You define one view for each type of lookup needed and include records only of the desired type in the view:</p>
+<pre><font face="Courier New" size="3">create sql view CUST_TYPE_LOOKUP as ;
+&#09;select CODE, DESCRIP ;
+&#09;from LOOKUPS ;
+&#09;where TYPE = 'A'
+create sql view CUST_REGION_LOOKUP as ;
+&#09;select CODE, DESCRIP ;
+&#09;from LOOKUPS ;
+&#09;where TYPE = 'B'</font></pre>
+<p>
+Using views gives you the best of both worlds: one physical table to manage but many easy-to-use logical representations. You don’t need to worry about the lookup type when setting up relations, doing SEEKs, or displaying a pick list. This code sets up the same type of relations as the previous code did, but using views:</p>
+<pre><font face="Courier New" size="3">select 0
+use CUST_TYPE_LOOKUP
+index on CODE tag CODE
+select 0
+use CUST_REGION_LOOKUP
+index on CODE tag CODE
+select 0
+use CUSTOMER
+set relation to TYPE into CUST_TYPE_LOOKUP, ;
+&#09;REGION into CUST_REGION_LOOKUP</font></pre>
+<p>
+This code shows the one downside of using views: because views don’t have predefined indexes, you can’t set up the relationships in the DataEnvironment of a form or report because you have to re-create the indexes every time the view is opened. Other than that, this code could open separate lookup tables or open different views of the same lookup table.</p>
+<h2>Visual FoxPro 5.0</h2>
+<p>
+Although there are a lot of new features in 5.0, not many changes were made to the database container. However, the ones that were made will make a big difference in your productivity. Let’s look at these.</p>
+<p>
+One change that will simplify things is having a multiuser database container. This means you no longer have to ensure that no one else on your network has the database open before adding new tables, making table structure changes, or rebuilding indexes. Because another user can add or remove tables or views from the database container while you have it open, a new Refresh function in the Database menu rereads the database from disk. Other new functions in the Database menu, such as Find Object and Arrange, make it easier to work with databases containing many objects.</p>
+<p>
+The Table Designer has a slightly new appearance. Instead of a Table button to display a table properties (such as rule and message) dialog box, there’s a Table page. This page also includes the name of the .DBF, and database and statistical information about the table (number of records, number of fields, and record size). The biggest change, though, is on the Fields page. Four new properties appear: InputMask, Format, DisplayLibrary, and DisplayClassLibrary. (These are the names of the properties as the DBGETPROP() and DBSETPROP() functions expect them.) These new properties, together with a new VFP feature called Intellidrop, will greatly improve your productivity in creating forms. Here’s how it works.</p>
+<p>
+In VFP 3.0, when you drag a field from the DataEnvironment, Project Manager, or Database Designer to a form, you get a control with the following attributes:</p>
+<p>
+The control is a VFP base class: Checkbox for Logical fields, Editbox for Memo fields, OLEBoundControl for General fields, and Textbox for all other data types.</p>
+<p>
+Text box controls are sized to hold about 10 characters, regardless of the actual field size, forcing you to resize the control.</p>
+<p>
+The name of the control is the name of the class followed by an instance number (for example, the first Textbox control is Textbox1 and the second is Textbox2). Usually, you’d rename the control to something more meaningful like txtCompany.</p>
+<p>
+No label is automatically created as a caption for the field.</p>
+<p>
+Developers complained long and hard about the shortcomings of dropping a field on a form, and Microsoft responded with the Intellidrop feature in VFP 5.0. When you drop a field on a form, Intellidrop does the following:</p>
+<p>
+Creates a control of the class defined in the DisplayClassLibrary property for the field defined in the database (the DisplayLibrary property tells VFP where this class is stored).</p>
+<p>
+Sizes the control appropriately for the field size.</p>
+<p>
+Copies the InputMask, Format, and Comment properties of the field to the same properties of the control.</p>
+<p>
+Creates a Label object to the left of the control whose Caption property is set to the Caption of the field.</p>
+<p>
+You can turn off some or all of these features by bringing up the Tools Options dialog box, selecting the Field Mapping page, and clearing the appropriate check box. You can also define which class to use by default for each data type; this class is used whenever a field with “&lt;default&gt;“ as the DisplayClassLibrary is dropped on a form.</p>
+<p>
+&#09;Like many things, Intellidrop has shortcomings:</p>
+<p>
+The name of the control is still the class name followed by an instance number.</p>
+<p>
+The controls aren’t always sized perfectly; you might still need to tweak the width a bit.</p>
+<p>
+The label it creates is of the Label base class; there’s no way to define a different class to use.</p>
+<p>
+Only classes stored in visual class libraries (VCXs) can be used (this isn’t so much a complaint as an observation).</p>
+<p>
+If you change the field properties in the database, you have to delete the label and field control and re-drop the field on the form, because these properties aren’t dynamically tied to the control.</p>
+<p>
+In addition to the benefits provided by Intellidrop, storing the InputMask and Format for a field in the database means you can create controls that dynamically set their InputMask and Format properties as appropriate for their ControlSource at runtime. The advantage is reduced maintenance: If you decide a field should contain only uppercase data, you have to edit every form and report, displaying the field if the format is hard-coded into its control. If the control asks the database at runtime for the format for the field, no editing is required at all. This is especially useful for user-customizable applications, such as an accounting system where the user can define the format for account codes or inventory part numbers.</p>
+<p>
+Here’s code you can put in the Init() method of a control (or better yet, in the Init() method of a class) to set the InputMask and Format properties at runtime (see the SFTextbox class in the CONTROLS.VCX class library on the Developer’s Disk):</p>
+<pre><font face="Courier New" size="3">if not empty(This.ControlSource) and ;
+&#09;not empty(dbc()) and ;
+&#09;indbc(This.ControlSource, 'Field')
+&#09;local lcInputMask, lcFormat
+&#09;lcInputMask = dbgetprop(This.ControlSource, ;
+&#09;&#09;'Field', 'InputMask')
+&#09;lcFormat = dbgetprop(This.ControlSource, ;
+&#09;&#09;'Field', 'Format')
+&#09;This.InputMask = iif(empty(lcInputMask), ;
+&#09;&#09;This.InputMask, lcInputMask)
+&#09;This.Format = iif(empty(lcFormat), ;
+&#09;&#09;This.Format, lcFormat)
+endif not empty(This.ControlSource) ...</font></pre>
+<p>
+An example of this scheme is shown in the EMPLOYEE.SCX form on the Developer’s Disk. If you examine the controls on this form, you’ll find the InputMask or Format properties haven’t been set. However, when you DO the form, the Phone field is formatted as 999-999-9999 and the Category field is forced to uppercase because that’s how those fields are defined in the database.</p>
+<p>
+I tested this code’s performance by including or excluding the code from the SFTextbox class used for the controls on the form, and found the form takes about 15 percent longer to instantiate. However, that means the form takes 0.327 seconds to display rather than 0.283 seconds, so the user really won’t notice the difference. Thus, perhaps with the exception of the busiest of forms, I suggest using this scheme to ensure your forms keep up to date with changes made to the database.</p>
+<p>
+Another new feature you’re going to love is being able to update fields in the current table in field and table validation rules. VFP 3.0 allowed you to update fields in another table in validation code, but attempting to change a field in the current table caused an “illegal recursion” error. For example, this meant you couldn’t define code to timestamp a record (put the date and time of the last change into a field) as a table rule, but instead had to do it in a form. The advantage of putting this code in a rule is that it automatically happens without the form developer having to code for it, and it also works in browses or programmatic changes to the table. In VFP 5.0, you can use code similar to the following (this code is in the stored procedures of the DATA database on the Developer’s Disk and is called as the table validation rule for the EMPLOYEE table):</p>
+<pre><font face="Courier New" size="3">function EmployeeTableRule
+local ltStamp
+
+* Assign the EMP_ID field if it hasn't been already.
+
+if empty(EMP_ID)
+&#09;replace EMP_ID with NEXT_ID('EMPLOYEE')
+endif empty(EMP_ID)
+
+* Timestamp the record.
+
+ltStamp = datetime()
+if LAST_UPDATE &lt;&gt; ltStamp
+&#09;replace LAST_UPDATE with ltStamp
+endif LAST_UPDATE &lt;&gt; ltStamp
+return .T.</font></pre>
+<p>
+This code does two things: assigns the primary key for the current record if it hasn’t already been assigned (this is another way to prevent “holes” in sequential primary keys as I discussed earlier), and timestamps the record every time it’s changed (you could also store the name of the user who made the change). You can use field level validation rules to ensure that the contents of a field are forced to uppercase or to automatically fill in partial entries with a complete value (similar to the AutoCorrect feature in Word 95).</p>
+<p>
+There are a few important things to know when writing rules that update the current table:</p>
+<p>
+Validation rules can modify the current table, but triggers can’t; they still give an “illegal recursion” error.</p>
+<p>
+The code that updates a field should do so only if the field’s value is different from what should be stored. The previous code updates the two fields only if their values need to be updated. This prevents recursion (yes, recursion can still occur in validation rules if you don’t do it properly).</p>
+<p>
+If it’s possible that recursion may occur, you can prevent it from going past more than one level (and causing VFP to bomb) by checking the calling stack (using the PROGRAM() function) and not doing the update if the validation code called itself:</p>
+<pre><font face="Courier New" size="3">lcProgram = ''
+lnLevel   = 1
+do while not empty(program(lnLevel))
+&#09;lcCaller  = lcProgram
+&#09;lcProgram = program(lnLevel)
+&#09;lnLevel   = lnLevel + 1
+enddo while not empty(program(lnLevel))
+if not lcCaller == program()
+&#09;* do the REPLACE here since we haven't
+&#09;* called ourselves
+endif not lcCaller == program()</font></pre>
+<p>
+Thanks to Linda Teh, Andy Neil, and Jim Slater for exploring and clarifying these issues in the VFP 5.0 Beta Forum on CompuServe.</p>
+<h2>Conclusion</h2>
+<p>
+Next month’s column will be “Christmas Stocking Stuffers,” a potpourri of useful ideas. We’ll look at lots of little things, such as where to put utility functions, why you shouldn’t use the GO command, and how to visually indicate that a control is read-only.</p>
+<p>
+<i>Doug Hennig is a partner with Stonefield Systems Group Inc. in Regina, Saskatchewan, Canada. He is the author of Stonefield’s add-on tools for FoxPro developers, including Stonefield Data Dictionary for FoxPro 2.x and Stonefield Database Toolkit for Visual FoxPro. He is also the author of </i>The Visual FoxPro Data Dictionary<i> in Pinnacle Publishing’s The Pros Talk Visual FoxPro series. Doug has spoken at user groups and regional conferences throughout North America. 75156.2326@compuserve.com.</i></p>
+<P align="center"><a
+href="http://www.pinpub.com/foxtalk/"><img src="Pinnacle.gif"
+border="0" width="216" height="72"></a></p>
+
+<P align="center"><strong>To find out more about
+FoxTalk and Pinnacle Publishing, visit their website at</strong> <br>
+<a href="http://www.pinpub.com/foxtalk/"><strong>http://www.pinpub.com/foxtalk/</strong></a></p>
+
+<P align="center"><font size="1">Note: This is not a
+Microsoft Corporation website. <br>
+Microsoft is not responsible for its content..</font></p>
+
+<P>This article is reproduced from the November 1996
+issue of FoxTalk. Copyright 1996, by Pinnacle Publishing, Inc.,
+unless otherwise noted. All rights are reserved. FoxTalk is an
+independently produced publication of Pinnacle Publishing, Inc.
+No part of this article may be used or reproduced in any fashion
+(except in brief quotations used in critical articles and
+reviews) without prior consent of Pinnacle Publishing, Inc. To
+contact Pinnacle Publishing, Inc., please call (800)788-1900 or
+(206)251-1900.</p>
+</font></BODY>
+</HTML>

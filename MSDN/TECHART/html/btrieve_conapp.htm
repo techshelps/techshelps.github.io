@@ -1,0 +1,461 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Converting the Application to ODBC and SQL</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+<h1><a name="btrieve_conapp"></a>Converting the Application to ODBC and SQL</h1>
+<p>
+To produce a high performance Microsoft SQL Server application, it is important to understand some of the basic differences between the SQL Server relational and the Btrieve ISAM models. The wrapper DLL discussed in the previous section successfully disguises SQL Server as Btrieve. However, this implementation is inefficient in the way that it accesses SQL Server data. In fact, the wrapper DLL implementation is likely to perform significantly worse than the original Btrieve application.</p>
+<p>
+The wrapper DLL accesses two unnormalized tables instead of taking advantage of the relational model capabilities that SQL Server provides. It also does not use any of the powerful application performance enhancing features like using the SQL language effectively, stored procedures, indexes, and triggers, to process its result sets. The next step is to change the focus of processing techniques used by the base application to take full advantage of the relational model provided by SQL&nbsp;Server. This can be accomplished through the creation of a new application, Odbcapp.exe, that uses ODBC and SQL only to access SQL Server data.</p>
+<p>
+The greatest benefit in SQL Server performance can be gained from the general areas of database, index, and query design. The most perplexing performance issues are often caused by deficiencies in these design areas. Because performance is a major concern, the application development staff should concentrate on these design issues first. Large performance improvements can be achieved with a relatively little time invested in these areas. This section focuses on making effective decisions in the areas of database, index, and query design using ODBC and SQL. Implementation comparisons between the Btrieve and SQL Server processing models will be made frequently to demonstrate the advantages that SQL Server provides.</p>
+<h3>Normalized Databases</h3>
+<p>
+Logical database design produces the best SQL Server performance. Many narrow tables characterize a normalized database. A normalized database helps improve performance by less data redundancy and the need for fewer indexes. For example, the file and table record formats used by Btrvapp.exe and Mybtrv32.dll for the Titlepub.btr file and <i>titlepublisher</i> table have redundancies in them. Specifically, the publisher information is duplicated for every title. Therefore, if a publisher manages more than one title, its publisher information will be duplicated for every title entry it manages. An ISAM-based system such as Btrieve does not provide join functionality nor does it group data from multiple files at the server. Therefore, you must add the redundant publisher data to the <i>Titles</i><b> </b>table to avoid manual join processing of two separate files at the client.</p>
+<p>
+This scenario can be avoided with SQL Server because multiple tables can be referenced together through a variety of join facilities that it supports at the server. Performing the joins at the server reduces the processing workload on the client and reduces the number of round-trips between the server and the client to handle data.</p>
+<h3>The Btrieve Navigational Model Compared to the SQL&nbsp;Server Structured Query Language</h3>
+<p>
+You should choose the implementation methodologies for data retrieval, modification, insertions, and deletions based on how the data is used in the application. Microsoft SQL Server is a powerful and flexible RDBMS. While many of the aspects of processing data in Btrieve can be applied to the SQL Server environment, you should avoid using Btrieve ISAM-like client-side result set processing techniques and take full advantage of the server processing SQL Server provides. The following discussion compares the result set processing models of both Btrieve and SQL Server. The goal is to briefly expose the differences in these processing models and to show how you can design this functionality effectively and, in many cases, more efficiently in the SQL&nbsp;Server environment.</p>
+<h4>Btrieve navigational model</h4>
+<p>
+Btrieve processes result sets based on the navigational data processing model. The navigational model accesses a single data file at a time; any operation involving multiple files must be done in the application itself. When searching the data file, all of the record data is usually returned to the client even if only one or two of the record attributes are needed to satisfy the requests. The navigational model is characteristic of positional-based operations. The application and Btrieve engine maintain a position within the data file and all operations that are performed against this file are based upon this position. All updates in Btrieve are positional requiring the application to search for and lock the record to be updated. Because the operations are position-based, the application cannot ask the database to change or delete records based on search criteria. </p>
+<p>
+In most cases, you will use an index to perform all or most searches. You should know all of the fields that are indexed within each data file that the application references (nonindex fields can be filtered using the extended get call). The Btrieve navigational model is capable of simple search arguments using the =, &lt;&gt;, &gt;, &lt;, &gt;=, and &lt;= comparison operators to filter the records retrieved from the data file. These search arguments are normally performed between a single indexed field and a constant. Btrieve offers an extended fetch call that can set up a search filter composed of multiple search arguments combined using the logical AND or OR operators, but the logical combinations of criteria in these filters are limited. </p>
+<h4>Transact-SQL</h4>
+<p>
+The power of Microsoft SQL Server is in its structured query language, Transact-SQL. Transact-SQL implementation is rich and robust and if used effectively it can make application development easier and more efficient. Transact-SQL can reference both unnormalized and normalized tables. Transact-SQL also allows you to return only the columns needed to satisfy a request rather than having to return all of the colums. Using Transact-SQL, search capabilities are not limited to indexed fields. You can search on any field in any table referenced in the FROM clause. In fact, you do not even need to know what indexes exist for any given table. The server decides whether an index is appropriate for an operation based on the criteria specified in the Transact-SQL statement. For example, the application can make a request to "Select the TitleID, Title, and Publisher for all of the titles that have sold over 25,000 copies" (<i>SELECT T.TitleId, T.Title, P.PubName from Titles T, Publishers P WHERE T.PubID = P.PubID and T.YTD-Sales &gt; 25000</i>). The application wouldn't need to know if YTD_Sales was an indexed field, and it wouldn't need to examine rows at the client that didn't meet the criteria.</p>
+<p>
+Transact-SQL provides advanced searching capabilities in addition to the basic comparison operators provided by Btrieve. Using Transact-SQL, you can perform complex joins, aggregate functions such as SUM, MAX, and MIN, as well as data grouping and ordering. One of Microsoft SQL Server's primary strengths is the ability to rapidly access and process data at the server. Processing query results at the server reduces the workload done at the client and also reduces the number of trips between the client and the server needed to process data. </p>
+<p>
+Using Transact-SQL is also the way to combine information from multiple tables at the server in one round-trip, using Transact-SQL's join facilities. The following example taken from the <b>GetTitlePubRec</b> function Odbcapp.exe demonstrates this point. The function makes a stored procedure call to return all of the title and publisher information for a particular TitleID.</p>
+<pre><code>/********************************************************************
+Returns Title and Publisher information for @titleID.&nbsp; The query in 
+this stored procedure performs a join between the Titles and the 
+Publishers table based on Publisher ID
+********************************************************************/
+CREATE PROCEDURE GetTPByTitleId @titleid char(6) AS
+SELECT T.TITLE_ID, T.TITLE, T.TYPE, T.PUB_ID, T.PRICE, T.ADVANCE,
+ &nbsp; T.ROYALTY, T.YTD_SALES, P.PUB_NAME, P.CITY, P.STATE,
+ &nbsp; P.COUNTRY
+FROM TITLES T, PUBLISHERS P
+WHERE T.TITLE_ID = @titleid AND T.PUB_ID = P.PUB_ID
+</code></pre>
+<p>
+After the client issues the stored procedure call, the server executes the stored procedure, retrieves all of the requested columns for all of the records that match the criteria in the WHERE clause, and sends the result set back to the client. </p>
+<p>
+Using the server-side resources involves exposing Transact-SQL to application developers if possible, rather than generating Transact-SQL statements automatically underneath an ISAM-like interface. Exposing Transact-SQL directly prevents the application from being hindered by processing overhead caused by not knowing how the data is organized within the tables. Because you have direct access to the tables using Transact-SQL, you have complete control over the way data is processed throughout the application. You can fine-tune each individual data request to optimize performance and maximize throughput and data concurrency.</p>
+<h3>Default Result Sets vs. Cursors</h3>
+<p>
+SQL Server allows you to process data within your application using both set-based operations (called default result sets) and row-at-a-time techniques by using server cursors (processed similar to the way Btrieve operations are performed). Each of these processing models has its own distinct role in the application development process. In the following section, these processing options are compared and contrasted to help you choose the one that satisfies the data processing requirements within your application.</p>
+<h4>Default result sets</h4>
+<p>
+When an application uses SQL effectively to request only the rows it needs from the server, the most efficient way to retrieve these rows is a default result set. An application requests a default result set by leaving the ODBC statement options at their default values prior to executing <b>SQLExecute</b> or <b>SQLExecDirect</b>. For a default result set, the server sends the rows returned from a SQL statement as fast as possible and maintains no position within this set of rows. The client application is responsible for immediately fetching these rows into application memory. Most data processing activity within an application can and should be accomplished using default result sets. Default result sets offer several distinct advantages:
+<ul type=disc>
+<li>
+Using default result sets requires only one round-trip between the client and the server to retrieve an entire set of data. <br><br></li>
+<li>
+Default result sets conserve server resources because between calls from the client they do not maintain position or other client "state" information at the server. This means that applications will scale better to many users.<br><br></li>
+<li>
+Default result sets can be returned by stored procedures that contain procedural logic. Putting procedural logic in stored procedures at the server is usually more efficient than moving the data out of the server to do procedural logic at the client. Stored procedures also allow data manipulation logic to be encapsulated and shared by all client applications.<br><br></li>
+<li>
+Multiple default result sets can be returned from a single batch of SQL requests, resulting in fewer round-trips to the server.</li>
+</ul>
+<h4>SQL Server cursors</h4>
+<p>
+As mentioned previously, most data retrievals and modifications can be performed using SQL Server default result sets. However, in some cases, an application may need to use row-at-a-time capabilities to satisfy a certain application request. For example, the user may have to examine information a row-at-a-time in order to make a decision or to use the information from the row to proceed with another task. SQL Server provides this type of functionality using server cursors. Like Btrieve, server cursors are used to maintain a position at the server. Server cursors act like an ISAM interface, except you cannot perform seek or find operations within the cursor result set. Cursors require that you perform this functionality within the client application.</p>
+<p>
+Server cursors can be opened on the whole table or any subset of a table just like default result sets. However, cursors differ from default result sets in the following distinct ways:
+<ul type=disc>
+<li>
+Depending on the type of cursor chosen (static, keyset-driven, forward-only, dynamic, and so on), the application can perform a variety of different fetching operations (fetch first, next, previous, absolute, relative, and so on) within the scope of the cursor result set at the server. With a default result set, an application can fetch only in a forward direction.<br><br></li>
+<li>
+Server cursors don't hold locks at the server on large unfetched result sets. Using default result sets, shared locks may remain in effect until the client application processes the entire result set or cancels the operation. This can be a problem in instances when the application waits for user input before it finishes fetching. Using default result sets, if the application does not immediately fetch all data requested, the shared locks may be held for a long time, preventing others from updating or deleting. Because server cursors do not hold locks by default, they are unaffected by this application behavior.<br><br></li>
+<li>
+Server cursors allow you to perform positional updates. Default result sets, because of their set-based nature, do not provide this functionality. If a client application needs to update or delete a row retrieved from a default result set, it must formulate a SQL UPDATE or DELETE statement with a WHERE clause containing the row's primary key (or equivalently, call a stored procedure that takes the primary key and new values as parameters). <br><br></li>
+<li>
+In ODBC, server cursors allow you to have multiple active statements on a single connection. Using default result sets, an application must fetch result rows entirely before a connection can be used for another statement execution.</li>
+</ul>
+<p>
+Clearly, server cursors within SQL Server are powerful and flexible. They are useful for ISAM-like row-at-a-time processing and for positional updates. However, server cursors incur some cost and have some limitations:
+<ul type=disc>
+<li>
+Opening a server cursor is more expensive than default result sets within SQL Server in terms of parse, compile, and execute time and <b>tempdb</b> resources. The additional cost of a server cursor varies by query depending on the number of tables involved (for example, single table or join) and type chosen (static, keyset-driven, forward-only, dynamic, and so on).<br><br></li>
+<li>
+Server cursors cannot be opened on SQL batches or stored procedures that return multiple result sets or involve conditional logic.<br><br></li>
+<li>
+Fetching from a server cursor requires one round-trip from client to server to:<ul type=disc>
+<li>
+Open the cursor.<br><br></li>
+<li>
+Retrieve the rowset number of rows specified within the application (in ODBC terms, one round-trip per call to <b>SQLFetchScroll</b> (or <b>SQLExtendedFetch</b> in ODBC 2.0).</li>
+</ul>
+</li>
+</ul>
+<p>
+The rowset size used to process a server cursor has a tremendous effect on the overall processing throughput. Setting the result set size too low causes unnecessary fetching overhead. A large rowset size requires a larger buffer on the client, but it minimizes the number of round-trips needed to return the result set between the client and server.</p>
+<p>
+In ODBC, you can communicate the number of rows to fetch at a time using the rowset size statement option. The size of the rowset needed depends on the operations performed by the application. Screen-based applications commonly follow one of two strategies. The first is to set the rowset size to the number of rows displayed on the screen. If the user resizes the screen, the application changes the rowset size accordingly. The second is to set the rowset size to a larger number, such as 100, which reduces the number of fetches between the client and the server needed to scroll through the result set.</p>
+<p>
+Because a large number of rows are buffered at the client, the application can scroll locally within the client-side buffer rather than repeatedly requesting data from the server. The application fetches rows only when the user scrolls outside of the buffered portion of the result set. </p>
+<p>
+If you need to use the features of server cursors despite their performance disadvantages, be sure to use them wisely. If a particular data request is known to retrieve only one or a small number of rows and positioned update is not required for these rows, use a default result set. When you do need to use a server cursor, be sure to set the rowset size to a reasonably high value.</p>
+<p>
+In summary, default result sets should be used as much as possible. They require less resources, and their result sets are easier to process than those of server-side cursors. You should carefully analyze the scope of each task within the application to decide whether default result sets or server cursors should be used. In general, server cursors should be used sparingly and should only be considered for row-at-a-time processing within the application.</p>
+<h3>Data Access Interface Issues</h3>
+<p>
+Now that several different data processing implementation techniques have been compared, the next step is to discuss how these methods can be used to access SQL Server data effectively. Implementing these concepts successfully will eliminate a large amount of overhead in your application design.</p>
+<h4>Allowing direct access to the tables with Transact-SQL</h4>
+<p>
+By using Transact-SQL statements or stored procedures, you should have direct access to the tables involved with the application. Allowing direct access with Transact-SQL ensures that you have complete control. You can determine how the data will be accessed and the sequence in which all operations will be performed. This layer of control helps you gain the best performance possible by giving you the ability to tune every statement that accesses the data.</p>
+<p>
+Often third-party application development controls and objects provide properties and methods to access and retrieve data. The overall goal of these objects and controls is to create a simple interface that allows you to access tables that minimizes or eliminates the need to use Transact-SQL. While these tools expedite the development process, they also add a layer of abstraction between the data and the application. This can put you at a disadvantage because you have little control over what is being sent to the server to access the data. Because the application developer does not have complete control of the way the data is accessed, the ability to tune the data access operations is limited. </p>
+<p>
+You also reduce your ability to use one of SQL Server's most powerful features—its Transact-SQL language. Transact-SQL is very powerful, and you should use it to its fullest extent. Stored procedures can be used to encapsulate your data access and leverage your SQL skills. Also, stored procedures offer a distinct performance advantage over Transact-SQL statements because they eliminate the parse, compile, and execute time needed to process the request. In summary, you should implement your own Transact-SQL statements as stored procedures, wherever possible, within the application.</p>
+<h4>Implementing data retrieval effectively</h4>
+<p>
+<i>You should not implement data seek operations at the client.</i> You may be tempted to use cursoring to perform these operations at the client to emulate the ISAM-like processing techniques used in the Btrieve environment. However, using this methodology to implement data retrieval greatly diminishes the performance advantages of using SQL&nbsp;Server's powerful relational engine. Remember to use server-side resources effectively with both default result sets and server cursors. Whenever your application doesn't need the features of server cursors, you should use default result sets to avoid unnecessary overhead.</p>
+<h4>Using the query optimizer effectively</h4>
+<p>
+The query optimizer is one of SQL Server's greatest assets. The query optimizer determines the best index to use for each optimized clause generated during the query analysis phase. SQL Server incorporates an intelligent, cost-based query optimizer, which when given a user's query can quickly determine the best access plan for returning the data. The optimizer is invoked for every query that is sent to SQL Server. Its primary goal is to minimize execution time, which generally has a direct link to minimizing physical data accesses within the database. Indexes are immensely important to the optimizer as it makes its access plan assessments.</p>
+<p>
+<i>You should avoid using optimizer hints to override the optimizer's index selections.</i> Hardcoding indexes is strongly discouraged because it reduces the flexibility of the database design and the application. If the conditions for making the index choice change, the application will not be able to adjust and performance may be adversely affected. While SQL Server offers a variety of different methods to override the optimizer, they are rarely needed. The optimizer reliably chooses the most effective index in the majority of cases. The overall index design strategy should be to provide a good selection of indexes to the optimizer, and trust it to make the right decision. Doing so reduces query analysis time and gives good performance over a wide range of situations.</p>
+<h4>Using join facilities at the server</h4>
+<p>
+As mentioned previously, you should use server-side resources as much as possible. Join processing at the server is essential for gaining optimal performance. Performing joins at the server reduces the amount of processing required at the client as well as the number of round-trips needed between the client and the server to process a result set. Essentially, processing joins at the server eliminates the need to perform nested iteration processing of result set data at the client.</p>
+<h3>Managing Concurrency and Locking within the Application</h3>
+<p>
+Data concurrency and lock management are two of the most critical implementation issues involved in the database application development process. Effective lock management has a substantial impact on data concurrency, scalability, and the overall performance of a database application system. Great care must be taken when designing a concurrency strategy to minimize the effects of locking within the scope of an application. An ineffective locking scheme will have drastic adverse effects on the performance of the application in a multiuser environment due to reduced concurrency and excessive blocking within the data.</p>
+<h4>Locking and voncurrency within the ISAM/Btrieve model</h4>
+<p>
+With Btrieve, locking can be handled by the application, or it can be done automatically. You can lock records automatically inside the scope of a transaction or manually on the statement level. Locks can be placed on a row, page, or the entire file; however, the decision of when and how to lock is left up to you.</p>
+<p>
+Because you are responsible for lock management, you must choose an optimistic or pessimistic locking concurrency approach in multiuser scenarios. Both approaches require a hard-coded locking scheme. This can reduce the flexibility and scalability of the application. One locking scheme may not be optimal in all situations and user environments due to varying database sizes and user concurrency conditions. You must carefully examine each transaction and data modification made within the application to determine what locks are needed to satisfy their requirements.</p>
+<p>
+No matter what locking scheme you choose, in Btrieve reads, writes, and the locks associated with them are not done as an atomic unit. You must first read a record with lock before it can be updated or deleted. Therefore, each data modification or deletion requires at least two round-trips between the client and the server. For example, the following code retrieves a single record from Titlepub.btr by its TitleID with a single-row wait-record lock (Btrieve lock bias 100) and then updates the record:</p>
+<pre><code>/* GET TITLE/PUBLISHERS RECORD WITH op and lock bias 100*/
+memset( &amp;tpRec, 0, sizeof(tpRec) );
+dataLen = sizeof(tpRec);
+tpStat = BTRV( op+100, tpPB, &amp;tpRec, &amp;dataLen, keyBuf, keyNum );
+if (tpStat != B_NO_ERROR)
+ &nbsp; return tpStat;
+.
+.
+.
+// Update with -1 key value because key for the record is not to be
+// changed
+tpStat = BTRV(B_UPDATE, tpPB, &amp;tpRec, &amp;dataLen, TitleID, -1 );
+if (tpStat != B_NO_ERROR){
+ &nbsp; printf( "\nBtrieve TitlePublishers UPDATE status = %d\n",&nbsp;&nbsp;&nbsp; tpStat );
+ &nbsp; return B_UNRECOVERABLE_ERROR;
+}
+</code></pre>
+<p>
+Because multiple round-trips are required to process these types of requests, their associated locks are maintained longer. This may reduce the concurrency and scalability of the application. SQL Server eliminates these round-trips because these operations are done as an atomic unit. The locks and data modification or deletion are done in one step, reducing the lock maintenance overhead. SQL Server can also automatically perform optimistic concurrency locking by using cursors.</p>
+<h4>Locking and concurrency within SQL Server</h4>
+<p>
+SQL Server processes queries and data modification operations in parallel, reducing contention and increasing concurrency and throughput. SQL Server provides transactional support that manages all of the locking for each task that it receives. All locking is handled by the server itself, reducing the complexity of the client application and development time. </p>
+<p>
+Microsoft SQL Server escalates lock granularity automatically based on the constraints of the query or data modification that is issued. SQL Server does not require you to perform a separate read and lock before the application can update or delete a record. SQL Server performs the read and its associated locking in a single operation by using the UPDATE or DELETE statement. The qualifications in the WHERE clause tell SQL Server exactly what will be affected and ultimately locked. For example, the following stored procedure and ODBC code performs the same update of a record based on its TitleID as the preceding Btrieve example:</p>
+<pre><code>/****** Object:&nbsp; Stored Procedure dbo.UpdtTitlesByPubID&nbsp;&nbsp; ******/
+CREATE PROCEDURE UpdtTitlesByPubID @PubID char(4) AS
+ &nbsp; UPDATE TITLES SET YTD_SALES = YTD_SALES + 
+ &nbsp; (SELECT SUM(QTY) FROM SALES WHERE TITLES.TITLE_ID = 
+ &nbsp; SALES.TITLE_ID) 
+ &nbsp; WHERE PUB_ID = @PubID
+GO
+
+// Bind the PubID input parameter for the stored procedure
+rc = SQLBindParameter(hstmtU, 1, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_CHAR, 4, 0, 
+choice, 5, &amp;cbInval);
+if&nbsp; (rc!=SQL_SUCCESS &amp;&amp; rc!=SQL_SUCCESS_WITH_INFO) {
+ &nbsp; ErrorDump("SQLBIND SELECT TITLEPUB 1", SQL_NULL_HENV, 
+ &nbsp; SQL_NULL_HDBC, hstmtU);
+ &nbsp; SQLFreeStmt(hstmtU, SQL_RESET_PARAMS);
+ &nbsp; SQLFreeStmt(hstmtU, SQL_CLOSE);
+ &nbsp; return FALSE;
+}
+
+// Execute the UPDATE
+rc=SQLExecDirect(hstmtU, "{call UpdtTitlesByPubID(?)}", SQL_NTS);
+if ((rc != SQL_SUCCESS &amp;&amp; rc != SQL_SUCCESS_WITH_INFO)){
+ &nbsp; ErrorDump("SQLEXECUTE UPDATE TITLEPUB", SQL_NULL_HENV, 
+ &nbsp; SQL_NULL_HDBC, hstmtU);
+ &nbsp; return FALSE;
+}
+</code></pre>
+<p>
+Because the locking is handled by the server, the number of operations needed to perform a task and the overall complexity of the application are reduced. Unlike most ISAM-based systems, SQL Server has an effective deadlock detection mechanism. Deadlock detection at the server helps reduce the logic and complexity needed within the application to address deadlocks.</p>
+<p>
+If you are used to the nonrelational ISAM model, you may want to use ISAM data locking and concurrency management techniques within your SQL Server application code. However, using these techniques will eliminate the performance enhancing advantages that SQL Server provides. The following list presents several fundamental locking and concurrency implementation roadblocks that result from using ISAM processing and locking techniques. A brief description of how each issue can be avoided is provided after each item.
+<ul type=disc>
+<li>
+Attempt to implement pessimistic SELECT FROM T (UPDLOCK) or locking cursors (using the SQL_CONCURRENCY statement option) to mimic the ISAM processing model.<p class=tl>
+As mentioned previously, SQL Server performs locking automatically based on the query or data modification that has been issued. This eliminates the need for you to lock the target record within the scope of your application. Therefore, locking the record manually is usually unnecessary. It increases the possibility of blocking or deadlocking, reducing the scalability and performance of the application. While SQL Server provides locking hints that allow you to control locking, there are very few cases where they are needed. In most cases, you should allow SQL Server to control locking for you.</P></li>
+<li>
+Reread the same record multiple times with lock to verify record existence before performing an update or delete. <p class=tl>
+In an ISAM environment such as Btrieve, you must verify a record's existence before it can modified or deleted. This processing model incurs a great deal of overhead. It also reduces concurrency within the data due to the number of round-trips between the client and application that are needed to perform this verification and the number and durations of locks acquired by these checks. </P></li>
+</ul>
+<p>
+SQL Server provides a mechanism for eliminating this overhead. The SQL Server system variable <i>@@ROWCOUNT</i> indicates the number of rows that were affected by the last operation. Therefore, when you issue an UPDATE or DELETE statement within the application, you can verify how many records were affected by using this variable. If no records exist that match the qualifications you specify in the WHERE clause, then no data will be affected and <i>@@ROWCOUNT</i> will be set to zero. The following example demonstrates the use of <i>@@ROWCOUNT</i> for this purpose:</p>
+<pre><code>UPDATE PUBLISHERS SET PUB_NAME = 'Microsoft Press', City = 'Redmond', State= 'WA', Country = 'USA' WHERE = TITLE_ID = 'BU1032'
+
+/* Verify that record was updated */
+
+IF @@ROWCOUNT &lt;1
+ &nbsp; /* Record does not exist so create it with correct values */
+ &nbsp; INSERT PUBLISHERS VALUES ('BU1032', 'Microsoft Press', 
+ &nbsp; 'Redmond', 'WA', 'USA') WHERE TITLE_ID = 'BU1032'
+</code></pre>
+<p>
+In the preceding example, the UPDATE is performed, and <i>@@ROWCOUNT</i> is set to the number of records it affected. If no records were modified, then a new record is inserted.</p>
+<h3>Implementing Effective Database and Query Design</h3>
+<p>
+Database and query design has the most dramatic impact on SQL Server application design. These areas are the foundation upon which the rest of the application is built. Successful planning and design at this stage will have substantial positive influence on your application's performance.</p>
+<h4>Selecting specific table columns</h4>
+<p>
+Creating applications for SQL Server requires a different development strategy than what you would implement in the Btrieve environment. In the Btrieve environment, most operations retrieve all of the column or attribute data for each record involved in each operation. This technique can be inefficient, especially in cases where only a small number of fields are actually involved. For example, the <b>GetSales</b> function in Btrvapp.exe must retrieve all of the sales record attributes from Sales.btr even though only the TitleID and Qty attributes are needed to complete the task. The following is the code fragment from the <b>GetSales</b> function in Mybtrv32.c that exhibits this behavior:</p>
+<pre><code>/* Get TITLE/PUBLISHER with OPERATION*/
+// Copy the desired TitleID to the keyBuffer for use by Btrieve and
+// initialize parameters
+strcpy(TitleID, keyBuf);&nbsp;&nbsp; 
+memset( &amp;salesRec, 0, sizeof(salesRec) );
+dataLen = sizeof(salesRec);'
+
+// Retrieve the sales record&nbsp;&nbsp; 
+salesStat = BTRV( op, salesPB, &amp;salesRec, &amp;dataLen, keyBuf, 1 );
+ &nbsp; if (salesStat != B_NO_ERROR)
+ &nbsp;&nbsp;&nbsp;&nbsp; return salesStat;
+</code></pre>
+<p>
+The same design inefficiency can be implemented in the SQL Server environment as well by selecting all of the columns from tables, views, or cursors involved in an operation. For example, the following code fragment from the <b>GetSales</b> function retrieves all of the sales record attributes from the BSALESCURSOR even though only the TitleID and Qty attributes are need to complete the task.</p>
+<pre><code>// Bind result set columns to buffers
+
+SQLBindCol(hstmt, 1, SQL_C_CHAR, salesRec.StorID, 5, &amp;cbStorID);
+SQLBindCol(hstmt, 2, SQL_C_CHAR, salesRec.TitleID, 7, &amp;cbTitleID);
+SQLBindCol(hstmt, 3, SQL_C_CHAR, salesRec.OrdNum, 21,&nbsp; &amp;cbOrdNum);
+SQLBindCol(hstmt, 4, SQL_C_SLONG, &amp;salesRec.Qty, 0, &amp;QtyInd);
+SQLBindCol(hstmt, 5, SQL_C_CHAR, salesRec.PayTerms, 13, &amp;cbPayTerms);
+
+// Fetch records one-at-a-time from the server until the desired
+// record is found
+while(!found)
+{
+memset(&amp;salesRec, 0, sizeof(salesRec)); // Initialize the record buffer
+
+// Fetch the record from the server cursor
+rc = SQLFetchScroll(hstmt, FetchOrientation, FetchOffset);
+if ((rc != SQL_SUCCESS &amp;&amp; rc != SQL_SUCCESS_WITH_INFO))
+ &nbsp;&nbsp;&nbsp;&nbsp; .
+ &nbsp;&nbsp;&nbsp;&nbsp; .
+ &nbsp;&nbsp;&nbsp;&nbsp; .
+</code></pre>
+<p>
+The preceding example of design inefficiency can be avoided by accessing only the sales record attributes needed to satisfy the particular task. Odbcapp.exe demonstrates a more efficient design concept in its <b>GetSales</b> function. The <b>GetSales</b> function in Odbcapp.exe calls the <b>GetSales</b> stored procedure from the SQL Server <i>pubs</i> database to retrieve only the TitleID and Qty columns to total the sales for the desired title. The following code fragment presents the <b>GetSales</b> stored procedure. It demonstrates how the stored procedure is executed and its results are processed in the Odbcapp.exe <b>GetSales</b> function.</p>
+<pre><code>/*Get Sales stored procedure */
+CREATE PROCEDURE GetSales @titleid char(6) AS
+SELECT TITLE_ID, QTY FROM SALES WHERE TITLE_ID = @titleid
+GO
+
+// Execute the stored procedure and bind client buffers for each
+// column of the result
+rc = SQLExecDirect(hstmtS, "{callGetSales(?)}", SQL_NTS);
+ &nbsp; .
+ &nbsp; .
+ &nbsp; .
+ &nbsp; SQLBindCol(hstmtS,1, SQL_C_CHAR, TitleID, 7, &amp;cbTitleID);
+ &nbsp; SQLBindCol(hstmtS, 2, SQL_C_SLONG, &amp; Qty, 0, &amp;QtyInd);
+
+// Fetch result set from the server until SQL_NO_DATA_FOUND
+ &nbsp; while( rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO)
+ &nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; rc = SQLFetch(hstmtS);
+.
+.
+.</code></pre>
+<h4>Using WHERE clauses to reduce the result set size</h4>
+<p>
+You should use WHERE clauses to restrict the scope of rows to be returned. Using WHERE clauses reduces the total amount of data affected by the operation, reduces unnecessary processing, and minimizes the number of locks needed to process the request. You should use the WHERE clause to reduce the result set as much as possible to avoid table contention, reduce the amount of data transferred between the client and the server, and increase the processing speed of the request. </p>
+<p>
+For example, the following cursor code was taken from the <b>CreateCursor</b> function of Mybtrv32.c:</p>
+<pre><code>// Creates the BSALESCURSOR
+if (!strcmp(curname, "BSALESCURSOR"))
+ &nbsp; rc=SQLExecDirect(*hstmt2,
+"SELECT STOR_ID, TITLE_ID, ORDNUM, QTY, PAYTERMS FROM 
+BSALES",&nbsp;&nbsp; SQL_NTS);
+</code></pre>
+<p>
+The BSALESCURSOR is created without using a WHERE clause. As a result, the server creates a cursor that covers the entire <i>bsales</i> table. Because this cursor requires more resources and processing at the client to obtain the sales information for a particular TitleID it is inefficient. It would be more efficient to use a WHERE clause that defines the exact TitleID or even a range of TitleIDs. This would reduce the amount of data sent for client-side examination and the number of round-trips between the client and the server to the client. An example of the same cursor using a WHERE clause follows. The cursor also involves only the TitleID and Qty columns from the <i>bsales</i> table because that is all the data the application needs.</p>
+<pre><code>if (!strcmp(curname, "BSALESCURSOR")){
+ &nbsp; SQLBindParameter(hstmtU, 1, SQL_PARAM_INPUT, SQL_C_CHAR, 
+ &nbsp;&nbsp;&nbsp;&nbsp; SQL_CHAR, 6, 0, inval, 7, &amp;cbInval);
+ &nbsp; rc=SQLExecDirect(*hstmt2,
+ &nbsp; "SELECT&nbsp; TITLE_ID, QTY FROM BSALES WHERE TITLE_ID LIKE ?",
+ &nbsp; SQL_NTS);
+</code></pre>
+<h4>Using the singleton SELECT</h4>
+<p>
+A singleton SELECT returns one row based on the criteria defined in the WHERE clause of the statement. Singleton SELECTs are often performed in applications and are worthy of special attention. Because only one row is returned, you should always use a default result set SELECT statement rather than a server-side cursor to retrieve the record. The default result set SELECT statement will take less time to retrieve the record and requires far less resources on both the client and the server, as opposed to using server cursors to retrieve the row. The following code fragment is an example of a singleton SELECT that returns the Pub_ID and Title for a single Title_ID:</p>
+<pre><code>SELECT PUB_ID, TITLE FROM TITLES WHERE TITLE_ID = 'PC8888'
+</code></pre>
+<p>
+Because singleton SELECTs are performed frequently in most environments, you should use stored procedures to perform the SELECT statement. Using a stored procedure will reduce the parse, compile, and execute time needed to process the request as opposed to issuing a SELECT statement directly. For example, the following code taken from the <b>GetTitlePubRec</b> function in Odbcapp.exe executes a singleton SELECT through the <b>GetTPByTitleId</b> stored procedure. Notice the small amount of processing needed in Odbcapp.exe to execute this stored procedure.</p>
+<pre><code>switch(key)
+ &nbsp; {
+ &nbsp; case 1:&nbsp;&nbsp; // Title_ID search
+ &nbsp;&nbsp;&nbsp;&nbsp; strcpy(StoredProc, "{call GetTPByTitleID(?)}");
+ &nbsp;&nbsp;&nbsp;&nbsp; // Identify stored procedure to call
+
+ &nbsp;&nbsp;&nbsp;&nbsp; // Bind the input parameter buffer
+ &nbsp;&nbsp;&nbsp;&nbsp; SQLBindParameter(hstmtU, 1, SQL_PARAM_INPUT, 
+ &nbsp;&nbsp;&nbsp;&nbsp; SQL_C_CHAR, 
+ &nbsp;&nbsp;&nbsp;&nbsp; SQL_CHAR, 6, 0, inval, 7, &amp;cbInval);
+ &nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp; .
+ &nbsp; .
+ &nbsp; .
+
+// Execute the stored procedure and bind result set row columns to variables
+ &nbsp; memset( &amp;tpRec, 0, sizeof(tpRec) );&nbsp; // Initialize buffer record
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // structure
+
+ &nbsp; rc=SQLExecDirect(hstmtU, StoredProc, SQL_NTS );
+ &nbsp; .
+ &nbsp; .
+ &nbsp; .
+
+ &nbsp; SQLBindCol(hstmtU, 1, SQL_C_CHAR, tpRec.TitleID, 7,
+ &nbsp; &amp;cbTitleID);
+ &nbsp; SQLBindCol(hstmtU, 2, SQL_C_CHAR, tpRec.Title, 81, &amp;cbTitle);
+ &nbsp; .
+ &nbsp; .
+ &nbsp; .
+ &nbsp; SQLBindCol(hstmtU, 12, SQL_C_CHAR, tpRec.Country, 31, 
+ &nbsp; &amp;cbCountry);
+
+// Process the results until SQL_NO_DATA_FOUND
+ &nbsp; while (rc==SQL_SUCCESS || rc==SQL_SUCCESS_WITH_INFO) 
+ &nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; rc=SQLFetch(hstmtU);
+ &nbsp;&nbsp;&nbsp;&nbsp; if (rc==SQL_SUCCESS || rc==SQL_SUCCESS_WITH_INFO) {
+ &nbsp; .
+ &nbsp; .
+ &nbsp; .
+</code></pre>
+<h4>Using effective indexing techniques</h4>
+<p>
+Efficient index design is crucial in achieving good SQL Server performance. Because indexing plays such a significant role in performance, you should experiment with different indexes. The optimizer reliably chooses the most effective index in most cases. The overall index design strategy should be to provide a good selection of indexes to the optimizer, and trust it to make the right decision. This reduces analysis time and gives good performance for a variety of situations. The following are some other basic index design recommendations:
+<ul type=disc>
+<li>
+The WHERE clause of all SQL queries should be analyzed because it is the primary focus of the optimizer. <p class=tl>
+Each column, and combination of columns, listed in the WHERE clause is a possible candidate for an index. Indexing effectiveness can be analyzed with the SET SHOWPLAN ON and SET STATISTICS I/O ON statements. You should create more indexes than only the primary key in each table. For example, columns that are used to drive searches or to join with other tables are often good candidates for indexes. The performance of the following <b>GetTPByPubID</b> stored procedure that is used by Odbcapp.exe would be improved by an index on the PUB_ID column:</P><pre><code>CREATE PROCEDURE GetTPByPubID @PubID char(4) ASSELECT T.TITLE_ID, T.TITLE, 
+T.TYPE, T.PUB_ID, T.PRICE, T.ADVANCE, T.ROYALTY, T.YTD_SALES, P.PUB_NAME,&nbsp; 
+P.CITY, P.STATE,&nbsp; P.COUNTRY FROM TITLES T, PUBLISHERS P 
+WHERE T.PUB_ID = P.PUB_ID AND T.PUB_ID = @PubID
+GO</code></pre>
+</li>
+<li>
+Use narrow indexes.<p class=tl>
+Narrow indexes are often more effective than multicolumn, compound indexes. Narrow indexes have more rows per index page and fewer index levels; this boosts performance. The SQL Server optimizer maintains complete distribution statistics on the most significant column of a compound index. Therefore, if the first column of a compound index has poor selectivity, it may not be used. The optimizer can effectively analyze hundreds or even thousands of index join possibilities. Maintaining a large number of narrow indexes provides the optimizer with more options to choose from.</P></li>
+<li>
+Use clustered indexes carefully, but always use them.<p class=tl>
+Clustered indexes physically order the table data on the columns being indexed. Appropriate use of clustered indexes can increase performance tremendously. There can only be one clustered index per table, so this index should be used wisely. Queries that return a large result set or involve a range of values are good candidates for a performance optimization by using a clustered index. Queries that return small result sets or columns that provide little uniqueness are not necessarily good candidates for clustered indexes. However, if you have only one index on a table, it should be a clustered index. If you can't decide which index to make the clustered index, pick the primary key and go back to experiment later if that table is involved in problem queries.</P></li>
+<li>
+Examine column uniqueness.<p class=tl>
+This helps you decide what column is a candidate for a clustered index, nonclustered index, or no index. A column that has a large number of unique values would be a good candidate for a nonclustered index because the data will not have to reorganized due to frequent insertions, deletions, or updates to the key value. A column that has a smaller number of unique values and is frequently used in WHERE clauses would be a good clustered-index candidate because data will be stored in physical data groupings and will not have to be reorganized as frequently. A column that has few or no unique values should not be indexed at all.</P></li>
+</ul>
+<p>
+For more information on indexing and performance, review the Microsoft Knowledge Base article Q110352, "Optimizing Microsoft SQL Server Performance." For more information on insert row level locking, review the <i>What's New in SQL Server 6.5</i> or use the SQL Server Books Online.</p>
+<h4>Implementing stored procedures</h4>
+<p>
+Stored procedures enhance the power, efficiency, and flexibility of Transact-SQL and can sometimes dramatically improve the performance of Transact-SQL statements and batches. Stored procedures differ from Transact-SQL statements because they are precompiled. The first time a stored procedure is run, the SQL Server query engine creates an execution plan and then stores the procedure in the procedure cache for future use. Subsequent calls to the stored procedure will run almost instantaneously since most of the preprocessing work has already been completed. The Odbcapp.exe application demonstrates how stored procedures are called using ODBC within an application.</p>
+<p>
+For more information on stored procedures, see the <i>Microsoft SQL Server Transact-SQL Reference </i>and various articles available in the Microsoft Knowledge Base.</p>
+<h4>Keeping transactions short and efficient</h4>
+<p>
+Compact transactions are essential in any multiuser application environment. The effect of small transactions is most often observed in mixed decision support and online transaction processing environments. Compact transactions make it easier to scale the application to larger numbers of users by decreasing table locking and process blocking. Compact transactions also allow for changes to be made on a smaller scale without affecting the entire system.</p>
+<p>
+You should include only those statements that are necessary to perform the desired data modifications in the transaction. Removing unnecessary statements will shorten the duration of the transaction thereby reducing the duration of all locks it needed to process the request. <i>You should also ensure that there is no user interaction within a transaction.</i> Ensuring there is no user interaction within a transaction eliminates the possibility of a user going to lunch or taking a break while a transaction is progress.</p>
+<h3>Updating and Deleting Data as Set Operations</h3>
+<p>
+You should implement UPDATE and DELETE as set-based operations using the WHERE clause. The WHERE clause should be used with these to restrict the data involved with the operation to that which matches a specific criteria. Implementing these operations using this methodology reduces the total amount of data affected by processing the operations and reduces the number of exclusive locks needed to process them. These operations should only be performed through server cursors if the decision to perform the UPDATE or DELETE in question cannot be specified in the SQL statement itself.</p>
+<p>
+The following two examples demonstrate the difference between a set-based update and a positional update using a cursor. Both of these examples update the YTD_Sales for each title covered by a specific PubID. The first example is a stored procedure used by Odbcapp.exe. It demonstrates the use of a default result set update using a WHERE clause.</p>
+<pre><code>/****** Object:&nbsp; Stored Procedure dbo.UpdtTitlesByPubID ******/
+CREATE PROCEDURE UpdtTitlesByPubID @PubID char(4) AS
+ &nbsp; UPDATE TITLES SET YTD_SALES = YTD_SALES + (SELECT SUM(QTY) FROM
+ &nbsp; SALES WHERE TITLES.TITLE_ID = SALES.TITLE_ID) 
+WHERE PUB_ID = @PubID
+GO
+</code></pre>
+<p>
+The preceding example is efficient and uses the server to perform the processing. The following example taken from Mybtrv32.exe is inefficient. It demonstrates the use of a positional update through a cursor. This example must fetch through the cursor, updating each record that has the desired PubID. Notice the amount of fetching (round-trips between the client and the server) needed to process this request.</p>
+<pre><code>// The following code is taken from the GetTitlePublisher function in
+// Mybtrv32.c
+// Scroll through the cursor a row-at-a-time until the row needing
+// updated is found.
+while (!found)
+{
+ &nbsp;&nbsp;&nbsp;&nbsp; memset( &amp;tpRec, 0, sizeof(tpRec) );&nbsp;&nbsp; // Initialize
+// the client row buffer
+
+// Fetch the record&nbsp;&nbsp; 
+ &nbsp; rc=SQLFetchScroll(hstmt8, FetchOrientation, FetchOffset);
+ &nbsp;&nbsp;&nbsp;&nbsp; if ((rc != SQL_SUCCESS &amp;&amp; rc != SQL_SUCCESS_WITH_INFO))
+ &nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (rc!=SQL_NO_DATA_FOUND){ 
+// Error encountered before end of cursor notify the user and return 
+ &nbsp;&nbsp;&nbsp;&nbsp; ErrorDump("SQLFetchScroll TitlePub", SQL_NULL_HENV, 
+SQL_NULL_HDBC, hstmt8);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return B_UNRECOVERABLE_ERROR;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+else {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return B_END_OF_FILE;} // End of cursor
+// found. Record does not exist
+}&nbsp;&nbsp; 
+
+// Check to see if this is the record we want to update
+ &nbsp;&nbsp;&nbsp;&nbsp; if (!strcmp(keyBuffer, tpRec.PubID))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; found=1;
+}
+
+// The record to be updated has been found. The next step is to
+// update it.
+// The following code is taken from the CursorUPD function in
+// Mybtrv32.c
+// Initialize the client record buffer
+
+memset( &amp;tpRec, 0, sizeof(tpRec) );
+memcpy(&amp;tpRec, dataBuffer, sizeof(tpRec));
+ &nbsp; // Initialize the tpRec data structure 
+ &nbsp; memset( &amp;tpRec, 0, sizeof(tpRec) );
+ &nbsp; memcpy(&amp;tpRec, dataBuffer, sizeof(tpRec));
+
+/*&nbsp; Update the current row within the cursor. We rebind the columns
+/*&nbsp; to update the length of the NULL terminated string columns. We 
+/*&nbsp; are using 0 for the the numRows parameter to affect all rows in 
+/*&nbsp; the rowset. Since we have a rowset size of 1 only the positioned 
+/*&nbsp; row will be affected. The key value of the current record is not 
+/*&nbsp; changing so we issue the positioned update using SQLSet
+/*&nbsp; Pos(SQL_UPDATE, SQL_LOCK_NO_CHANGE)*/
+
+ &nbsp; SQLBindCol(hstmtS, 1, SQL_C_CHAR, tpRec.TitleID, 7, &amp;cbTitleID);
+.
+.
+.
+ &nbsp; rc=SQLSetPos(hstmtS, numRows, SQL_UPDATE,&nbsp; SQL_LOCK_NO_CHANGE);
+ &nbsp; if ((rc != SQL_SUCCESS &amp;&amp; rc != SQL_SUCCESS_WITH_INFO))
+ &nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ErrorDump("SQLSetPos SQL_UPDATE for TITLEPUBLISHER FAILED", SQL_NULL_HENV, SQL_NULL_HDBC, hstmtS);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return B_UNRECOVERABLE_ERROR;
+ &nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp; return B_NO_ERROR;
+</code></pre>
+</BODY>
+</HTML>

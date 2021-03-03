@@ -1,0 +1,1888 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Investigating Multilanguage Debugging and the New IDEs of Visual Studio 97</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF">
+<font face="verdana,arial,helvetica" size="2">
+<H1>Investigating Multilanguage Debugging and the New IDEs of Visual Studio 97</H1><P>Robert Schmidt</P>
+<P>Robert Schmidt is a contributing editor to C/C++ Users Journal, a member of the ANSI/ISO C committees, and a regular speaker at the Software Development Conference. You can reach him at rschmidt@netcom.com.</P>
+<P>Microsoft&reg;&nbsp;Visual Studio&trade; 97 integrates&nbsp;several&nbsp;programming languages into one behemoth development package (see Mary Kirtland's article in this issue for details). What may not be so obvious is that you can now code different parts of a project with different languages and debug those parts simultaneously. The secret rests on three conditions: each language's translator must emit the same native code set so that both translated pieces share an execution context; each language must emit the same symbolic information so that each piece can interpret the other's source context; and each language must support the same binary protocol so that each piece can transfer control to the other.</P>
+<P>Now, multilanguage debugging is nothing new, even from Microsoft. You've been able to mix high-level and assembly language sources for ages. Every commercial C++ compiler I've used also supports C and allows both languages to coexist in a project. And with the advent of COM, Microsoft officially sanctioned multilanguage support at runtime so that an interpreted LISP application can reference a C++ object without either piece knowing (or caring) how the other was written.</P>
+<P>So what is new? First, Visual Basic&reg; shares the same code-generating back end as Visual C++&reg;. Translation: Visual Basic can now produce COM-aware native code executables and symbolic information (PDB) files. Second, SQL Server data and stored procedures can be wrapped within Developer Studio data projects that support symbolic debugging. Third, Visual J++&trade; Java&trade;-based projects also live within Developer Studio, support symbolic debugging, and can implement and call into COM interfaces.</P>
+<P>To demonstrate, I'll walk you through the construction and debugging of a simple stock purchasing system. The UI is a Visual Basic-based application containing a stock transaction component object DLL written in C++. This component records the transactions in a SQL database. Once I show you how to build the pieces, I'll analyze several different methods for debugging the combination and summarize the costs and benefits of each method. I'll finish with a discussion of Java's implications and some final observations.</P>
+<P></P>
+<H2><A NAME="sec0"></A>Caveats</H2><P>The three pieces—container, component, and database—are the foundation for exploring multilanguage debugging and the new Visual Studio integrated development environments (IDEs). They are not designed as a tutorial in programming style or as a study in transaction programming. I will spend a fair amount of time explaining how the IDEs build and use the source files, and how the built pieces flow together. I will spend almost no time analyzing the actual programs themselves.</P>
+<P>A brave few at Microsoft have provided me with almost all the code you'll see here. They wrote it to demonstrate cross-tool development in general, not multilanguage debugging in particular. I've made some cosmetic changes to accommodate <I>MSJ</I>'s code-listing format and altered some names to better represent this article's language-centric view.</P>
+<P>Visual Studio contains several new language components and development features. Those required to understand multilanguage debugging I will discuss in detail; others that are simply a means for producing the demonstration system I will gloss over, including the Active Template Library (ATL), the Microsoft Interface Definition Language (MIDL), and the Microsoft Transaction Server (MTS), formerly codenamed Viper.</P>
+<P></P>
+<H2><A NAME="sec1"></A>Getting Started</H2><P>According to Microsoft, the demo runs on Windows NT&reg; 4.0 only and assumes you use a single computer with at least 32MB of RAM. You also need the Visual Studio Enterprise Edition with these components installed, in this order, from the Visual Studio Master Setup:</P>
+<SPAN><OL><LI>Run Setup for Visual Basic Enterprise Edition. Install with the standard features and options.</LI><LI>Run Setup for Visual C++ Enterprise Edition. Install with the standard features and options.</LI><LI>Click the Visual C++ Server Components, then run setup for SQL Server 6.5. Install with the standard features and options, and install the database on the local machine. Microsoft recommends you leave the system administrator (sa) password blank.</LI><LI>Click the Visual C++ Server Components, then run setup for Visual C++ Server Components. Install with the standard features and options.</LI><LI>Click the Visual C++ Server Components, then run setup for SQL Server Service Pack 2. Install with the standard features and options.</LI><LI>Run Setup for Transaction Server. Choose the development addition and the Visual Basic Add-In.</LI></OL></SPAN><P>For the remainder of this article, I assume you have downloaded but not yet installed the complete source code archive for this article (see page 5 for details). As I walk through each piece of the demo, I'll show you how I created that piece from scratch. That way, you can adapt the techniques to your own real projects. After I've shown what you can generate from wizards and the like, I'll then have you patch in the hand-generated or hand-modified pieces from the source code archive.</P>
+<P>I also assume the demo project source folders you create will live within the common folder C:\MSJ_debug_demo. If you decide to use a different root folder name, please substitute that name for C:\MSJ_debug_demo in the following descriptions.</P>
+<P></P>
+<H2><A NAME="sec2"></A>Creating and Configuring the SQL Database</H2><P>This demo stores stock purchasing information in a SQL database. To install this database:</P>
+<SPAN><OL><LI>From the code archive, copy InstSamp.SQL (see Figure 1) to C:\MSJ_debug_demo.</LI><LI>From the taskbar's Start button, find the Microsoft SQL Server&trade; 6.5 group and open the ISQL_w application.</LI><LI>Assuming you have just installed SQL Server on your machine, you need to create a local connection. In ISQL/W, choose File | Connect, select Use Trusted Connection as Login Information, and click the Connect button.</LI><LI>Still within the ISQL/W application, chose File | Open, select the InstSamp.SQL file you installed in step 1, and click OK. You now see a Query window filled with the contents of InstSamp.SQL.</LI><LI>Select Query | Execute. In the Results tab of the Query window, you'll see status messages as the database installs. Once the message "Ending InstSamp.SQL" appears, the installation is complete.</LI><LI>Exit the ISQL/W application. </LI></OL></SPAN><P>Figure 1  InstSamp.SQL</P>
+
+<PRE>-- - InstSamp.SQL   09/18/1996
+GO
+
+---------------------------------------------------------------
+-- Create Database
+---------------------------------------------------------------
+-- Set switches for creating database
+set nocount on
+set dateformat mdy
+
+-- Initially point to the master database
+USE master
+
+GO
+
+-- Drop the VCEESamples database if it initially exists
+declare @dttm varchar(55)
+select @dttm=convert(varchar,getdate(),113)
+raiserror('Beginning InstSamp.SQL at %s ....',1,1,@dttm) with nowait
+
+if exists (select * from sysdatabases where name='VCEESamples')
+    DROP database VCEESamples
+
+GO
+
+-- Check for completion.&nbsp;(Make sure db is completely dropped b4 creating another.)
+CHECKPOINT
+
+GO
+
+-- Create the VCEESamples database using 3 MB of space in master.
+CREATE DATABASE VCEESamples
+    on master = 3
+
+GO
+
+-- Check for completion.  (Make sure db is completely created b4 proceeding.)
+CHECKPOINT
+
+GO
+
+-- Switch to the VCEESamples database.
+USE VCEESamples
+
+GO
+
+-- Verify the existence of VCEESamples.
+if db_name() = 'VCEESamples'
+    raiserror ('''VCEESamples'' database created, and context now in use.',
+                     1, 1)
+else
+    raiserror ('Error in InstSamp.SQL, ''USE VCEESamples'
+                     ' failed! Killing the SPID now.', 22, 127) with log
+
+GO
+
+-- Clear the log.
+execute sp_dboption 'VCEESamples', 'trunc. log on chkpt.' , 'true'
+
+GO
+
+---------------------------------------------------------------
+-- Create Tables
+---------------------------------------------------------------
+
+-- Echo to console that we are creating tables.
+raiserror('Now at the create table section ....',1,1)
+
+GO
+
+---------------------------------------------------------------
+-- Tables for Orders Samples
+
+-- OrdersAccount
+CREATE TABLE OrdersAccount
+(
+ AccountID      int  NOT NULL   CONSTRAINT UPKCL_ccountind PRIMARY KEY CLUSTERED,
+ Balance     money   NOT NULL,
+ PIN     varchar(4)  NOT NULL
+)
+
+GO
+
+-- OrdersInventory
+CREATE TABLE OrdersInventory
+(
+ PartID      int     NOT NULL    CONSTRAINT UPKCL_partidind PRIMARY KEY CLUSTERED,
+ InStock     int     NOT NULL,
+ Description varchar(128)    NULL,
+ Price       money   NOT NULL
+)
+
+GO
+
+-- OrdersShipping
+CREATE TABLE OrdersShipping
+(
+ OrderID    int     NOT NULL    CONSTRAINT UPKCL_orderidind PRIMARY KEY CLUSTERED,
+ AccountID  int     NOT NULL,
+ PartID     int     NOT NULL,
+ Quantity   int     NOT NULL,
+ State      int     NOT NULL
+)
+
+GO
+
+---------------------------------------------------------------
+-- Tables for Stocks Samples
+
+-- StocksAccount
+CREATE TABLE StocksAccount
+(
+ AccountID  int     NOT NULL  CONSTRAINT UPKCL_accountidind PRIMARY KEY CLUSTERED,
+ Balance    money   NOT NULL,
+ PIN     varchar(4)  NOT NULL
+)
+
+GO
+
+-- StocksShares and additional index
+CREATE TABLE StocksShares
+(
+    AccountID   int     NOT NULL,
+    Stock       varchar(10) NOT NULL,
+    Shares      int     NOT NULL
+)
+
+GO
+
+CREATE INDEX UPKCL_stockind ON StocksShares(Stock)
+
+GO
+
+-- StocksTrades
+CREATE TABLE StocksTrades
+(
+    AccountID   int     NOT NULL,
+    Stock       varchar(10) NOT NULL,
+    Action      int     NOT NULL,
+    Shares      int     NOT NULL,
+    Price       float   NOT NULL
+)
+
+GO
+
+---------------------------------------------------------------
+-- Populate tables with data
+---------------------------------------------------------------
+
+GO
+
+---------------------------------------------------------------
+-- Tables for Orders Samples
+
+-- OrdersAccount
+raiserror('Now at the inserts to OrdersAccount ....',1,1)
+
+insert OrdersAccount VALUES(1, 1000.00, 'xxxx')
+insert OrdersAccount VALUES(2, 1000.00, 'xxxx')
+insert OrdersAccount VALUES(3, 1000.00, 'xxxx')
+insert OrdersAccount VALUES(4, 1000.00, 'xxxx')
+insert OrdersAccount VALUES(5, 1000.00, 'xxxx')
+insert OrdersAccount VALUES(6, 1000.00, 'xxxx')
+
+GO
+
+-- OrdersInventory
+raiserror('Now at the inserts to OrdersInventory ....',1,1)
+
+GO
+
+insert OrdersInventory VALUES(1, 1000, 'Widgets', 5.25)
+insert OrdersInventory VALUES(2, 1500, 'Nuts', 0.05)
+insert OrdersInventory VALUES(3, 200, 'Bolts', 0.25)
+insert OrdersInventory VALUES(4, 2000, 'Hammers', 15.75)
+
+GO
+
+---------------------------------------------------------------
+-- Tables for Stocks Samples
+
+-- StocksAccount
+raiserror('Now at the inserts to StocksAccount ....',1,1)
+
+GO
+
+insert StocksAccount VALUES(1, 100000.00, 'xxxx')
+insert StocksAccount VALUES(2, 25.00, 'xxxx')
+insert StocksAccount VALUES(3, 5000.00, 'xxxx')
+insert StocksAccount VALUES(4, 5.00, 'xxxx')
+insert StocksAccount VALUES(5, -20.00, 'xxxx')
+insert StocksAccount VALUES(6, 0.00, 'xxxx')
+insert StocksAccount VALUES(7, 3000.00, 'xxxx')
+insert StocksAccount VALUES(8, 400000.00, 'xxxx')
+insert StocksAccount VALUES(9, 6795.23, 'xxxx')
+insert StocksAccount VALUES(10, 600.00, 'xxxx')
+insert StocksAccount VALUES(11, 50.00, 'xxxx')
+insert StocksAccount VALUES(12, 1000000.00, 'xxxx')
+
+GO
+
+-- StocksTrades
+raiserror('Now at the inserts to StocksTrades ....',1,1)
+
+GO
+
+insert StocksTrades VALUES(1, 'FOO', 1, 100, 25.25)
+insert StocksTrades VALUES(2, 'BAR', 0, 200, 20.00)
+insert StocksTrades VALUES(3, 'FOO', 1, 1000, 25.375)
+insert StocksTrades VALUES(4, 'BAR', 0, 300, 20.25)
+
+GO
+
+-- StocksShares
+raiserror('Now at the inserts to StocksShares ....',1,1)
+
+GO
+insert StocksShares VALUES(1, 'FOO', 1000)
+insert StocksShares VALUES(2, 'BAR', 200)
+insert StocksShares VALUES(1, 'BAR', 300)
+insert StocksShares VALUES(2, 'BAZ', 500)
+insert StocksShares VALUES(4, 'FOO', 2000)
+insert StocksShares VALUES(5, 'BAR', 500)
+
+GO
+
+-- Create sp to validate account used by MTO's.
+raiserror('Now creating sp_validaccount ....',1,1)
+
+GO
+
+CREATE PROCEDURE sp_validaccount @acct int
+AS
+declare @cnt int
+select @cnt=count(*) from StocksAccount where StocksAccount.AccountID = @acct
+if @cnt=0
+begin
+    raiserror ('Invalid Account', 16, -1)
+end
+RETURN
+
+---------------------------------------------------------------
+-- Grant permissions to db objects
+---------------------------------------------------------------
+
+GO
+
+-- SP Valid Account
+raiserror('Now granting permissions for stored procedures ....',1,1)
+
+GO
+
+GRANT execute ON sp_validaccount TO public
+GRANT CREATE PROCEDURE TO public
+
+GO
+
+GRANT ALL ON OrdersAccount TO public
+GRANT ALL ON OrdersInventory TO public
+GRANT ALL ON OrdersShipping TO public
+GRANT ALL ON StocksAccount TO public
+GRANT ALL ON StocksShares TO public
+GRANT ALL ON StocksTrades TO public
+
+GRANT CREATE TABLE TO public
+GRANT CREATE VIEW TO public
+GRANT CREATE RULE TO public
+GRANT CREATE DEFAULT TO public
+GRANT CREATE PROCEDURE TO public
+
+GO
+
+-- Refresh the database to update permissions.
+UPDATE STATISTICS OrdersAccount
+UPDATE STATISTICS OrdersShipping
+UPDATE STATISTICS OrdersInventory
+UPDATE STATISTICS StocksAccount
+UPDATE STATISTICS StocksShares
+UPDATE STATISTICS StocksTrades
+
+GO
+
+-- Ensure permissions are granted before proceeding.
+CHECKPOINT
+
+GO
+
+---------------------------------------------------------------
+-- End the script.
+---------------------------------------------------------------
+
+-- Return to the master database.
+USE master
+
+GO
+
+-- Ensure we are in the master database before proceeding.
+CHECKPOINT
+
+GO
+
+-- Send date and time that script completed.
+declare @dttm varchar(55)
+select @dttm=convert(varchar,getdate(),113)
+raiserror('Ending InstSamp.SQL at %s ....',1,1,@dttm) with nowait
+
+GO
+-- -</PRE>
+<P></P>
+<P>Next, you must configure the newly created database: </P>
+<SPAN><OL><LI>Open the Control Panel and double-click the ODBC icon. Select the System DSN tab and click the Add button. Select SQL Server from the list box and click Finish.</LI><LI>Enter VCEESamples as the Data Source Name, select (local) as the Server name, then click Options. In the Login group, enter VCEESamples as the Database Name.</LI><LI>Click OK in the ODBC SQL Server Setup dialog, and OK to the ODBC Data Source Administrator dialog. Exit Control Panel.</LI></OL></SPAN><P></P>
+<H2><A NAME="sec3"></A>Creating the SQL Database Project</H2><P>To create the data project managing your new SQL database: </P>
+<SPAN><OL><LI>Run Developer Studio and select File | New. From the dialog, select the Projects tab.</LI><LI>On the Projects tab select Database Project. Enter C:\MSJ_debug_demo as the Location, SQL_database as the Project name, and select Create new workspace.      Click OK.</LI><LI>In the Select Data Source dialog that displays, select the Machine Data Source tab, highlight VCEESamples as Data Source Name, and select OK.</LI><LI>In the resulting SQL Server Login dialog, select your SQL Login ID and Password, then click OK.</LI><LI>Select File | Save Workspace.</LI></OL></SPAN><P>Figure 2 shows the resulting Data View, while Figure 3 summarizes the files in your SQL_database folder. In Figure 2, the name in parentheses is your server name. I'm using Dave Edson's computer—hence the server name DAVEE1.</P>
+<P><img src="debug2.gif"></P>
+<P>Figure 2  Project Data View</P>
+<P>Figure 3  Wizard-generated SQL Database Project</P>
+
+<TABLE COLS="2" BORDER="1" CELLPADDING="7"><COLGROUP><COL WIDTH="153pt" VALIGN="TOP"><COL WIDTH="288pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P>File</P></TD><TD VALIGN="TOP"><P>Description</P></TD></TR><TR><TD VALIGN="TOP"><P>SQL_database.dsp</P></TD><TD VALIGN="TOP"><P>Project settings</P></TD></TR><TR><TD VALIGN="TOP"><P>SQL_database.dsw</P></TD><TD VALIGN="TOP"><P>Workspace settings</P></TD></TR><TR><TD VALIGN="TOP"><P>SQL_database.ncb</P></TD><TD VALIGN="TOP"><P>Program database</P></TD></TR><TR><TD VALIGN="TOP"><P>SQL_database.opt</P></TD><TD VALIGN="TOP"><P>Workspace options</P></TD></TR></TBODY></TABLE>
+<P><BR></P><H2><A NAME="sec4"></A>Creating the C++ Component</H2><P>The C++ component is born from an application wizard: </P>
+<SPAN><OL><LI>Run Developer Studio and select File | New.</LI><LI>In the resulting dialog, select the Projects tab. On that tab, select ATL/COM AppWizard from the listbox. Enter C:\MSJ_debug_demo as the Location, CPP_component as the Project name, and elect to create a new workspace.</LI><LI>In the AppWizard dialog select Server Type of DLL, and turn on the check box that allows merging of stub/proxy code. Select Finish in this dialog and OK in the next New Project Information dialog. </LI></OL></SPAN><P>Your new project folder contains sixteen files. Of these, three (Resource.h, StdAfx.cpp, and StdAfx.h) are the traditional AppWizard boilerplate files, nine (CPP_component.*) form the new project, and four are the merged ATL proxy. I summarize the CPP_component.* files in Figure 4 and the proxy files in Figure 5. Figure 6 shows the Developer Studio FileView itemizing the new source files.</P>
+<P>Figure 4  Wizard-generated C++ Component Project</P>
+
+<TABLE COLS="2" BORDER="1" CELLPADDING="7"><COLGROUP><COL WIDTH="135pt" VALIGN="TOP"><COL WIDTH="306pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P>File</P></TD><TD VALIGN="TOP"><P>Description</P></TD></TR><TR><TD VALIGN="TOP"><P>CPP_component.clw</P></TD><TD VALIGN="TOP"><P>MFC Class Wizard settings.</P></TD></TR><TR><TD VALIGN="TOP"><P>CPP_component.cpp</P></TD><TD VALIGN="TOP"><P>DLL initialization and exports (DllMain and friends). Also contains instructions for merging the proxy stub into your project.</P></TD></TR><TR><TD VALIGN="TOP"><P>CPP_component.def</P></TD><TD VALIGN="TOP"><P>Linker module definitions.</P></TD></TR><TR><TD VALIGN="TOP"><P>CPP_component.dsp</P></TD><TD VALIGN="TOP"><P>Project settings. Note the new extension; in previous Visual C++ versions project file names ended in MAK.</P></TD></TR><TR><TD VALIGN="TOP"><P>CPP_component.dsw</P></TD><TD VALIGN="TOP"><P>Workspace settings. As with project settings, these also had a different extension (MDP) in earlier versions.</P></TD></TR><TR><TD VALIGN="TOP"><P>CPP_component.h</P></TD><TD VALIGN="TOP"><P>Empty header. Will later be replaced by the MIDL compiler.</P></TD></TR><TR><TD VALIGN="TOP"><P>CPP_component.idl</P></TD><TD VALIGN="TOP"><P>Interface Definition Language file translated by the MIDL compiler.</P></TD></TR><TR><TD VALIGN="TOP"><P>CPP_component.ncb</P></TD><TD VALIGN="TOP"><P>Visual C++ program database.</P></TD></TR><TR><TD VALIGN="TOP"><P>CPP_component.rc</P></TD><TD VALIGN="TOP"><P>Resource script.</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P>Figure 5  Wizard-generated Proxy Files</P>
+
+<TABLE COLS="2" BORDER="1" CELLPADDING="7"><COLGROUP><COL WIDTH="221pt" VALIGN="TOP"><COL WIDTH="221pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P>File</P></TD><TD VALIGN="TOP"><P>Description</P></TD></TR><TR><TD VALIGN="TOP"><P>CPP_componentps.def</P></TD><TD VALIGN="TOP"><P>Linker module definitions for a separate proxy DLL (the ps in the file name stands for proxy stub).</P></TD></TR><TR><TD VALIGN="TOP"><P>CPP_componentps.mk</P></TD><TD VALIGN="TOP"><P>Proxy stub make file, in case you want to create a separate proxy DLL.</P></TD></TR><TR><TD VALIGN="TOP"><P>dlldatax.c</P></TD><TD VALIGN="TOP"><P>Wraps the file dlldata.c, which is generated by the MIDL compiler during project build.</P></TD></TR><TR><TD VALIGN="TOP"><P>dlldatax.h</P></TD><TD VALIGN="TOP"><P>Extern C declarations of dlldata.c exports.</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P><img src="debug6.gif"></P>
+<P>Figure 6  Wizard-generated files</P>
+<P>(For the morbidly curious, the proxy files arbitrate control flow between two objects that may not be directly accessible to each other. This is more a COM topic than anything else, and I won't explore it in this article.)</P>
+<P>Figures 4 and 5 mention Interface Definition Language (IDL) files and the corresponding MIDL compiler. In essence, IDL expresses COM interface information you'd traditionally put in a C or C++ header. Now that Visual Studio supports COM interfaces in multiple languages, and considering that COM has been ostensibly language-independent all along, Microsoft apparently reckoned they needed a language-independent representation for those interfaces.</P>
+<P>However intuitively IDL may express interfaces to humans, it doesn't do C++ compilers a lick of good. So Microsoft also provides the MIDL compiler to convert IDL files into a form digestible by Visual C++. As you build the project, the MIDL compiler will generate CPP, H, and TLB files from CPP_component.idl. </P>
+<P></P>
+<H2><A NAME="sec5"></A>Building the C++ Component</H2><P>The source generated by the ATL COM AppWizard, like that of application wizards everywhere, is the barest boilerplate. To make this baby crawl, add these source files: CAccount.cpp, CDBStock.cpp, CRow.cpp, CShares.cpp, CStock.cpp, and CTrades.cpp. Also add their collateral headers from the archive for a total of 12 new files. These files form the glue between the Visual Basic container application and the MTS layer abstracting SQL. </P>
+<P>Once you've added all the new files to your project, your workspace FileView should look like Figure 7. You will also need to replace three wizard-generated files—CPP_component.cpp, CPP_component.idl, and StdAfx.h—with those from the code archive. In each of these three source files, I've flagged new lines with /** **/ comments to help you see the changes.</P>
+<P><img src="debug7.gif"></P>
+<P>Figure 7  Your finished workspace</P>
+<P>Make sure the Build tab is visible in the Output window, then select Build | Rebuild All. After deleting the (currently nonexistent) intermediate and output files, the IDE runs the MIDL compiler. In the Build window you'll see the compiler process CPP_component.idl, making reference to other IDL files (oaidl.idl, objidl.idl, and so on) along the way.</P>
+<P>Once the build completes you'll find five new files in your project directory; I summarize these files in Figure 8. Earlier I suggested that the MIDL compiler would translate CPP_component.idl into several Visual C++ source files during the build. Three of the files are cited in Figure 8 as the result of that translation. In addition, the existing file, CPP_component.h, which was generated empty by the AppWizard, has been altered by the IDL translation.</P>
+<P>Figure 8  CPP_component Files</P>
+
+<TABLE COLS="2" BORDER="1" CELLPADDING="7"><COLGROUP><COL WIDTH="144pt" VALIGN="TOP"><COL WIDTH="297pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P>File</P></TD><TD VALIGN="TOP"><P>Description</P></TD></TR><TR><TD VALIGN="TOP"><P>CPP_component.plg</P></TD><TD VALIGN="TOP"><P>Project build logfile.</P></TD></TR><TR><TD VALIGN="TOP"><P>CPP_component.tlb</P></TD><TD VALIGN="TOP"><P>COM Type library generated by MIDL compiler.</P></TD></TR><TR><TD VALIGN="TOP"><P>CPP_component_i.cpp</P></TD><TD VALIGN="TOP"><P>COM, CLSID, and IID definitions generated by MIDL compiler.</P></TD></TR><TR><TD VALIGN="TOP"><P>CPP_component_p.cpp</P></TD><TD VALIGN="TOP"><P>Proxy stub code.</P></TD></TR><TR><TD VALIGN="TOP"><P>dlldata.c</P></TD><TD VALIGN="TOP"><P>List of proxies, generated by MIDL compiler and wrapped by dlldatax.cpp.</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P>In the FileView, you'll see three of these MIDL-generated or altered files showing up as external dependencies (see Figure 9). Figure 10 shows the important parts of the CPP_component source code.</P>
+<P><img src="debug9.gif"></P>
+<P>Figure 9  MIDL-generated files</P>
+<P>Figure 10  CPP_component</P>
+<P></P>
+<P>CAccount.cpp</P>
+
+<PRE>#include "stdafx.h"
+#include "CAccount.h"
+#include &lt;tchar.h&gt;
+
+CAccount::CAccount()
+    {
+    m_lAccountID = 0;
+    m_dblBalance = 0.0;
+    m_cbAccountID = 0;
+    m_cbBalance = 0;
+    }
+
+CAccount::~CAccount()
+    {
+    }
+
+BOOL CAccount::Prepare(LPCTSTR lpszQuery /* = NULL */)
+    {
+    BOOL bRet = CRow::Prepare(lpszQuery);
+    bRet &amp;= BindParam(1, &amp;m_lAccountID, &amp;m_cbAccountID);
+    bRet &amp;= BindParam(2, &amp;m_dblBalance, &amp;m_cbBalance);
+    return bRet;
+    }
+
+BOOL CAccount::Execute()
+    {
+    BOOL bRet = CRow::Execute();
+    bRet &amp;= Bind(1, &amp;m_lAccountID, &amp;m_cbAccountID);
+    bRet &amp;= Bind(2, &amp;m_dblBalance, &amp;m_cbBalance);
+    return bRet;
+    }
+
+BOOL CAccount::IsValidAccount(long lAccountID)
+    {
+    HSTMT hStmtValid = NULL;
+    RETCODE rc;
+    // This function uses a separate statement that shows off a sp
+    // call.  You can use the Visual C++ Enterprise SQL Debugger to
+    // debug the sp.
+    //
+    // Prepare the statement
+    ::SQLAllocStmt(m_hConnect, &amp;hStmtValid);
+    if (hStmtValid == NULL)
+        return FALSE;
+    ::SQLSetStmtOption(m_hStmt, SQL_CURSOR_TYPE,
+                       SQL_CURSOR_FORWARD_ONLY);
+    ::SQLSetStmtOption(m_hStmt, SQL_CONCURRENCY,
+                       SQL_CONCUR_READ_ONLY);
+    ::SQLPrepare(hStmtValid, (SQLCHAR*) "{call sp_validaccount(?)}",
+                 SQL_NTS);
+    ::SQLBindParameter(hStmtValid, 1, SQL_PARAM_INPUT, SQL_C_LONG,
+                       SQL_INTEGER, 0, 0, &amp;m_lAccountID, 0, &amp;m_cbAccountID);
+    // Execute the statement if it fails, we know the account doesn't
+    // exist.
+    m_lAccountID = lAccountID;
+    rc = ::SQLExecute(hStmtValid);
+    ::SQLFreeStmt(hStmtValid, SQL_DROP);
+    return SQLSUCCEEDED(rc);
+    }
+</PRE>
+<P></P>
+<P>CPP_component.h</P>
+
+<PRE>/* this ALWAYS GENERATED file contains the definitions for the interfaces */
+
+
+/* File created by MIDL compiler version 3.01.75 */
+/* at Sat Feb 22 21:15:31 1997
+ */
+/* Compiler settings for CPP_component.idl:
+    Oicf (OptLev=i2), W1, Zp8, env=Win32, ms_ext, c_ext
+    error checks: none
+*/
+//@@MIDL_FILE_HEADING(  )
+#include "rpc.h"
+#include "rpcndr.h"
+#ifndef COM_NO_WINDOWS_H
+#include "windows.h"
+#include "ole2.h"
+#endif /*COM_NO_WINDOWS_H*/
+
+#ifndef __CPP_component_h__
+#define __CPP_component_h__
+
+#ifdef __cplusplus
+extern "C"{
+#endif 
+
+/* Forward Declarations */ 
+
+#ifndef __IStock_FWD_DEFINED__
+#define __IStock_FWD_DEFINED__
+typedef interface IStock IStock;
+#endif     /* __IStock_FWD_DEFINED__ */
+
+
+#ifndef __CStock_FWD_DEFINED__
+#define __CStock_FWD_DEFINED__
+
+#ifdef __cplusplus
+typedef class CStock CStock;
+#else
+typedef struct CStock CStock;
+#endif /* __cplusplus */
+
+#endif     /* __CStock_FWD_DEFINED__ */
+
+/* header files for imported files */
+#include "oaidl.h"
+#include "ocidl.h"
+
+void __RPC_FAR * __RPC_USER MIDL_user_allocate(size_t);
+void __RPC_USER MIDL_user_free( void __RPC_FAR * ); 
+
+#ifndef __IStock_INTERFACE_DEFINED__
+#define __IStock_INTERFACE_DEFINED__
+
+/****************************************
+ * Generated header for interface: IStock
+ * at Sat Feb 22 21:15:31 1997
+ * using MIDL 3.01.75
+ ****************************************/
+/* [unique][helpstring][dual][uuid][object] */ 
+
+EXTERN_C const IID IID_IStock;
+
+#if defined(__cplusplus) &amp;&amp; !defined(CINTERFACE)
+    
+    interface DECLSPEC_UUID("C8D363E5-FC5C-11CF-A288-00A0C905A457")
+    IStock : public IDispatch
+    {
+    public:
+        virtual /* [helpstring] */ HRESULT STDMETHODCALLTYPE Buy( 
+            /* [in] */ long lAccount,
+            /* [in] */ BSTR bstrStock,
+            /* [in] */ long lShares,
+            /* [in] */ double dblPrice) = 0;
+        
+        virtual /* [helpstring] */ HRESULT STDMETHODCALLTYPE Sell( 
+            /* [in] */ long lAccount,
+            /* [in] */ BSTR bstrStock,
+            /* [in] */ long lShares,
+            /* [in] */ double dblPrice) = 0;
+        
+        virtual /* [helpstring][propput] */ HRESULT STDMETHODCALLTYPE put_Commission( 
+            /* [in] */ double dblCommission) = 0;
+        
+        virtual /* [helpstring][propget] */ HRESULT STDMETHODCALLTYPE get_Commission( 
+            /* [retval][out] */ double __RPC_FAR *retval) = 0;
+        
+    };
+    
+#else     /* C style interface */
+
+    typedef struct IStockVtbl
+    {
+        BEGIN_INTERFACE
+        
+        HRESULT ( STDMETHODCALLTYPE __RPC_FAR *QueryInterface )( 
+            IStock __RPC_FAR * This,
+            /* [in] */ REFIID riid,
+            /* [iid_is][out] */ void __RPC_FAR *__RPC_FAR *ppvObject);
+        
+        ULONG ( STDMETHODCALLTYPE __RPC_FAR *AddRef )( 
+            IStock __RPC_FAR * This);
+        
+        ULONG ( STDMETHODCALLTYPE __RPC_FAR *Release )( 
+            IStock __RPC_FAR * This);
+        
+        HRESULT ( STDMETHODCALLTYPE __RPC_FAR *GetTypeInfoCount )( 
+            IStock __RPC_FAR * This,
+            /* [out] */ UINT __RPC_FAR *pctinfo);
+        
+        HRESULT ( STDMETHODCALLTYPE __RPC_FAR *GetTypeInfo )( 
+            IStock __RPC_FAR * This,
+            /* [in] */ UINT iTInfo,
+            /* [in] */ LCID lcid,
+            /* [out] */ ITypeInfo __RPC_FAR *__RPC_FAR *ppTInfo);
+        
+        HRESULT ( STDMETHODCALLTYPE __RPC_FAR *GetIDsOfNames )( 
+            IStock __RPC_FAR * This,
+            /* [in] */ REFIID riid,
+            /* [size_is][in] */ LPOLESTR __RPC_FAR *rgszNames,
+            /* [in] */ UINT cNames,
+            /* [in] */ LCID lcid,
+            /* [size_is][out] */ DISPID __RPC_FAR *rgDispId);
+        
+        /* [local] */ HRESULT ( STDMETHODCALLTYPE __RPC_FAR *Invoke )( 
+            IStock __RPC_FAR * This,
+            /* [in] */ DISPID dispIdMember,
+            /* [in] */ REFIID riid,
+            /* [in] */ LCID lcid,
+            /* [in] */ WORD wFlags,
+            /* [out][in] */ DISPPARAMS __RPC_FAR *pDispParams,
+            /* [out] */ VARIANT __RPC_FAR *pVarResult,
+            /* [out] */ EXCEPINFO __RPC_FAR *pExcepInfo,
+            /* [out] */ UINT __RPC_FAR *puArgErr);
+        
+        /* [helpstring] */ HRESULT ( STDMETHODCALLTYPE __RPC_FAR *Buy )( 
+            IStock __RPC_FAR * This,
+            /* [in] */ long lAccount,
+            /* [in] */ BSTR bstrStock,
+            /* [in] */ long lShares,
+            /* [in] */ double dblPrice);
+        
+        /* [helpstring] */ HRESULT ( STDMETHODCALLTYPE __RPC_FAR *Sell )( 
+            IStock __RPC_FAR * This,
+            /* [in] */ long lAccount,
+            /* [in] */ BSTR bstrStock,
+            /* [in] */ long lShares,
+            /* [in] */ double dblPrice);
+        
+        /* [helpstring][propput] */ HRESULT ( STDMETHODCALLTYPE __RPC_FAR
+                                             *put_Commission )(
+                                             IStock __RPC_FAR * This,
+                                             /* [in] */ double dblCommission);
+        
+        /* [helpstring][propget] */ HRESULT ( STDMETHODCALLTYPE __RPC_FAR
+                                    *get_Commission )( 
+                                    IStock __RPC_FAR * This,
+                                    /* [retval][out] */ double __RPC_FAR *retval);
+        
+        END_INTERFACE
+    } IStockVtbl;
+
+    interface IStock
+    {
+        CONST_VTBL struct IStockVtbl __RPC_FAR *lpVtbl;
+    };
+
+#ifdef COBJMACROS
+
+#define IStock_QueryInterface(This,riid,ppvObject)    \
+    (This)-&gt;lpVtbl -&gt; QueryInterface(This,riid,ppvObject)
+
+#define IStock_AddRef(This)    \
+    (This)-&gt;lpVtbl -&gt; AddRef(This)
+
+#define IStock_Release(This)    \
+    (This)-&gt;lpVtbl -&gt; Release(This)
+
+#define IStock_GetTypeInfoCount(This,pctinfo)    \
+    (This)-&gt;lpVtbl -&gt; GetTypeInfoCount(This,pctinfo)
+
+#define IStock_GetTypeInfo(This,iTInfo,lcid,ppTInfo)    \
+    (This)-&gt;lpVtbl -&gt; GetTypeInfo(This,iTInfo,lcid,ppTInfo)
+
+#define IStock_GetIDsOfNames(This,riid,rgszNames,cNames,lcid,rgDispId)    \
+    (This)-&gt;lpVtbl -&gt; GetIDsOfNames(This,riid,rgszNames,cNames,lcid,rgDispId)
+
+#define IStock_Invoke(This,dispIdMember,riid,lcid,wFlags,pDispParams,pVarResult,pExcepInfo,puArgErr)    \
+    (This)-&gt;lpVtbl -&gt; Invoke(This,dispIdMember,riid,lcid,wFlags,pDispParams,pVarResult,pExcepInfo,puArgErr)
+
+#define IStock_Buy(This,lAccount,bstrStock,lShares,dblPrice)    \
+    (This)-&gt;lpVtbl -&gt; Buy(This,lAccount,bstrStock,lShares,dblPrice)
+
+#define IStock_Sell(This,lAccount,bstrStock,lShares,dblPrice)    \
+    (This)-&gt;lpVtbl -&gt; Sell(This,lAccount,bstrStock,lShares,dblPrice)
+
+#define IStock_put_Commission(This,dblCommission)    \
+    (This)-&gt;lpVtbl -&gt; put_Commission(This,dblCommission)
+
+#define IStock_get_Commission(This,retval)    \
+    (This)-&gt;lpVtbl -&gt; get_Commission(This,retval)
+
+#endif /* COBJMACROS */
+
+#endif     /* C style interface */
+
+/* [helpstring] */ HRESULT STDMETHODCALLTYPE IStock_Buy_Proxy( 
+    IStock __RPC_FAR * This,
+    /* [in] */ long lAccount,
+    /* [in] */ BSTR bstrStock,
+    /* [in] */ long lShares,
+    /* [in] */ double dblPrice);
+
+void __RPC_STUB IStock_Buy_Stub(
+    IRpcStubBuffer *This,
+    IRpcChannelBuffer *_pRpcChannelBuffer,
+    PRPC_MESSAGE _pRpcMessage,
+    DWORD *_pdwStubPhase);
+
+/* [helpstring] */ HRESULT STDMETHODCALLTYPE IStock_Sell_Proxy( 
+    IStock __RPC_FAR * This,
+    /* [in] */ long lAccount,
+    /* [in] */ BSTR bstrStock,
+    /* [in] */ long lShares,
+    /* [in] */ double dblPrice);
+
+void __RPC_STUB IStock_Sell_Stub(
+    IRpcStubBuffer *This,
+    IRpcChannelBuffer *_pRpcChannelBuffer,
+    PRPC_MESSAGE _pRpcMessage,
+    DWORD *_pdwStubPhase);
+
+/* [helpstring][propput] */ HRESULT STDMETHODCALLTYPE IStock_put_Commission_Proxy( 
+    IStock __RPC_FAR * This,
+    /* [in] */ double dblCommission);
+
+void __RPC_STUB IStock_put_Commission_Stub(
+    IRpcStubBuffer *This,
+    IRpcChannelBuffer *_pRpcChannelBuffer,
+    PRPC_MESSAGE _pRpcMessage,
+    DWORD *_pdwStubPhase);
+
+/* [helpstring][propget] */ HRESULT STDMETHODCALLTYPE IStock_get_Commission_Proxy( 
+    IStock __RPC_FAR * This,
+    /* [retval][out] */ double __RPC_FAR *retval);
+
+void __RPC_STUB IStock_get_Commission_Stub(
+    IRpcStubBuffer *This,
+    IRpcChannelBuffer *_pRpcChannelBuffer,
+    PRPC_MESSAGE _pRpcMessage,
+    DWORD *_pdwStubPhase);
+
+#endif     /* __IStock_INTERFACE_DEFINED__ */
+
+#ifndef __CPP_COMPONENTLib_LIBRARY_DEFINED__
+#define __CPP_COMPONENTLib_LIBRARY_DEFINED__
+
+/****************************************
+ * Generated header for library: CPP_COMPONENTLib
+ * at Sat Feb 22 21:15:31 1997
+ * using MIDL 3.01.75
+ ****************************************/
+/* [helpstring][version][uuid] */ 
+
+EXTERN_C const IID LIBID_CPP_COMPONENTLib;
+
+#ifdef __cplusplus
+EXTERN_C const CLSID CLSID_CStock;
+
+class DECLSPEC_UUID("C8D363E9-FC5C-11CF-A288-00A0C905A457")
+CStock;
+#endif
+#endif /* __CPP_COMPONENTLib_LIBRARY_DEFINED__ */
+
+/* Additional Prototypes for ALL interfaces */
+
+unsigned long             __RPC_USER BSTR_UserSize(    unsigned long __RPC_FAR *,
+                                                       unsigned long,
+                                                                BSTR __RPC_FAR *); 
+unsigned char __RPC_FAR * __RPC_USER BSTR_UserMarshal( unsigned long __RPC_FAR *,
+                                                       unsigned char __RPC_FAR *,
+                                                                BSTR __RPC_FAR *); 
+unsigned char&nbsp;__RPC_FAR * __RPC_USER BSTR_UserUnmarshal(unsigned&nbsp;long __RPC_FAR *,
+                                                      &nbsp; unsigned&nbsp;char __RPC_FAR *,
+                                                                BSTR __RPC_FAR *); 
+void                     __RPC_USER BSTR_UserFree(     unsigned long __RPC_FAR *,
+                                                                BSTR __RPC_FAR *); 
+
+/* end of Additional Prototypes */
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
+
+CPP_component.cpp
+// CPP_component.cpp : Implementation of DLL Exports.
+
+// Note: Proxy/Stub Information
+//        To merge the proxy/stub code into the object DLL, add the file 
+//        dlldatax.c to the project.  Make sure precompiled headers 
+//        are turned off for this file, and add _MERGE_PROXYSTUB to the 
+//        defines for the project.  
+//
+//        If you are not running WinNT4.0 or Win95 with DCOM, then you
+//        need to remove the following define from dlldatax.c
+//        #define _WIN32_WINNT 0x0400
+//
+//        Further, if you are running MIDL without /Oicf switch, you also 
+//        need to remove the following define from dlldatax.c.
+//        #define USE_STUBLESS_PROXY
+//
+//        Modify the custom build rule for CPP_component.idl by adding the following 
+//        files to the Outputs.
+//            CPP_component_p.c
+//            dlldata.c
+//        To build a separate proxy/stub DLL, 
+//        run nmake -f CPP_componentps.mk in the project directory.
+
+#include "stdafx.h"
+#include "resource.h"
+#include "initguid.h"
+#include "CPP_component.h"
+#include "CStock.h"
+#include "dlldatax.h"
+
+#define IID_DEFINED /** new macro definition **/
+#include "CPP_component_i.c"
+
+#ifdef _MERGE_PROXYSTUB
+extern "C" HINSTANCE hProxyDll;
+#endif
+
+CComModule _Module;
+
+BEGIN_OBJECT_MAP(ObjectMap)
+    OBJECT_ENTRY(CLSID_CStock, CStock) /** new entry **/
+END_OBJECT_MAP()
+
+/////////////////////////////////////////////////////////////////////////////
+// DLL Entry Point
+
+extern "C"
+BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID lpReserved)
+{
+    lpReserved;
+#ifdef _MERGE_PROXYSTUB
+    if (!PrxDllMain(hInstance, dwReason, lpReserved))
+        return FALSE;
+#endif
+    if (dwReason == DLL_PROCESS_ATTACH)
+    {
+        _Module.Init(ObjectMap, hInstance);
+        DisableThreadLibraryCalls(hInstance);
+    }
+    else if (dwReason == DLL_PROCESS_DETACH)
+        _Module.Term();
+    return TRUE;    // ok
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Used to determine whether the DLL can be unloaded by OLE
+
+STDAPI DllCanUnloadNow(void)
+{
+#ifdef _MERGE_PROXYSTUB
+    if (PrxDllCanUnloadNow() != S_OK)
+        return S_FALSE;
+#endif
+    return (_Module.GetLockCount()==0) ? S_OK : S_FALSE;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Returns a class factory to create an object of the requested type
+
+STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv)
+{
+#ifdef _MERGE_PROXYSTUB
+    if (PrxDllGetClassObject(rclsid, riid, ppv) == S_OK)
+        return S_OK;
+#endif
+    return _Module.GetClassObject(rclsid, riid, ppv);
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// DllRegisterServer - Adds entries to the system registry
+
+STDAPI DllRegisterServer(void)
+{
+#ifdef _MERGE_PROXYSTUB
+    HRESULT hRes = PrxDllRegisterServer();
+    if (FAILED(hRes))
+        return hRes;
+#endif
+    // registers object, typelib and all interfaces in typelib
+    return _Module.RegisterServer(TRUE);
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// DllUnregisterServer - Removes entries from the system registry
+
+STDAPI DllUnregisterServer(void)
+{
+#ifdef _MERGE_PROXYSTUB
+    PrxDllUnregisterServer();
+#endif
+    _Module.UnregisterServer();
+    return S_OK;
+}
+
+CPP_component.idl
+// CPP_component.idl : IDL source for CPP_component.dll
+//
+
+// This file will be processed by the MIDL tool to
+// produce the type library (CPP_component.tlb) and marshalling code.
+
+import "oaidl.idl";
+import "ocidl.idl";
+
+/** almost all of this file's contents are new **/
+
+[
+object,
+uuid(C8D363E5-FC5C-11CF-A288-00A0C905A457),
+dual,
+helpstring("IStock Interface"),
+pointer_default(unique)
+]
+
+interface IStock : IDispatch
+    {
+    import "oaidl.idl";
+
+    [
+    helpstring("Buys Stock if Available")
+    ]
+    HRESULT Buy([in] long lAccount, [in] BSTR bstrStock,
+            [in] long lShares, [in] double dblPrice);
+
+    [
+    helpstring("Sells Stock if Available")
+    ]
+    HRESULT Sell([in] long lAccount, [in] BSTR bstrStock,
+            [in] long lShares, [in] double dblPrice);
+
+    [
+    propput,
+    helpstring("Sets Commission")
+    ]
+    HRESULT Commission([in] double dblCommission);
+        
+    [
+    propget,
+    helpstring("Gets Commission")
+    ]
+    HRESULT Commission([out, retval] double* retval);        
+    };
+
+[
+uuid(C8D363E3-FC5C-11CF-A288-00A0C905A457),
+version(1.0),
+helpstring("CPP_component 1.0 Type Library")
+]
+
+library CPP_COMPONENTLib
+    {
+    importlib("stdole32.tlb");
+    [
+    uuid(C8D363E9-FC5C-11CF-A288-00A0C905A457),
+    helpstring("Stock Class")
+    ]
+    coclass CStock
+        {
+        [default] interface IStock;
+        };
+    };
+
+CPP_component_i.c
+/* this file contains the actual definitions of */
+/* the IIDs and CLSIDs */
+
+/* link this file in with the server and any clients */
+
+/* File created by MIDL compiler version 3.01.75 */
+/* at Sat Feb 22 21:15:31 1997
+ */
+/* Compiler settings for CPP_component.idl:
+    Oicf (OptLev=i2), W1, Zp8, env=Win32, ms_ext, c_ext
+    error checks: none
+*/
+//@@MIDL_FILE_HEADING(  )
+#ifdef __cplusplus
+extern "C"{
+#endif 
+
+#ifndef __IID_DEFINED__
+#define __IID_DEFINED__
+
+typedef struct _IID
+{
+    unsigned long x;
+    unsigned short s1;
+    unsigned short s2;
+    unsigned char  c[8];
+} IID;
+
+#endif // __IID_DEFINED__
+
+#ifndef CLSID_DEFINED
+#define CLSID_DEFINED
+typedef IID CLSID;
+#endif // CLSID_DEFINED
+
+const IID IID_IStock = {0xC8D363E5,0xFC5C,0x11CF,{0xA2,0x88,0x00,0xA0,0xC9,0x05,0xA4,0x57}};
+
+const IID LIBID_CPP_COMPONENTLib = {0xC8D363E3,0xFC5C,0x11CF,{0xA2,0x88,0x00,0xA0,0xC9,0x05,0xA4,0x57}};
+
+const CLSID CLSID_CStock = {0xC8D363E9,0xFC5C,0x11CF,{0xA2,0x88,0x00,0xA0,0xC9,0x05,0xA4,0x57}};
+
+#ifdef __cplusplus
+}
+#endif
+
+CRow.h
+#if !defined DEF_CRow_
+    #define  DEF_CRow_
+
+class CRow
+    {
+// Constructors and Destructors
+public:
+    CRow();
+    virtual ~CRow();
+// Attributes
+protected:
+    HENV m_hEnvironment;
+    HDBC m_hConnect;
+    HSTMT m_hStmt;
+    UWORD m_uRowStatus;
+    LPTSTR m_lpszQuery;
+// Operations
+public:
+    // Open &amp; Close
+    virtual BOOL Open(DWORD dwCursor = SQL_CURSOR_FORWARD_ONLY,
+                      DWORD dwConcur = SQL_CONCUR_READ_ONLY);
+    virtual BOOL Close();
+    // SQL Statement Helpers
+    virtual LPCTSTR GetDefaultSQL()
+        {
+        return NULL;
+        };
+    virtual BOOL Prepare(LPCTSTR lpszQuery = NULL);
+    virtual BOOL Execute();
+    // Column Binding Helpers
+    BOOL Bind(short nItem, long* plValue, SDWORD* pcbValue);
+    BOOL Bind(short nItem, double* pdblValue, SDWORD* pcbValue);
+    BOOL Bind(short nItem, BOOL* pbValue, SDWORD* pcbValue);
+    BOOL Bind(short nItem, LPCTSTR lpszValue, SDWORD* pcbValue,
+              long lLength);
+    // Parameter Binding Helpers
+    BOOL BindParam(short nItem, long* plValue, SDWORD* pcbValue);
+    BOOL BindParam(short nItem, double* pdblValue, SDWORD* pcbValue);
+    BOOL BindParam(short nItem, BOOL* pbValue, SDWORD* pcbValue);
+    BOOL BindParam(short nItem, LPCTSTR lpszValue, SDWORD* pcbValue,
+            long lLength);
+    // Rowset Helpers : Only forward only handled
+    BOOL Update(short lRow = 1);
+    BOOL Delete(short lRow = 1);
+    BOOL Add(short lRow = 1);
+    BOOL MoveFirst();
+    BOOL MoveNext();
+// Implementation
+protected:
+    BOOL ReportODBCError(SQLRETURN ret);
+    void DBReportODBCError();
+    };
+
+#endif // !defined DEF_CRow_
+
+CStock.h
+#if !defined DEF_CStock_
+    #define  DEF_CStock_
+
+#include "CDBStock.h"
+#include "CPP_component.h"
+#include "resource.h"
+
+class CStock : 
+    public CComDualImpl&lt;IStock, &amp;IID_IStock, &amp;LIBID_CPP_COMPONENTLib&gt;,
+    public CComObjectRoot,
+    public CComCoClass&lt;CStock,&amp;CLSID_CStock&gt;
+    {
+public:
+    CStock();
+    virtual ~CStock();
+    BEGIN_COM_MAP(CStock)
+        COM_INTERFACE_ENTRY(IDispatch)
+        COM_INTERFACE_ENTRY(IStock)
+    END_COM_MAP()
+    DECLARE_NOT_AGGREGATABLE(CStock) 
+    DECLARE_REGISTRY(CStock, _T("Stock.Stock.1"), _T("Stock.Stock"),
+                     IDS_PROJNAME, THREADFLAGS_APARTMENT)
+// IStock
+public:
+    STDMETHOD(Buy)(long lAccount, BSTR bstrStock, long lShares, double dblPrice);
+    STDMETHOD(Sell)(long lAccount, BSTR bstrStock, long lShares, double dblPrice);
+    STDMETHOD(put_Commission)(double dblCommission);
+    STDMETHOD(get_Commission)(double* retval);
+// Attributes
+protected:
+    CDBStock m_Stock;
+    double    m_dblCommission;
+    };
+
+#endif // !defined DEF_CStock_
+
+CStock.cpp
+#include "stdafx.h"
+
+#include "CStock.h"
+
+#include "CDBStock.h"
+#include &lt;mtx.h&gt;
+
+CStock::CStock()
+    {
+    m_dblCommission = 0.0;
+    }
+
+CStock::~CStock()
+    {
+    }
+
+STDMETHODIMP CStock::Buy
+        (long lAccount, BSTR bstrStock, long lShares, double dblPrice)
+    {
+    USES_CONVERSION;
+    HRESULT    hr;
+    IObjectContext* pContext = NULL;
+    double dblCommission = 0.0;
+    // Get Context Reference
+    hr = GetObjectContext(&amp;pContext);
+    if (hr != S_OK)
+        return hr;
+    // Validate Account
+    get_Commission(&amp;dblCommission);
+    if (!m_Stock.IsValidAccount(lAccount))
+        {
+        pContext-&gt;SetAbort();
+        return E_FAIL;
+        }
+    if (!m_Stock.BuyStock(lAccount, OLE2T(bstrStock), lShares,
+                          dblPrice, dblCommission))
+        {
+        pContext-&gt;SetAbort();
+        return E_FAIL;
+        }
+    pContext-&gt;SetComplete();
+    return S_OK;
+    }
+
+STDMETHODIMP CStock::Sell
+        (long lAccount, BSTR bstrStock, long lShares, double dblPrice)
+    {
+    USES_CONVERSION;
+    HRESULT hr;
+    IObjectContext* pContext = NULL;
+    double dblCommission = 0.0;
+    hr = GetObjectContext(&amp;pContext);
+    if (hr != S_OK)
+        return hr;
+    // Validate Account
+    if (!m_Stock.IsValidAccount(lAccount))
+        {
+        pContext-&gt;SetAbort();
+        return E_FAIL;
+        }
+    get_Commission(&amp;dblCommission);
+    if (!m_Stock.SellStock(lAccount, OLE2T(bstrStock), lShares,
+                           dblPrice, dblCommission))
+        {
+        pContext-&gt;SetAbort();
+        return E_FAIL;
+        }
+    pContext-&gt;SetComplete();
+    return S_OK;
+    }
+
+STDMETHODIMP CStock::put_Commission(double dblPrice)
+    {
+    m_dblCommission = dblPrice;
+    return S_OK;
+    }
+
+STDMETHODIMP CStock::get_Commission(double* retval)
+    {
+    if (retval == NULL)
+        return E_POINTER;
+    *retval = m_dblCommission;
+    return S_OK;
+    }
+
+StdAfx.h
+// stdafx.h : include file for standard system include files,
+//      or project specific include files that are used frequently,
+//      but are changed infrequently
+
+#if !defined(AFX_STDAFX_H__AA2B5095_89FC_11D0_AA8A_00A0C9055E55__INCLUDED_)
+#define AFX_STDAFX_H__AA2B5095_89FC_11D0_AA8A_00A0C9055E55__INCLUDED_
+
+#if _MSC_VER &gt;= 1000
+#pragma once
+#endif // _MSC_VER &gt;= 1000
+
+#define STRICT
+
+#define _WIN32_WINNT 0x0400
+#define _ATL_APARTMENT_THREADED
+
+#include &lt;atlbase.h&gt;
+//You may derive a class from CComModule and use it if you want to override
+//something, but do not change the name of _Module
+extern CComModule _Module;
+#include &lt;atlcom.h&gt;
+
+/** next 4 lines are new **/
+#include &lt;sql.h&gt;
+#include &lt;sqlext.h&gt;
+#define REPORTERROR(x) ReportODBCError(x)
+#define SQLSUCCEEDED(x) (!((x)&gt;&gt;1))
+
+//{{AFX_INSERT_LOCATION}}
+// Microsoft Developer Studio will insert additional declarations 
+// immediately before the previous line.
+
+#endif // !defined(AFX_STDAFX_H__AA2B5095_89FC_11D0_AA8A_00A0C9055E55__INCLUDED)
+</PRE>
+<P></P>
+<P>In what I'm sure is no surprise, you have a new Debug folder containing your built binaries. Also, after you save the workspace, the IDE generates the workspace options file CPP_component.opt. Finally, during the build, the RegSvr32 tool registered your type library, CPP_component.tlb. You'll see the Visual Basic container referring to this library very soon. </P>
+<P></P>
+<H2><A NAME="sec6"></A>Configuring Microsoft Transaction Server</H2><P>I said I'd just gloss over the new Microsoft Transaction Server. Unfortunately, to make the demo work, you must make MTS cognizant of your new C++ component: </P>
+<SPAN><OL><LI>Open the Transaction Server Explorer.</LI><LI>Double-click the icon representing your computer, then double-click on the Packages Installed icon</LI><LI>From the menu select File | New. In the resulting Package Wizard dialog, click "Create an empty package".</LI><LI>In the Create Empty Package dialog, enter CPP_component as the package name.</LI><LI>In the Set Package Identity dialog, select Interactive user, then click Finish.</LI><LI>Once back to the main Transaction Server Explorer window, double-click the CPP_component package, then double-click the Component icon.</LI><LI>Select File | New from the menu. In the Component Wizard dialog, click "Install new component(s)."</LI><LI>In the Install Components dialog, select Add files and browse to (or directly enter) the debug version of the C++ component. The path name is C:\MSJ_debug_demo\CPP_component\Debug\CPP_component.dll. Click Open.</LI><LI>Once the Select file to install dialog disappears, the Install Components dialog should look like Figure 11. Click Finish.</LI><LI>In the Transaction Server window, right-click on the Stock.Stock.1 component icon and choose Properties.</LI><LI>On the Transaction tab, click the Supports Transactions button.</LI><LI>On the Activation tab, turn on the first three check boxes and turn off the fourth, so the result looks like Figure 12. Click OK.</LI></OL></SPAN><P><img src="debug11.gif"></P>
+<P>Figure 11  Install Components Dialog</P>
+<P><img src="debug12.gif"></P>
+<P>Figure 12  Activation Parameters</P>
+<P>If you are the Curious George type, double-click in succession the Stock.Stock.1 component, the Interfaces folder, the IStock interface, and the Methods folder. The C++ component implements these methods in class CStock. You'll see entries for the COM IUnknown methods, those methods particular to the stock transaction class (Buy, Sell, and so on), and IDispatch methods (since IStock, the interface CStock implements, derives from IDispatch). I mention all this to show that, even though the Microsoft Transaction Server setup may seem like a hassle, the end result actually makes sense. Visual Studio's online help has plenty of documentation on the Transaction Server, and I encourage you to browse there to learn more.</P>
+<P></P>
+<H2><A NAME="sec7"></A>Creating and Building the Visual Basic Container</H2><P>Unlike the C++ component, you create the Visual Basic container application without a wizard: </P>
+<SPAN><OL><LI>Create the folder VB_container inside C:\MSJ_debug_demo. Copy VB_container.frm from the code archive into this folder.</LI><LI>Run the Visual Basic IDE. If the New Project dialog doesn't pop up, bring it up by selecting File | New Project. In the New Project dialog choose Standard EXE. The IDE presents the typical Visual Basic default Form1.</LI><LI>Select Project | Add Form. In the Add Form dialog, select the Existing tab, then open C:\MSJ_debug_demo\VB_container\VB_container.frm.</LI><LI>If the Project Explorer window is not visible in the IDE, select View | Project Explorer to bring it up.</LI><LI>In the Project Explorer, right-click on the icon Form1 (Form1), then choose Remove Form1 from the popup menu. The Form1 window will disappear from the middle of the IDE.</LI><LI>Still in the Project Explorer, right-click on the icon Project1 (Project1) and select Project1 Properties from the popup menu. </LI><LI>Select the General tab of the resulting dialog, change the Project Name to VB_container, and change the Startup Object to VB_container_.</LI><LI>On the Make tab, change the Application Title to VB_container.</LI><LI>On the Compile tab, choose the Compile to Native Code, No Optimization, and Create Symbolic Debug Info options. Click OK.</LI><LI>From the menu, select Project | References, scroll down the resulting list box until you find CPP_component 1.0 Type Library, check that item, then click OK. This is the type library you created in the C++ project earlier.</LI></OL></SPAN><P>Building the application is comparatively simple: </P>
+<SPAN><OL><LI>Select File | Make VB_container.exe, specify C:\MSJ_debug_demo\VB_container\VB_container.exe as the target file, and click OK.</LI><LI>You'll see a status bar flash near the top of the IDE as it compiles, then writes, the executable.</LI><LI>In your VB_container folder you should have six files     as summarized in Figure 13.</LI></OL></SPAN><P>Figure 13  VB_container Files After Build</P>
+
+<TABLE COLS="2" BORDER="1" CELLPADDING="7"><COLGROUP><COL WIDTH="108pt" VALIGN="TOP"><COL WIDTH="333pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P>File</P></TD><TD VALIGN="TOP"><P>Description</P></TD></TR><TR><TD VALIGN="TOP"><P>VB_container.frm</P></TD><TD VALIGN="TOP"><P>Visual Basic form.</P></TD></TR><TR><TD VALIGN="TOP"><P>VB_container.frx</P></TD><TD VALIGN="TOP"><P>FoxPro report.</P></TD></TR><TR><TD VALIGN="TOP"><P>VB_container.exe</P></TD><TD VALIGN="TOP"><P>Container application executable.</P></TD></TR><TR><TD VALIGN="TOP"><P>VB_container.pdb</P></TD><TD VALIGN="TOP"><P>Program database, holding symbolic debugging information. Same format as CPP_component.pdb.</P></TD></TR><TR><TD VALIGN="TOP"><P>VB_container.vbp</P></TD><TD VALIGN="TOP"><P>Project file, analogous to CPP_component.dsp.</P></TD></TR><TR><TD VALIGN="TOP"><P>VB_container.vbw</P></TD><TD VALIGN="TOP"><P>Workspace file, analogous to CPP_component.dsw.</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P></P>
+<P>You now have all the pieces in place to run the debugging demonstration. </P>
+<P></P>
+<H2><A NAME="sec8"></A>On with the Show!</H2><P>In the following section, I'll show you three different multilanguage debugging methods: staying completely within the Visual Basic IDE, staying completely within the Developer Studio IDE, and using both IDEs. No single method is likely to serve all your needs all the time. However, I'm hoping you can combine these methods well enough to suit most debugging problems.</P>
+<P></P>
+<P><B>Debugging in the Visual Basic IDE</B> This method is the easiest: do all debugging in the Visual Basic IDE. To see the demo in action, fire up the Visual Basic IDE, select File | Open Project, and open VB_container.vbp. In the Project Explorer, double-click on the VB_container form icon. This brings up the main VB_container UI in the IDE. Double-click on the form to bring up the form's code.</P>
+<P>Search the code (there isn't much) and set breakpoints on these two lines: </P>
+<P></P>
+
+<PRE>CPP_component.Buy account, stock,
+                  shares, price</PRE>
+<P></P>
+<P>and</P>
+<P></P>
+
+<PRE>Set CPP_component = New
+               CPP_COMPONENTLib.CStock</PRE>
+<P></P>
+<P>Now hit F5 to start debugging the application. The debugger breaks straightway on the line:</P>
+<P></P>
+
+<PRE>Set CPP_component = New
+                                 CPP_COMPONENTLib.CStock</PRE>
+<P></P>
+<P>What is CPP_COMPONENTLib? If you look in CPP_component.idl you'll find the line:</P>
+<P></P>
+
+<PRE>library CPP_COMPONENTLib</PRE>
+<P></P>
+<P>Remember, the IDL file turned into (among other things) the type library CPP_component.tlb. CPP_COMPONENTLib is the type library's logical name. Later in the library section of the IDL file you see</P>
+<P></P>
+
+<PRE>coclass CStock</PRE>
+<P></P>
+<P>which accounts for the Visual Basic reference to the type CPP_COMPONENTLib.CStock.</P>
+<P>If you now try to step into the code (F8) you may be surprised—instead of tracing into the C++ component, you see a momentary pause (while the component is loaded) before control passes to the next Visual Basic line. This is much like debugging C++ calls into the Windows API; if you don't have source, the call is opaque and you can't see into it. Here, you do have source, just not the right kind. Visual Basic knows how to trace into Visual Basic, but does not know how to trace into C++. In this regard, nothing's really changed from earlier versions of Visual Basic. The biggest gain is that the Visual Basic-based application is native, resulting in much faster execution. For your purposes, it means the application fails to trace into C++ faster than an interpreted application would fail to trace. </P>
+<P>Actually, if you're a seasoned Visual Basic programmer, there are other advantages—you stay in your familiar IDE and can generate interpreted code instead of native code, which makes for faster edit/debug cycles. However, where programmers familiar with Visual Basic may be at home, C++ programmers may feel lost. I know I'm far from adept in the Visual Basic IDE, so I personally don't consider this method advantageous.</P>
+<P>Hit F5 to continue debugging. After pondering a bit longer, the IDE presents you with the container application's UI (see Figure 14). Select the Purchase tab (which should be the default) and fill in the fields as follows: enter a nonzero integral Account Number, a character string Stock name, an integral count of Shares, and a real share Price.</P>
+<P><img src="debug14.gif"></P>
+<P>Figure 14  VB_Container</P>
+<P>Remember, this is a demo, not a production-quality application. It does a fair amount of checking against the database's integrity and permissions, but almost no input validation; if you feed it bogus data, it may die horribly.</P>
+<P>Once you've filled in the fields, click the Purchase button. You'll see a progress bar start to fill, followed by the debugger stopping at the breakpoint on</P>
+<P></P>
+
+<PRE>CPP_component.Buy account, stock,
+                  shares, price</PRE>
+<P></P>
+<P>If you once again crack open CPP_component.idl, you'll see the line:</P>
+<P></P>
+
+<PRE>HRESULT Buy([in] long lAccount, [in] BSTR bstrStock,
+            [in] long lShares, [in] double dblPrice);</PRE>
+<P></P>
+<P>This declaration matches the name and argument list of the CPP_component.Buy call. Both the programmer implementing the interface in C++ and the programmer calling the interface in Visual Basic can use the IDL as a common frame of reference. I suspect this is one motivation for IDL; it offers a language-neutral interface expression equally arcane to all programmers.</P>
+<P>Hit F5 again. Your machine will grind a bit as VC_container calls into CPP_component, which in turns interacts with the SQL database. After a few moments, the progress bar goes to 100 percent and you'll see a small message box proclaiming Purchase Complete. Click OK. The dialog and progress bar go away, and you're back to the regular UI.</P>
+<P>I trust you get the idea, so I won't bother tracing through the other two tabs and their CPP_component calls. Feel free to experiment, although be forewarned that the Commission tab is a little hokey as written—it always seems to return a commission of zero. Also, remember where you set these two breakpoints since you'll need them later.</P>
+<P>In summary, debugging in the Visual Basic IDE offers several benefits. It provides a familiar environment for programmers used to working with Visual Basic. In addition, it can use interpreted p-code, speeding the development cycle. However, it's an unfamiliar environment for programmers who don't use Visual Basic much, and you can't trace into components written in other languages.</P>
+<P></P>
+<P><B>Debugging in the Developer Studio IDE</B> Since the EXE and PDB files Visual Basic produces are compatible with those Visual C++ produces, you can actually load and debug Visual Basic-based applications within the C++ environment. That's the good news. The bad news is, while C++ source can be read by generic text editors, Visual Basic source is a form of rich text with code and properties formatted in a way that only Visual Basic can properly parse. When you import a Visual Basic form into Developer Studio, the code and properties are translated into plain text and you lose the form's visual representation.</P>
+<P>To try this out, stop VB_container and the Visual Basic IDE (if they are still running), launch Developer Studio, and open VB_container.frm (see Figure 15).  Most of the file consists of property information. Scroll to the bottom and find the same code you saw in the Visual Basic IDE. Set breakpoints on the same two lines</P>
+
+<PRE>CPP_component.Buy account, stock, shares, price
+
+and
+
+Set CPP_component = New CPP_COMPONENTLib.CStock
+</PRE>
+<P>that you set earlier. Notice VB_container.frm's lack of syntax coloring? Developer Studio can't parse forms and treats them like any other nonsource text file, to the point of&nbsp;letting&nbsp;you&nbsp;set&nbsp;breakpoints&nbsp;on&nbsp;comments&nbsp;and&nbsp;empty&nbsp;lines.</P>
+<P>Next, open CStock.cpp and set a breakpoint on the constructor:</P>
+<P></P>
+
+<PRE>CStock::CStock()
+    {
+m_dblCommission = 0.0; //set
+                       //breakpoint
+                       //here
+    }</PRE>
+<P></P>
+<P>Because CPP_container is a DLL, you must bind it to an executable for debugging. From the menu select Project | Settings, go to the Debug tab, enter C:\MSJ_debug_demo\VB_container\VB_container.exe as the Executable name, and click OK.</P>
+<P>Figure 15  VC_container:frm</P>
+
+<PRE>VERSION 5.00
+Object = "{BDC217C8-ED16-11CD-956C-0000C04E4C0A}#1.1#0"; "TABCTL32.OCX"
+Object = "{6B7E6392-850A-101B-AFC0-4210102A8DA7}#1.1#0"; "COMCTL32.OCX"
+Begin VB.Form VB_container_ 
+   Caption         =   "VB_container"
+   ClientHeight    =   5340
+   ClientLeft      =   60
+   ClientTop       =   345
+   ClientWidth     =   7245
+   LinkTopic       =   "Form1"
+   ScaleHeight     =   5340
+   ScaleWidth      =   7245
+   StartUpPosition =   3  'Windows Default
+   Begin ComctlLib.ProgressBar ProgressBar1 
+      Align           =   2  'Align Bottom
+      Height          =   240
+      Left            =   0
+      TabIndex        =   22
+      Top             =   5100
+      Width           =   7245
+      _ExtentX        =   12779
+      _ExtentY        =   423
+      _Version        =   327680
+      Appearance      =   1
+   End
+   Begin TabDlg.SSTab SSTab1 
+      Height          =   4215
+      Left            =   120
+      TabIndex        =   10
+      Top             =   240
+      Width           =   7095
+      _ExtentX        =   12515
+      _ExtentY        =   7435
+      _Version        =   327680
+      TabHeight       =   520
+      TabCaption(0)   =   "Purchase"
+      TabPicture(0)   =   "VB_container.frx":0000
+      Tab(0).ControlCount=   9
+      Tab(0).ControlEnabled=   -1  'True
+      Tab(0).Control(0)=   "Purchase_Price_label"
+      Tab(0).Control(0).Enabled=   0   'False
+      Tab(0).Control(1)=   "Purchase_Shares_label"
+      Tab(0).Control(1).Enabled=   0   'False
+      Tab(0).Control(2)=   "Purchase_Stock_label"
+      Tab(0).Control(2).Enabled=   0   'False
+      Tab(0).Control(3)=   "Purchase_Account_label"
+      Tab(0).Control(3).Enabled=   0   'False
+      Tab(0).Control(4)=   "Purchase_Price"
+      Tab(0).Control(4).Enabled=   0   'False
+      Tab(0).Control(5)=   "Purchase_Shares"
+      Tab(0).Control(5).Enabled=   0   'False
+      Tab(0).Control(6)=   "Purchase_Stock"
+      Tab(0).Control(6).Enabled=   0   'False
+      Tab(0).Control(7)=   "Purchase_Account"
+      Tab(0).Control(7).Enabled=   0   'False
+      Tab(0).Control(8)=   "Purchase"
+      Tab(0).Control(8).Enabled=   0   'False
+      TabCaption(1)   =   "Sell"
+      TabPicture(1)   =   "VB_container.frx":001C
+      Tab(1).ControlCount=   9
+      Tab(1).ControlEnabled=   0   'False
+      Tab(1).Control(0)=   "Sell"
+      Tab(1).Control(0).Enabled=   -1  'True
+      Tab(1).Control(1)=   "Sell_Account"
+      Tab(1).Control(1).Enabled=   -1  'True
+      Tab(1).Control(2)=   "Sell_Stock"
+      Tab(1).Control(2).Enabled=   -1  'True
+      Tab(1).Control(3)=   "Sell_Shares"
+      Tab(1).Control(3).Enabled=   -1  'True
+      Tab(1).Control(4)=   "Sell_Price"
+      Tab(1).Control(4).Enabled=   -1  'True
+      Tab(1).Control(5)=   "Sell_Account_label"
+      Tab(1).Control(5).Enabled=   0   'False
+      Tab(1).Control(6)=   "Sell_Stock_label"
+      Tab(1).Control(6).Enabled=   0   'False
+      Tab(1).Control(7)=   "Sell_Shares_label"
+      Tab(1).Control(7).Enabled=   0   'False
+      Tab(1).Control(8)=   "Sell_Price_label"
+      Tab(1).Control(8).Enabled=   0   'False
+      TabCaption(2)   =   "Commission"
+      TabPicture(2)   =   "VB_container.frx":0038
+      Tab(2).ControlCount=   3
+      Tab(2).ControlEnabled=   0   'False
+      Tab(2).Control(0)=   "Commission"
+      Tab(2).Control(0).Enabled=   -1  'True
+      Tab(2).Control(1)=   "Get_Commission"
+      Tab(2).Control(1).Enabled=   -1  'True
+      Tab(2).Control(2)=   "Commission_label"
+      Tab(2).Control(2).Enabled=   0   'False
+      Begin VB.TextBox Commission 
+         BeginProperty Font 
+            Name            =   "Arial"
+            Size            =   12
+            Charset         =   0
+            Weight          =   700
+            Underline       =   0   'False
+            Italic          =   0   'False
+            Strikethrough   =   0   'False
+         EndProperty
+         Height          =   405
+         Left            =   -72600
+         TabIndex        =   20
+         Top             =   720
+         Width           =   3015
+      End
+      Begin VB.CommandButton Get_Commission 
+         Caption         =   "Get Commission"
+         Height          =   495
+         Left            =   -72600
+         TabIndex        =   19
+         Top             =   3120
+         Width           =   1815
+      End
+      Begin VB.CommandButton Sell 
+         Caption         =   "Sell"
+         Height          =   495
+         Left            =   -72600
+         TabIndex        =   9
+         Top             =   3120
+         Width           =   1815
+      End
+      Begin VB.TextBox Sell_Account 
+         BeginProperty Font 
+            Name            =   "Arial"
+            Size            =   12
+            Charset         =   0
+            Weight          =   700
+            Underline       =   0   'False
+            Italic          =   0   'False
+            Strikethrough   =   0   'False
+         EndProperty
+         Height          =   405
+         Left            =   -72600
+         TabIndex        =   5
+         Top             =   720
+         Width           =   3015
+      End
+      Begin VB.TextBox Sell_Stock 
+         BeginProperty Font 
+            Name            =   "Arial"
+            Size            =   12
+            Charset         =   0
+            Weight          =   700
+            Underline       =   0   'False
+            Italic          =   0   'False
+            Strikethrough   =   0   'False
+         EndProperty
+         Height          =   405
+         Left            =   -72600
+         TabIndex        =   6
+         Top             =   1200
+         Width           =   3015
+      End
+      Begin VB.TextBox Sell_Shares 
+         BeginProperty Font 
+            Name            =   "Arial"
+            Size            =   12
+            Charset         =   0
+            Weight          =   700
+            Underline       =   0   'False
+            Italic          =   0   'False
+            Strikethrough   =   0   'False
+         EndProperty
+         Height          =   405
+         Left            =   -72600
+         TabIndex        =   7
+         Top             =   1680
+         Width           =   3015
+      End
+      Begin VB.TextBox Sell_Price 
+         BeginProperty Font 
+            Name            =   "Arial"
+            Size            =   12
+            Charset         =   0
+            Weight          =   700
+            Underline       =   0   'False
+            Italic          =   0   'False
+            Strikethrough   =   0   'False
+         EndProperty
+         Height          =   405
+         Left            =   -72600
+         TabIndex        =   8
+         Top             =   2160
+         Width           =   3015
+      End
+      Begin VB.CommandButton Purchase 
+         Caption         =   "Purchase"
+         Height          =   495
+         Left            =   2400
+         TabIndex        =   4
+         Top             =   3120
+         Width           =   1815
+      End
+      Begin VB.TextBox Purchase_Account 
+         BeginProperty Font 
+            Name            =   "Arial"
+            Size            =   12
+            Charset         =   0
+            Weight          =   700
+            Underline       =   0   'False
+            Italic          =   0   'False
+            Strikethrough   =   0   'False
+         EndProperty
+         Height          =   405
+         Left            =   2400
+         TabIndex        =   0
+         Top             =   720
+         Width           =   3015
+      End
+      Begin VB.TextBox Purchase_Stock 
+         BeginProperty Font 
+            Name            =   "Arial"
+            Size            =   12
+            Charset         =   0
+            Weight          =   700
+            Underline       =   0   'False
+            Italic          =   0   'False
+            Strikethrough   =   0   'False
+         EndProperty
+         Height          =   405
+         Left            =   2400
+         TabIndex        =   1
+         Top             =   1200
+         Width           =   3015
+      End
+      Begin VB.TextBox Purchase_Shares 
+         BeginProperty Font 
+            Name            =   "Arial"
+            Size            =   12
+            Charset         =   0
+            Weight          =   700
+            Underline       =   0   'False
+            Italic          =   0   'False
+            Strikethrough   =   0   'False
+         EndProperty
+         Height          =   405
+         Left            =   2400
+         TabIndex        =   2
+         Top             =   1680
+         Width           =   3015
+      End
+      Begin VB.TextBox Purchase_Price 
+         BeginProperty Font 
+            Name            =   "Arial"
+            Size            =   12
+            Charset         =   0
+            Weight          =   700
+            Underline       =   0   'False
+            Italic          =   0   'False
+            Strikethrough   =   0   'False
+         EndProperty
+         Height          =   405
+         Left            =   2400
+         TabIndex        =   3
+         Top             =   2160
+         Width           =   3015
+      End
+      Begin VB.Label Commission_label 
+         Caption         =   "Commission"
+         BeginProperty Font 
+            Name            =   "Arial"
+            Size            =   12
+            Charset         =   0
+            Weight          =   700
+            Underline       =   0   'False
+            Italic          =   0   'False
+            Strikethrough   =   0   'False
+         EndProperty
+         Height          =   255
+         Left            =   -74760
+         TabIndex        =   21
+         Top             =   720
+         Width           =   2055
+      End
+      Begin VB.Label Sell_Account_label 
+         Caption         =   "Account Number"
+         BeginProperty Font 
+            Name            =   "Arial"
+            Size            =   12
+            Charset         =   0
+            Weight          =   700
+            Underline       =   0   'False
+            Italic          =   0   'False
+            Strikethrough   =   0   'False
+         EndProperty
+         Height          =   255
+         Left            =   -74760
+         TabIndex        =   18
+         Top             =   720
+         Width           =   2055
+      End
+      Begin VB.Label Sell_Stock_label 
+         Caption         =   "Stock"
+         BeginProperty Font 
+            Name            =   "Arial"
+            Size            =   12
+            Charset         =   0
+            Weight          =   700
+            Underline       =   0   'False
+            Italic          =   0   'False
+            Strikethrough   =   0   'False
+         EndProperty
+         Height          =   255
+         Left            =   -74760
+         TabIndex        =   17
+         Top             =   1200
+         Width           =   2055
+      End
+      Begin VB.Label Sell_Shares_label 
+         Caption         =   "Shares"
+         BeginProperty Font 
+            Name            =   "Arial"
+            Size            =   12
+            Charset         =   0
+            Weight          =   700
+            Underline       =   0   'False
+            Italic          =   0   'False
+            Strikethrough   =   0   'False
+         EndProperty
+         Height          =   255
+         Left            =   -74760
+         TabIndex        =   16
+         Top             =   1680
+         Width           =   2055
+      End
+      Begin VB.Label Sell_Price_label 
+         Caption         =   "Price"
+         BeginProperty Font 
+            Name            =   "Arial"
+            Size            =   12
+            Charset         =   0
+            Weight          =   700
+            Underline       =   0   'False
+            Italic          =   0   'False
+            Strikethrough   =   0   'False
+         EndProperty
+         Height          =   255
+         Left            =   -74760
+         TabIndex        =   15
+         Top             =   2160
+         Width           =   2055
+      End
+      Begin VB.Label Purchase_Account_label 
+         Caption         =   "Account Number"
+         BeginProperty Font 
+            Name            =   "Arial"
+            Size            =   12
+            Charset         =   0
+            Weight          =   700
+            Underline       =   0   'False
+            Italic          =   0   'False
+            Strikethrough   =   0   'False
+         EndProperty
+         Height          =   375
+         Left            =   240
+         TabIndex        =   14
+         Top             =   720
+         Width           =   2055
+      End
+      Begin VB.Label Purchase_Stock_label 
+         Caption         =   "Stock"
+         BeginProperty Font 
+            Name            =   "Arial"
+            Size            =   12
+            Charset         =   0
+            Weight          =   700
+            Underline       =   0   'False
+            Italic          =   0   'False
+            Strikethrough   =   0   'False
+         EndProperty
+         Height          =   255
+         Left            =   240
+         TabIndex        =   13
+         Top             =   1200
+         Width           =   2055
+      End
+      Begin VB.Label Purchase_Shares_label 
+         Caption         =   "Shares"
+         BeginProperty Font 
+            Name            =   "Arial"
+            Size            =   12
+            Charset         =   0
+            Weight          =   700
+            Underline       =   0   'False
+            Italic          =   0   'False
+            Strikethrough   =   0   'False
+         EndProperty
+         Height          =   255
+         Left            =   240
+         TabIndex        =   12
+         Top             =   1680
+         Width           =   2055
+      End
+      Begin VB.Label Purchase_Price_label 
+         Caption         =   "Price"
+         BeginProperty Font 
+            Name            =   "Arial"
+            Size            =   12
+            Charset         =   0
+            Weight          =   700
+            Underline       =   0   'False
+            Italic          =   0   'False
+            Strikethrough   =   0   'False
+         EndProperty
+         Height          =   255
+         Left            =   240
+         TabIndex        =   11
+         Top             =   2160
+         Width           =   2055
+      End
+   End
+End
+Attribute VB_Name = "VB_container_"
+Attribute VB_GlobalNameSpace = False
+Attribute VB_Creatable = False
+Attribute VB_PredeclaredId = True
+Attribute VB_Exposed = False
+Private CPP_component As CPP_COMPONENTLib.CStock
+
+Private Sub Purchase_Click()
+       
+    Dim account As Long
+    Dim stock As String
+    Dim shares As Long
+    Dim price As Double
+    Dim message
+
+    account = CLng(Purchase_Account.Text)
+    stock = CStr(Purchase_Stock.Text)
+    shares = CLng(Purchase_Shares.Text)
+    price = CDbl(Purchase_Price.Text)
+    
+    ProgressBar1.Value = 20
+    
+    ' Call C++ component's IStock::Buy interface
+    ' implemented by CStock::Buy
+    CPP_component.Buy account, stock, shares, price
+    
+    ProgressBar1.Value = 60
+    ProgressBar1.Value = 100
+    message = MsgBox("Purchase Complete", vbExclamation, "Stock Transactions")
+    ProgressBar1.Value = 0
+
+End Sub
+
+Private Sub Sell_Click()
+    
+    Dim account As Long
+    Dim stock As String
+    Dim shares As Long
+    Dim price As Double
+    Dim message
+    
+    account = CLng(Sell_Account.Text)
+    stock = CStr(Sell_Stock.Text)
+    shares = CLng(Sell_Shares.Text)
+    price = CDbl(Sell_Price.Text)
+    
+    ProgressBar1.Value = 20
+    ' Call C++ component's IStock::Sell interface
+    ' implemented by CStock::Sell
+    CPP_component.Sell account, stock, shares, price
+    
+    ProgressBar1.Value = 60
+    ProgressBar1.Value = 100
+    message = MsgBox("Sale Complete", vbExclamation, "Stock Transactions")
+    ProgressBar1.Value = 0
+
+End Sub
+
+Private Sub Get_Commission_Click()
+    ' Call C++ component's IStock::Commission interface
+    ' implemented by CStock::get_Commission
+   Commission = CPP_component.Commission
+End Sub
+
+Private Sub Form_Load()
+    ' Call C++ component's CStock constructor.
+    Set CPP_component = New CPP_COMPONENTLib.CStock
+End Sub
+
+Private Sub SSTab1_DblClick()
+
+End Sub</PRE>
+<P></P>
+<P>Hit F5 in the IDE to start debugging VB_container. After a few moments the debugger should break on</P>
+<P></P>
+
+<PRE>Set CPP_component = New CPP_COMPONENTLib.CStock</PRE>
+<P></P>
+<P>just as it did in the Visual Basic IDE. Bring up the call stack window (View | Debug Windows |Call Stack). The first few lines look something like this:</P>
+<P></P>
+
+<PRE>VB_container_::Form_Load() line 479
+MSVBVM50! 0f0349b8()
+__vba@0018057C + 3683 bytes
+MSVBVM50! 0f034992()
+MSVBVM50! 0f0348b6()
+MSVBVM50! 0f0435b1()</PRE>
+<P></P>
+<P>The first line is the VB_container.frm breakpoint. Note how the call stack represents this in class::method form, as if it were C++ code. I'm guessing the third line is Visual Basic startup code, analogous to __astart in the C++ runtime. The rest is other Visual Basic runtime context for which you don't have symbols.</P>
+<P>If you are truly masochistic, go to the menu, select View | Debug Windows | Disassembly, then double-click on the first line in the call stack. You'll see Visual Basic source mixed with assembly:</P>
+<P></P>
+
+<PRE>479:     Set CPP_component = New CPP_COMPONENTLib.CStock
+004047A8   push        offset ___vba@00182FAC(0x00402b0c)
+004047AD   call        ___vbaNew(0x00401130)
+004047B2   push        eax
+004047B3   lea         eax,dword ptr [unnamed_var1]
+004047B6   push        eax
+004047B7   call        @__vbaObjSet(0x0040118a)</PRE>
+<P></P>
+<P>After sating your assembler lust, close the Disassembly window.</P>
+<P>Hit F5 to continue. After thinking a spell, the IDE will break on the CStock constructor. The Call Stack window (see Figure 16) is now much more interesting. The first line, of course, is the CStock constructor (the latest breakpoint). The next four lines are ATL wrapper calls—the last of these is the most impressive (aren't C++ templates wonderful?). After the ATL calls come a few without symbols, then the Visual Basic code you broke on originally.</P>
+<P><img src="debug16.gif"></P>
+<P>Figure 16  Call Stock</P>
+<P>Hit F5 again. The now-familiar VB_container UI comes up. Select the Buy tab, fill in the fields as before, and click Purchase. The debugger once again breaks in VB_container.frm</P>
+<P></P>
+
+<PRE>CPP_component.Buy account, stock, shares, price</PRE>
+<P></P>
+
+<PRE>while the call stack shows</PRE>
+<P></P>
+
+<PRE>VB_container_::Purchase_Click() line 437
+MSVBVM50! 0f0349b8()
+__vba@0018057C + 3644 bytes</PRE>
+<P></P>
+<P>The last time you were here, you couldn't step into the CPP_component.Buy call. This time, fortune favors the foolish—press F11, and you find yourself at the first line of CStock::Buy. The call stack changes to:</P>
+<P></P>
+
+<PRE>CStock::Buy() line 19
+VB_container_::Purchase_Click() line 437 + 35 bytes
+MSVBVM50! 0f0349b8()
+__vba@0018057C + 3644 bytes</PRE>
+<P></P>
+<P>If you didn't already know from the names, you couldn't tell by looking at this stack which call is Visual Basic and which is C++.</P>
+<P>At this point, you can hit F5 to continue, then close the VB_container application. Remove the VB_container.frm breakpoints, but leave the ones in CStock.cpp. You'll need them set for the next exercise.</P>
+<P>I did find a few glitches while testing this method. First, remember that SQL_database project you created? If you open the project from Developer Studio, you can set breakpoints in sp_validaccount (the only stored procedure in this demo). The syntax coloring and breakpoint control work just as you'd expect. In theory, you can also trace into the stored procedure from the IDE. However, try as I might, I was unable to get the traces to work. I was able to set the breakpoint, but never saw the breakpoint hit. Microsoft confirmed this should work. My only guesses are that either a beta bug bit me, or the Visual Studio Enterprise Edition was installed incorrectly (Microsoft provided me a machine with all software preinstalled).</P>
+<P>Second, because Developer Studio doesn't really understand Visual Basic source, it can't adjust breakpoint placement when that source changes externally. If you set Visual Basic breakpoints in Developer Studio, change the form in the Visual Basic IDE, then reload the form into Developer Studio, you may find the breakpoints are on the same absolute line numbers but not on the actual statements you wanted.</P>
+<P>Third, as I tested this method, the MTS calls within CPP_component occasionally failed. I never found the cause, but I did find some cures: reinstall CPP_component within the Transaction Server Explorer, rebuild CPP_component, or restart Developer Studio. From what I can tell, some registry values (or some runtime piece's cache of those values) became corrupted. This may have been an artifact of my using beta software. Nonetheless, if you find calls that used to work suddenly failing, you may want to try these solutions.</P>
+<P>The bottom line is, using the Developer Studio IDE means you can debug assembler, C, C++, Visual Basic, and (in theory) SQL stored procedures simultaneously from the same IDE session. It's also the most familiar environment for C++ programmers. On the other hand, Developer Studio doesn't have the Visual Basic environment's interactive context. Visual Basic source manifests as text only, and the IDE is unfamiliar to folks who use Visual Basic exclusively.</P>
+<P></P>
+<P><B>Debugging in Both IDEs</B> To combine aspects of the previous two methods, you can run both IDEs simultaneously. However, the setup involves a twist compared to what's come before.</P>
+<SPAN><OL><LI>In Developer Studio, open the CPP_component workspace. Ensure that the two breakpoints from the previous exercise in Developer Studio are active. Select Project | Settings, then select the Debug tab. Here's the twist: last time you chose VB_container.exe as the debugging executable; this time choose the Visual Basic IDE itself.</LI><LI>Enter the absolute path name of the Visual Basic IDE as the debug session executable. On my machine, that file is C:\Program Files\DevStudio\VB\vb5.exe.</LI><LI>Enter C:\MSJ_debug_demo\VB_container as the working directory.</LI><LI>Enter VB_container.exe as the program argument.</LI></OL></SPAN><P>The net result is that Developer Studio spawns Visual Basic, which in turn spawns VB_container within the VB_container home directory. Figure 17 shows how the Project Settings dialog should look. Once you're satisfied you've set it up correctly, click OK on this dialog.</P>
+<P><img src="debug17.gif"></P>
+<P>Figure 17  Project Settings Dialog</P>
+<P>If the Visual Basic IDE is running, close it—you need it running as a child of Developer Studio, not standalone. In Developer Studio, hit F5 to start debugging Visual Basic. Depending on how Developer Studio is configured, you may get a message warning that vb5.exe lacks debugging information. Unless you work for Microsoft, subcontract to Microsoft, or engage in industrial espionage, you probably don't have access to the vb5.exe source, so press OK on this dialog.</P>
+<P>Once Visual Basic is running, reset the breakpoints you set in the first exercise (debugging in Visual Basic), then hit F5 to debug VB_container. You should soon hit the breakpoint on</P>
+<P></P>
+
+<PRE>Set CPP_component = New CPP_COMPONENTLib.CStock</PRE>
+<P></P>
+<P>Hit F5 again. Control passes to the Developer Studio IDE, breaking on the CStock constructor just as in the second exercise. Take a look at the Developer Studio call stack:</P>
+<P></P>
+
+<PRE>CStock::CStock() line 9
+[... ATL calls removed]
+OLE32! 77b2c7f1()
+OLE32! 77b2c8db()
+OLE32! 77b2c6eb()
+VBA5! 0fab3181()
+VBA5! 0fbdfd52()
+VBA5! 0fbdfcf9()
+VBA5! 0fbdd0f0()
+VB5! 00481425()</PRE>
+<P></P>
+<P>Compare it to the one shown in Figure 16. When debugging in Developer Studio, you were able to see symbols for both CPP_component and VB_container. Now you can see symbols for only the former; VB_container calls show up generically as addresses in VBA5 or VB5.</P>
+<P>If you try to go back to the Visual Basic IDE, you may be in for a surprise: you can't activate it. That IDE is just like any other debugged program; once you hit a breakpoint, the debuggee (Visual Basic) freezes and control passes to the debugger (Developer Studio).</P>
+<P>Within Developer Studio, hit F5. The Visual Basic IDE thaws, and you eventually see the VB_container UI. At this point, both IDEs and VB_container are active. Fill in the VB_container Purchase form as usual and press the Purchase button. As expected, you break once again in Visual Basic at</P>
+<P></P>
+
+<PRE>CPP_component.Buy account, stock, shares, price</PRE>
+<P></P>
+<P>All three applications are still active. If you now hit F8 (Step Into) from Visual Basic, you land in the other IDE at CStock::Buy. Compare this to the first exercise, where the same Step Into didn't work (the call was opaque). As a side effect, the other two applications once again freeze.</P>
+<P>Hit F5 in Developer Studio and control stops in Visual Basic! Remember, you stepped into the C++ code from Visual Basic. Once that C++ code returns, Visual Basic steps to its next source line.</P>
+<P>I assume you get the gist, so go back to Developer Studio and stop the vb5.exe debugging session (Shift+F5). Both the Visual Basic IDE and VB_container disappear. Exit Developer Studio.</P>
+<P>As I worked through this, I found myself occasionally losing track of which IDE I was in. More than once, I tried to use a Developer Studio keystroke in Visual Basic, and vice versa. I became disoriented by the Visual Basic context alternately freezing and thawing, and by having to remember the state of each IDE as control passed from one to the other.</P>
+<P>I also received a low virtual memory warning from Windows&reg; NT on a 32MB system. These IDEs are memory gluttons; running one is bad enough, but running two (plus Word, as I am for writing this article) turns Windows NT into a hard drive thrash-o-matic. I recommend that you close all nonessential applications and consider running on a machine with more than 32MB of RAM to pull off this method of debugging.</P>
+<P>Once the dust settles, this method allows each executable piece to live within its most natural environment. However, it requires a more complex setup; you must have both IDEs running, and you must coordinate control and settings between them. Plus, Visual Basic context freezes when control passes to Developer Studio, and it's RAM-intensive.</P>
+<P></P>
+<H2><A NAME="sec9"></A>Whither Java?</H2><P>Not wanting to leave you in the lurch, I whipped up a quick Java applet to see if the same techniques work. The source is quite simple:</P>
+<P></P>
+
+<PRE>import cpp_component.*;</PRE>
+<P></P>
+
+<PRE>public class Java_applet
+{
+    public static void main(String args[])
+ {
+ IStock stock = (IStock) new
+                CStock();
+ stock.getCommission();
+ }
+}</PRE>
+<P></P>
+<P>To test this out, run Developer Studio and create a new Java project as C:\MSJ_debug_demo\Java_applet. Copy Java_applet.java from the code archive to this new folder and add the source file to the Java project.</P>
+<P>Go into the IDE's Project Settings. On the Debug tab enter Java_applet as the class for debugging/executing, and specify the standalone interpreter. On the Java tab, turn on debugging info generation and turn off optimization. Click OK.</P>
+<P>From the Tools menu, run the Java Type Library Wizard. Select CPP_component 1.0 Type Library (the same selection you made from Visual Basic in the first exercise) and click OK. This synthesizes the Java package cpp_component from the C++ component's type library. The package's class files are in C:\WINNT\Java\TrustLib\cpp_component along with a text file describing the package's methods.</P>
+<P>To build Java_applet, set a breakpoint on</P>
+<P></P>
+
+<PRE>stock.getCommission();</PRE>
+<P></P>
+<P>then hit F5. You'll see the Java interpreter (jview.exe) come up, followed by control passing back to the IDE at your breakpoint. Hit F11 to Step Into. Just as with Visual Basic, the call is opaque and control passes to the next Java statement. However, the lack of a thrown exception implies that the call to getCommission was a success.</P>
+<P>Debugging both languages simultaneously is a different matter. Because Java generates neither EXE nor PDB files, debugging in Developer Studio alone doesn't work. I tried many variations of debugging both IDEs, to the point of hardcoding an INT 3 in CPP_component.dll. No dice—all I got was a second copy of jview.exe running in a debugger.</P>
+<P>One of Java's selling points is that it parties within its own private Java Virtual Machine (VM) sandbox. A Java applet calls standard library methods; the Java VM interprets the methods' instructions, making real OS calls on the applet's behalf. The wizard-created class files seem to extend the Java VM's reach to COM objects.</P>
+<P>For multilanguage debugging to work, some other language would have to play in the Java VM sandbox, and none of Microsoft's other languages currently do. That's my interpretation anyway; at the time I submitted this article for publication, Microsoft had neither confirmed nor denied the possibility of multilanguage debugging with Java.</P>
+<P></P>
+<H2><A NAME="sec10"></A>Coda</H2><P>Of the three debugging methods I surveyed, my choice is probably the second, debugging in the Developer Studio IDE. That stems in part from my experience with C++ and in part from the balance between features and convenience. Using Visual Basic is pretty ineffective for direct C++ debugging, while using both Visual Basic and Developer Studio requires a lot of bookkeeping (and RAM).</P>
+<P>Assuming you have more luck with SQL debugging than I did, you can drive your language-choice decisions less on the strength of a language's development environment and more from that language's technical and strategic merits. I'm guessing Microsoft may revamp Visual Basic or Developer Studio so the two work seamlessly together. Now that C++ and Visual Basic use the same code generator back end, perhaps the time has come for them to coexist in the same development environment as well.</P>
+<P>Java is another matter; the Java VM model may guarantee you'll never use these debugging techniques. I doubt anyone could port C++ to the Java VM without either constraining the language severely or extending the VM in proprietary (and unsafe) ways. As it is, I have to wonder about the security of Microsoft's current COM-enabled Java VM architecture. Microsoft could possibly target interpreted Visual Basic to the Java VM, provided it found a market there.</P>
+<P>Alternatively, Microsoft may alter Visual J++ to emit native code, bypassing the Java VM. Given Java's more purely OOP semantics, and the fact that it lacks some of C++'s more treacherous features, I can envision a market cropping up for Java sans VM (call it caffeine-free). The International Organization for Standards (ISO) has recently formed the Java Study Group (SC22JSG) to explore the merit of and issues surrounding Java standardization. One of the group's big topics: should the Java language be standardized separately from the Java VM?</P>
+<P>Microsoft is a big player in the study group at present. Don't be surprised if a future version of Visual J++ native-compiles. That, combined with my earlier guesses about Visual Basic melding with Developer Studio, would permit all Microsoft languages to live (and be debugged) under one roof. </P>
+<P><I>This article is reproduced from Microsoft Systems Journal. Copyright &copy; 1997 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S. and Canada, or (303) 678-0439 in all other countries. For other inquiries, call (415) 905-2200.</P>
+<P></P></font></body></HTML>

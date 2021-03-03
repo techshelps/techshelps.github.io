@@ -1,0 +1,254 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>BindInterface Sample</title>
+<link disabled rel=stylesheet href=../../backsdk3.css>
+<style type="text/css">
+@import url(../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h1><a name="_mpr_bindinterface_sample"></a>BindInterface Sample</h1>
+<p>
+<span style=color:#FF0000>[This is preliminary documentation and subject to change.]</span> </p>
+<pre><code>DWORD
+APIENTRY
+BindInterface(
+    IN DWORD dwIndex,
+    IN PVOID pBinding
+    )
+/*++
+  Routine Description
+      Called by the IP Router Manager once it learns the address(es)
+      on an interface.  This may happen as soon as the router starts
+      (after the interface is added, of course) when the interface has
+      a static address or may happen when an interface acquires a DHCP
+      address or may happen when IPCP acquire the address for a dial up
+      link. The binding may consist of one or more addresses.  We walk
+      the addresses given and find the corresponding block in our
+      config.  We then update any information and if the interface has
+      been enabled, we activate the binding, i.e. begin running on it.
+
+  Arguments
+      dwIndex   Index of the interface in question
+      pBinding  Pointer to IP_ADAPTER_BINDING_INFO containing info about
+                the addresses on the interface
+
+  Return Value
+      ERROR_INVALID_PARAMETER
+      NO_ERROR
+
+--*/
+{
+    PNT_IF      pIf;
+    PLIST_ENTRY pleNode;
+    PINTRNL_IF  pBind;
+    ULONG       i;
+    BOOL        bFound;
+    DWORD       dwResult;
+    
+    PIP_ADAPTER_BINDING_INFO pBindingInfo;
+    
+    EnterProtocolApi();
+
+    TraceEnter("BindInterface");
+    
+    if(pBinding == NULL)
+    {
+        Trace0(ERR,
+               "BindInterface: Router Manager called us with NULL binding");
+
+        TraceLeave("BindInterface");
+
+        ExitProtocolApi();
+
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    pBindingInfo = (PIP_ADAPTER_BINDING_INFO)pBinding;
+
+    if(pBindingInfo-&gt;NumAddresses &lt; 1)
+    {
+        Trace0(ERR,
+               "BindInterface: Router Manager called us with NO binding");
+
+        TraceLeave("BindInterface");
+
+        ExitProtocolApi();
+
+        return ERROR_INVALID_PARAMETER;
+    }
+
+
+    EnterCriticalSection(&amp;g_csIfListLock);
+
+    pIf = GetIfBlockGivenIndex(dwIndex);
+
+    if(pIf == NULL)
+    {
+        LeaveCriticalSection(&amp;g_csIfListLock);
+        
+        Trace1(ERR,
+               "BindInterface: Interface %d does not exist",
+               dwIndex);
+
+        TraceLeave("BindInterface");
+
+        ExitProtocolApi();
+
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    if(IsNtBound(pIf))
+    {
+        //
+        // Can not receive two bind notifications without an
+        // Unbind in the middle
+        //
+
+        Trace1(ERR,
+               "BindInterface: Interface %S is already bound",
+               pIf-&gt;pwszIfName);
+
+        LeaveCriticalSection(&amp;g_csIfListLock);
+        
+
+        TraceLeave("BindInterface");
+
+        ExitProtocolApi();
+
+        return ERROR_INVALID_PARAMETER;
+    }
+        
+    SetNtBound(pIf);
+    
+    for(i = 0; i &lt; pBindingInfo-&gt;NumAddresses; i++)
+    {
+        pBind = GetBindingGivenAddress(pIf,
+                                       pBindingInfo-&gt;Address[i].IPAddress);
+
+        if(pBind == NULL)
+        {
+            //
+            // Our config is bad, we will try and go through all
+            // the blocks and see if we can at least bind on the others.
+            //
+
+            Trace3(ERR,
+                   "BindInterface: Couldnt find config block for %d.%d.%d.%d/%d.%d.%d.%d over %S",
+                   PRINT_ADDRESS(pBindingInfo-&gt;Address[i].IPAddress),
+                   PRINT_ADDRESS(pBindingInfo-&gt;Address[i].Mask),
+                   pIf-&gt;pwszIfName);
+
+            continue;
+        }
+
+        if(pBindingInfo-&gt;NumAddresses == 1)
+        {
+            //
+            // If we have only one address, then the addresses
+            // may not match, so update them
+            //
+            
+            pBind-&gt;dwAddress = pBindingInfo-&gt;Address[i].IPAddress;
+            pBind-&gt;dwMask    = pBindingInfo-&gt;Address[i].Mask;
+        }
+    }
+
+#if DBG
+
+    //
+    // Check to make sure we got bindings for all the
+    // configured addresses
+    //
+
+    if(pIf-&gt;ulNumBindings &gt; 1)
+    {
+        for(pleNode  = pIf-&gt;leInternalIfHead.Flink;
+            pleNode != &amp;pIf-&gt;leInternalIfHead;
+            pleNode  = pleNode-&gt;Flink)
+        {
+            bFound = FALSE;
+
+            pBind = CONTAINING_RECORD(pleNode, INTRNL_IF, leInternalIfLink);
+            
+            for(i = 0; i &lt; pBindingInfo-&gt;NumAddresses; i++)
+            {
+                if(pBind-&gt;dwAddress == pBindingInfo-&gt;Address[i].IPAddress)
+                {
+                    ASSERT(pBind-&gt;dwMask == pBindingInfo-&gt;Address[i].Mask);
+
+                    bFound = TRUE;
+                    break;
+                }
+            }
+
+            if(!bFound)
+            {
+                Trace3(ERR,
+                       "BindInterface: Binding not indicated for %d.%d.%d.%d/%d.%d.%d.%d over %S",
+                       PRINT_ADDRESS(pBind-&gt;dwAddress),
+                       PRINT_ADDRESS(pBind-&gt;dwMask),
+                       pIf-&gt;pwszIfName);
+            }
+        }
+    }
+    
+#endif // DBG
+    
+
+    //
+    // OK now we have the bindings all set up
+    //
+
+    if(IsNtEnabled(pIf))
+    {
+        //
+        // So the interface is bound and enabled =&gt; we are all set
+        // to go
+        //
+        
+        for(pleNode  = pIf-&gt;leInternalIfHead.Flink;
+            pleNode != &amp;pIf-&gt;leInternalIfHead;
+            pleNode  = pleNode-&gt;Flink)
+        {
+            pBind = CONTAINING_RECORD(pleNode, INTRNL_IF, leInternalIfLink);
+
+            if(pBind-&gt;bEnabled)
+            {
+                //
+                // Our config tells us that we are enabled
+                // for this address
+                //
+
+                ASSERT(pBind-&gt;dwState != BINDING_UP);
+                
+                //
+                // This will set the state to BINDING_UP
+                //
+
+                dwResult = ActivateBinding(pBind);
+                
+                if(dwResult != NO_ERROR)
+                {
+                    Trace2(ERR,
+                           "BindInterface: Unable to activate %d.%d.%d.%d over %S",
+                           PRINT_ADDRESS(pBind-&gt;dwAddress),
+                           pIf-&gt;pwszIfName);
+                }
+            }
+        }
+    }
+
+    LeaveCriticalSection(&amp;g_csIfListLock);
+    
+    TraceLeave("BindInterface");
+
+    ExitProtocolApi();
+
+    return NO_ERROR;
+}</code></pre>
+<p>&nbsp;</p></body>
+</HTML>

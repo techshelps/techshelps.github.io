@@ -1,0 +1,372 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Programming Mouse and Keyboard with DirectInput 3.0</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><a name="msdn_dinput3"></a>Programming Mouse and Keyboard with DirectInput 3.0</h1>
+<p>
+Peter Donnelly<br>
+Microsoft Developer Network Technology Group</p>
+<p>
+October 25, 1996 </p>
+<p>
+<i>Peter Donnelly has been a game designer since 1972 and a programmer since 1984. He has authored four "paper" games with historical and fantasy themes, and his computer design credits include three interactive comic-book adventures and one full-scale adventure game. He has also developed shareware games and game editors for MS-DOS and Windows.</i></p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="5001">
+</OBJECT><a href="javascript:sample1.Click()">Click to open or copy the files in the DINPUT sample application for this technical article.</a></p>
+<h2>Abstract</h2>
+<p>
+In September 1996, Microsoft released version 3.0 of the DirectX™ Software Development Kit (SDK), a set of tools for games and multimedia applications. This version of the SDK is the first to provide support for mouse and keyboard input. In previous versions, DirectInput was actually just another name for the extended joystick services in the standard Microsoft® Windows® SDK.</p>
+<p>
+In this article I will guide you through the process of setting up and using DirectInput objects for mouse and keyboard. I will only touch on the existing joystick services, which are well documented elsewhere.</p>
+<p>
+The information here is intended to supplement the documentation found in DINPUT3E.DOC, part of the DirectX SDK. You should have that document at hand as a reference to the data structures and functions I will introduce as I step through the implementation of DirectInput.</p>
+<h2>The Sample Program</h2>
+<p>
+DINPUT.EXE is a simple program that illustrates most of the techniques described in this article. It relies entirely on DirectInput routines for mouse and keyboard input, except for input processed by Windows itself, such as mouse clicks on the menu.</p>
+<p>
+Two keystrokes are recognized: ESC to quit the program, and F2 to display absolute mouse coordinates. Clicking the left mouse button displays a message, and clicking the right button flushes the mouse input buffer. Other options are available on the <b>View</b> menu.</p>
+<p>
+The program is in the form of a project for Microsoft Visual C++® version 4.0. It uses C++ syntax but no classes other than the Component Object Model (COM) objects. It requires Windows 95 and will not run under Windows NT®.</p>
+<p>
+From time to time I'll also be referring to Scrawl, the sample DirectInput application included with the DirectX SDK. You'll probably want to refer to the source code for that application as I go along.</p>
+<h2>The Component Object Model</h2>
+<p>
+DirectX is based on COM, defined by Williams and Kindel (see Further Reading at the end of this article) as "a component software architecture that allows applications and systems to be built from components supplied by different software vendors." Put another way, it is a protocol that allows software modules to work with one another even when they are written in different languages and running on different platforms.</p>
+<p>
+You may find it helpful to have some understanding of COM before delving into the DirectX SDK, but it is possible to implement DirectInput for a single-user Win32 application without getting into the nitty-gritty of COM interfaces. (In COM, an object's interface is a menu of its available methods.) Consequently, I won't go into the theory, but at the end of the article I will point you to several good overviews.</p>
+<p>
+It is important to note here that although COM is object-oriented, you don't need an object-oriented programming language to use DirectInput or, indeed, any of the DirectX application programming interfaces (APIs). Although the examples I'll present here are written for C++, the samples in the DirectX package all use plain C. The only significant difference is the way of calling member functions of the DirectInput objects. For instance, in C you would use the following syntax to call the <b>CreateDevice</b> function for the DirectInput object (treated as a structure) that is pointed to by <i>lpdi</i>:</p>
+<pre><code>lpdi-&gt;lpVtbl-&gt;CreateDevice(lpdi, &amp;guid, &amp;lpdiKeyboard, NULL);
+</code></pre>
+<p>
+Here <i>lpVtbl</i> is a pointer to a table of pointers to functions. In C++, since we can treat <i>lpdi </i>as a pointer to an object, we access the member functions more directly:</p>
+<pre><code>lpdi-&gt;CreateDevice(guid, &amp;lpdiKeyboard, NULL);
+</code></pre>
+<h2>Setting Up: An Overview</h2>
+<p>
+Before an application can start reading the mouse or keyboard with DirectInput, it has to go through a few preliminary steps: first setting up the master DirectInput object and identify any available devices, and then setting up each device to be used.</p>
+<h3>Setting Up DirectInput</h3>
+<p>
+The following two procedures have to be performed once only. The DirectInput object is then ready to manage all mouse and keyboard devices attached to the system.
+<ul type=disc>
+<li>
+<b>Create the DirectInput object.</b> This sets up the basic framework for handling all input.<br><br></li>
+<li>
+<b>Enumerate the devices.</b> We obtain the globally unique identifier (GUID) for any input devices attached to the system. At the same time we can do any other processing we like, such as checking for a particular mouse model. This step can be skipped if the application is using only the standard system mouse and keyboard; in this case the predefined global variables <i>GUID_SysMouse</i> and <i>GUID_SysKeyboard</i> can be used to identify the devices.</li>
+</ul>
+<h3>Setting Up a Device</h3>
+<p>
+After the DirectInput object is created and the devices have been enumerated, the following steps are needed to set up each input device. Normally, this would mean one mouse and one keyboard, but potentially an application could support multiple pointing devices.
+<ol>
+<li>
+<b>Create the device.</b> This step creates a code object for the mouse or keyboard and attaches it to the DirectInput object.<br><br></li>
+<li>
+<b>Set the cooperative level.</b> You let the system know the desired level of access to the device. This step is optional if the default setting (nonexclusive background) is acceptable.<br><br></li>
+<li>
+<b>Set the data format.</b> Tell DirectInput how to return the information you want about the device when you poll it.<br><br></li>
+<li>
+<b>Set properties.</b> An optional step taken only if you want to change any of the default properties of the device, for example, to tell the mouse to return absolute rather than relative coordinates.<br><br></li>
+<li>
+<b>Acquire the device.</b> Finally, you tell the system that you wish to begin receiving data from the device. This step gives DirectInput a chance to set up the input buffer and otherwise optimize the device for your application. The step has to be repeated whenever your window has "lost" the device because it has been yielded to another application or to the system.</li>
+</ol>
+<h2>Setting Up: The Details</h2>
+<h3>Create DirectInput Object</h3>
+<p>
+The first step in setting up DirectInput in your application is to create the master object that provides access to the COM interface. It's done like this:</p>
+<pre><code>LPDIRECTINPUT lpdi;
+DirectInputCreate(hTheInstance, DIRECTINPUT_VERSION, &amp;lpdi, NULL)
+</code></pre>
+<p>
+The first argument is the handle of the application or dynamic-link library (DLL) that is creating the object. The second is always DIRECTINPUT_VERSION, defined in DINPUT.H; this is simply a safety check to make sure the application is running with the correct version of the run-time DLLs. The third argument is the location where we want the pointer to the <b>IDirectInput</b> interface to be stored. Finally, we pass NULL to the function if we want the object to be created normally and initialized automatically. (To put it another way, if you don't know what the documentation for this argument means by "the controlling unknown for OLE aggregation," just pass NULL and don't worry.)</p>
+<p>
+If the call succeeds, <i>lpdi</i> points to the <b>IDirectInput</b> interface and, as we've seen, can be used just like a pointer to an object; for example, in C++, <b>lpdi-&gt;EnumDevices()</b> calls the <b>EnumDevices</b> method implemented for the <b>IDirectInput</b> interface.</p>
+<h3>Enumerate Devices</h3>
+<p>
+The <b>EnumDevices</b> function finds all mice (including similar devices such as trackballs) and keyboards on the system and calls an application-defined callback function for each one. If you want to restrict the enumeration to devices of one type or the other, pass DIDEVTYPE_MOUSE or DIDVETYPE_KEYBOARD as the <b>dwDevType</b> argument; to enumerate all devices, make this argument zero. You can't use subtypes in the argument to narrow down the search further, but you can check the subtype in the callback function.</p>
+<p>
+Here's an example that checks whether the machine has an enhanced keyboard attached. First the callback function:</p>
+<pre><code>LPDIRECTINPUT lpdi;
+BOOL&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hasEnhanced;
+GUID&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; KeyboardGUID = GUIDSysKeyboard;
+
+BOOL CALLBACK DIEnumKbdProc(LPCDIDEVICEINSTANCE lpddi,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; LPVOID pvRef)
+  {
+  *(GUID*) pvRef = lpddi-&gt;guidProduct;
+  if (GET_DIDEVICE_SUBTYPE(lpddi-&gt;dwDevType) == DIDEVTYPEKEYBOARD_PCENH)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; hasEnhanced = TRUE;
+ &nbsp;&nbsp; return DIENUM_STOP;
+ &nbsp;&nbsp; }
+  return DIENUM_CONTINUE;
+  }
+</code></pre>
+<p>
+Then, in the setup section, we do the enumeration:</p>
+<pre><code>lpdi-&gt;EnumDevices(DIDEVTYPE_KEYBOARD,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DIEnumKbdProc,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;KeyboardGUID,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DIEDFL_ATTACHEDONLY);
+</code></pre>
+<p>
+The third argument to <b>EnumDevices</b> can be a pointer to any data you want to process in the callback function. In this case we use it to return the GUID for the enhanced keyboard.</p>
+<p>
+We use DIENUM_CONTINUE as the default return value for the callback because we want to be sure to look at all keyboards attached to the system, in the unlikely event that there are more than one. As soon as an enhanced keyboard is found, DIENUM_STOP is returned so that <b>EnumDevices</b> stops enumerating—which doesn't accomplish much in the example except possibly shave a few milliseconds off the application's startup time.</p>
+<h3>Create Device</h3>
+<p>
+Now that you've obtained the GUID for a device, either through <b>EnumDevices</b> or by using the predefined <i>GUID_SysMouse </i>and <i>GUID_SysKeyboard </i>variables, you have to create a code object for communicating with the <b>IDirectInputDevice</b> interface. This is similar to what we did to create the master DirectInput object pointed to by <i>lpdi</i>. Here we go:</p>
+<pre><code>LPDIRECTINPUTDEVICE lpdiKeyboard;
+lpdi-&gt;CreateDevice(GUID_SysKeyboard, &amp;lpdiKeyboard, NULL);
+</code></pre>
+<p>
+Our DirectInput object has now created a DirectInputDevice object, pointed to by <i>lpdiKeyboard</i>. This pointer gives us access to all the methods we need. As with <b>CreateDirectInput</b>, the NULL argument ensures that the device is created normally, in which case initialization is automatic.</p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;In all the code examples that follow, <i>lpdiDevice</i>, <i>lpdiKeyboard</i>, and <i>lpdiMouse</i> are presumed to be initialized pointers of type <b>LPDIRECTINPUTDEVICE</b>.</p>
+<h3>Set Cooperative Level</h3>
+<p>
+The cooperative level of a device determines the circumstances in which an application has access to it and whether the Windows operating system has access. It's set by passing a combination of flags, plus the window handle, to <b>SetCooperativeLevel</b>:</p>
+<pre><code>lpdiDevice-&gt;SetCooperativeLevel(hwnd, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DISCL_NONEXCLUSIVE | DISCL_FOREGROUND)
+</code></pre>
+<p>
+For Windows 95, the valid flag combinations are:
+<ul type=disc>
+<li>
+DISCL_NONEXCLUSIVE | DISCL_BACKGROUND (the default)<br><br></li>
+<li>
+DISCL_NONEXCLUSIVE | DISCL_FOREGROUND<br><br></li>
+<li>
+DISCL_EXCLUSIVE | DISCL_FOREGROUND (mouse only)</li>
+</ul>
+<p>
+DISCL_BACKGROUND really means foreground and background. A device with a DISC_BACKGROUND cooperative level can be acquired (that is, used) by an application at any time, even when the application does not have the focus. In the sample application, if you set the <b>Access</b> option button in the <b>Mouse Properties</b> dialog box to Background, and then turn on the display of mouse coordinates, you will see the coordinates changing even when another application is in the foreground. With the Foreground setting, the mouse is <i>unacquired</i> whenever another application is activated, so the coordinates don't change.</p>
+<p>
+The DISC_EXCLUSIVE argument gives the application exclusive access to the mouse while the application is in the foreground. This means that Windows stops monitoring the mouse, and no messages are generated for it. A side effect is that the cursor disappears, since Windows is no longer tracking the axes. (I'll get back to the topic of cursors later in this article.)</p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;DirectInput is not currently supported on Windows NT, and in the future only the exclusive foreground mode will be supported. Also keep in mind the warning in the DirectInput documentation: "The Windows NT version of DirectInput (and the Windows 95 version of DirectInput on a non-supported mouse driver) will report DIERR_INPUTLOST more frequently than the Windows 95 version [on a fully supported mouse driver], and your application should be written to handle these cases."</p>
+<h3>Set Data Format</h3>
+<p>
+Before your application can acquire a device, you have to tell DirectInput the format of the data required from the device. This mechanism is doubtless intended to allow future compatibility with joysticks, force-feedback gloves, and other devices. At present, because only the mouse and keyboard are supported, you don't have to worry about the intricacies of the <b>DIDATAFORMAT</b> structure used in the argument to <b>SetDataFormat</b>. DirectInput provides a couple of global variables, <i>c_dfDIKeyboard</i> and <i>c_dfDIMouse</i>, that are declared in DINPUT.H and defined in DINPUT.LIB.</p>
+<p>
+This is all you need to do:</p>
+<pre><code>lpdiKeyboard-&gt;SetDataFormat(&amp;c_dfDIKeyboard);
+lpdiMouse-&gt;SetDataFormat(&amp;c_dfDIMouse);
+</code></pre>
+<p>
+Looking at the reference for the <b>DIDATAFORMAT</b> structure, you might be tempted to think that you can tinker with the device properties here by changing the contents of <b>dwFlags</b>. But you can't do this with <i>c_dfDIMouse</i>, because it is a <b>const</b>. If you want to change the properties, do so in the next step.</p>
+<h3>Set Properties</h3>
+<p>
+A device (for example, a mouse) or device object (for example, a mouse axis) has up to four properties:
+<ul type=disc>
+<li>
+Axis mode (determines whether it reports its position absolutely or relatively)<br><br></li>
+<li>
+Range of values reported for an axis<br><br></li>
+<li>
+Granularity (smallest increment reported for an axis value)<br><br></li>
+<li>
+Size of the buffer used for buffered input</li>
+</ul>
+<p>
+Only one of these, the buffer size, applies to the keyboard. Two properties, the axis mode and the buffer size, can be altered at run time.</p>
+<p>
+You can't set properties for an acquired device. If it's necessary to change a property after the initial setup, use <b>Unacquire</b> first.</p>
+<p>
+Before calling <b>SetProperty</b> (or <b>GetProperty</b>, for that matter), you need to set up a <b>DIPROPDWORD</b> structure, which consists of a header and a data word. Initialize the header with (1) its own size, (2) the size of the <b>DIPROPDWORD</b> structure, (3) an object identifier, and (4) a "how" code indicating the way the object ID should be interpreted. When setting properties, <b>dwObj</b> is always zero and <b>dwHow</b> is always DIPH_DEVICE. (Future versions of DirectInput may permit properties to be changed for individual objects, but for now they can only be changed for devices.)</p>
+<p>
+After these rather complicated preliminaries, you pass the address of the header into <b>SetProperty</b>, along with an identifier for the property you want to change.</p>
+<p>
+Here's an example that sets the buffer size for a device so that it will hold 10 data items:</p>
+<pre><code>#define BufferSize&nbsp; 10
+DIPROPDWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dipdw;
+HRESULT&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hres;
+
+dipdw.diph.dwSize = sizeof(DIPROPDWORD);
+dipdw.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+dipdw.diph.dwObj = 0;
+dipdw.diph.dwHow = DIPH_DEVICE;
+dipdw.dwData = BufferSize;
+hres = lpdiDevice-&gt;SetProperty(DIPROP_BUFFERSIZE, &amp;dipdw.diph);
+if (hres != DI_OK)
+  OutputDebugString("Failed to set buffer size.\n");
+</code></pre>
+<p>
+As I've already stated, DirectInput 3.0 doesn't let you set object properties. So, you can't set the axis mode for an individual axis; it must be set for the entire device, using zero in the <b>dwObj</b> field.</p>
+<h3>Acquire Device</h3>
+<p>
+We've finally reached the last step in making the device ready for use. In DirectInput, <i>acquiring</i> a device essentially means getting permission to use it. Acquisition is not permanent; your application may acquire and unacquire the mouse or keyboard many times. It's a bit like an old-fashioned hotel where you're expected to leave your key at the front desk. You've already booked the room and checked in, but you still need to go to the desk every time you enter or leave the building. There might be a single key (<i>exclusive</i> access) or more than one (<i>nonexclusive</i>), but no one gets in without a key.</p>
+<p>
+Simple-minded analogies not enough? Okay, here's a more technical explanation of just why an application needs to acquire and unacquire devices. There are two main points.</p>
+<p>
+First, DirectInput has to be able to tell the application when the flow of data from the device has been interrupted by the system. For instance, if the user has switched to another application with ALT+TAB, and used the mouse or keyboard in that application, your application needs to know that the input no longer belongs to it and that the state of the buffers may have changed. DirectInput automatically unacquires the device for you in such circumstances.</p>
+<p>
+Second, because your application can alter the properties of the device, without safeguards DirectInput would have to check the properties each time you wanted to get data with <b>GetDeviceState</b> or <b>GetDeviceData</b>. Obviously this would be very inefficient. Even worse, messy things could happen like a hardware interrupt accessing a data buffer just as you were changing the buffer size. So DirectInput requires your application to unacquire the device before changing properties. When you reacquire it, DirectInput looks at the properties and decides on the optimal way of transferring data from the device to the application. This is done only once, thereby making <b>GetDeviceState</b> and <b>GetDeviceData</b> lightning-fast.</p>
+<p>
+If the device's cooperative level is set to foreground only, it is automatically unacquired whenever the window loses the focus, even to the application's own menu. The DINPUT sample copes by reacquiring the mouse and keyboard whenever the window is reactivated. This may not be the best way of doing things in light of the warning in the DirectInput documentation that I quoted above—with some mouse drivers, DIERR_INPUTLOST may be reported "more frequently". See SCRAWL.CPP for another way of ensuring that your application is not trying to get data from an unacquired device.</p>
+<p>
+There's no harm in attempting to reacquire a device that is already acquired. Repeated calls to <b>Acquire</b> have no effect, and the device can still be unacquired with a single call to <b>Unacquire</b>.</p>
+<p>
+Remember, Windows doesn't have access to the mouse when your application is using it in exclusive mode. If you want to let Windows have the mouse, you must let it go. There's an example in the Scrawl application that responds to a click of the right button by unacquiring the mouse, putting the Windows cursor in the same spot as its own, popping up a context menu, and letting Windows handle the input until a menu choice is made.</p>
+<h2>Using the Keyboard</h2>
+<p>
+You can use DirectInput either to take a snapshot of the keyboard state or to maintain a buffer of keyboard incidents, an <i>incident</i> being the press or release of a key. (I'll use this word rather than <i>event</i> in order to avoid confusion with Windows messages or event objects.) We'll look at buffered input later; for now, here's a bit of code that takes a snapshot and checks for a depressed ESC key:</p>
+<pre><code>BYTE diKeys[256];
+
+if (lpdiKeyboard-&gt;GetDeviceState(256, &amp;diKeys)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == DI_OK)
+  {
+ &nbsp;&nbsp; if (diKeys[DIK_ESCAPE] &amp; 0x80) DoSomething();
+  }
+</code></pre>
+<p>
+The call to <b>GetDeviceState</b> simply returns an array of 256 bytes, each standing for a key. If the key is depressed, the high bit is set. The array can be indexed most conveniently with the DIK_* defines from DINPUT.H.</p>
+<p>
+Remember, <b>GetDeviceState</b> returns the present state of the keyboard, not a record of incidents. If your application does something in response to a keystroke, it's your responsibility to make sure the action isn't repeated inappropriately if the key is still down on the next pass through the polling loop.</p>
+<h2>Using the Mouse</h2>
+<h3>DirectInput Doesn't Do Cursors</h3>
+<p>
+When programming the mouse with the standard Windows API, it's easy to think of the mouse and the cursor as being one and the same. With DirectInput you can't think this way, because DirectInput does not concern itself about the cursor at all. Its mouse services are first and last an interface to the device rolling around on the tabletop, and the screen might as well not exist at all.</p>
+<p>
+The Scrawl sample program shows how you can synthesize a mouse-controlled cursor with DirectInput. This technique is necessary if you need to have both a cursor and exclusive access to the mouse in a full-screen application. (Remember, exclusive mode kills the default cursor and all Windows mouse messages.) In other cases, if you need a cursor but not exclusive access—and if performance is not a big issue—it's way easier to let Windows handle cursor movement while you track it with <b>GetCursorPos</b> or WM_MOUSEMOVE messages. You can still use DirectInput to monitor mouse clicks.</p>
+<p>
+Bear in mind that if your application does synthesize a cursor, none of the user settings in the Control Panel mouse applet, such as speed and acceleration, are relevant. Also, there is no way for DirectInput to deduce how far the mouse has actually rolled in order to produce a given change of axis. That's why Scrawl allows the user to set mouse sensitivity within the program—at the default setting, the cursor may move too slowly or too quickly in response to mouse movements.</p>
+<h3>Polling the Mouse</h3>
+<p>
+DirectInput bypasses the Windows message system, so the only way to find out what the mouse is up to is to ask it. To poll the mouse in real time (we'll get to buffered input later), use <b>GetDeviceState</b>, which returns the current state of the mouse in a <b>DIMOUSESTATE </b>structure. Here's an example that retrieves the axis values and produces a beep if the left button is clicked:</p>
+<pre><code>DIMOUSESTATE diMouseState;
+BOOL&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ClickHandled;
+LONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; MouseX, MouseY;
+
+if (lpdiMouse-&gt;GetDeviceState(sizeof(diMouseState), &amp;diMouseState)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == DI_OK)
+  {
+  if (diMouseState.rgbButtons[0] &amp; 0x80)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; if (!ClickHandled) 
+ &nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; MessageBeep(0);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ClickHandled = TRUE;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; }
+  else ClickHandled = FALSE;
+  MouseX = diMouseState.lX;
+  MouseY = diMouseState.lY;
+  }
+</code></pre>
+<p>
+We use the <i>ClickHandled</i> variable to keep track of whether the button press has been dealt with. Remember, <b>GetDeviceState</b> returns the current <i>state</i> of the mouse buttons, not presses or releases, so we have to ensure that the program doesn't keep responding to the mouse-down state.</p>
+<p>
+In DINPUT.EXE you can see the results of real-time mouse axis polling after setting Axis Display to Relative or Absolute in the <b>Mouse Properties</b> dialog box.</p>
+<h3>Relative and Absolute Axes</h3>
+<p>
+By default, the mouse axis coordinates are returned as relative values, that is, the amount by which they have changed since the last call to <b>GetDeviceState</b> or, in the case of buffered input, since the last item was put in the buffer. You can use <b>SetProperty</b> to have the axes returned as absolute values, which show the position of the mouse relative to an arbitrary point (somewhere in the next county, judging from the size of the default offset in my tests). In both cases the units are <i>mickeys</i>, the smallest measurable movements of a given device.</p>
+<h2>Using Buffered Data</h2>
+<p>
+When real-time input is not what's needed, your application can read events from a buffer instead.</p>
+<p>
+It's your responsibility to set the size of the buffer; see the example under <b>Set Properties</b>, above. By default the buffer size is zero, so this is a crucial step. The value in the <b>dwData</b> field of the <b>DIPROPHEADER</b> structure passed into <b>SetProperty</b> is the number of data items you want buffered, not the memory size in bytes or words. For the keyboard, each press and each release of a key is an item of data. For the mouse, an item is a button press or release or any movement that generates an interrupt.</p>
+<p>
+The sample program, DINPUT.EXE, buffers both mouse and keyboard input. Press a few keys and then examine the contents of the keyboard buffer by choosing Keyboard buffer on the View menu. Move the mouse slightly, click the left button once or twice, then press the right button to display the contents of the mouse buffer. Displaying the buffer also has the effect of flushing it, though this behavior can be altered.</p>
+<p>
+The buffer display shows the sequence number and age of each incident. For the keyboard, the key scan code and the type of action is also shown. For the mouse, you see which button or axis generated the incident, the type of action, and—for axes—the relative movement, unless the axes have been changed to absolute in the <b>Mouse Properties</b> dialog box. If more than 10 incidents have occurred since the buffer was last flushed, a buffer overflow warning is displayed as well. When the buffer overflows, it is the most recent events, not the oldest, that are lost.</p>
+<p>
+Items are in chronological order within the buffer, so you don't need the sequence numbers for determining the order in which they were generated. But there are a couple of tasks where sequence numbers do come in handy:
+<ol>
+<li>
+Recognizing simultaneous events. You'll observe in our sample program that a diagonal movement of the mouse produces the same sequence number for the changes in the X and Y axes. In Scrawl, a line is not drawn till simultaneous changes in the X and Y axes have both been processed—otherwise a right angle would be drawn instead of a slanting line.<br><br></li>
+<li>
+Finding out which event came first when processing input from more than one device. Take, for example, a quiz game where two players vie to be the first to sound a buzzer, one player using the keyboard while the other uses the mouse. Sequence numbers would allow the application to determine whether the keystroke or the mouse click came first, regardless of how close together they were. (Note that DirectInput maintains a single sequence of numbers, not a separate sequence for each device.)</li>
+</ol>
+<p>
+Here's the code our sample uses to retrieve and display the contents of the keyboard buffer:</p>
+<pre><code>HRESULT FlushKbdBuffer(void)
+  {
+  HRESULT&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hres;
+  DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dwItems;
+  char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; szScan[7];
+  char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; szAge[10];
+  char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; szOutput[99];
+  DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; k;
+  DIDEVICEOBJECTDATA *lpdidod;
+
+  dwItems = BUFFERCOUNT;&nbsp; // defined as 10
+  hres = lpdiKeyboard-&gt;GetDeviceData(sizeof(DIDEVICEOBJECTDATA),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; KbdBuffer, &amp;dwItems, 0);
+  if (hres == DI_BUFFEROVERFLOW)
+ &nbsp;&nbsp;&nbsp; TextToScreen(hMainWindow, "Buffer overflow!");
+  
+  for (k = 0; k &lt; dwItems; k++)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; lpdidod = &amp;KbdBuffer[k];
+ &nbsp;&nbsp; sprintf(szOutput, "%d", lpdidod-&gt;dwSequence);
+ &nbsp;&nbsp; strcat(szOutput, ". Scan code ");
+ &nbsp;&nbsp; sprintf(szScan, "%x", lpdidod-&gt;dwOfs);
+ &nbsp;&nbsp; strcat(szOutput, szScan);
+ &nbsp;&nbsp; 
+ &nbsp;&nbsp; if (lpdidod-&gt;dwData &amp; 0x80) 
+ &nbsp;&nbsp;&nbsp;&nbsp; strcat(szOutput, " pressed ");
+ &nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp; strcat(szOutput, " released ");
+ &nbsp;&nbsp; sprintf(szAge, "%d ms ago", GetTickCount() - lpdidod-&gt;dwTimeStamp);
+ &nbsp;&nbsp; strcat(szOutput, szAge);
+ 
+ &nbsp;&nbsp; TextToScreen(hMainWindow, szOutput);
+ &nbsp;&nbsp; }
+  return hres;
+  }
+</code></pre>
+<p>
+Points to note:
+<ul type=disc>
+<li>
+Before calling <b>GetDeviceData</b>, we set <b>dwItems</b> to the maximum number of items in the buffer. On return, <b>dwItems</b> holds the actual number of items retrieved. You don't have to retrieve the entire contents of the buffer; the Scrawl demo, for instance, retrieves just one item at a time. Whenever you retrieve an item with <b>GetDeviceData</b>, by default it is removed from the buffer, making room for another. You can, however, preserve the data in the buffer by using the DIGDD_PEEK flag.<br><br></li>
+<li>
+<i>KbdBuffer</i> is an array of <b>DIDEVICEOBJECTDATA</b> structures. Each structure holds the data for one key press or release. The information returned includes the scan code of the key, a sequence number, and a timestamp in milliseconds equivalent to what would be returned by <b>GetTickCount</b>. The size of the array depends on the definition of BUFFERCOUNT, and we have to be careful not to attempt to retrieve more elements than exist. For the keyboard, the value returned in <b>dwOfs</b> is the scan code of the key that generated the incident. For the mouse, this is a DIMOFS_* constant (more accurately a macro that returns a constant) representing one of the buttons or axes. The most significant bit of the low-order byte of the <b>dwData</b> field for each data item is set for a key press and cleared for a release. This works the same way for mouse buttons. For axes, <b>dwData</b> holds the coordinate.</li>
+</ul>
+<h2>Event Notification</h2>
+<p>
+DirectInput provides support for thread synchronization in the form of the <b>SetEventNotification</b> function. You can see a simple implementation in Scrawl, which sets up an event object for the mouse with <b>CreateEvent</b> and then orders the DirectInput mouse object to report to the event object with <b>SetEventNotification</b>. The <b>WinMain</b> loop then calls <b>MsgWaitForMultipleObjects</b> to check whether the mouse event is signaled, that is, whether there is input that needs to be processed.</p>
+<h2>Running Control Panel Applets</h2>
+<p>
+I can't imagine the circumstances under which you would want to run Control Panel from your application, since most, if not all, of the Control Panel settings are ignored by DirectInput. However, if you want to run the applet for a device, it's a simple call:</p>
+<pre><code>lpdiKeyboard-&gt;RunControlPanel(NULL, 0);
+</code></pre>
+<p>
+The first argument is the parent window and the second argument is for flags, none of which is so far defined.</p>
+<h2>Other Input Devices Under DirectInput 3.0</h2>
+<p>
+Future releases of DirectX will include COM-based services for other input devices, including the joystick, game pads, and virtual-reality gloves. At present, however, the DirectInput support for devices other than the mouse and keyboard is nominal; in fact, it is available in the standard Windows SDK in the form of the extended joystick services centered on <b>joyGetPosEx</b>.</p>
+<p>
+The <b>joyGetPosEx</b> function is actually quite powerful, supporting up to 32 buttons, six axes, and a point-of-view hat on digital and analog devices. It is well documented elsewhere, and I won't discuss it here further than to point you to the useful articles listed below.</p>
+<p>
+Incidentally, the 32-bit joystick driver VJOYD.VXD is improved in DirectX 3. Older versions were flawed and several companies produced fixes, causing confusion. One problem that has been cleared up is the tendency for the joystick readings to "jitter" when they happened to coincide with DMA (direct memory access) transfers.</p>
+<h2>Further Reading</h2>
+<p>
+At time of writing there were no resources for the DirectInput new mouse and keyboard services other than the SDK documentation and samples. The following articles provide further information on COM theory and on programming for the joystick and similar devices.</p>
+<p>
+Brockschmidt, Kraig. "How OLE and COM Solve the Problems of Component Software Design." <i>Microsoft Systems Journal</i> (May and June 1996).</p>
+<p>
+Donnelly, Peter. <a href="msdn_dos2win2.htm">"Moving Your Game to Windows, Part 2: Mouse and Joystick Input."</a></p>
+<p>
+Edson, Dave. "Get World-Class Noise and Total Joy from Your Games with DirectSound and DirectInput." <i>Microsoft Systems Journal</i> 11 (February 1996). (MSDN Library, Periodicals) (Includes an introduction to the joystick functions.)</p>
+<p>
+Microsoft Corporation. <a href="msdn_sidewind3d.htm">"Developing for the Microsoft SideWinder 3D Pro."</a></p>
+<p>
+Microsoft Corporation. <a href="msdn_sidewind.htm">"Developing for the Microsoft SideWinder Game Pad."</a> </p>
+<p>
+Microsoft Corporation. <a href="msdn_extdirect.htm">"Extending DirectInput's Joystick Subsystem Services."</a></p>
+<p>
+Willliams, Sara, and Charlie Kindel. "The Component Object Model: A Technical Overview." Adapted from an article in <i>Dr. Dobbs' Journal</i> (Newsstand Special Edition, December 1994). (MSDN Library, Technical Articles) </p>
+</BODY>
+</HTML>

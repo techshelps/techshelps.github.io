@@ -1,0 +1,288 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>MFC/COM Objects 3: Objects That Talk Back</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_house3"></a></sup>MFC/COM Objects 3: Objects That Talk Back</h1>
+<p>
+Nigel Thompson<br>
+Microsoft Developer Network Technology Group</p>
+<p>
+March 20, 1995</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="4232">
+</OBJECT><a href="javascript:sample1.Click()">Click to open or copy the files in the HOUSE3 sample application for this technical article.</a></p>
+<h2>Abstract</h2>
+<p>
+This technical article is the third in a series that describes creating and using 32-bit Component Object Model (COM) objects with Visual C++™ and the Microsoft® Foundation Class Library (MFC). This article looks at objects that send notification events back to their users.</p>
+<p>
+<b>Note</b> &nbsp;&nbsp; Before running the sample, you must register the location of the APPLIANCES.DLL in the registry. See the first article in this series (<a href="msdn_house1.htm">"MFC/COM Objects 1: Creating a Simple Object"</a>) for details on how to do this.</p>
+<h2>Introduction</h2>
+<p>
+On many occasions the user of an object would like to know when the object changes state. For example, in the previous article (<a href="msdn_house2.htm">"MFC/COM Objects 2: Using Interfaces"</a>), we were controlling various light bulbs through an interface that allowed us to turn them on and off and maybe set a brightness level. In order to see the effect of these changes of state, we redrew the entire scene, asking each bulb to draw itself in its current state. We knew that if one of the control dialog boxes changed the state of an object, we needed to redraw the scene to see the change.</p>
+<p>
+You might have tried running two instances of the slider control for the standard lamp and noticed that when you moved one slider, the image of the lamp changed, but the other slider did not. In this article we're going to look at a better way for users of an object to find out when it changes state. By the time we're done, you'll be able to bring up two sliders for the standard lamp, move one of them, and see not only the image of the lamp change, but also the position of the other slider.</p>
+<h2>A Notification Architecture</h2>
+<p>
+Figure 1 shows a picture of what we want to happen when a slider is used to update the state of the lamp.</p>
+<p>
+<img src="house3_1.gif" border=0></p>
+<p class=label>
+<b>Figure 1. Notification events being used to update state</b></p>
+<p>
+In the scenario shown here, Slider 1 is moved by the user and uses the <b>ILight</b> interface of the standard lamp to set a new brightness level (1). The standard lamp object then sends out notification events (2, 3, and 4) to all users of the object that need to know about a change of the object's state. In response to these notifications, the sliders use the object's <b>ILight</b> interface to find its current brightness level and reset their own positions accordingly. The house simply uses the object's <b>IDrawing </b>interface to ask the object to draw itself in its current (new) state. No big deal, eh?</p>
+<p>
+Although this may look simple, there's a fair bit of work required to set it up. Let's go through the steps one by one, starting with the moment the house first creates the lamp object. At this point, the house needs to tell the lamp that it (the house) would like to be notified of any change of state in the lamp. How does the house do this? First of all, we need to create some new interface that the lamp supports, that allows the lamp to be told that someone wants to be notified of something. I called this new interface <b>INotifySrc</b> because it deals with objects that are the source of some notification event. So if we make our lamp support <b>INotifySrc</b>, we have an interface the house can talk to to tell the lamp that the house wants change-of-state notification events. Note that because there is a potential for multiple users of a single object to need change-of-state notification, the object must keep a list of all interested parties.</p>
+<p>
+So now the lamp has a list—but a list of what? What exactly is the lamp object going to store that it can use to tell its user that a change of state has taken place? Score one point if you said a pointer to something. Take a point off if you said a pointer to the <b>CMainFrame</b> C++ object. Take 10 points off (and see me after class) if you said a window handle. Score 10 zillion points if you said—<i>A pointer to an interface</i>. Why does it need an interface pointer and not some other pointer? Well, in the longer term, objects and users of objects might be on different machines or, at least, in different process address spaces. A regular Joe Soap pointer isn't going to be much use in a different address space, but an interface pointer can be marshaled by the wonders of remote procedure call (RPC) so that it still works. OK, so maybe it's a bit of a thin argument, but we're in here trying to learn about interfaces, and this is where we can add another one.</p>
+<p>
+So for a user of the object to receive notification from the object, it (the user) must provide the object with a pointer to some interface of its own that the object can use to send the notification event. I called this new interface <b>INotify</b>. Figure 2 shows a nice pictorial summary.</p>
+<p>
+<img src="house3_2.gif" border=0></p>
+<p class=label>
+<b>Figure 2. The notification interfaces in use</b></p>
+<h2>Adding the New Code</h2>
+<p>
+I added the code to support notification in three steps. First, I added the <b>INotify</b> interface to the house code. Then I added <b>INotifySrc</b> support to the standard lamp object, and finally I added <b>INotify</b> support to the slider dialog. We'll look at these steps in turn.</p>
+<h3>Adding INotify Support to the House</h3>
+<p>
+The first step is to declare the interface map and the interface itself in MAINFRM.H:</p>
+<pre><code>class CMainFrame : public CFrameWnd
+{
+ &nbsp; [...]
+
+ &nbsp;&nbsp; // 3:INotify support
+ &nbsp;&nbsp; // Declare the interface map for this object
+ &nbsp;&nbsp; DECLARE_INTERFACE_MAP()
+
+ &nbsp;&nbsp; // INotify interface
+ &nbsp;&nbsp; BEGIN_INTERFACE_PART(Notify, INotify)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD(Change)(LPVOID pUserInfo);
+ &nbsp;&nbsp; END_INTERFACE_PART(Notify)
+
+};
+</code></pre>
+<p>
+Now, in MAINFRM.CPP, we implement the interface map:</p>
+<pre><code>BEGIN_INTERFACE_MAP(CMainFrame, CCmdTarget)
+ &nbsp;&nbsp; INTERFACE_PART(CMainFrame, IID_INotify, Notify)
+END_INTERFACE_MAP()
+</code></pre>
+<p>
+Note that we don't need to use the OLECREATE. . . macros because we won't be creating any objects through this interface.</p>
+<p>
+Next we modify <b>CHouseApp::InitInstance</b> and <b>CHouseApp::ExitInstance</b> in HOUSE.CPP to register and revoke the class factories. I haven't mentioned class factories before, and there isn't space to go into detail here, so if you want to know more, read Kraig Brockschmidt's book, <i>Inside OLE2</i> (MSDN Library, Books).</p>
+<pre><code>BOOL CHouseApp::InitInstance()
+{
+ &nbsp; [...]
+ &nbsp;&nbsp; // 3:Register our class factories.
+ &nbsp;&nbsp; COleObjectFactory::RegisterAll();
+ &nbsp; [...]
+}
+
+int CHouseApp::ExitInstance() 
+{
+ &nbsp; // 3:Revoke all class factories.
+ &nbsp;&nbsp; COleObjectFactory::RevokeAll();
+ &nbsp; [...]
+}
+</code></pre>
+<p>
+The last step is to provide the implementation of the interface itself in MAINFRM.CPP:</p>
+<pre><code>IMPLEMENT_IUNKNOWN(CMainFrame, Notify)
+
+STDMETHODIMP CMainFrame::XNotify::Change(LPVOID pUserInfo)
+{
+ &nbsp;&nbsp; METHOD_PROLOGUE(CMainFrame, Notify);
+
+ &nbsp;&nbsp; // One of the objects has changed, so redraw to see the effect.
+ &nbsp;&nbsp; pThis-&gt;Invalidate();
+
+ &nbsp;&nbsp; return NOERROR;
+}
+</code></pre>
+<p>
+Note that we aren't trying to be clever here. If we detect that an object has changed state (<b>CMainFrame::XNotify::Change</b> is called by an object), we simply redraw the entire scene. We could optimize this quite a bit by only redrawing the area around the changed object.</p>
+<p>
+The application now has a complete implementation of <b>INotify</b>. All that it needs to do now is supply a pointer to this interface when it creates an object that supports the <b>INotifySrc</b> interface. We do this in the <b>CMainFrame::CreateAppliance</b> helper function:</p>
+<pre><code>void CMainFrame::CreateAppliance(REFIID riid,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; IUnknown** ppIUnknown, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; int x, int y,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CRect* pRect)
+{
+ &nbsp; [...]
+ &nbsp;&nbsp; // 3:Get a pointer to the object's INotifySrc interface.
+ &nbsp;&nbsp; INotifySrc* pINotifySrc = NULL;
+ &nbsp;&nbsp; if ((*ppIUnknown)-&gt;QueryInterface(IID_INotifySrc,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (LPVOID*)&amp;pINotifySrc) != S_OK) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dprintf2("INotifySrc not supported");
+ &nbsp;&nbsp; } else {
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Give the COM object a pointer to our own INotify interface,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // and use the user info ptr to store the object's IUnknown ptr.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; INotify* pINotify = NULL;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ExternalQueryInterface(&amp;IID_INotify, (LPVOID*)&amp;pINotify);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ASSERT(pINotify); 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pINotifySrc-&gt;SetUser(pINotify, *ppIUnknown);
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Free the interface.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pINotifySrc-&gt;Release();
+ &nbsp;&nbsp; }
+}
+</code></pre>
+<p>
+Note the use of <b>ExternalQueryInterface</b> to get a pointer to our own <b>INotify</b> interface. <b>ExternalQueryInterface </b>is part of MFC's <b>IUnknown</b> implementation in <b>CCmdTarget</b>.</p>
+<h3>Adding INotifySrc Support to the Standard Lamp</h3>
+<p>
+Supporting <b>INotifySrc</b> in the standard lamp required two things: the creation of a simple C++ object to store information about each client, and the addition of code to implement the <b>INotifySrc</b> interface itself. Because there can be multiple clients wanting notification, the standard lamp actually keeps a list (a <b>CObList</b> object) of clients. Here are the additions to STANDARD.H:</p>
+<pre><code>class CStandardLamp : public CCmdTarget
+{
+ &nbsp; [...]
+
+ &nbsp;&nbsp; // 3:INotifySrc interface
+ &nbsp;&nbsp; BEGIN_INTERFACE_PART(NotifySrc, INotifySrc)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD(SetUser)(INotify* pNotify, LPVOID pUserInfo);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD(UnsetUser)(INotify* pNotify);
+ &nbsp;&nbsp; END_INTERFACE_PART(NotifySrc)
+
+ &nbsp;&nbsp; // 3:Support fns
+ &nbsp;&nbsp; void CStandardLamp::NotifyChange();
+
+   [...]
+
+ &nbsp;&nbsp; // 3:Notification list
+ &nbsp;&nbsp; CObList m_NotifyList;
+};
+
+// 3:Notification info class
+class CUserInfo
+{
+public:
+ &nbsp;&nbsp; INotify* pNotify;
+ &nbsp;&nbsp; LPVOID pUserInfo;
+};
+</code></pre>
+<p>
+Don't forget to also add the <b>INotify</b> and <b>INotifySrc</b> header files to each module that uses them and also to GUIDS.CPP.</p>
+<p>
+The implementation of <b>INotifySrc</b> is quite straightforward, so we'll look at only the essential parts here. Here's the <b>SetUser</b> function, which adds a new client to the notification list:</p>
+<pre><code>STDMETHODIMP CStandardLamp::XNotifySrc::SetUser(INotify* pNotify,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; LPVOID pUserInfo)
+{
+ &nbsp;&nbsp; METHOD_PROLOGUE(CStandardLamp, NotifySrc);
+ &nbsp;&nbsp; if (!pNotify) return E_INVALIDARG;
+
+ &nbsp;&nbsp; // Save the user's INotify interface and info.
+ &nbsp;&nbsp; pNotify-&gt;AddRef();
+ &nbsp;&nbsp; CUserInfo* pInfo = new CUserInfo;
+ &nbsp;&nbsp; ASSERT(pInfo);
+ &nbsp;&nbsp; pInfo-&gt;pNotify = pNotify;
+ &nbsp;&nbsp; pInfo-&gt;pUserInfo = pUserInfo;
+ &nbsp;&nbsp; pThis-&gt;m_NotifyList.AddTail((CObject*)pInfo);
+
+ &nbsp;&nbsp; return NOERROR;
+}
+</code></pre>
+<p>
+Note that we are saving a pointer to the user's <b>INotify</b> interface and also a pointer to some information that users will need to know when they are notified of a change later. For example, a user may send a pointer to an internal data structure that describes how the object is used in the application. When the application gets a change notification, it can use the pointer to access whatever private data it uses to make updates, based on the change of state. So let's see what happens when the lamp changes state:</p>
+<pre><code>STDMETHODIMP CStandardLamp::XLight::SetBrightness(BYTE bLevel)
+{
+ &nbsp;&nbsp; METHOD_PROLOGUE(CStandardLamp, Light);
+ &nbsp;&nbsp; pThis-&gt;m_bLevel = bLevel;
+ &nbsp;&nbsp; pThis-&gt;NotifyChange();
+ &nbsp;&nbsp; return NOERROR;
+}
+</code></pre>
+<p>
+When the brightness is changed, an internal helper function (<b>NotifyChange</b>) is called to notify all the object's users. Here's the function:</p>
+<pre><code>void CStandardLamp::NotifyChange()
+{
+ &nbsp;&nbsp; // Walk the notification list.
+ &nbsp;&nbsp; POSITION pos = m_NotifyList.GetHeadPosition();
+ &nbsp;&nbsp; while(pos) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CUserInfo* pInfo = (CUserInfo*)m_NotifyList.GetNext(pos);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ASSERT(pInfo &amp;&amp; pInfo-&gt;pNotify);
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Report the change of state.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pInfo-&gt;pNotify-&gt;Change(pInfo-&gt;pUserInfo);
+ &nbsp;&nbsp; }
+}
+</code></pre>
+<p>
+Note how the user information pointer is sent back to the user as a parameter of <b>INotify::Change</b>.</p>
+<h3>Adding INotify Support to the Slider Dialog</h3>
+<p>
+The final step is to modify the slider dialog box to support the <b>INotify </b>interface and have it set up a notification request when the dialog box is created. As for the application, we declare the interface in the dialog's header:</p>
+<pre><code>class CLightDlg : public CDialog
+{
+ &nbsp; [...]
+ &nbsp;&nbsp; // 3:INotify support
+ &nbsp;&nbsp; // Declare the interface map for this object.
+ &nbsp;&nbsp; DECLARE_INTERFACE_MAP()
+
+ &nbsp;&nbsp; // INotify interface
+ &nbsp;&nbsp; BEGIN_INTERFACE_PART(Notify, INotify)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD(Change)(LPVOID pUserInfo);
+ &nbsp;&nbsp; END_INTERFACE_PART(Notify)
+
+ &nbsp;&nbsp; INotify* m_pINotify;
+};
+</code></pre>
+<p>
+Let's see what happens when the dialog box is displayed:</p>
+<pre><code>BOOL CLightDlg::OnInitDialog() 
+{
+ &nbsp; [...]
+ &nbsp;&nbsp; // 3:Tell it we'd like change notification.
+ &nbsp;&nbsp; INotifySrc* pINotifySrc = NULL;
+ &nbsp;&nbsp; if (m_pILight-&gt;QueryInterface(IID_INotifySrc,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (LPVOID*)&amp;pINotifySrc) != S_OK) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dprintf2("INotifySrc not supported");
+ &nbsp;&nbsp; } else {
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Give the COM object a pointer to our own INotify interface,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // and use the user info ptr to store the object's IUnknown ptr.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_pINotify = NULL;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ExternalQueryInterface(&amp;IID_INotify, (LPVOID*)&amp;m_pINotify);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ASSERT(m_pINotify); 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pINotifySrc-&gt;SetUser(m_pINotify, m_pILight);
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Free the interface.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pINotifySrc-&gt;Release();
+ &nbsp;&nbsp; }
+ &nbsp; [...]
+}
+</code></pre>
+<p>
+As for the application, the object is given a pointer to the dialog's <b>INotify</b> interface. Finally, let's see what happens when the notification event is received:</p>
+<pre><code>STDMETHODIMP CLightDlg::XNotify::Change(LPVOID pUserInfo)
+{
+ &nbsp;&nbsp; METHOD_PROLOGUE(CLightDlg, Notify);
+
+ &nbsp;&nbsp; // The object has changed, so redraw to see the effect.
+ &nbsp;&nbsp; BYTE b;
+ &nbsp;&nbsp; pThis-&gt;m_pILight-&gt;GetBrightness(&amp;b);
+ &nbsp;&nbsp; pThis-&gt;m_wndBright.SetPos(255 - b);
+
+ &nbsp;&nbsp; return NOERROR;
+}
+</code></pre>
+<p>
+Pretty simple really—the slider is set to the current brightness value of the lamp.</p>
+<p>
+One point to note is that when the (human) user moves the slider, it's now unnecessary to tell the application to repaint because the application is also receiving notification events from the object as it changes state.</p>
+<h2>Summary</h2>
+<p>
+Using notification events from objects can make multiple use of a single object very easy to manage. Implementing the interfaces required for such notification support everywhere can require that a lot of code be repeated. In the next article (<a href="msdn_house4.htm">"MFC/COM Objects 4: Aggregation"</a>) we'll look at a technique called <i>aggregation </i>for reusing code in COM objects.</p>
+</BODY>
+</HTML>

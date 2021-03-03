@@ -1,0 +1,324 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML>
+<HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>2.2  IRPs and Driver-specific I/O Stack Locations</TITLE>
+<style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD>
+<BODY BGPROPERTIES="FIXED" TEXT="#000000" BGCOLOR="#FFFFFF">
+
+<FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<H2><A NAME="DDK_IRPs_and_Driver_specific_I_O_Stack_Locations_KG"></A>2.2  IRPs and Driver-specific I/O Stack Locations</H2>
+<P>
+<A HREF="02irps_1.htm#DDK_Figure_2..2_KG">Figure 2.2</A>&nbsp;shows an IRP with two I/O stack
+locations, but an IRP can have any number of I/O stack locations, depending on
+how many layered drivers will handle a given request.
+<P>
+<A NAME="DDK_Figure_2..3_KG"></A>Figure 2.3 illustrates in more detail how the
+drivers of <A HREF="02irps_1.htm#DDK_Figure_2..2_KG">Figure 2.2</A>&nbsp;use I/O support routines (<B>Io</B>Xxx
+routines) to process the IRP for a read or write request. Figure 2.3 also
+shows more detail of an IRP’s I/O stack location for a lowest-level driver,
+such as a physical disk driver.
+<P>
+<B><IMG SRC="../art/2girpeg.gif" BORDER=0></B>
+<P>
+<B>Figure 2.3    Processing IRPs in Layered NT Drivers</B>
+<OL>
+<LI>
+The I/O Manager calls the file system driver (FSD) with the IRP it has
+allocated for the subsystem’s read/write request. The FSD accesses its I/O
+stack location in the IRP to determine what operation it should carry out.
+<P>
+<LI>
+The FSD can break the original request into smaller requests (possibly for
+more than one device driver) by calling an I/O support routine (<B>IoAllocateIrp</B>)
+one or more times to allocate IRPs, which are returned to the FSD with
+zero-filled I/O stack location(s) for lower-level driver(s). At its
+discretion, the FSD can reuse the original IRP, rather than allocating
+additional IRPs as shown in Figure 2.3, by setting up the next-lower driver’s
+I/O stack location in the original IRP and passing it on to lower drivers.
+<P>
+<LI>
+For each driver-allocated IRP, the FSD in <A HREF="#DDK_Figure_2..3_KG">Figure
+2.3</A>&nbsp;calls an I/O support routine to register an FSD-supplied completion
+routine so it can determine whether lower drivers satisfied the request and
+free each driver-allocated IRP when lower drivers have completed it. The I/O
+Manager will call the FSD-supplied completion routine whether each
+driver-allocated IRP was completed successfully, with an error status, or
+cancelled. A higher-level NT driver is responsible for freeing any IRPs it
+allocates and sets up on its own behalf for lower-level drivers. The I/O
+Manager frees the IRPs that it allocates after all NT drivers have completed
+them.
+<P>
+Next, the FSD calls an I/O support routine to access the next-lower-level
+driver’s I/O stack location in its FSD-allocated IRP in order to set up the
+request for the next-lower driver, which happens to be the lowest-level driver
+in <A HREF="#DDK_Figure_2..3_KG">Figure 2.3</A>. The FSD then calls an I/O support
+routine to pass that IRP on to the next driver.
+<P>
+<LI>
+When it is called with the IRP, the physical device driver checks its I/O
+stack location to determine what operation (indicated by the IRP_MJ_<I>XXX</I>
+function code) it should carry out on the target device, which is represented
+by the device object in its I/O stack location and passed with the IRP to the
+driver. This driver can assume that the I/O Manager has routed the IRP to an
+entry point that the driver defined for the IRP_MJ_<I>XXX</I>&nbsp;operation (here
+IRP_MJ_READ or IRP_MJ_WRITE) and that the higher-level driver has checked the
+validity of other parameters for the request.
+<P>
+If there were no higher-level driver, such a device driver would check whether
+the input parameters for an IRP_MJ_<I>XXX</I>&nbsp;operation are valid. If they
+are, a device driver usually calls I/O support routines to tell the I/O
+Manager that a device operation is pending on the IRP and to either queue or
+pass the IRP on to another driver-supplied routine that accesses the target
+device (here, a physical or logical device: the disk or a partition on the
+disk).
+<P>
+<LI>
+The I/O Manager determines whether the device driver is already busy
+processing another IRP for the target device, queues the IRP if it is, and
+returns. Otherwise, the I/O Manager routes the IRP to a driver-supplied
+routine that starts the I/O operation on its device. (At this stage, both
+drivers in <A HREF="#DDK_Figure_2..3_KG">Figure 2.3</A>&nbsp;and the I/O Manager return
+control.)
+<P>
+<LI>
+When the device interrupts, the driver’s interrupt service routine (ISR) does
+only as much work as it must to stop the device from interrupting and to save
+necessary context about the operation. The ISR then calls an I/O support
+routine with the IRP to queue a driver-supplied DPC routine to complete the
+requested operation at a lower hardware priority than the ISR.
+<P>
+<LI>
+When the driver’s DPC gets control, it uses the context (passed in the ISR’s
+call to <B>IoRequestDpc</B>) to complete the I/O operation. The DPC calls a
+support routine to dequeue the next IRP (if any) and to pass that IRP on to
+the driver-supplied routine that starts I/O operations on the device (see Step
+5). The DPC then sets status about the just completed operation in the IRP’s
+I/O status block and returns it to the I/O Manager with <B>IoCompleteRequest</B>.
+<P>
+<LI>
+The I/O Manager zeroes the lowest-level driver’s I/O stack location in the IRP
+and calls the file system’s registered completion routine (see Step 3) with
+the FSD-allocated IRP. This completion routine checks the I/O status block to
+determine whether to retry the request or to update any internal state
+maintained about the original request and to free its driver-allocated IRP.
+The file system can collect status information for all driver-allocated IRPs
+it sends to lower-level drivers in order to set I/O status and complete the
+original IRP. When it has completed the original IRP, the I/O Manager returns
+NT status to the original requestor (the subsystem’s native function) of the
+I/O operation.
+</OL>
+<P>
+<A HREF="#DDK_Figure_2..3_KG">Figure 2.3</A>&nbsp;also shows two I/O stack locations in
+the original IRP because it shows two NT drivers, a file system driver and a
+mass-storage device driver. The I/O Manager gives each driver in a chain of
+layered NT drivers an I/O stack location of its own in every IRP that it sets
+up. The driver-allocated IRPs in Figure 2.3 do not have a stack location for
+the FSD that created them. Any higher-level driver that allocates IRPs for
+lower-level drivers also determines how many I/O stack locations the new IRPs
+should have, according to the <B>StackSize</B>&nbsp;value of the next-lower
+driver’s device object.
+<P>
+As shown in <A HREF="#DDK_Figure_2..3_KG">Figure 2.3</A>, each driver-specific I/O
+stack location in an IRP contains the following general information:
+<UL>
+<LI>
+The major function code (IRP_MJ_<I>XXX</I>), indicating the basic operation
+the driver should carry out
+<P>
+<LI>
+For some major function codes handled by FSDs and higher-level SCSI drivers, a
+minor function code (IRP_MN_<I>XXX</I>), indicating which sub-case of the
+basic operation the FSD should carry out
+<P>
+<LI>
+A set of operation-specific arguments, such as the length and starting
+location of a buffer into which or from which the driver transfers data
+<P>
+<LI>
+A pointer to the driver-created device object, representing the target
+(physical, logical, or virtual) device for the requested operation
+<P>
+<LI>
+A pointer to the file object, representing an open file, device, directory, or
+volume
+<P>
+An NT file system driver accesses the file object through its I/O stack
+location in IRPs. Other NT drivers usually ignore the file object.
+</UL>
+<P>
+The set of IRP major and minor function codes that a particular NT driver
+handles can be device-type-specific. However, NT device and intermediate
+drivers usually handle the following set of basic requests:
+<UL>
+<LI>
+IRP_MJ_CREATE - open the target device object, indicating that it is present
+and available for I/O operations
+<P>
+<LI>
+IRP_MJ_READ - transfer data from the device
+<P>
+<LI>
+IRP_MJ_WRITE - transfer data to the device
+<P>
+<LI>
+IRP_MJ_DEVICE_CONTROL - set up (or reset) the device, according to a
+system-defined, device-type-specific I/O control code
+<P>
+<LI>
+IRP_MJ_CLOSE - close the target device object
+</UL>
+<P>
+For more information about the major function codes and device I/O control
+codes that NT drivers for particular kinds of devices are required to handle,
+see the <I>Kernel-Mode Driver Reference</I>.
+<P>
+In general, the I/O Manager sends IRPs with at least two I/O stack locations
+to mass-storage device drivers because an NT file system is layered over NT
+drivers for mass-storage devices. The I/O Manager sends IRPs with a single
+stack location to any physical device driver that has no driver layered above
+it.
+<P>
+However, the NT I/O Manager provides support for adding a new driver to any
+chain of existing drivers in the system. For example, an intermediate mirror
+driver that backs up data on a given disk partition might be inserted between
+a pair of drivers, such as those shown in <A HREF="#DDK_Figure_2..3_KG">Figure
+2.3</A>. When this new driver attaches itself to the device driver, the I/O
+Manager adjusts the number of I/O stack locations in all IRPs it sends to the
+file system, mirror, and disk device drivers. Every IRP that the file system
+in Figure 2.3 allocated would also contain another I/O stack location for such
+a new mirror driver.
+<P>
+Note that this support for adding new NT drivers to an existing chain implies
+certain restrictions on any particular NT driver’s access to the I/O stack
+locations in IRPs:
+<UL>
+<LI>
+A higher-level driver in a chain of layered NT drivers can safely access only
+its own and the next-lower-level driver’s I/O stack locations in any IRP. Such
+a driver must set up the I/O stack location for the next-lower-level driver in
+IRPs. However, the designer of such a higher-level driver cannot predict when
+(or whether) a new driver will be added to the existing chain just below the
+designer’s driver.
+<P>
+Every writer of a higher-level NT driver must assume that any subsequently
+added driver will handle the same IRP major function codes (IRP_MJ_<I>XXX</I>)
+as the displaced next-lower-level driver did.
+<P>
+<LI>
+The lowest-level driver in a chain of layered NT drivers can safely access
+only its own I/O stack location in any IRP. The designer of such a driver
+cannot predict when (or whether) a new driver will be added to the existing
+chain above the designer’s device driver.
+<P>
+Every writer of a lowest-level NT driver must assume that the driver can
+continue to process IRPs using the information passed in its own I/O stack
+location, whatever the originating source of a given IRP and however many
+drivers are layered above it.
+</UL>
+<P>
+Like the file system driver shown in <A HREF="#DDK_Figure_2..3_KG">Figure 2.3</A>,
+any new driver that is added to a chain of existing drivers can do all of the
+following:
+<UL>
+<LI>
+Set its own completion routine into an IRP that checks the I/O status block to
+determine whether lower drivers completed the IRP successfully, cancelled the
+IRP, and/or completed it with an error. Such a driver’s completion routine can
+also update any IRP-specific state the driver might have saved, release any
+operation-specific resources the driver might have allocated, and so forth,
+before completing the IRP. Such a completion routine can even reregister
+itself and reuse an incoming IRP to send another request to the
+next-lower-level driver before allowing the IRP to complete.
+<P>
+<LI>
+Call I/O support routines to allocate new IRPs. However, NT intermediate
+drivers, which are chained somewhere between a highest-level driver (such as
+the file system in <A HREF="#DDK_Figure_2..3_KG">Figure 2.3</A>) and a lowest-level
+(physical device) driver, cannot call <B>IoMakeAssociatedIrp</B>. Only the
+highest-level driver in a chain can create associated IRPs because the I/O
+Manager automatically completes associated IRPs, and the original IRP (also
+called a “master IRP”) when all its associated IRPs are completed, as long as
+the allocating driver does not register its completion routine for an
+associated IRP. NT intermediate drivers call other support routines to create
+IRPs that they send down to lower drivers.
+<P>
+<LI>
+Set up the next-lower-level driver’s I/O stack location in the IRPs it
+allocates and send requests to the next-lower-level driver.
+<P>
+<LI>
+Pass any incoming requests on to lower drivers by setting up the next-lower
+driver’s I/O stack location in each IRP and calling <B>IoCallDriver</B>.
+</UL>
+<P>
+For specific information about the support routines that intermediate and
+lowest-level NT drivers call and about device-type-specific requests these
+drivers must handle, see the <I>Kernel-Mode Driver Reference</I>.
+<P>
+As shown in <A HREF="#DDK_Figure_2..3_KG">Figure 2.3</A>, an NT file system is a
+two-part driver:
+<OL>
+<LI>
+A file system driver (FSD), which executes in the context of a user-mode
+thread that calls an I/O system service
+<P>
+The I/O Manager sends the corresponding IRP to the FSD. If the FSD sets up a
+completion routine for an IRP, its completion routine is not necessarily
+called in the original user-mode thread’s context.
+<P>
+<LI>
+A set of file system threads, and possibly an <I>FSP</I>&nbsp;(<I>file system
+process</I>)
+<P>
+An FSD can create a set of driver-dedicated system threads, but most FSDs use
+system worker threads in order to get work done without tying up user-mode
+threads that make I/O requests. Any FSD might set up its own process address
+space in which its driver-dedicated threads execute, but the system-supplied
+FSDs avoid this practice to conserve system memory.
+</OL>
+<P>
+NT file systems generally use system worker threads to set up and manage
+internal work queues of IRPs that they send to one or more lower-level
+drivers, possibly for different devices.
+<P>
+While the physical device driver shown in <A HREF="#DDK_Figure_2..3_KG">Figure
+2.3</A>&nbsp;processes each IRP in stages through a set of discrete, driver-supplied
+routines, it does not use system threads as the file system does. A physical
+device driver does not need its own thread context unless setting up its
+device for I/O is such a protracted process that it has a noticable effect on
+system performance. Few NT device or intermediate drivers need to set up their
+own driver-dedicated or device-dedicated system threads, and those that do pay
+a performance penalty caused by context switches to their threads.
+<P>
+Most NT drivers, like the physical device driver in <A HREF="#DDK_Figure_2..3_KG">Figure
+2.3</A>, execute in an arbitrary thread context: that of whatever thread happens
+to be current when they are called to process an IRP. Consequently, NT drivers
+usually maintain state about their I/O operations and the devices they service
+in a driver-defined part of their device objects, called a <I>device extension</I>.
+<P>
+Each driver-created device object represents a physical, logical, or virtual
+device for which a particular NT driver carries out I/O requests. For
+guidelines about how different kinds of device drivers use device objects to
+represent their respective physical, logical, and virtual devices, see <A HREF="02irps_21.htm">Section
+2.5</A>&nbsp;later in this chapter. For detailed information about creating and setting
+up a device object, see <A HREF="03ntobj.htm">Chapter
+3</A>.
+<P>
+As <A HREF="#DDK_Figure_2..3_KG">Figure 2.3</A>&nbsp;also shows, most NT drivers process
+each IRP in stages through a driver-supplied set of system-defined <I>standard
+routines</I>, but drivers at different levels in a chain necessarily have
+different standard routines. For example, only lowest-level NT drivers handle
+interrupts from a physical device, so only a lowest-level driver would have an
+ISR and a DPC that completes interrupt-driven I/O operations. On the other
+hand, a lowest-level driver cannot register a completion routine for a given
+IRP as higher-level drivers can, so only a higher-level NT driver would have
+one or more completion routines like the FSD in <A HREF="#DDK_Figure_2..3_KG">Figure
+2.3</A>. See <A HREF="02irps_5.htm">Section
+2.3</A>&nbsp;for a brief introduction to the system-defined routines that NT drivers
+must or can have. See <A HREF="04drvovr.htm">Chapter 4</A>&nbsp;for an
+overview of these standard driver routines and subsequent chapters for
+routine-specific requirements.
+<P></FONT>
+</BODY>
+</HTML>

@@ -1,0 +1,65 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Examples</TITLE><META HTTP-EQUIV="CONTENT-TYPE" CONTENT="text/html; charset= iso-8859-1"><style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD><BODY BGCOLOR="#FFFFFF">
+<FONT FACE="verdana,arial,helvetica" SIZE="2">
+<H3>Examples </H3><P>Nested execution suffers from being relatively important yet poorly-understood. To help close the gap, various examples illustrating common scenarios are given here. All of the examples assume that EBX contains the handle of the current virtual machine and that EBP contains a pointer to the client registers. </P>
+<P>The first example is the prototypical case, where a virtual device wishes to obtain information from MS-DOS. Note that in general, this is a dangerous thing to do without first ensuring that the call will not result in MS-DOS being re-entered. </P>
+<P><BR></P>
+<PRE>Push_Client_State             ; Save all registers
+VMMcall Begin_Nest_V86_Exec       ; Enter nested execution in V86-mode
+mov     [ebp.Client_AH], 30h  ; 30h = get MS-DOS version #
+mov     eax, 21h                  ; Execute an Int 21h in the
+VMMcall Exec_Int                  ; current VM to call MS-DOS
+mov     ax, [ebp.Client_AX]   ; Load MS-DOS version into AX register
+VMMcall End_Nest_Exec         ; end of nested exec calls
+Pop_Client_State              ; Restore all registers when done
+                              ; At this point, AX = MS-DOS version
+</PRE>
+<P>Notice that the <B>Exec_Int</B> service was used here to simulate and execute the interrupt. It is equivalent to calling <B>Simulate_Int</B> followed by <B>Resume_Exec</B>. </P>
+<P>For software interrupts, an alternative method is to execute the interrupt "directly" from ring zero: </P>
+<P><BR></P>
+<PRE>mov     ah, 30h  ; 30h = get MS-DOS version #
+VxD_Int 21h      ; Execute the Int 21h directly
+                 ; At this point, AX = MS-DOS version
+</PRE>
+<P>This mechanism's main benefit is convenience. The drawback is that <I>all</I> changes to registers (other than segment registers) made by the software interrupt are propagated back into ring 0. This is dangerous because the software interrupt might modify a register you expected to be preserved. This is particularly true of software interrupts 21h and 13h, which are often hooked by TSRs or device drivers which do not preserve all the registers properly. Specifically, we've found TSRs and even BIOSes which destroy the high words of extended registers across these calls. </P>
+<P>Furthermore, the <B>VxD_Int</B> method cannot be used to call services which return information in segment registers, because the ring zero segment registers SS, DS and ES must always remain equal to flat selector. </P>
+<P>Another drawback to the <B>VxD_Int</B> method is that it is not always available. For example, translation services for Int 21h calls is not ready until DOSMGR and IFSMGR complete their initialization; similar remarks apply to Int 13h calls and provided by BIOSXLAT and INT13. Attempting to <B>VxD_Int</B> an MS-DOS call before the translation services are ready will result in very random behavior. Other services might not even be translated at all. (For example, you cannot use <B>VxD_Int</B> to call Int 33h because nobody provides translation services for that software interrupt.) </P>
+<P>The moral of the story is that you should exercise caution when using <B>VxD_Int</B>. </P>
+<P>Sometimes software interrupts aren't enough. You might find it necessary to call a far procedure in V86-mode, possibly with arguments passed on the stack or in registers. Suppose that you need to call a procedure in V86-mode (for example, a TSR or a device driver) with a word parameter on the stack and with a function code in the DX register. The procedure returns with a 'retf' instruction, relying on the caller to clean the stack on return. </P>
+<P><BR></P>
+<PRE>Push_Client_State            ; Save client state on stack
+VMMCall Begin_Nest_V86_Exec  ; Prepare to execute V86-mode code
+mov     ax, wStackParameter  ; the parameter that goes on the stack
+VMMCall Simulate_Push        ; Push it onto the client stack
+mov     [ebp].Client_DX, 0   ; Function code in client DX
+mov     cx, segV86Proc       ; CX = segment of the V86-mode procedure
+movzx   edx, word ptr ofsV86Proc ; EDX = offset of the V86-mode 
+                                 ;   procedure (hiword must be 0)
+VMMCall Simulate_Far_Call    ; Make it look like client did a "call far" 
+                             ;   instruction
+VMMCall Resume_Exec          ; Run the procedure until it returns
+VMMCall Simulate_Pop         ; Pop the parameter off the stack
+                             ; &lt;&lt;Inspect the return value here&gt;&gt;
+VMMCall End_Nest_Exec        ; Finished with nested execution
+Pop_Client_State             ; Restore client state from stack
+</PRE>
+<P>Note that there is no equivalent to <B>VxD_Int</B> for far procedures. You have to use nested execution explicitly. </P>
+<P>A final example is a callback procedure registered by an application. Suppose that an application registered an address that it expects to be called back asynchronously based on some condition. You can call the procedure back with the following mechanism, assuming that the procedure uses the Pascal calling convention and takes two arguments: </P>
+<P><BR></P>
+<PRE>Push_Client_State         ; Save client state on stack
+VMMCall Begin_Nest _Exec  ; Prepare to execute application-mode code
+mov     ax, wParam1       ; Pascal calling convention says
+VMMCall Simulate_Push     ; you push arguments from left to right
+mov     ax, wParam2
+VMMCall Simulate_Push
+mov     cx, segAppProc    ; CX = segment of the procedure to call
+mov     edx, word ptr ofsAppProc  ; EDX = offset of the procedure to 
+                                  ;   call (hiword must be 0 if V86 or 
+                                  ;   16-bit PM)
+VMMCall Simulate_Far_Call ; Make it look like client did a "call 
+                          ;   far" instruction
+VMMCall Resume_Exec       ; Run the procedure until it returns
+VMMCall End_Nest_Exec     ; Finished with nested execution
+Pop_Client_State          ; Restore client state from stack
+</PRE>
+<P>Be aware that this mechanism does not work for Win32 applications. Note also that this callback is made completely asynchronously with respect to the application. At a minimum, you should wait until the client interrupt flag is clear. </P></FONT></BODY></HTML>

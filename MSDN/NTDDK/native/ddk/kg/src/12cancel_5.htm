@@ -1,0 +1,138 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML>
+<HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>12.3  Cancel Routine Functionality</TITLE>
+<style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD>
+<BODY BGPROPERTIES="FIXED" TEXT="#000000" BGCOLOR="#FFFFFF">
+
+<FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<H2><A NAME="DDK_Cancel_Routine_Functionality_KG"></A>12.3  Cancel Routine Functionality</H2>
+<P>
+The I/O Manager calls a driver-supplied Cancel routine with an input IRP to be
+cancelled and a <I>DeviceObject</I>&nbsp;pointer representing the target for the
+request.
+<P>
+Such an IRP might be one that the driver’s DispatchReadWrite routine has
+queued just as the current Win32 application is being closed by the user. Such
+an IRP also might be one that a higher-level driver explicitly cancelled,
+depending on the nature of the underlying device.
+<P>
+When its Cancel routine is called, the input IRP might already be the <B>CurrentIrp</B>
+in the target device object or might already be in the device queue associated
+with the target device object if the driver has a StartIo routine. If the
+driver has no StartIo routine, such a request might be in a driver-managed
+internal queue of IRPs when its Cancel routine is called. In either case, the
+I/O Manager resets the Cancel entry point in the incoming IRP to NULL before
+it calls the Cancel routine with that IRP.
+<H4><IMG SRC="../../../wedge.gif" BORDER=0>&nbsp; &nbsp; NT driver writers should consider the following implementation guidelines for Cancel routines: </H4>
+<UL>
+<LI>
+Because a Cancel routine is <I>always</I>&nbsp;called with the system cancel spin
+lock held, this routine <I>must not</I>&nbsp;call <B>IoAcquireCancelSpinLock</B>
+unless it calls <B>IoReleaseCancelSpinLock</B>&nbsp;first.
+<P>
+<LI>
+A Cancel routine <I>cannot</I>&nbsp;be holding the system cancel spin lock when it
+returns control. That is, every Cancel routine must call <B>IoReleaseCancelSpinLock</B>
+at least once before it returns control.
+<P>
+<LI>
+If it calls <B>IoAcquireCancelSpinLock</B>, a Cancel routine must make the
+reciprocal call to <B>IoReleaseCancelSpinLock</B>&nbsp;as quickly as possible.
+<P>
+<LI>
+<I>Never</I>&nbsp;call <B>IoCompleteRequest</B>&nbsp;with an IRP while holding a spin
+lock.
+<P>
+Attempting to complete an IRP while holding a spin lock can cause deadlocks.
+</UL>
+<H5>Cancel Routines in Drivers with StartIo Routines</H5>
+<P>
+The I/O Manager maintains the <B>CurrentIrp</B>&nbsp;field in a device object only
+if IRPs are queued in the associated device queue object. That is, the driver
+has a StartIo routine.
+<P>
+In such a driver, a Cancel routine usually does the following:
+<OL>
+<LI>
+Tests whether the pointer for the input IRP matches the target device object’s
+<B>CurrentIrp</B>&nbsp;address
+<P>
+If these pointers are equivalent, the Cancel routine calls <B>ReleaseCancelSpinLock</B>,
+sets the IRP’s I/O status block with STATUS_CANCELLED for <B>Status</B>&nbsp;and
+zero for <B>Information</B>, calls <B>IoStartNextPacket</B>, calls <B>IoCompleteRequest</B>
+with the IRP, and returns control.
+<P>
+<LI>
+Otherwise, the Cancel routine checks whether the input IRP is in the device
+queue associated with the target device object by calling <B>KeRemoveEntryDeviceQueue</B>
+with the IRP’s <B>Tail.Overlay.DeviceQueueEntry</B>&nbsp;pointer
+<P>
+<UL>
+<LI>
+If the IRP is in the device queue, calling <B>KeRemoveEntryDeviceQueue</B>
+removes it from the queue. The Cancel routine calls <B>IoReleaseCancelSpinLock</B>,
+sets the IRP’s I/O status block with STATUS_CANCELLED for <B>Status</B>&nbsp;and
+zero for <B>Information</B>, calls <B>IoStartNextPacket</B>, calls <B>IoCompleteRequest</B>
+with the cancelled IRP, and returns control.
+<P>
+<LI>
+If the IRP is not in the device queue, the Cancel routine calls <B>IoReleaseCancelSpinLock</B>
+and returns control.
+</UL>
+</OL>
+<P>
+Such a driver’s Cancel routine calls <B>KeRemoveEntryDeviceQueue</B>&nbsp;to test
+whether the IRP is in the device queue because this support routine either
+removes the given IRP from the device queue or does nothing except return
+FALSE, indicating that the given entry was not queued. A Cancel routine cannot
+assume that the input IRP is at any particular position in the device queue,
+so it cannot call <B>KeRemoveDeviceQueue</B>&nbsp;or <B>KeRemoveByKeyDeviceQueue</B>
+to compare the pointers to the returned IRP and input IRP.
+<P>
+NT drivers with Cancel routines can handle IRP_MJ_CLEANUP requests as well.
+For more information about DispatchCleanup routines, see Chapter 6.
+<H5>Cancel Routines in Drivers without StartIo Routines</H5>
+<P>
+The I/O Manager maintains the <B>CurrentIrp</B>&nbsp;field in a device object only
+if IRPs are queued in the associated device queue object.
+<P>
+If an NT driver manages its own internal queues of IRPs, its Cancel routines
+can be called with an input IRP that is neither the <B>CurrentIrp</B>&nbsp;for the
+input target device object nor an IRP in the driver’s internal queue. Such a
+driver must maintain its own state about which IRP is currently being
+processed and should have a Cancel routine for each of its queues. Such a
+driver’s internal queue should be an interlocked queue because its internal
+queue must be protected by an executive spin lock.
+<P>
+When such a driver’s Cancel routine is called, it usually does the following:
+<OL>
+<LI>
+Calls <B>IoReleaseCancelSpinLock</B>
+<P>
+<LI>
+Acquires the spin lock that protects its interlocked queue and walks the queue
+to find an IRP with <B>Irp-&gt;Cancel</B>&nbsp;set to TRUE
+<P>
+<UL>
+<LI>
+If it finds such an IRP in the interlocked queue, dequeues it thereby
+releasing the spin lock protecting the queue, sets the IRP’s I/O status block
+with STATUS_CANCELLED for <B>Status</B>&nbsp;and zero for <B>Information</B>,
+starts the next queued IRP, calls <B>IoCompleteRequest</B>&nbsp;with the cancelled
+IRP, and returns control
+<P>
+<LI>
+Otherwise, releases any spin locks it is holding and returns control
+<P>
+Such a driver usually assumes that I/O processing for the input IRP has
+already begun if it is not queued.
+</UL>
+</OL>
+<P>
+NT drivers with Cancel routines can handle IRP_MJ_CLEANUP requests as well.
+For more information about DispatchCleanup routines, see Chapter 6.
+<P></FONT>
+</BODY>
+</HTML>

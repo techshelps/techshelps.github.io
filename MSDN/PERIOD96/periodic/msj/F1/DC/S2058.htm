@@ -1,0 +1,512 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Under the Hood</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  Under the Hood</H1><P>Matt Pietrek</P>
+<P>Matt Pietrek is the author of <I>Windows 95 System Programming Secrets</I> (IDG Books, 1995). He works at NuMega Technologies Inc., and can be reached at 71774.362@compuserve.com.</P>
+<P><OBJECT id=sample1 type="application/x-oleobject"
+classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Backgrounders Samples">
+<PARAM name="Item2" value="4959">
+</OBJECT><a href="javascript:sample1.Click()">
+
+Click to open or copy the PSAPI project files.</A></P><P>In my August 1996 column, I described some of the APIs in PSAPI.DLL. This DLL is the closest thing that Windows NT¨ has to true system-level information APIs. For example, PSAPI.DLL lets you obtain system information like the list of running processes. While you can get much of this information from the performance data in the Windows NT registry, it's messy and complicated. PSAPI.DLL is much simpler and faster to use than the registry. PSAPI.DLL isn't a standard part of Windows NT, but it is a redistributable component from the new Win32¨ SDK that supports Windows NT 4.0.</P>
+<P>This month, let's go over the remaining APIs in PSAPI.DLL. These APIs fall into two categories that are related enough for me to incorporate them all into a demo program. The first category obtains information about the working set of a process, while the second category relates to retrieving the names of memory-mapped files. First, I'll examine all of these APIs, then finish by walking through the demonstration program.</P>
+<P>Have you ever wondered about the "Mem Usage" column in the Windows NT 4.0 Task Manager? Where does it get those numbers from? Those numbers are the actual working set of each process. What exactly is a working set? Alas, the term has at least two different meanings. In the traditional computer science sense, the working set of a process is the absolute smallest amount of physical RAM for the process to continue executing without incurring any page faults. A process with a working set of 12KB would only take up 12KB of physical RAM to hold all the code and data that's being accessed at the moment. </P>
+<P>The other meaning of the term "working set" is the amount of physical RAM that a process is currently using. This second interpretation is what Microsoft uses. To quote from the Win32 SDK documentation:</P>
+<P><I>The working set of a process is the set of memory pages currently visible to the process in physical RAM memory. These pages are resident and available for an application to use without triggering a page fault. The size of the working set of a process is specified in bytes. The minimum and maximum working set sizes affect the virtual memory paging behavior of a process.</I></P>
+<P>PSAPI.DLL provides access to process working-set information in two ways. The first is via the QueryWorkingSet API. This API fills a buffer with information about every page that's currently part of the working set of the specified process. The only memory pages reported are those physically present at the exact moment you call QueryWorkingSet. The other type of working set information comes from the GetWsChanges API. This routine reports just the pages that have been mapped into memory since monitoring began (you begin monitoring with the InitializeProcessForWsWatch API, which I will discuss later). This is useful for situations such as finding out how much additional RAM a particular operation (for instance, saving a file) takes.</P>
+<P>Let's look at the QueryWorkingSet API first, since it's conceptually simpler.</P>
+<P><BR></P>
+<PRE> BOOL WINAPI QueryWorkingSet( HANDLE hProcess, PVOID pv, 
+                             DWORD cb );</PRE>
+<P>The first parameter is a process handle for a running process. The easiest way to get a process handle for an arbitrary process is with the Win32 OpenProcess API. If you're not up on the OpenProcess API and process IDs, my August column on PSAPI.DLL describes them.</P>
+<P>Returning to the QueryWorkingSet API, the second parameter is a pointer to a memory buffer that QueryWorkingSet writes a series of DWORDs to. The third parameter tells QueryWorkingSet how big the buffer is so that QueryWorkingSet won't write past the end of the buffer. Unfortunately, there's no way to find out ahead of time how big a buffer QueryWorkingSet will need. You have to pass a buffer that's hopefully big enough and be prepared to handle the case where it's not (the API will return FALSE, and you need to try again with a bigger buffer).</P>
+<P>The meanings of the DWORDs that QueryWorkingSet writes to the buffer are slightly strange, as I found out the hard way! The first DWORD contains the number of valid DWORD values that follow the first DWORD in the buffer. Each remaining DWORD represents one page in the process working set, and is composed of a linear address combined with various flag values.</P>
+<P>To decode these DWORDs, it's necessary to split apart the bits in the high 20 bits from the low 12 bits (actually, it's 13 bits for the DEC Alpha, which has 8KB pages). It's easy to do this with the bitwise AND operator. The high 20 bits (obtained by doing a bitwise AND with 0xFFFFF000) contain the linear address of a page of memory mapped into the specified process. The bottom 12 bits are flag values that define operating system attributes for the page.</P>
+<P>The exact meaning of the bit values in the low 12 bits aren't defined in PSAPI.H or anywhere else that I'm aware of. Some experimentation showed the following bit interpretations to be consistent:</P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="50pt" VALIGN="TOP"><COL WIDTH="270pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P> 0x001</P></TD><TD VALIGN="TOP"><P>The page is read-only (if bit 0x004 not set)</P></TD></TR><TR><TD VALIGN="TOP"><P> 0x002</P></TD><TD VALIGN="TOP"><P>The page is executable (code)</P></TD></TR><TR><TD VALIGN="TOP"><P> 0x004</P></TD><TD VALIGN="TOP"><P>The page is writeable (if bit 0x001 is not set)</P></TD></TR><TR><TD VALIGN="TOP"><P> 0x005</P></TD><TD VALIGN="TOP"><P>The page is copy-on-write (bits 0x001 and 0x004 are both set)</P></TD></TR><TR><TD VALIGN="TOP"><P> 0x100</P></TD><TD VALIGN="TOP"><P>The page can be shared across processes, given the right conditions</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P>As an example of what QueryWorkingSet returns, consider the following DWORDs:</P>
+<P><BR></P>
+<PRE> 0x00000003
+0x00400103
+0x00480101
+0x00500004</PRE>
+<P>Breaking apart the bits, these DWORDs would be interpreted like this:</P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="90pt" VALIGN="TOP"><COL WIDTH="351pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P> 0x00000003</P></TD><TD VALIGN="TOP"><P>3 DWORDs to follow</P></TD></TR><TR><TD VALIGN="TOP"><P> 0x00400103</P></TD><TD VALIGN="TOP"><P>Linear address 0x00400000, read-only, executable, shared</P></TD></TR><TR><TD VALIGN="TOP"><P> 0x00480101</P></TD><TD VALIGN="TOP"><P>Linear address 0x00480000, read-only, shared</P></TD></TR><TR><TD VALIGN="TOP"><P> 0x00500004</P></TD><TD VALIGN="TOP"><P>Linear address 0x00500000, writeable</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P>Now that you know how to get the entire working set of a process using QueryWorkingSet, let's examine the other working set APIs. The primary API is GetWsChanges.</P>
+<P><BR></P>
+<PRE> BOOL WINAPI GetWsChanges(HANDLE hProcess,
+   PPSAPI_WS_WATCH_INFORMATION lpWatchInfo, DWORD cb );</PRE>
+<P>The first parameter is a process handle specifying which process you want information for. The last two parameters specify the buffer GetWsChanges writes its information to.</P>
+<P>As mentioned earlier, GetWsChanges returns information on what changes to the working set have occurred since monitoring began. The format of the data returned by GetWsChanges is quite a bit different than what QueryWorkingSet returns. Luckily, PSAPI.H tells you exactly what the format of the return data is:</P>
+<P><BR></P>
+<PRE> typedef struct _PSAPI_WS_WATCH_INFORMATION {
+    LPVOID FaultingPc;
+    LPVOID FaultingVa;
+} PSAPI_WS_WATCH_INFORMATION...</PRE>
+<P>GetWsChanges fills in an array of these structures, one structure for each new page added to the working set of the process. The second LPVOID in the structure (FaultingVa) contains the linear memory address of the page that was added to the working set. The first LPVOID in the structure (FaultingPc) is the address of the instruction that caused the page fault referred to by the FaultingVa address. In simpler terms, the structure tells you which pages are in memory, and what caused them to be paged in.</P>
+<P>Before racing out and experimenting with GetWsChanges, there's another API, InitializeProcessForWsWatch, that you need to know about. Before you can use GetWsChanges, you need to first pass the process handle to InitializeProcessForWsWatch. Not all processes let you read their working set information due to the security in Windows NT, so be sure that the API returns TRUE.</P>
+<P>The last working set API in PSAPI.DLL is EmptyWorkingSet. It takes one parameter, (you guessed it) a process handle. Calling the API causes Windows NT to remove as many pages as possible from the process working set. Why would you want to do this? Primarily for testing and tuning. One note on EmptyWorkingSet: the API is, in essence, obsolete. The Win32 SetProcessWorkingSetSize API does the same thing if you pass it 0xFFFFFFFF for the minimum and maximum sizes. </P>
+<P>With the working-set APIs out of the way, the only remaining APIs to cover in PSAPI.DLL are GetMappedFileNameA and GetMappedFileNameW. As you can probably guess, the version ending in A is the ANSI version, while the version ending in W is the Unicode version. The ANSI version of GetMappedFileName is prototyped like this:</P>
+<P><BR></P>
+<PRE> DWORD WINAPI GetMappedFileNameA(HANDLE hProcess, 
+                                LPVOID lpv,
+                                LPSTR lpFilename, 
+                                DWORD nSize );</PRE>
+<P>The hProcess and lpv parameters specify a linear address in a specific process. If this address is somewhere within a memory-mapped file, the lpFilename buffer is filled with the name of that memory-mapped file. The nSize parameter tells the API how big the lpFilename buffer is. It's interesting that the filenames returned by GetMappedFileName don't use drive letters. Rather, they're in their device form. For example:</P>
+<P><BR></P>
+<PRE> \Device\Harddisk0\Partition1\WINNT\System32\ctype.nls</PRE>
+<H2><A NAME="sec0"></A>  The PSAPIWorkingSetDemo Program</H2><P>To pull together all of the APIs that I've described here, I wrote the PSAPIWorkingSetDemo program (see <B>Figure 1</B>). This program was a real stretch for me, at least the user interface was. Normally, for a demo program, I would create an app with a dialog as the main window. For PSAPIWorkingSetDemo, I used two, count 'em, two dialogs. I hope you appreciate my extra labor.</P>
+<P><B> Figure 1  PSAPIWorkingSetDemo</B></P>
+<P></P>
+<P>PSAPIWorkingSetDemo.CPP</P>
+<P><BR></P>
+<PRE> //=======================================
+// PSAPI Working Set Demo - Matt Pietrek 1996
+// Microsoft Systems Journal, November 1996
+// FILE: "PSAPIWorkingSetDemo.CPP"
+//=======================================
+//....
+void AddWorkingSetInfo( HWND hDlg, DWORD processID )
+{
+    HANDLE hProcess = OpenProcess(  PROCESS_QUERY_INFORMATION |
+                                    PROCESS_VM_READ,
+                                    FALSE, processID );
+
+    if ( !hProcess )
+        return;
+
+    HWND hWndLb = GetDlgItem( hDlg, IDC_LB_WORKING_SET_DETAILS );
+
+    __try
+    {
+        SendMessage( hWndLb, WM_SETREDRAW, FALSE, 0 );  // Disable LB updating
+
+        char szBuffer[MAX_PATH * 4];
+
+        if ( !QueryWorkingSet(  hProcess, g_WorkingSetPages,
+                                sizeof(g_WorkingSetPages) ) )
+            __leave;
+
+        DWORD cPages = g_WorkingSetPages[0];    // First DWORD is page count
+        DWORD cPrivatePages = 0;
+        DWORD cSharedPages = 0;
+        DWORD cPageTablePages = 0;
+                
+        qsort( &amp;g_WorkingSetPages[1], cPages, sizeof(DWORD), CompareDWORDs );
+
+        for ( DWORD i = 1; i &lt;= cPages; i++ )
+        {
+            DWORD pageAddr = g_WorkingSetPages[i] &amp; g_AbovePageMask;
+            DWORD pageFlags = g_WorkingSetPages[i] &amp; g_SubPageMask;
+            DWORD thisPageAddr, nextPageAddr, nextPageFlags;
+            DWORD cPagesThisRange = 0;
+
+            // Loop through all subseqent pages that are contiguous in
+            // memory and have the same attributes
+            while ( i &lt;= cPages )
+            {
+                cPagesThisRange++;
+
+                if ( i == cPages )  // Break out if it's the last page
+                    break;
+
+                thisPageAddr = g_WorkingSetPages[i] &amp; g_AbovePageMask;
+                nextPageAddr = g_WorkingSetPages[i+1] &amp; g_AbovePageMask;
+                nextPageFlags = g_WorkingSetPages[i+1] &amp; g_SubPageMask;
+
+                if ( (nextPageAddr == (thisPageAddr + g_PageSize)) &amp;&amp;
+                     (nextPageFlags == pageFlags) )
+                {
+                     i++;       // Keep going
+                }
+                else            // Noncontiguous page or different flags
+                    break;
+            }
+
+            // Is it a page from outside of the "page table" region???
+            if ( (pageAddr &lt; 0xC0000000) || (pageAddr &gt; 0xE0000000) )
+            {
+                if ( pageFlags &amp; 0x100 )            // 0x100 == shared
+                    cSharedPages+= cPagesThisRange;
+                else                                // 0x000 == private
+                    cPrivatePages+= cPagesThisRange;
+            }
+            else    // It's a page from the page table region
+                cPageTablePages += cPagesThisRange;
+
+            PSTR pszBuffCurr = szBuffer;    // ptr to working output string
+
+            pszBuffCurr += wsprintf(pszBuffCurr, "%08X  %4uK",
+                                    pageAddr, cPagesThisRange * 4 );
+
+            // 0x100 == not private (i.e., shared)
+            pszBuffCurr += wsprintf( pszBuffCurr,
+                                    pageFlags &amp; 0x100 ? "  S":  "  P" );
+
+            // 0x01 == ReadOnly
+            // 0x04 == Writeable
+            // 0x05 == Copy On Write (special case)
+            if ( 0x5 == (pageFlags &amp; 0x5) )
+                pszBuffCurr += wsprintf( pszBuffCurr, " CW" );
+            else if ( pageFlags &amp; 0x1 )
+                pszBuffCurr += wsprintf( pszBuffCurr, " RO" );
+            else if ( pageFlags &amp; 0x4 )
+                pszBuffCurr += wsprintf( pszBuffCurr, " RW" );
+            else
+                pszBuffCurr += wsprintf( pszBuffCurr, " ??" );
+
+            // 0x02 == Executable
+            pszBuffCurr += wsprintf( pszBuffCurr,
+                                     pageFlags &amp; 0x2 ? " E  " : "    " );
+
+            char    szMod[MAX_PATH];
+            char    szSection[IMAGE_SIZEOF_SHORT_NAME+1];
+            DWORD   uSection;
+            BOOL    fFoundInfo;
+
+            // Get information (such as the module and section name) for the
+            // page that was faulted in
+            fFoundInfo = GetModuleNameAndSectionInfo(
+                            hProcess,
+                            (PVOID)pageAddr,
+                            szMod, sizeof(szMod),
+                            szSection, sizeof(szSection),
+                            &amp;uSection );
+
+            if ( fFoundInfo )   // We found Win32 module info!
+            {
+                if ( uSection ) // We even know which section!
+                {
+                    pszBuffCurr += wsprintf(pszBuffCurr,"%s!%s(%u)",
+                                            szMod,szSection,uSection);
+                }
+                else            // We have a module, but no section
+                {
+                    pszBuffCurr += wsprintf( pszBuffCurr, "%s", szMod );
+                }
+            }
+            else
+            {
+                // Perhaps it's a memory-mapped file!
+                char szOwner[MAX_PATH];
+                if ( GetMappedFileNameA( hProcess, (PVOID)pageAddr,
+                                        szOwner, sizeof(szOwner) )  )
+                    pszBuffCurr += wsprintf( pszBuffCurr, "%s", szOwner );
+            }
+
+            // Add the output string to the listbox (finally!)
+            SendMessage( hWndLb, LB_ADDSTRING, 0, (LPARAM) szBuffer );
+        }
+
+        //
+        // Fix this!  page size should be determined dynamically!
+        //
+        wsprintf( szBuffer, "Total: %uK", cPages * 4 );
+        SetDlgItemText( hDlg, IDC_TOTAL_MEMORY, szBuffer );
+        wsprintf( szBuffer, "Private: %uK", cPrivatePages * 4 );
+        SetDlgItemText( hDlg, IDC_PRIVATE_MEMORY, szBuffer );
+        wsprintf( szBuffer, "Shared: %uK", cSharedPages * 4 );
+        SetDlgItemText( hDlg, IDC_SHARED_MEMORY, szBuffer );
+        wsprintf( szBuffer, "Page Tables: %uK", cPageTablePages * 4 );
+        SetDlgItemText( hDlg, IDC_PAGE_TABLES, szBuffer );
+    }
+    __finally
+    {
+        SendMessage( hWndLb, WM_SETREDRAW, TRUE, 0 );   // Enable LB updating
+        CloseHandle( hProcess );
+    }
+}</PRE>
+<P>PSAPIWorkingSetDelta.CPP</P>
+<P><BR></P>
+<PRE> //=======================================
+// PSAPI Working Set Demo - Matt Pietrek 1996
+// Microsoft Systems Journal, November 1996
+// FILE: "PSAPIWorkingSetDelta.CPP"
+//=======================================
+// ....
+static PSAPI_WS_WATCH_INFORMATION g_WorkingSetChanges[MAX_WS_DELTA_PAGES];
+
+void FillDeltaListbox( HWND hWndLb )
+{
+    // Create a pointer to the g_WorkingSetChanges array
+    PPSAPI_WS_WATCH_INFORMATION pWSDelta
+                        = (PPSAPI_WS_WATCH_INFORMATION) g_WorkingSetChanges;
+
+    SendMessage( hWndLb, WM_SETREDRAW, FALSE, 0 );  // Disable LB updating
+
+    // Loop through each entry in the array until we find an element that
+    // has both the FaultingPC and FaultingVA set to 0.  This indicates the
+    // end of the array.
+
+    while ( pWSDelta-&gt;FaultingPc || pWSDelta-&gt;FaultingVa )
+    {
+        // Skip over entries above 2GB.  They can't (easily) be mapped to
+        // module names, and the user can't do any about them anyway
+        if ( pWSDelta-&gt;FaultingPc &gt;= (PVOID)0x80000000 )
+        {
+            pWSDelta++;
+            continue;
+        }
+            
+        //
+        // Warning!!! If a long period transpires between the start and end of
+        // the WorkingSetDelta, or if memory is extremely low, it's possible
+        // to have multiple entries here with the same address.
+        //
+        char szOutBuffer[ MAX_PATH * 4 ];
+        PSTR pszBuffCurr = szOutBuffer;
+
+        pszBuffCurr += wsprintf( pszBuffCurr, "%08X  %08X  ",
+                                 pWSDelta-&gt;FaultingVa, pWSDelta-&gt;FaultingPc );
+
+        char    szMod[MAX_PATH];
+        char    szSection[IMAGE_SIZEOF_SHORT_NAME+1];
+        DWORD   uSection;
+        BOOL    fFoundInfo;
+
+        // Get information (such as the module and section name) for the
+        // page that was faulted in
+        fFoundInfo = 
+            GetModuleNameAndSectionInfo(
+                                        g_WorkingSetHProcess,
+                                        pWSDelta-&gt;FaultingVa,
+                                        szMod, sizeof(szMod),
+                                        szSection, sizeof(szSection),
+                                        &amp;uSection );
+
+        if ( fFoundInfo )   // The address is within a loaded Win32 module
+        {
+            if ( uSection )
+                pszBuffCurr += wsprintf( pszBuffCurr, "%s!%s(%u)",
+                                         szMod, szSection, uSection);
+            else
+                pszBuffCurr += wsprintf( pszBuffCurr, "%s", szMod);
+        }
+        else    // Not an address in a Win32 module
+        {
+            // Could be a stack page, a heap page, or whatever!
+            pszBuffCurr += wsprintf( pszBuffCurr, "???" );
+        }
+
+        // Get information (such as the module and section name) for the
+        // page that caused the fault
+        fFoundInfo = 
+            GetModuleNameAndSectionInfo(
+                                        g_WorkingSetHProcess,
+                                        pWSDelta-&gt;FaultingPc,
+                                        szMod, sizeof(szMod),
+                                        szSection, sizeof(szSection),
+                                        &amp;uSection );
+
+        if ( fFoundInfo )   // The address is within a loaded Win32 module
+        {
+            if ( uSection )
+                pszBuffCurr += wsprintf( pszBuffCurr, " via %s!%s(%u)",
+                                         szMod, szSection, uSection);
+        }
+
+        // Dump everything out the listbox (finally!)
+        SendMessage( hWndLb, LB_ADDSTRING, 0, (LPARAM)szOutBuffer );
+
+        pWSDelta++;     // Advance to next page which was faulted in
+    }
+
+    SendMessage( hWndLb, WM_SETREDRAW, TRUE, 0 );   // Enable LB updating
+}
+
+//...
+
+BOOL StartWorkingSetDelta( DWORD pid )
+{
+    // Open a process handle, and store it in (Eeek!) a Global variable
+    g_WorkingSetHProcess = OpenProcess( PROCESS_ALL_ACCESS, FALSE, pid );
+
+    if ( !g_WorkingSetHProcess )
+        return FALSE;
+
+    if ( !InitializeProcessForWsWatch( g_WorkingSetHProcess ) )
+    {
+        CloseHandle( g_WorkingSetHProcess );
+        g_WorkingSetHProcess = 0;
+        return FALSE;
+    }
+
+    // Warning!  This function can "fail" (return FALSE) if there aren't
+    // any new WS pages to report.  It can also fail if you pass it in
+    // a bogus HPROCESS.  Unfortunately, there's no way to tell the two
+    // situations apart.
+    GetWsChanges( g_WorkingSetHProcess, g_WorkingSetChanges,
+                        sizeof(g_WorkingSetChanges) );
+
+    return TRUE;
+}
+
+void EndWorkingSetDelta( HWND hWndOwner )
+{
+    if ( !g_WorkingSetHProcess )
+        return;
+
+    if ( GetWsChanges(  g_WorkingSetHProcess, g_WorkingSetChanges,
+                        sizeof(g_WorkingSetChanges) ) )
+    {
+        // We got 1 or more WS changes.  Report it
+        DialogBox(  GetModuleHandle(0),
+                    MAKEINTRESOURCE(IDD_PSAPIWorkingSetDelta),
+                    hWndOwner,
+                    (DLGPROC)DeltaDlgProc );
+    }
+    else
+    {
+        MessageBox( hWndOwner,
+                    "No working set changes, or error",
+                    "Working set delta",
+                    MB_OK );
+    }
+
+    CloseHandle( g_WorkingSetHProcess );
+    g_WorkingSetHProcess = 0;
+}
+</PRE>
+<P></P>
+<P>PSAPIHELPER.CPP</P>
+<P><BR></P>
+<PRE> //=======================================
+// PSAPI Working Set Demo - Matt Pietrek 1996
+// Microsoft Systems Journal, November 1996
+// FILE: PSAPIHELPER.CPP
+//=======================================
+#include &lt;windows.h&gt;
+#pragma hdrstop
+#include "psapi.h"
+#include "PSAPIhelper.h"
+
+BOOL GetModuleNameAndSectionInfo(
+        HANDLE  hProcess,
+        PVOID   p,
+        PSTR    pszModuleName,
+        DWORD   cbModuleName,
+        PSTR    pszSectionName,
+        DWORD   cbSectionName,
+        PDWORD  puSectionNum )
+{
+
+    MEMORY_BASIC_INFORMATION mbi;
+
+    if ( !VirtualQueryEx( hProcess, p, &amp;mbi, sizeof(mbi)) )
+        return FALSE;
+
+    PVOID hModule = mbi.AllocationBase;
+
+    DWORD cbRead;       
+    IMAGE_DOS_HEADER dosHdr;
+
+    if ( !ReadProcessMemory(hProcess, hModule,
+                            &amp;dosHdr, sizeof(dosHdr), &amp;cbRead) )
+        return FALSE;
+
+    if ( IMAGE_DOS_SIGNATURE != dosHdr.e_magic )
+        return FALSE;
+
+    if ( dosHdr.e_lfarlc &lt; 0x40 )
+        return FALSE;
+
+    DWORD peHdrOffs = (DWORD)hModule + dosHdr.e_lfanew;
+
+    IMAGE_NT_HEADERS ntHdr;
+
+    if ( !ReadProcessMemory(hProcess, (PVOID)peHdrOffs,
+                            &amp;ntHdr, sizeof(ntHdr), &amp;cbRead ) )
+        return FALSE;
+
+    if ( IMAGE_NT_SIGNATURE != ntHdr.Signature )
+        return FALSE;
+
+    PVOID sectionHdrOffs = (PVOID)(
+                    peHdrOffs
+                    + FIELD_OFFSET( IMAGE_NT_HEADERS, OptionalHeader )
+                    + ntHdr.FileHeader.SizeOfOptionalHeader );
+
+    #define MAX_SECTIONS 128
+
+    IMAGE_SECTION_HEADER sections[ MAX_SECTIONS ];
+    PIMAGE_SECTION_HEADER pSection;
+
+    DWORD cSections = min( ntHdr.FileHeader.NumberOfSections, MAX_SECTIONS );
+
+    if ( !ReadProcessMemory(hProcess,
+                            sectionHdrOffs,
+                            &amp;sections,
+                            cSections * IMAGE_SIZEOF_SECTION_HEADER,
+                            &amp;cbRead) )
+        return FALSE;
+
+    // Get the module name now, since we can't assume that we'll find
+    // a section name/index later.  For instance, the RVA might be somewhere
+    // in the NT header page, rather than in a code/data section.
+    GetModuleBaseName(  hProcess, hModule,
+                        pszModuleName, cbModuleName );
+    
+    pszSectionName[0] = 0;  // Set to void values in case we bail out of the
+    *puSectionNum = 0;      // loop below without finding a section.
+
+    DWORD rva = (DWORD)p - (DWORD)hModule;
+
+    pSection = (PIMAGE_SECTION_HEADER)&amp;sections;
+
+    for ( DWORD i = 0; i &lt; cSections; i++, pSection++ )
+    {
+        DWORD endRVA = pSection-&gt;VirtualAddress
+                + max(pSection-&gt;SizeOfRawData, pSection-&gt;Misc.VirtualSize);
+
+        if ( pSection-&gt;VirtualAddress &gt; rva )   // Is this section's RVA
+            break;                              // past the RVA we're after?
+
+        if ( (rva &gt;= pSection-&gt;VirtualAddress) &amp;&amp; (rva &lt;= endRVA ) )
+        {
+            lstrcpyn( pszSectionName, (PSTR)pSection-&gt;Name,
+                       min(IMAGE_SIZEOF_SHORT_NAME+1, cbSectionName) );
+            *puSectionNum = i+1;
+            return TRUE;
+        }
+    }
+
+    return TRUE;
+}</PRE>
+<P>The main window of PSAPIWorkingSetDemo is shown in<B> Figure 2</B>. The top list box contains a list of all processes (and their IDs) that I obtained using the PSAPI APIs described in my earlier column. Whenever you click on a process in the top list box, the bottom list box updates with detailed information about the working set of the selected process.</P>
+<P><img src="hood2.gif"></P>
+<P><B> Figure 2  PSAPI Working Set Demo</B></P>
+<P>On the top-right side, you'll find a summary of the working set information shown in the bottom list box. The "total" field is exactly how much RAM is used for the selected process (including RAM used by shared system DLLs like KERNEL32.DLL). This number should always be the same value that you see reported from the Windows NT 4.0 Task Manager. I didn't invest the time to make PSAPIWorkingSetDemo update these fields automatically. Instead, I'll drag out the old "Left as an exercise for the reader" ploy.</P>
+<P>The Private field shows the amount of memory used by pages that cannot be shared with other processes in the system. Examples of this would be stack and heap pages. The Shared field shows how much memory is used by pages that could theoretically be shared with other processes. For example, the code pages of EXEs and DLLs can usually be shared across processes. The Page Tables field shows how much RAM is taken up by the page mapping tables that translate between virtual addresses and the physical addresses that go out on the computer's bus.</P>
+<P>Along the bottom row of the main PSAPIWorkingSetDemo window are four buttons. When pressed, the Empty working set button calls EmptyWorkingSet on the process that's selected in the top list box. The Start Delta and End Delta buttons are used in tandem. I'll come back to them later when I describe the other dialog.</P>
+<P>Let's zoom in on the bottom list box (the working set details) and see what it's all about. The list box is populated by calling QueryWorkingSet and analyzing the output before sending it on to the list box. All of this is done by the AddWorkingSetInfo routine in PSAPIWorkingSetDemo.CPP. As I describe what happens, refer to that routine's code to see my implementation.</P>
+<P>The AddWorkingSetInfo routine starts by calling OpenProcess on the specified process ID to get back a process handle. Next, the code calls QueryWorkingSet to get an array of all the pages in the process. Since the addresses in the array aren't sorted, I call qsort to put them into ascending address order. Once sorted, the bulk of the routine just iterates through every page and adds information about the page to the bottom list box. Actually, this isn't strictly true. Whenever I see two or more adjacent memory pages with the same attributes (for example, readonly, shared, and so on), I combine them into one line in the output. This is why the second column in every output line is a size that's a multiple of 4KB.</P>
+<P>For each reported range of pages in the output list box, the function emits the starting address of the range, the size of the range, the attributes of the pages and, if possible, where the page came from. The attributes of the page are extracted from the bottom 12 bits of the page's DWORD description, and are exactly the attributes I described earlier (readonly, executable, and so on). In the list box, I've abbreviated the attributes as follows:</P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="140pt" VALIGN="TOP"><COL WIDTH="211pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P> 0x001</P></TD><TD VALIGN="TOP"><P>RO (read-only)</P></TD></TR><TR><TD VALIGN="TOP"><P> 0x002</P></TD><TD VALIGN="TOP"><P>E  (executable)</P></TD></TR><TR><TD VALIGN="TOP"><P> 0x004</P></TD><TD VALIGN="TOP"><P>RW (readable,writeable)</P></TD></TR><TR><TD VALIGN="TOP"><P> 0x005</P></TD><TD VALIGN="TOP"><P>CW (copy-on-write)</P></TD></TR><TR><TD VALIGN="TOP"><P> 0x100</P></TD><TD VALIGN="TOP"><P>S  (shared)</P></TD></TR><TR><TD VALIGN="TOP"><P> 0x000</P></TD><TD VALIGN="TOP"><P>P  (private, if 0x100 bit not set)</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P>The last column for each page is the owner of the page (if I was able to determine an owner). The primary means of identifying who owns a page is the GetModuleNameAndSectionInfo function, a routine I wrote, which I'll describe later. If GetModuleNameAndSectionInfo didn't find an owner, the page may be from a memory-mapped file. I check for this possibility by calling GetMappedFileNameA. If the page is from a memory-mapped file, the API returns TRUE, and my code emits the memory-mapped file's name as the page's owner.</P>
+<P>If a working-set page doesn't come from an EXE or DLL, and if it's not from a memory-mapped file, its owner field will be blank. There are numerous ways that this can happen. For starters, all pages with addresses above 2GB are from the ring 0 (kernel mode) portion of Windows NT. I wasn't able to come up with a good way to identify the owners of these pages while working within the confines of ring 3 user-mode code. As for pages below 2GB in memory without a listed owner, owners could be part of a stack, a heap, or belong to system data structures like the thread information block. See my May 1996 column for details on the thread information block.</P>
+<P>Having explained the working-set information in the main dialog, let's now turn to those Start Delta and End Delta buttons. These two buttons demonstrate the other portion of PSAPI.DLL's working set functionality, the GetWsChanges API. When you press Start Delta, PSAPIWorkingSetDemo begins collecting working set additions to the currently selected process. The End Delta dialog causes PSAPIWorkingSetDemo to display a second dialog with information about each new page added since the Start Delta button was pressed. This dialog, entitled Working Set Delta, is shown in <B>Figure 3</B>.</P>
+<P><img src="hood3.gif"></P>
+<P><B> Figure 3  Working Set Delta</B></P>
+<P>When you press the Start Delta button, the StartWorkingSetDelta function in PSAPIWorkingSetDelta.CPP gets control. It begins by opening a handle to the selected process, and then passes that handle to InitializeProcessForWsWatch. Next, the function calls GetWsChanges. The code ignores the results of this call. Why bother to call GetWsChanges and then ignore the results? Calling this API clears out all of the information about working-set pages up to the moment that the Start Delta button was pressed.</P>
+<P>The End Delta button causes the EndWorkingSetDelta function, also in PSAPIWorkingSetDelta.CPP, to take over. This function calls GetWsChanges to get all the working set additions into an array of PSAPI_WS_WATCH_INFORMATION structures. The FillDeltaList box function is where all processing of the working-set additions occurs. The outermost loop of this function walks through every valid PSAPI_WS_WATCH_INFORMATION and throws out all working set changes made by ring 0 system code above 2GB. The end of the PSAPI_WS_WATCH_INFORMATION array is indicated by an entry with a NULL linear address for either the FaultingVa or FaultingPc field.</P>
+<P>For every remaining PSAPI_WS_WATCH_INFORMATION, FillDeltaListbox adds a line to the Working Set Delta list box. Each line contains the FaultingVa and FaultingPc addresses at a minimum. In addition, the code attempts to decode those addresses to something more meaningful. Once again, I fall back on my GetModuleNameAndSectionInfo function. In the best case, my code can give information about where the new page is from and who forced it into memory. For example, the line below says that the page encompassing the address 10190275 was faulted in by the instruction at 1017FFAF.</P>
+<P><BR></P>
+<PRE> 10190275 1017FFAF CWDLL32.DLL!.data(4) via CWDLL32.DLL!.text(1)</PRE>
+<P>The remainder of the line gives more information. The page at 10190275 is in the CWDLL32.DLL .data section (section 4). The faulting instruction at address 1017FFAF is in the .text section (section 1) of CWDLL32.DLL.</P>
+<P>The last part of the PSAPIWorkingSetDemo code to describe is the GetModuleNameAndSectionInfo function from PSAPIHELPER.CPP. This function takes a process handle, a linear address, and output buffers to write its results to. Using the process handle and the linear address, the function tries to determine which EXE or DLL the address falls within. Not content to stop there, the function burrows down another level and attempts to determine the specific code or data section within the EXE or DLL. If everything goes well, the function could tell you (for instance) that a particular address is within the .rsrc section of KERNEL32.DLL, and that the .rsrc section is the fourth section within KERNEL32.DLL.</P>
+<P>The GetModuleNameAndSectionInfo code starts with a call to VirtualQueryEx. VirtualQueryEx fills in a MEMORY_ BASIC_INFORMATION structure with information about the input address. It seems to be a little known fact that after a VirtualQueryEx call, one of the MEMORY_BASIC_ INFORMATION fields (AllocationBase) contains the load address of the EXE or DLL that the input address belongs to. For instance, if you pass an address within USER32.DLL to VirtualQueryEx, upon return the AllocationBase field will contain USER32.DLL's load address.</P>
+<P>Once you know that a particular address falls within an EXE or DLL, a little more work yields the specific section within the module. To figure out which section the address falls within, you need to look at the module's IMAGE_SEC-TION_HEADER table. The IMAGE_SECTION_HEADER and other executable file data structures are defined in WINNT.H. I won't attempt to describe the intricacies of locating the IMAGE_SECTION_HEADER here. The code in PSAPIHELPER.CPP is the best description.</P>
+<P>One key point about GetModuleNameAndSectionInfo is that the code for traversing the module's data structures can't just access the data using pointers. Remember, the module being examined is in another process. The function has to use ReadProcessMemory to get at the module's data structures. That's why the code may seem a little more complex than it needs to be. </P>
+<P>This ends my little tour of PSAPI.DLL. This month, I described the working set and memory-mapped file APIs. Be sure to refer back to my August column for a description of the process, module, and memory-management APIs. It would be nice if there was a set of unified Win32 API APIs to retrieve this information on both Windows NT and Windows¨ 95. But, given all of the information that PSAPI.DLL provides, at least there's no reason for Windows NT programmers to be envious of the Windows 95 TOOLHELP32 APIs. </P>
+<P>Have a question about programming in Windows? Send it to Matt at 71774.362@compuserve.com.</P>
+<P><I>This article is reproduced from Microsoft Systems Journal. Copyright © 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P><I>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</I></P>
+<P></P></font></body></HTML>

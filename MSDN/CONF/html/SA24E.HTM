@@ -1,0 +1,219 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Filling the Item and Screen Tables</TITLE><META HTTP-EQUIV="CONTENT-TYPE" CONTENT="text/html; charset= iso-8859-1"><style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"><style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>	<BODY bgcolor="#FFFFFF" link=#003399 vlink=#996699>
+
+
+	<FONT FACE="Verdana, Arial, Helvetica" SIZE="2">
+
+	<!--TOOLBAR_START-->
+	<!--TOOLBAR_EXEMPT-->
+	<!--TOOLBAR_END-->
+
+<h3>Filling the Item and Screen Tables</H3><p>The main work of our compiler is to properly fill the Screen and Item tables of our database. How we fill these tables depends upon the mode in which the compiler is running:</P>
+<P><ul><li>    In the minimal tagging mode, the compiler fills the Item table completely from a outline stored in a text file. It fills some of the fields for some of the Screen records from the outline also. The remaining Screen table information is filled from the content files.</P>
+<P><li>    In the full tagging mode, the compiler fills all information for both tables directly from the content files.</P></ul>
+<H4> </A>Minimal Tagging</H4><p>In minimal tagging mode, all information about items and some about screens is input from an outline file. Authors create the outline in a spreadsheet. They indicate indentation by skipping columns in the spreadsheet. For example, an item that they want indented by two has the first two columns blank. Following these blank columns, the spreadsheet contains an id, a title, and two other parameters each in it's own column. The author exports the outline out of the spreadsheet program in comma delimited format to make it available to the compiler.</P>
+<p>In the routine below, the compiler:</P>
+<P><ul><li>    Reads a line from the comma delimited outline file.</P>
+<P><li>    Determines its indentation.</P>
+<P><li>    Parses its content.</P>
+<P><li>    Formats an Item and a Screen table record from it. </P>
+<P CLASS="spacing"><BR></P></ul>
+<pre><FONT FACE="Courier New" SIZE="3">Sub Read_Outline
+  'Get a line and return its indentation level
+  nLevel = nGetOlineLine(hInFIle, sCurrLine)
+  
+  Do While Not EOF(hInFIle)
+    'parse a line of the outline
+    sId = sOlineParm(sCurrLine)
+    sTitle = sOlineParm(sCurrLine)
+    sParm1 = sOlineParm(sCurrLine)
+    sParm2 = sOlineParm(sCurrLine)
+    
+    If sId = "" Or sTitle = "" Then
+      &lt;Error trap&gt;
+      Exit Sub
+    End If
+  
+    'format the value for the SortOrder field
+    sCurrCount = Format$(nCount(nLevel))
+    sCurrCount = Right$("000" + sCurrCount, 3)
+    
+    'fill in the values for an Item Record
+    item.itemid = sId
+    item.itemtitle = sTitle
+    item.parent = sParent(nLevel)
+    item.sortorder = sCurrCount
+    
+    'Get level of next item to see if current one is a folder or not
+    nNxtLevel = nGetOlineLine(hInFIle, sNxtLine)
+    If nNxtLevel &lt;= nLevel Then
+      'item is not a folder
+      item.itemtype = "4"
+    Else
+      'what type of folder?
+      If nLevel Mod 2 = 0 Then
+        item.itemtype = "1"
+      Else
+        item.itemtype = "3"
+      End If
+    End If
+    
+    'flush item to database
+    If Not bFlushItem(item) Then
+      MsgBox "couldn't flush item"
+    End If
+  
+    'fill in the values for a Screen record
+    screen.screenid = sId
+    screen.screentitle = sTitle
+    screen.Text = "Information not available at release time."
+    screen.ScreenType = "rtf"
+    screen.history = True
+    screen.orderid = sParm1
+    screen.fliter = sParm2
+
+    'flush screen to database
+    If Not bFlushScreen(screen) Then
+      MsgBox "couldn't flush screen"
+    End If
+  
+    'update aray of parent ids
+    sParent(nLevel + 1) = sId
+    nCount(nLevel) = nCount(nLevel) + 1
+    'blank all parents lower than the current level
+    For J = nLevel + 1 To 5
+      nCount(J) = 1
+    Next J
+  
+    'transfer next line to current line
+    sPrevTitle = sTitle
+    nLevel = nNxtLevel
+    sCurrLine = sNxtLine
+  Loop
+End Sub</font></pre>
+<p>The id, title, filter, and OrderId fields are directly read from the file. The SortOrder, Parent, and ItemType fields have to be deduced from the position of the line in relation to the other lines in the outline. To track parent and SortOrder data the sParent and nCount arrays are used. The ItemType (which basically tells the front-end what icon to display in the table of contents outline control) is determined by the indentation of the line below the current one in the outline file.</P>
+<p>This routine produces one Screen record (called the master Screen) for each Item in the outline. Later, as the compiler processes content files, it will match the filename of the content file with the ScreenIds created by the outline. The first screen in the content file is assumed to contain the text and title for the master screen. The compiler updates the title and text field of this master screen from the data in the content file. Any other screens in the content file are saved in the Screen table as Subscreens to the master screen. If the compiler does not find a master screen for a content file, it issues a warning.</P>
+<H4> </A>Full Tagging</H4><p>In full tagging mode, the compiler generates all of the information it needs for the Item and Screen tables from tags embedded in the source text files. In the routine below, the compiler reads a paragraph from the current source file. If it is a paragraph with a tag in it, the tag data is processed. In most cases this processing is simply assigning the tag data to the variable for a field in the Screen or Item table. </P>
+<p>If the paragraph read does not have a tag on it, the compiler puts it in a text buffer. If no screen or item tags have yet been found in the file, the compiler assumes that the text is part of the RTF Header. If a screen or item tag has been processed, the compiler assumes that the text is the content of the current screen. The text continues to be buffered until the next screen or item tag is found. At that time, the compiler flushes the data it has gathered for the current screen and item and flushes it to the database.</P>
+<p>The following routine processes the paragraphs of content returned by sGetALine(hInFile).</P>
+<P CLASS="spacing"><BR></P>
+<pre><FONT FACE="Courier New" SIZE="3">sCurrLine = sGetALine(hInFile)
+Do While Not EOF(hInFile)
+  'If is a dot tag line then process the tag
+  If bIsDotLine(sCurrLine, sDotTag, sDotData) Then
+    Select Case sDotTag
+    Case "..ITEM"
+      If bFirstRecord Then
+        If Not bProcessFrontMatter(sFrontBuffer) Then EndAPP
+      Else
+        ValidateData(Item, screen, VALIDATE_ITEM Or VALIDATE_SCREEN)
+        If Not bFlushItem(Item) Then EndAPP
+        If Not bFlushScreen(screen) Then EndAPP
+      End If
+      '&lt;Clear out vars for next item&gt;
+       bFirstRecord = False
+    Case "..SCREEN"
+      If bFirstRecord Then
+        If Not bProcessFrontMatter(sFrontBuffer) Then EndAPP
+      Else
+        ValidateData(Item, screen, VALIDATE_SCREEN)
+        If Not bFlushScreen(screen) Then EndAPP
+      End If
+      '&lt;Clear out vars for next item&gt;
+      bFirstRecord = False
+    Case "..ID"
+      screen.screenid = sDotData
+      Item.itemid = sDotData
+      Item.screenid = sDotData
+    Case "..TOCPOSITION"
+      Item.TocPosition = sMakeTocPos(sDotData)
+    Case "..PARENT"
+       Item.Parent = UCase$(sDotData)
+    Case "..ITEMTYPE"
+      Item.ItemType = LCase$(sDotData)
+    Case "..SCREENTYPE"
+      screen.ScreenType = LCase$(sDotData)
+    Case "..HOTSPOTS"
+      screen.HotId = sDotData
+    Case "..FILTERS"
+      screen.Filter = LCase$(sDotData)
+    Case "..PICTURE"
+      screen.MEdiaId = sDotData
+    Case "..TEXT"
+      sCurrBuffer = "rtf"
+    Case Else
+      &lt;Error trap&gt;
+    End Select
+  Else
+   'No dot command on the line so add it to a text buffer
+    'Process any hypertext in the text
+    nRet = bProcessCharStuff(sCurrLine)
+    Select Case sCurrBuffer
+    Case "rtf"
+      If Len(sRtfBuffer) + Len(sCurrLine) &gt; 20000 Then
+        If Not bFlushToTmp(sRtfBuffer) Then EndAPP
+        sRtfBuffer = ""
+      End If
+      sRtfBuffer = sRtfBuffer + sCurrLine &amp; gsCR
+    Case "front"
+      sFrontBuffer = sFrontBuffer + sCurrLine &amp; gsCR
+    Case Else
+      &lt;Error trap&gt;
+    End Select
+  End If
+  
+  'Read a new para of text
+   sCurrLine = sGetALine(hInFile)
+Loop </font></pre>
+<p>The routine above uses the ScreenRecord and ItemRecord type variables we defined earlier to store and keep organized the data it collects for the Screen and Item records. As tags are processed, the components of these type variables are filled in. When it is time to flush the data to the database, the entire type variable is passed. </P>
+<p>Text that is not tagged is initially buffered in a string variable (sRtfBuffer). As described earlier, to process chunks of text larger than Visual Basic's maximum size for string variables, we may need to further buffer text in a database memo field that can accommodate as much text as we need. Thus, if the length of the string variable plus the length of the current paragraph is greater then 20,000 (the working maximum we found for this operation), then the string variable is flushed to temporary storage and reset to empty.</P>
+<p>The routine below illustrates the process of moving data from our internal variables and temporary storage location into the database. </P>
+<P CLASS="spacing"><BR></P>
+<pre><FONT FACE="Courier New" SIZE="3">Function bFlushScreen (screen As screenrecord) As Integer
+  'Update an existing record or add a new one
+  mtbScreen.Seek "=", screen.screenid
+  If mtbScreen.NoMatch Then
+    mtbScreen.AddNew
+  Else
+    mtbScreen.Edit
+  End If
+
+  'Save data
+  mtbScreen("ScreenID") = screen.screenid
+  mtbScreen("ScreenTitle") = screen.ScreenTitle
+  mtbScreen("Viewer") = screen.ScreenType
+  mtbScreen("MediaID") = screen.MEdiaId
+  mtbScreen("HotSpots") = screen.HotId
+  mtbScreen("Filter") = screen.Filter
+  mtbScreen("history") = screen.History
+  mtbScreen("parentid") = screen.parentid
+  mtbScreen("sortpath") = screen.sortpath
+
+  'xfer large data from the temp table to the screen table
+  If mtbTmp("text").FieldSize() &gt; 10 Then
+    ChunkSize = 10000  ' Set size of chunk.
+    ' Get field size.
+    TotalSize = mtbTmp("text").FieldSize()
+    NumChunks = TotalSize \ ChunkSize ' Set number of chunks.
+    ' Set number of remaining bytes.
+    RemChunk = TotalSize Mod ChunkSize
+    ' Set starting size of chunk.
+    CurSize = ChunkSize
+    For i = 0 To NumChunks
+      If i = NumChunks Then CurSize = RemChunk
+      curChunk = mtbTmp("text").GetChunk(i * ChunkSize, CurSize)
+      mtbScreen("Text").AppendChunk curChunk ' Write chunk to file.
+    Next i
+    'clear temp table for next time
+    InitTmpTable
+  End If
+  'Add what's in the text field to database
+  If screen.Text &lt;&gt; "" Then mtbScreen("Text").AppendChunk screen.Text
+
+  mtbScreen.Update
+    
+  '&lt;Initialize screen variable&gt;
+  bFlushScreen = True
+End Function</font></pre>
+<p>The routine checks to see if the record it is trying to create is already there. If it is, it simply updates it. Otherwise it creates a new record. Then the routine moves data from the type variable to the corresponding database fields. If there is content in the temporary storage table (mtbTmp("text")) it is assumed to belong in the Text field of the current Screen table record. The application moves it 10,000 bytes at a time from temporary to permanent storage. The compiler finally appends whatever is in the type variable for the Text field onto whatever data it has found in temporary storage.</P></BODY></HTML>

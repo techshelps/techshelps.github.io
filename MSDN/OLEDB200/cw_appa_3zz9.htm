@@ -1,0 +1,113 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>The Persistent State</title>
+<link disabled rel=stylesheet href=msdn_ie3.css>
+<style type="text/css">
+@import url(msdn_ie4.css);
+</style>
+</HEAD>
+<BODY>
+<FONT FACE="Verdana, Arial, Helvetica" SIZE="2">
+
+	<!--TOOLBAR_START-->
+	<!--TOOLBAR_EXEMPT-->
+	<!--TOOLBAR_END-->
+
+
+<h1><a name="thepersistentstate"></a>The Persistent State</h1>
+<p>
+One of the most important things your control will do is save and restore its persistent state. This typically is done in one of two ways: through the <b>PropertyBag</b> interfaces for text persistence, and through streams for binary persistence. With the latter, performance is absolutely critical to make your control load quickly.</p>
+<p>
+The ActiveX controls framework requires your control to implement four member functions to support persistence. The control is required to implement <b>LoadTextState</b>, <b>LoadBinaryState</b>, <b>SaveTextState</b>, and <b>SaveBinaryState</b>. If you are certain that the control is never going to be in a host that uses <b>IPersistPropertyBag</b>, then you can ignore the two text interfaces, but this isn't recommended (they are easy to use).</p>
+<h1>Text Persistence</h1>
+<p>
+Text persistence in the framework is done via <b>IPersistPropertyBag</b> and <b>IPropertyBag</b>. All ActiveX controls have an implementation of <b>IPersistPropertyBag</b>, and are given pointers to property bag objects to do their work.</p>
+<p>
+Effectively, the <b>IPropertyBag</b> interface has two routines that you can use: <b>Read</b> and <b>Write</b>. In both, you pass in a VARIANT. With <b>Read</b>, the property is put in the VARIANT if it was saved out. If the property can’t be found (it was never saved out), the default value for that property should be used, and an error should probably not be returned. For <b>Write</b>, a VARIANT with the data is passed in. To persist out a collection or an object (such as a Font or Picture object), you can pass in a VT_UNKNOWN object, and the <b>PropertyBag</b> will use <b>QueryInterface</b> on that object for <b>IPersistPropertyBag</b> or <b>IPersistStream</b> and persist it. This actually proves effective for persisting collections; they can just support <b>IPersistPropertyBag</b>.</p>
+<p>
+The accompanying samples show how to persist out properties using <b>PropertyBags</b>.&nbsp; For controls with many properties, it often makes sense to use a table-driven persistence to reduce code size and bug potential.</p>
+<p>
+For additional information, see the MSDN and <i>Inside OLE (2nd edition),</i> by Kraig Brockschmidt, both of which have descriptions of the <b>IPropertyBag</b> interface.&nbsp; </p>
+<h1>Binary Persistence</h1>
+<p>
+It is critical to work on binary persistence when implementing an ActiveX control. Control load speed can be severely hampered by a poorly written <b>LoadBinaryState</b> routine, so it's critical to spend some time thinking about how to keep this routine fast. The binary persistence code is used by some hosts all the time, and by other hosts when including the control in a generated executable file.</p>
+<p>
+In both binary routines, the control is handed a pointer to an <b>IStream</b> object. The key to load speed is to reduce the number of operations on the stream. For saving, this is slightly less critical. </p>
+<p>
+Typically, a control saves the following information (often in the given order):
+<ul type=disc>
+<li>
+Some sort of header with a magic number, version, and size information.<br><br></li>
+<li>
+Fixed-size state information, such as longs, floats, colors, and strings.<br><br></li>
+<li>
+Variable-size persistent state, such as fonts, pictures, and collections.</li>
+</ul>
+<p>
+Most control writers should start the control's binary persistent state with a header structure that includes a "magic" number that the control can check when loading. You may also want to include some sort of version number so that future versions of the control can distinguish older versions. Finally, you may want the control to write out the number of bytes of data that were written.</p>
+<p>
+The samples in the framework that have a binary persistent state use the following structure:</p>
+<pre><code>#define STREAMHDR_MAGIC&nbsp; 0x12345678
+
+typedef struct {
+   DWORD dwMagic;
+   DWORD dwVersion;
+   DWORD cbSize;
+} STREAMHDR;
+</code></pre>
+<p>
+The <b>SaveBinaryState</b> routine saves this information; the <b>LoadBinaryState</b> routine looks for it.</p>
+<p>
+One way to write out all the fixed-size information (and therefore load it efficiently) is to do it all at once. If the control's fixed persistent state is in a structure in the control object, you can write out the structure in the persistence code. Controls generated by the control wizard have a structure defined for them called MYCTLNAMECTLSTATE, into which you can put the control's fixed-state data. Then, when saving, the control does the following:</p>
+<pre><code>hr = pStream-&gt;Write(&amp;m_state, sizeof(m_state), NULL);
+</code></pre>
+<p>
+For loading, it becomes as simple as this:</p>
+<pre><code>hr = pStream-&gt;Read(&amp;(m_state), sizeof(m_state), NULL);
+</code></pre>
+<p>
+It’s efficient and simple.</p>
+<p>
+For fonts and pictures, it's slightly more complicated. The control has to use <b>QueryInterface</b> on those objects for <b>IPersistStream</b>, and then call the <b>Load</b> or <b>Save</b> method with the stream that the control has been given. Typically, this can be done after the control has written out all other information.&nbsp; </p>
+<p>
+If you follow the above suggestions for persistent state structure, your control's load routine could look something like this:</p>
+<pre><code>IPersistStream *pps;
+STREAMHDR sh;
+HRESULT hr;
+
+// First read in the streamhdr, and make sure we like what we're getting.
+
+hr = pStream-&gt;Read(&amp;sh, sizeof(sh), NULL);
+RETURN_ON_FAILURE(hr);
+
+// Sanity check.
+
+if (sh.dwMagic != STREAMHDR_MAGIC || sh.cbSize != sizeof(m_state))
+   return E_UNEXPECTED;
+
+// Read in the control state information.
+
+hr = pStream-&gt;Read(&amp;(m_state), sizeof(m_state), NULL);
+RETURN_ON_FAILURE(hr);
+
+// Now read in the font!
+
+OleCreateFontIndirect(&amp;_fdDefault, IID_IFont, (void **)&amp;m_pFont);
+RETURN_ON_NULLALLOC(m_pFont);
+
+// QueryInterface it for IPersistStream and load it in.
+
+hr = m_pFont-&gt;QueryInterface(IID_IPersistStream, (void **)&amp;pps);
+RETURN_ON_FAILURE(hr);
+
+hr = pps-&gt;Load(pStream);
+pps-&gt;Release();
+
+return hr;
+</code></pre>
+<p>
+This is fast and robust.</p>
+</font></BODY>
+</HTML>

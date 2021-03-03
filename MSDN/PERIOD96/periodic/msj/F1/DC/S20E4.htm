@@ -1,0 +1,334 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Win32 Q &amp; A</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  Win32 Q &amp; A</H1><P>Jeffrey Richter</P>
+<P>Jeffrey Richter wrote <I>Advanced Windows</I> (Microsoft Press, 1995) and <I>Windows 95: A Developer's Guide</I> (M&amp;T Books, 1995). Jeff is a consultant and teaches Win32-based programming seminars. He can be reached at v-jeffrr@microsoft.com.</P>
+<P><OBJECT id=sample1 type="application/x-oleobject"
+classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Backgrounders Samples">
+<PARAM name="Item2" value="4952">
+</OBJECT><a href="javascript:sample1.Click()">
+
+Click to open or copy the COUNTER project files.</A></P><P><font size="6" face="verdana,arial,helvetica">Q</font>I was reading Matt Pietrek's article, "Poking Around Under the Hood: A Programmer's View of Windows NT 4.0," in the August 1996 issue of <I>MSJ</I>. When I got to the section about fibers, I started wondering if fibers could be used as an easier, more efficient mechanism for performing background processing tasks.</P>
+<P>Sometimes, tasks like spreadsheet recalculations are done using a background thread. To design the spreadsheet application to work this way, I'd have to spawn a worker thread that scans the spreadsheet's cells, recalculates each cell's value, and then saves the new value back in the cell, possibly updating the window so that the user can see the change as well. Of course, the application's user-interface (primary) thread may be responding to the user's input asynchronously and changing the contents of cells while the recalculation thread is running. Since data could be corrupted if the two threads access a cell's value at the same time, thread synchronization would have to be employed. </P>
+<P>Without actually implementing this code myself, I guess that I would use a single critical section to guard access to all the spreadsheet's cells. But it's also possible that the user could change a cell that requires the recalculation thread to stop what it's doing and start all over from the beginning. To implement this correctly, I'd need some interthread communication, probably implemented as a global variable, that the user-interface thread would set and that the recalculation worker thread would look for. When the worker thread saw the flag, it would restart itself, recalculating all of the spreadsheet's cells.</P>
+<P>I didn't implement this code myself because it didn't sound like much fun. But when I started reading about fibers, I thought that they could be used to easily implement this technique. It seems to me that you can structure your user-interface thread as one fiber and your recalculation thread as another fiber. Because both fibers are really running on a single thread they cannot run at the same time, and therefore you avoid the tricky thread synchronization problems. </P>
+<P>Can you please explain the fiber functions in more detail and demonstrate how you might use them to perform the kind of background processing I've just described?</P>
+<P><I>Via the Internet</I></P>
+<P></P>
+<P><font size="6" face="verdana,arial,helvetica">A</font>OK, I accept your challenge. I'll begin with a conceptual overview of fibers. Then I'll examine the various functions that exist for manipulating fibers. After that, I'll present a small application that uses fibers to perform background processing tasks.</P>
+<P>The first thing to keep in mind is that threads are implemented by the Windows¨ kernel. The OS has intimate knowledge of threads and schedules them according to the algorithm defined by Microsoft. A fiber is implemented in user-mode code; the kernel does not have knowledge of fibers, and fibers are scheduled according to your algorithm. This means fibers are nonpreemptively scheduled as far the kernel is concerned.</P>
+<P>The next thing to be aware of is that a single thread may contain one or more fibers. As far as the kernel is concerned, a thread is being preemptively scheduled and is executing code. The thread will be executing one fiber's code at a time—you decide which fiber is executing. This will become clearer as I go on.</P>
+<P>The first step that must be performed when using fibers is to turn your existing thread into a fiber. This is done by calling ConvertThreadToFiber:</P>
+<P><BR></P>
+<PRE> LPVOID ConvertThreadToFiber(LPVOID lpParameter);</PRE>
+<P>This function allocates memory for the fiber's execution context (about 200 bytes in size). This execution context consists of the following:</P>
+<UL><LI>    A user-defined 32-bit value initialized to the value passed to ConvertThreadToFiber's lpParameter argument.</LI><LI>   The head of a structured exception-handling chain.</LI><LI>   The top and bottom memory addresses of the fiber's stack. When converting a thread to a fiber, this is also the thread's stack. </LI><LI>   Various CPU registers including a stack pointer, instruction pointer, and others.</LI></UL><P>After the fiber execution context has been allocated and initialized, the address of the execution context is associated with the thread—the thread has been converted to a fiber and the fiber is now running on this thread. (If you have only one fiber, then it is the same as having only the thread. The fun doesn't begin until you have multiple fibers.) ConvertThreadToFiber actually returns the memory address of the fiber's execution context. You will need to use this address later, but you should never read or write to the execution context data yourself. The fiber functions will manipulate the contents of the structure for you when necessary. If your fiber (thread) returns or calls ExitThread, the fiber and the thread both die.</P>
+<P>There is no reason to convert a thread to a fiber unless you plan to create additional fibers to run on the same thread. To create another fiber, the thread (with the currently running fiber) calls CreateFiber:</P>
+<P><BR></P>
+<PRE> LPVOID CreateFiber(DWORD dwStackSize,
+                      LPFIBER_START_ROUTINElpStartAddress,
+                   LPVOID lpParameter);</PRE>
+<P>CreateFiber first attempts to create a new stack of the size indicated by the dwStackSize parameter. Usually zero is passed, which, by default, creates a stack that can grow <BR>to 1MB but initially has two pages of storage committed to it. If you specify a nonzero size, a stack is reserved and committed using the specified size.</P>
+<P>After the stack is created, CreateFiber allocates a new fiber execution context structure and initializes it. The user-defined value is set to the value passed to CreateFiber's lpParameter, the top and bottom memory addresses of the new stack are saved, and the memory address of the fiber function (passed as the lpStartAddress argument) is saved. The lpStartAddress argument must specify the address of a fiber routine, which you must implement and which must have the following prototype:</P>
+<P><BR></P>
+<PRE> VOID WINAPI FiberFunc(PVOID lpParameter);</PRE>
+<P>When the fiber is scheduled for the first time, this function executes and is passed the lpParameter value originally passed to CreateFiber. You can do whatever you like in this fiber function. Notice that the function is prototyped as returning VOID. This is not because the return value has no meaning; it is because this function should never return at all! If a fiber function does return, the thread and all the fibers created on it are destroyed immediately.</P>
+<P>Like ConvertThreadToFiber, CreateFiber returns the memory address of the fiber's execution context. Unlike ConvertThreadToFiber, this new fiber is not executing because the currently running fiber is still executing. Only one fiber at a time can be executing on a single thread. To make the new fiber execute, SwitchToFiber must be called:</P>
+<P><BR></P>
+<PRE> VOID SwitchToFiber(LPVOID lpFiber);</PRE>
+<P>lpFiber is the memory address of a fiber's execution context as returned by a previous call to ConvertThreadToFiber or CreateFiber. This memory address tells the function which fiber to schedule now. Internally, SwitchToFiber performs the following steps:</P>
+<OL><LI> 1.    Some of the current CPU registers are saved in the currently running fiber's execution context. This includes the instruction pointer register and the stack pointer register.</LI><LI>2.    The registers previously saved in the soon-to-be-running fiber's execution context are loaded into the CPU registers. This includes the stack pointer register so that this fiber's stack will be used when the thread continues execution.</LI><LI>3.    The fiber's execution context is associated with the thread—the thread is running the specified fiber.</LI><LI>4.    The thread's instruction pointer is set to the saved instruction pointer. The thread (fiber) will continue execution where this fiber was last executing.</LI></OL><P>SwitchToFiber is the only way for a fiber to get any CPU time. Since your code must explicitly call SwitchToFiber at the appropriate times, you are in complete control of the fiber scheduling. Keep in mind that this has nothing to do with the thread scheduling. The thread that the fibers are running on is always preemptable by the operating system. When the thread is scheduled, the currently selected fiber runs and no other fiber will run unless SwitchToFiber is explicitly called.</P>
+<P>When you want to destroy a fiber, you do so by calling DeleteFiber:</P>
+<P><BR></P>
+<PRE> VOID DeleteFiber(LPVOID lpFiber);</PRE>
+<P>This function deletes the fiber indicated by the lpFiber parameter, which is the address of a fiber's execution context. This function frees the memory used by the fiber's stack and then destroys the fiber's execution context. Take note: if you pass the address of the fiber currently associated with the thread, this function calls ExitThread internally, which causes the thread and all the fibers created on the thread to die. DeleteFiber is the same as ExitThread if you delete the active fiber. Watch out!</P>
+<P>Note that DeleteFiber is usually called by one fiber to delete another fiber. The deleted fiber's stack is destroyed and the fiber's execution context is freed. Notice the difference here between fibers and threads: threads usually kill themselves by calling ExitThread. In fact, it is considered bad form for one thread to terminate another thread using TerminateThread. If you do call TerminateThread, the system does not destroy the terminated thread's stack. I exploit a fiber's ability to cleanly delete another fiber in my sample application.</P>
+<P>Two additional fiber functions exist simply for your convenience. A thread can be executing one fiber at a time and the operating system always knows which fiber is currently associated with the thread. If you want to get the address of the currently-running fiber's execution context, you can call GetCurrentFiber:</P>
+<P><BR></P>
+<PRE> PVOID GetCurrentFiber(VOID)</PRE>
+<P>The other convenience function is GetFiberData:</P>
+<P><BR></P>
+<PRE> PVOID GetFiberData(VOID)</PRE>
+<P>As I've mentioned, each fiber's execution context contains a 32-bit user-defined value. This value is initialized with the value passed as the lpParameter argument to either ConvertThreadToFiber or CreateFiber. This value is also passed as an argument to a fiber function. GetFiberData simply looks in the currently executing fiber's execution context and returns the saved 32-bit value.</P>
+<P>Both GetCurrentFiber and GetFiberData are very fast functions and are usually implemented as intrinsics, which means that the compiler generates the code for these functions inline.</P>
+<H2><A NAME="sec0"></A>  The Counter Sample Application</H2><P>The Counter application listed in <B>Figure 1</B> demonstrates fibers for background processing. When you run the application, the dialog box shown in <B>Figure 2</B> appears. </P>
+<P><B> Figure 1  Counter.c</B></P>
+<P><BR></P>
+<PRE> /*************************************************************
+Module name: Counter.c
+Notices: 1996 Jeffrey Richter
+Description: Demonstrates background processing using fibers
+*************************************************************/
+
+
+#define STRICT 
+#define _WIN32_WINNT  0x0400  // for Fiber function prototypes
+#include &lt;Windows.h&gt;
+#include &lt;WindowsX.h&gt;
+#include "Resource.h"
+
+
+//////////////////////////////////////////////////////////////
+
+
+// The possible state of the background processing
+typedef enum { 
+   BPS_STARTOVER,  // Start the background processing from
+                   // beginning
+   BPS_CONTINUE,   // Continue the background processing 
+   BPS_DONE        // There is no background processing to do
+} BKGNDPROCSTATE;
+
+
+typedef struct {
+   // User-interface fiber execution context
+   PVOID pFiberUI;
+
+   // Handle of main UI window
+   HWND  hwnd;
+
+   // State of background processing
+   BKGNDPROCSTATE bps;
+} FIBERINFO, *PFIBERINFO;
+
+
+// A global that contains application state information. This 
+// global is accessed directly by the UI fiber and indirectly
+// by the background processing fiber.
+FIBERINFO g_FiberInfo;
+
+
+//////////////////////////////////////////////////////////////
+
+
+void WINAPI Counter_FiberFunc (LPVOID pvParam) {
+   PFIBERINFO pFiberInfo = (PFIBERINFO) pvParam;
+   BOOL fTranslated;
+   int x, nCount;
+
+   // Update the window showing which fiber is executing
+   SetDlgItemText(pFiberInfo-&gt;hwnd, 
+      IDC_FIBER, __TEXT("Recalculation"));
+
+   // Get the current count in the EDIT control
+   nCount = GetDlgItemInt(
+      pFiberInfo-&gt;hwnd, IDC_COUNT, &amp;fTranslated, FALSE);
+   
+   // Count from 0 to nCount updating the STATIC control
+   for (x = 0; x &lt;= nCount; x++) {
+
+      // UI events have higher priority than counting.
+      // If there are any UI events, handle them ASAP.
+      if (HIWORD(GetQueueStatus(QS_ALLEVENTS)) != 0) {
+
+         // The UI fiber has something to do, temporarily
+         // pause counting, and handle the UI events.
+         SwitchToFiber(pFiberInfo-&gt;pFiberUI);
+
+         // The UI has no more events, continue counting
+         SetDlgItemText(pFiberInfo-&gt;hwnd, 
+            IDC_FIBER, __TEXT("Recalculation"));
+      }
+
+      // Update the STATIC control with the most recent count
+      SetDlgItemInt(pFiberInfo-&gt;hwnd, IDC_ANSWER, x, FALSE);
+
+      // Sleep for a while to exaggerate the effect; remove 
+      // the call to Sleep in production code.
+      Sleep(200);
+   }
+
+
+   // Indicate that counting is complete.
+   pFiberInfo-&gt;bps = BPS_DONE;
+
+   // Reschedule the UI thread. When the UI thread is running
+   // and has no events to process, the thread is put to sleep
+   // NOTE: If we just allow the fiber function to return,
+   // the thread and the UI fiber die -- we don't want this!
+   SwitchToFiber(pFiberInfo-&gt;pFiberUI);
+}
+
+
+//////////////////////////////////////////////////////////////
+
+
+BOOL Counter_OnInitDialog(HWND hwnd, 
+   HWND hwndFocus, LPARAM lParam) {
+
+#ifdef _DEBUG
+   // In debug versions, move the window to the top, left so
+   // that the rest of the screen is available to the debugger.
+   SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
+#endif
+   SetDlgItemInt(hwnd, IDC_COUNT, 0, FALSE);
+   return(TRUE);
+}
+
+
+//////////////////////////////////////////////////////////////
+
+
+void Counter_OnCommand(HWND hwnd,int id, HWND hwndCtl, 
+                       UINT codeNotify) {
+
+   switch (id) {
+      case IDCANCEL: 
+         // If the Escape key is hit, destroy the modeless 
+         // dialog box, terminating the application.
+         DestroyWindow(hwnd); 
+         break;
+
+      case IDC_COUNT:
+         if (codeNotify == EN_CHANGE) {
+
+            // When the user changes the count, start the 
+            // background processing over from the beginning
+            g_FiberInfo.bps = BPS_STARTOVER; 
+         }
+         break;
+   }
+}
+
+
+//////////////////////////////////////////////////////////////
+
+
+BOOL WINAPI Counter_DlgProc (HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+   switch (uMsg) {
+      HANDLE_MSG(hwnd, WM_INITDIALOG, Counter_OnInitDialog);
+      HANDLE_MSG(hwnd, WM_COMMAND, Counter_OnCommand);
+   }
+   return(FALSE);
+}
+
+
+//////////////////////////////////////////////////////////////
+
+
+int WINAPI WinMain (HINSTANCE hinstExe, 
+   HINSTANCE hinstExePrev, LPSTR pszCmdLine, int nCmdShow) {
+
+   // Counter fiber execution context
+   PVOID pFiberCounter = NULL;   
+
+   // Convert this thread to a fiber
+   g_FiberInfo.pFiberUI = ConvertThreadToFiber(NULL);
+
+   // Create the appication's UI window
+   g_FiberInfo.hwnd = CreateDialog(hinstExe, 
+      MAKEINTRESOURCE(IDD_COUNTER), NULL, Counter_DlgProc);
+
+   // Update the window showing which fiber is executing
+   SetDlgItemText(g_FiberInfo.hwnd, 
+      IDC_FIBER, __TEXT("User-interface"));
+
+   // Initially, there is no background processing to be done
+   g_FiberInfo.bps = BPS_DONE;
+
+   // While the UI window still exists...
+   while (IsWindow(g_FiberInfo.hwnd)) {
+
+      // UI messages are higher priority 
+      // than background processing
+      MSG msg;
+      if (PeekMessage(&amp;msg, NULL, 0, 0, PM_REMOVE)) {
+
+         // If a message exists in the queue, process it
+         if (!IsDialogMessage(g_FiberInfo.hwnd, &amp;msg)) {
+            TranslateMessage(&amp;msg);
+            DispatchMessage(&amp;msg);
+         }
+
+      } else {
+
+         // If no UI messages exist, check the 
+         // state of the background processing
+         switch (g_FiberInfo.bps) {
+            case BPS_DONE:
+               // No messages exist and there is no background 
+               // processing to do; wait for a UI event
+               WaitMessage();
+               break;
+
+            case BPS_STARTOVER:
+               // The user has changed the count, start the 
+               // background processing over from the beginning.
+
+               if (pFiberCounter != NULL) { 
+                  // If a recaulculation fiber already exists,
+                  // delete it so that background processing 
+                  // will start all over from the beginning
+                  DeleteFiber(pFiberCounter); 
+                  pFiberCounter = NULL; 
+               }
+
+               // Create a new recalc fiber that
+               // starts over from the beginning
+               pFiberCounter = CreateFiber(
+                  0, Counter_FiberFunc, &amp;g_FiberInfo);
+
+               // Indicate that we have started the background 
+               // processing and that it should continue
+               g_FiberInfo.bps = BPS_CONTINUE;
+
+               // Fall through to BPS_CONTINUE case...
+
+            case BPS_CONTINUE:
+               // Allow the background processing to execute...
+               SwitchToFiber(pFiberCounter);
+
+               // The background processing has been paused (because 
+               // a UI message showed up) or has been stopped 
+               // (because the counting completed).
+
+               // Update the window showing which fiber is executing
+               SetDlgItemText(g_FiberInfo.hwnd, 
+                  IDC_FIBER, __TEXT("User-interface"));
+
+               if (g_FiberInfo.bps == BPS_DONE) { 
+                  // If the background processing ran to completion,
+                  // delete the background fiber so that background 
+                  // processing will start all over from the 
+                  // beginning next time
+                  DeleteFiber(pFiberCounter); 
+                  pFiberCounter = NULL; 
+               }
+               break;
+         }  // switch on background processing state
+
+      }  // No UI messages exist
+   }  // while the window still exists
+
+   return(0);  // End the application
+}
+
+
+//////////////////////// End Of File /////////////////////////</PRE>
+<P><img src="win32qa2.gif"></P>
+<P><B> Figure 2  Counter</B></P>
+<P>You can think of this application as a super-miniature spreadsheet consisting of two cells. First is a writable cell implemented as an edit control (after the "Count to" text); second is a read-only cell implemented as a static control (after the "Answer" text). As you change the number in the edit control, the Answer cell automatically recalculates. For this simple application, the recalculation is a counter that starts at zero and increments slowly until the answer becomes the same value as the entered number. For demonstration purposes, the bottom of the dialog box updates to indicate which fiber is currently executing. This can be either the user-interface fiber or the recalculation fiber.</P>
+<P>To test the application out, type a 5 into the edit control: the currently running fiber field will change to Recalculation and the number in the Answer field will slowly increment from zero to 5. When the counting is finished, the currently running fiber field will change back to user-interface and the thread will go to sleep.</P>
+<P>Next, type a zero in the edit control after the 5 (making 50) and watch the counting start over from zero to 50. But this time, while the answer is incrementing, move the window on the screen. When you do this, you'll notice that the recalculation fiber is preempted and that the user-interface fiber is rescheduled so that the application's user-interface stays responsive. When you stop moving the window, the recalculation fiber is rescheduled and the answer field continues counting from where it left off.</P>
+<P>Here's another way to test the program: while the recalculation fiber is counting, change the number in the edit control. Again, the UI is responsive to your input, but when you stop typing, the recalculation fiber starts counting from the very beginning. This is exactly the kind of behavior desirable in a real spreadsheet application.</P>
+<P>Keep in mind that there are no critical sections or other thread-synchronization objects used in this application—everything is done using a single thread consisting of two fibers.</P>
+<P>Now let's discuss the implementation. When the process's primary thread starts by executing WinMain (at the end of <B>Figure 1</B>), ConvertThreadToFiber is called to turn the thread into a fiber and to allow you to create another fiber later. Then a modeless dialog box is created, which is the application's main window. Next, a state variable is initialized to indicate the background processing state (BPS). This state variable is the bps member contained inside the global g_FiberInfo variable. There are three possible states, as described in <B>Figure 3</B>.</P>
+<P><B> Figure 3  FiberInfo Variable State Values</B></P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="126pt" VALIGN="TOP"><COL WIDTH="315pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P> <B>BPS_DONE</B></P></TD><TD VALIGN="TOP"><P>The recalculation ran to completion and the user has not changed anything that would require a recalculation.</P></TD></TR><TR><TD VALIGN="TOP"><P> <B>BPS_STARTOVER</B></P></TD><TD VALIGN="TOP"><P>The user changed something that  requires restarting the recalculation from the very beginning.</P></TD></TR><TR><TD VALIGN="TOP"><P> <B>BPS_CONTINUE</B></P></TD><TD VALIGN="TOP"><P>The recalculation was started but has not finished; the user has not changed anything that would require restarting the recalculation from the beginning.</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P>The background processing state variable is examined in the thread's message loop, which is more complicated than a normal message loop. First, if a window message exists (the user interface is active), it processes the message. Keeping the user interface responsive is always higher priority than recalculating values. If the user interface has nothing to do, then it checks to see if there are recalculations that need to be performed (the background processing state is BPS_STARTOVER or BPS_CONTINUE). If there is nothing to do (BPS_DONE), it suspends the thread by calling WaitMessage; only a user-interface event can cause a recalculation to be required.</P>
+<P>If the user-interface fiber has nothing to do and the user has just changed the value in the edit control, the app needs to start the recalculation over from the beginning (BPS_STARTOVER). The first thing to realize here is that there may already be a recalculation fiber running. If this is the case, you need to delete the fiber and create a new fiber, which will start its counting from the very beginning. The user-interface fiber calls DeleteFiber to destroy the existing recalculation fiber. This is where fibers (as opposed to threads) come in handy. Deleting the recalculation fiber is a perfectly OK thing to do; the fiber's stack and execution context are completely and cleanly destroyed. If you were using threads instead of fibers, it would not be possible to have the user-interface thread destroy the recalculation thread cleanly—you would need some form of interthread communication and wait for the recalculation thread to die on its own. Once you know that no recalculation fiber exists, you can create a new recalculation fiber and set the background processing state to BPS_CONTINUE.</P>
+<P>When the user-interface fiber is idle and the recalculation fiber has something to do, schedule it by calling SwitchToFiber. SwitchToFiber will not return until the recalculation fiber calls SwitchToFiber again, passing the address of the user-interface fiber's execution context. </P>
+<P>The Counter_FiberFunc function contains the code executed by the recalculation fiber. This fiber function is passed the address of the global g_FiberInfo structure so it knows the handle of the dialog box window, the address of the user-interface fiber's execution context, and the current background processing state. It's true that the address of this structure does not need to be passed since it is in a global variable, but I wanted to demonstrate how to use arguments to fiber functions. Besides, passing the address places fewer dependencies on the code, which is always a good thing. </P>
+<P>The first thing the fiber function does is update the status control in the dialog box to indicate that the recalculation fiber is executing. Then the function gets the number inside the edit control and enters a loop that starts counting from zero to the number. Each time the number is about to be incremented, GetQueueStatus is called to see if any messages have shown up in the thread's message queue (all fibers running on a single thread share the thread's message queue). When a message does show up, the user-interface fiber has something to do, and because I want it to take priority over the recalculations, SwitchToFiber is immediately called so the user-interface fiber can process the message. After the messages have been processed, the user-interface fiber will reschedule the recalculation fiber (as described earlier) and the background processing will continue.</P>
+<P>When there are no messages to be processed, the recalculation fiber updates the answer field in the dialog box and then sleeps for 200 milliseconds. In production code, you should remove the call to Sleep; I have it here to exaggerate the time required to perform the recalculation.</P>
+<P>When the recalculation fiber has finished calculating the answer, the background processing state variable is set to BPS_DONE and the user-interface fiber is rescheduled through a call to SwitchToFiber. At this point, if the user-interface fiber has nothing to do, it will call WaitMessage, suspending the thread so that no CPU time is wasted.</P>
+<P>Have a question about programming in Win32? Send your questions via email to Jeffrey Richter: v-jeffrr@microsoft.com.</P>
+<P><I>This article is reproduced from Microsoft Systems Journal. Copyright © 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</P>
+<P></P></font></body></HTML>

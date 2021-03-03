@@ -1,0 +1,735 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>OLE Q &amp; A</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  OLE Q &amp; A</H1><P>Don Box</P>
+<P>Don Box is a principal scientist at DevelopMentor, where he builds tools and courseware for developers using OLE and COM. Don can be reached at dbox@braintrust.com.</P>
+<P><OBJECT id=sample1 type="application/x-oleobject"
+classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Backgrounders Samples">
+<PARAM name="Item2" value="4575">
+</OBJECT><a href="javascript:sample1.Click()">
+
+Click to open or copy the SHARE project files.</A></P><P><font size="6" face="verdana,arial,helvetica">Q</font>I'd like to put an object in shared memory to allow multiple processes to access it simultaneously. What is the best way to do this?</P>
+<P><I>Posted Frequently to comp.object</I></P>
+<P></P>
+<P><font size="6" face="verdana,arial,helvetica">A</font>Before you attempt to place an object into shared memory, it is important to note that simply by implementing your class as an out-of-process server in COM, your objects will automatically be sharable across multiple processes, provided that all of the interfaces that your object exports have proxy/stub pairs installed on the user's machine. This is inherent in the standard marshaling architecture of COM. But there are still valid reasons for placing an object into shared memory, the most common being efficiency. As noted in the December 1995 OLE Q&amp;A, the cost of invoking methods on out-of-process objects is considerable. This cost can be attributed to the overhead of context switching, parameter marshaling, and message queuing under Windows NT' and Windows" 95. Placing the data members of an object into shared memory allows them to be accessed directly from within the client process without context switching, marshaling, or queuing, as long as the code that implements the methods has been mapped into each client's address space. This is the role of object handlers in COM.</P>
+<P>Before I explain how handlers work, let's review some terms. The act of passing an object (or anything) from one process to another is called marshaling. COM supports two types of marshaling: standard and custom. Standard marshaling refers to passing an object from process A to process B by reference. If the object resides in process A, a proxy is created in process B that refers to the object via an RPC channel that is connected to a stub in the object's process. Fortunately, if that proxy (reference) is later passed to yet another process, a new proxy is created in the target process that is directly connected to the stub (see <B>Figure 1</B>), avoiding the unnecessary level of indirection that would result in creating a proxy to a proxy. This is similar to the way object references and pointers behave in traditional C++.</P>
+<P><img src="OLEQA1.gif"></P>
+<P><B> Figure 1  Object Sharing Using Standard Marshaling</B></P>
+<P>Ultimately, objects/proxies are passed from one process to another via marshaling packets that contain whatever state is required to connect the client to the object. These packets are created by the marshaling code used to remote a given method call, and are populated with object references by calling the COM API function CoMarshalInterface:</P>
+<P> </P>
+<P><BR></P>
+<PRE> HRESULT CoMarshalInterface(IStream *pstm
+                           REFIID riid, 
+                           IUnknown *pUnk, 
+                           DWORD dwDestContext,
+                           void *pvDestContext,
+                           DWORD mshlflags);</PRE>
+<P> </P>
+<P>If the marshaled object uses standard marshaling, CoMarshalInterface first examines the object (referred to by pUnk) to verify that it is not a handler or proxy. If pUnk points to an actual object, CoMarshalInterface then uses CoGetStandardMarshal to create the stub that will be used to manage the object side of the connection and fills the marshaling packet referred to by pstm with the unique identifier of the stub.  This identifier, along with the CLSID of the handler that knows how to interpret it (CLSID_StdMarshal), is then transmitted to the receiver where it is ultimately unmarshaled from the packet and used to initialize and connect the proxy in the client's address space to the new stub. The COM function CoUnmarshalInterface creates and unmarshals the proxy.</P>
+<P> </P>
+<P><BR></P>
+<PRE> HRESULT CoUnmarshalInterface(IStream *pstm
+                             REFIID riid,       
+                             void **ppvObject);</PRE>
+<P> </P>
+<P>CoUnmarshalInterface is called by the remoting code in the client's address space. CoUnmarshalInterface first reads the CLSID of the handler to be instantiated (here, CLSID_StdMarshal) from the stream and passes this value to CoCreateInstance to instantiate the handler (proxy) that will act as the client's reference to the object. CoUnmarshalInterface then instructs the handler to unmarshal what remains of the marshaling packet (in this example, the identifier of the stub) to establish the connection to the stub.</P>
+<P>When the interface pointer that is passed to CoMarshalInterface points to a proxy and not an actual object implementation, the marshaling packet is formed by simply extracting the stub's unique identifier from the proxy. When this packet is unmarshaled in the remote process, it creates a second direct connection to the original stub, not an indirect connection through the original proxy.</P>
+<P>To allow objects greater control over their distributional characteristics, COM allows an object to bypass the normal proxy/stub connection management used by standard marshaling. The object instead establishes a private subcontract for communications between the client and the object. To implement this private subcontract, the object must provide an inprocess handler that will be used in the client in lieu of the generic proxy used in standard marshaling. This is custom marshaling.</P>
+<P>In contrast to standard marshaling, custom marshaling is implemented on an object-by-object basis, and must be implemented more or less by hand. The lack of tool support is due to the fact that when an object is custom marshaled from process A to process B, it is being passed by value. The actual value being passed is not necessarily a linear representation of the object's data members, but rather a serialized version of whatever state the object needs on the client side to "connect" to the object in the originating process. To give objects control over the transmission and reception of this state, COM specifies the IMarshal interface, which must be implemented by all objects that implement custom marshaling (see <B>Figure 2</B>). Given this, you can see in detail how objects are transmitted across marshaling contexts, and how to create and connect the handler based on the received packet (see <B>Figure 3</B>).</P>
+<P><B> Figure 2  IMarshal</B></P>
+<P><BR></P>
+<PRE> interface IMarshal : IUnknown {
+// what is the clsid of the handler ?
+  HRESULT GetUnmarshalClass(REFIID riid,
+                            void *pvObject,
+                            DWORD dwDestContext,
+                            void *pvDestContext,
+                            DWORD mshlflags,
+                            CLSID *pClsid);
+        
+// how big does the marshaling packet have to be?
+  HRESULT GetMarshalSizeMax(REFIID riid,
+                            void *pvObject,
+                            DWORD dwDestContext,
+                            void *pvDestContext,
+                            DWORD mshlflags,
+                            DWORD *pSize);
+        
+// fill the marshaling packet
+  HRESULT MarshalInterface( IStream *pStm,
+                            REFIID riid,
+                            void *pvObject,
+                            DWORD dwDestContext,
+                            void *pvDestContext,
+                            DWORD mshlflags);
+        
+// initialize the handler from marshaling packet 
+  HRESULT UnmarshalInterface(IStream *pStm,
+                             REFIID riid,
+                             void **ppvObject);
+        
+// The marshaling packet is no longer needed
+  HRESULT ReleaseMarshalData(IStream *pStm);
+
+// the object called CoDisconnectObject to sever
+// any outstanding connections
+  HRESULT DisconnectObject(DWORD dwReserved);
+}</PRE>
+<P><B> Figure 3  Using Packets and Handlers</B></P>
+<P><BR></P>
+<PRE> HGLOBAL *CreatePacket(IUnknown *pUnkSource,
+                      REFIID riidInitialInterface)
+{
+    HGLOBAL result = 0;
+// grab the IMarshal interface
+    IMarshal *pmsh;
+    pUnkSource-&gt;QueryInterface(IID_IMarshal,
+                       (void**)&amp;pmsh);
+
+// allocate the memory for the packet and 
+// create an IStream interface to it
+    ULONG cbPacketSize;
+    pmsh-&gt;GetMarshalSizeMax(riidInitialInterface,
+                            pUnkSource,
+                            MSHCTX_LOCAL,
+                            0,
+                            MSHLFLAGS_NORMAL,
+                            &amp;cbPacketSize);
+
+    result = GlobalAlloc(GHND, cbPacketSize);
+
+    IStream *pstm = 0;
+    CreateStreamOnHGlobal(result, FALSE, &amp;pstm);
+
+// write out the handler's CLSID and any data that
+// will be needed to connect it to the object
+    CLSID clsid;
+    pmsh-&gt;GetUnmarshalClass(riidInitialInterface,
+                            pUnkSource,
+                            MSHCTX_LOCAL,
+                            0,
+                            MSHLFLAGS_NORMAL,
+                            &amp;clsid);
+
+    WriteClassStm(pstm, clsid);
+    pmsh-&gt;MarshalInterface( pstm,
+                            riidInitialInterface,
+                            pUnkSource,
+                            MSHCTX_LOCAL,
+                            0,
+                            MSHLFLAGS_NORMAL);
+    
+    pstm-&gt;Release();
+    pmsh-&gt;Release();
+    return result;
+}              
+
+
+void CreateHandler(HGLOBAL hgpacket,
+                   REFIID riidInitialInterface,
+                   void **ppvObj)
+{
+// create an IStream interface to the packet
+    IStream *pstm = 0;
+    CreateStreamOnHGlobal(hgpacket, FALSE, &amp;pstm);
+
+// read the CLSID for the handler and instantiate
+    CLSID clsid;
+    ReadClassStm(pstm, &amp;clsid);
+    IMarshal *pmsh = 0;
+    CoCreateInstance(clsid, 0, 
+                     CLSCTX_INPROC_HANDLER,
+                     IID_IMarshal, (void**)&amp;pmsh);
+
+// connect/initialize the handler
+    IStream *pstmClone;
+    pstm-&gt;Clone(&amp;pstmClone); // keep our place
+    pmsh-&gt;UnmarshalInterface(pstm, 
+                             riidInitialInterface,
+                             ppvObj);
+
+// release the marshaling packet
+    pmsh-&gt;ReleaseMarshalData(pstmClone);
+    pstm-&gt;Release();
+    pstmClone-&gt;Release();
+    pmsh-&gt;Release();
+    GlobalFree(0, hgpacket);
+}</PRE>
+<P></P>
+<P>The implementations of CreatePacket and CreateHandler are very similar to the implementations of the COM API functions CoMarshalInterface and CoUnmarshalInterface. The fundamental difference is that if the initial QueryInterface for IMarshal fails, the API functions use CoGetStandardMarshal to attach the standard marshaler to the object, establishing a default proxy/stub connection.</P>
+<P>Now let's place an object into shared memory. A reasonable strategy is to place the shared data members into a Win32" section object, and protect it from concurrent access using a mutex. The shared data members can be defined in a separate struct or class, and the handles to the mutex and file mapping objects can be stored in the handler along with the pointer to the shared memory. Assuming that the object's lifetime does not need to be bound to any one process, you can safely implement only an InprocHandler for our object that will support custom marshaling (see <B>Figure 4</B>).</P>
+<P><img src="OLEQA4.gif"></P>
+<P><B> Figure 4  Object Sharing Using Inproc Handlers</B></P>
+<P>As much of the code for implementing the handler is boilerplate and not dependent on the shared state of the object (except for its size and CLSID), I chose to implement a generic shared object using templates, as is shown in <B>Figures 5</B> and <B>6</B>. The class CoSharedObjectBase contains most of the core code and is where IMarshal is implemented. As is shown in <B>Figure 7</B>, the handler maintains a pointer to a shared memory section where the actual object state is kept. Prepended to this is a shared reference count that keeps track of how many handlers are currently connected. When the section is initially created (in AttachToSection), the reference count is set to one and a virtual function call is made (OnInitializeSection) to allow the derived class to initialize the user-area of the section. When the final handler goes away, it makes a different virtual function call (OnDestroySection) to allow the derived class to clean up any state that may be associated with the shared members. As this implementation does not assume that the process identity of the object is fixed, it is entirely possible that the section will be initialized in one process and destroyed in another. For some applications, this is preferable; for others, it is not. Note that the template class CoSharedObject provides default implementations of OnInitializeSection and OnDestroySection that use placement to construct and destroy the shared state in place.</P>
+<P><img src="OLEQA5.gif"></P>
+<P><B> Figure 5  CoSharedObject Hierarchy</B></P>
+<P><B>Figure 6  Generic Shared Object</B></P>
+<P></P>
+<P>SHAREDOB.H</P>
+<P><BR></P>
+<PRE> /////////////////////////////////////////////////////////////
+//
+// SharedObj.h - 1996, Don Box
+//
+
+#ifndef _SHAREDOBJ_H
+#define _SHAREDOBJ_H
+
+// we need the placement operator
+#include &lt;new.h&gt;
+
+// CoSharedObjectBase is a non-template base class that implements 
+// most of the custom marshaling code to share a memory section in 
+// a thread-safe fashion
+
+class CoSharedObjectBase : private IMarshal {
+// handle to mutex that protects the shared
+// data members
+    HANDLE m_hmutex;
+
+// handle to section object that contains 
+// shared data members
+    HANDLE m_hsection;
+
+// pointer to shared data member(s)
+    void *m_pvData;
+
+// unique GUID that "names" the 2 shared Win32
+// kernel objects
+    GUID m_guid;
+
+// normal COM refcount
+    ULONG m_cRef;
+
+// helper function to attach to section object
+    BOOL AttachToSection(DWORD dwTimeOut = INFINITE);
+
+    struct SECTIONHEADER;
+    SECTIONHEADER *GetSectionHeader();
+    void *GetSectionData();
+
+// Virtual upcalls that allow derived client to construct/destroy 
+// shared data members
+    virtual BOOL OnInitializeSection(void *pv) = 0;
+    virtual void OnDestroySection(void *pv) = 0;
+
+// Virtual upcalls that are used to find the size of the shared 
+// data members and the CLSID of this class
+    virtual DWORD OnGetSize() = 0;
+    virtual const CLSID&amp; OnGetCLSID() = 0;
+
+// IMarshal members
+    STDMETHODIMP GetUnmarshalClass( REFIID riid,      
+                                    void * pv,      
+                                    DWORD dwDestCtx,
+                                    void * pvDestCtx,
+                                    DWORD mshlflags,
+                                    CLSID * pclsid);
+
+    STDMETHODIMP GetMarshalSizeMax( REFIID riid,      
+                                    void * pv,      
+                                    DWORD dwDestCtx,
+                                    void * pvDestCtx,
+                                    DWORD mshlflags,
+                                    ULONG *pcb);
+
+    STDMETHODIMP MarshalInterface(  IStream *pStm,
+                                    REFIID riid,
+                                    void *pv,
+                                    DWORD dwDestCtx,
+                                    void *pvDestCtx,
+                                    DWORD mshlflags);
+
+    STDMETHODIMP UnmarshalInterface(IStream * pStm,
+                                    REFIID riid,
+                                    void ** ppv);
+
+    STDMETHODIMP ReleaseMarshalData(IStream * pStm);
+
+    STDMETHODIMP DisconnectObject(DWORD dwReserved);
+protected:
+// IUnknown members (protected to allow forwarding)
+    STDMETHODIMP QueryInterface(REFIID riid, void **ppv);
+    STDMETHODIMP_(ULONG) AddRef();
+    STDMETHODIMP_(ULONG) Release();
+
+// Lock/Unlock the shared data
+    void *AccessSharedData(DWORD dwTimeOut = INFINITE);
+    void  ReleaseSharedData();
+
+    CoSharedObjectBase();
+    virtual ~CoSharedObjectBase();
+};
+
+
+// CoSharedObject is a template class that implements a handler
+// that accesses a shared data structure (SharedState) and implements
+// one COM interface (beyond IMarshal)
+
+template &lt;  class SharedState,     // the shared data
+                  const CLSID *pclsid,   // this CLSID
+            interface IUser,       // Primary Interface
+                  const IID* PIID_IUser  // Primary IID
+             &gt;
+class CoSharedObject :  private CoSharedObjectBase, 
+                        public  IUser {
+private:
+// default implementation uses placement version
+// of new to construct the object "in place"
+    virtual BOOL OnInitializeSection(void *pv) {
+        new (pv) SharedState;
+        return TRUE;
+    }
+
+// default implementation calls destructor explicitly
+// to destruct the object "in place"
+    virtual void OnDestroySection(void *pv)  {
+        ((SharedState*)pv)-&gt;~SharedState();
+    }
+
+// default implementation returns the size of the 
+// data members without chasing pointer members
+    virtual DWORD OnGetSize() {
+        return sizeof(SharedState);
+    }
+    
+// simply return the template paramter
+    virtual const CLSID&amp; OnGetCLSID() {
+        return *pclsid;
+    }
+    
+protected:
+// SharedThis is a helper class that aquires the mutex in
+// an exception-safe fashion. Declare an instance of SharedThis
+// at the beginning of each member function of your derived class
+// to access the shared data members of your object
+
+    class SharedThis {
+        CoSharedObject *m_phandler;
+        SharedState *m_pthis;
+    public:
+        SharedThis(CoSharedObject *pt, DWORD dwTimeOut = INFINITE) 
+        :   m_phandler(pt),
+            m_pthis(0)
+        {
+            m_pthis = (SharedState*)pt-&gt;AccessSharedData(dwTimeOut);
+        }
+
+        ~SharedThis()
+        {
+                  if (m_pthis)
+                        m_phandler-&gt;ReleaseSharedData();
+        }
+
+        operator SharedState * () { return m_pthis; }
+        SharedState * operator -&gt; () { return m_pthis; }
+    };
+    friend class SharedThis;
+
+public:
+
+// hook QI to expose the new interface
+    STDMETHODIMP QueryInterface(REFIID riid, void**ppv) {
+        if (riid == *PIID_IUser) {
+            LPUNKNOWN(*ppv = (IUser*)this)-&gt;AddRef();
+            return S_OK;
+        }
+        return CoSharedObjectBase::QueryInterface(riid, ppv);
+    }
+    
+// use default AddRef and Release
+    STDMETHODIMP_(ULONG) AddRef() {
+        return CoSharedObjectBase::AddRef();
+    }
+
+    STDMETHODIMP_(ULONG) Release() {
+        return CoSharedObjectBase::Release();
+    }
+
+};
+
+#endif</PRE>
+<P></P>
+<P>SHAREDOB.CPP</P>
+<P><BR></P>
+<PRE> /////////////////////////////////////////////////////////////
+//
+// SharedObj.cpp - 1996, Don Box
+//
+
+#include &lt;windows.h&gt;
+#include "sharedobj.h"
+
+// standard module lifetime functions (defined elsewhere)
+extern void SvcLock();
+extern void SvcUnlock();
+
+// header for shared memory section
+struct CoSharedObjectBase::SECTIONHEADER {
+// shared ref count
+    DWORD m_cRef;
+// padding
+    DWORD m_reserved;
+};
+
+// the header resides at the beginning of the section
+inline CoSharedObjectBase::SECTIONHEADER *
+CoSharedObjectBase::GetSectionHeader() {
+    return (SECTIONHEADER*)m_pvData;
+}
+
+// the payload resides immediately after the header, so use 
+// the magic of pointer arithmetic to find its address
+inline void *
+CoSharedObjectBase::GetSectionData() {
+    return GetSectionHeader() + 1;
+}
+
+// initialize data members to null and lock the server module
+CoSharedObjectBase::CoSharedObjectBase()
+:   m_hmutex(0), m_hsection(0), m_pvData(0), m_cRef(0)
+{
+    SvcLock();
+}
+
+// close all handles and unlock the server module
+CoSharedObjectBase::~CoSharedObjectBase() {
+    if (m_hsection) {
+        UnmapViewOfFile(m_pvData);
+        CloseHandle(m_hsection);
+    }
+
+    if (m_hmutex)
+        CloseHandle(m_hmutex);
+    SvcUnlock();
+}
+
+
+// helper function to create or open section object and mutex
+BOOL 
+CoSharedObjectBase::AttachToSection(DWORD dwTimeOut)
+{
+// synthesize section and mutex name based on guid value,(e.g., 
+// "{12345678-0000-0000-0000-DEAD00000000}_MTX" for the mutex
+// "{12345678-0000-0000-0000-DEAD00000000}_SCT" and for the section
+
+    TCHAR szSectionName[128];
+    TCHAR szMutexName[128];
+    OLECHAR szGUID[128];
+
+// m_guid acts as the object ID in this usage
+    StringFromGUID2(m_guid, szGUID, sizeof(szGUID));
+
+#ifdef UNICODE
+    lstrcpy(szSectionName, szGUID);
+#else
+    wcstombs(szSectionName, szGUID, sizeof(szSectionName));
+#endif
+
+    lstrcpy(szMutexName, szSectionName);
+    lstrcat(szMutexName, TEXT("_MTX"));
+    lstrcat(szSectionName, TEXT("_SCT"));
+
+// Create/open the mutex, ascertain "firstness" and grab the mutex
+    m_hmutex = CreateMutex(0, FALSE, szMutexName);
+    BOOL bFirst = GetLastError() != ERROR_ALREADY_EXISTS;
+    WaitForSingleObject(m_hmutex, dwTimeOut);
+
+// create/open a section big enough to hold shared state and 
+// header, then map it into address space
+    m_hsection = CreateFileMapping(HANDLE(0xFFFFFFFF), 0, PAGE_READWRITE, 0,
+                                   sizeof(SECTIONHEADER) + OnGetSize(),
+                                   szSectionName);
+
+    m_pvData = MapViewOfFile(m_hsection, FILE_MAP_ALL_ACCESS, 0,0,0);
+        
+       if (bFirst)
+    {
+// set shared ref count to one and initialize payload of section via
+// the virtual function OnInitializeSection
+        GetSectionHeader()-&gt;m_cRef = 1;
+        OnInitializeSection(GetSectionData());
+    }
+    else
+    {
+// simply bump the shared ref count
+        GetSectionHeader()-&gt;m_cRef++;
+    }
+
+    ReleaseMutex(m_hmutex);
+    return TRUE;
+}
+
+
+// IUnknown members
+STDMETHODIMP 
+CoSharedObjectBase::QueryInterface(REFIID riid, void **ppv)
+{
+    if (riid == IID_IUnknown || riid == IID_IMarshal)
+        LPUNKNOWN(*ppv = (IMarshal*)this)-&gt;AddRef();
+    else
+        *ppv = 0;
+    return *ppv ? S_OK : E_NOINTERFACE;
+}
+
+STDMETHODIMP_(ULONG) 
+CoSharedObjectBase::AddRef()
+{
+    return ++m_cRef;
+}
+
+STDMETHODIMP_(ULONG) 
+CoSharedObjectBase::Release()
+{
+    ULONG result = --m_cRef;
+    if (result == 0)
+    {
+// We must detach from section prior to destruction
+// in order to get the appropriate virtual function
+// called (we can't call OnDestroySection in our destructor)
+
+        WaitForSingleObject(m_hmutex, INFINITE);
+        if (--GetSectionHeader()-&gt;m_cRef == 0)
+            OnDestroySection(GetSectionData()); 
+        ReleaseMutex(m_hmutex);
+
+        delete this;
+    }
+    return result;
+}
+
+// IMarshal members
+
+// GetUnmarshalClass uses the virtual upcall OnGetCLSID to
+// ascertain the classname of the handler. Marshaling contexts
+// that do not support shared memory simply fail
+
+STDMETHODIMP 
+CoSharedObjectBase::GetUnmarshalClass(  REFIID riid, void * pv, DWORD dwDestCtx,
+                                        void * pvDestCtx, DWORD mshlflags,
+                                        CLSID * pclsid)
+{
+    SCODE result = E_FAIL;
+    if (dwDestCtx == MSHCTX_LOCAL ||
+        dwDestCtx == MSHCTX_INPROC)
+    {
+        *pclsid = OnGetCLSID();
+        result = S_OK;
+    }
+    return result;
+}
+
+// Since we only send the object ID (m_guid) in the marshaling
+// packet, we hard code the size to sizeof(GUID) 
+
+STDMETHODIMP 
+CoSharedObjectBase::GetMarshalSizeMax( REFIID riid, void * pv, DWORD dwDestCtx,
+                                        void * pvDestCtx, DWORD mshlflags,
+                                        ULONG *pcb)
+{
+    SCODE result = E_FAIL;
+    if (dwDestCtx == MSHCTX_LOCAL ||
+        dwDestCtx == MSHCTX_INPROC)
+    {
+        *pcb = sizeof(GUID);
+        result = S_OK;
+    }
+    return result;
+}
+
+
+// We transmit the object ID (m_guid) through the stream
+// using WriteClassStm
+
+STDMETHODIMP 
+CoSharedObjectBase::MarshalInterface(  IStream *pStm, REFIID riid, void *pv,
+                                        DWORD dwDestCtx, void *pvDestCtx,
+                                        DWORD mshlflags)
+{
+    SCODE result = E_FAIL;
+    if (dwDestCtx == MSHCTX_LOCAL ||
+        dwDestCtx == MSHCTX_INPROC)
+    {
+        WriteClassStm(pStm, m_guid);
+        result = S_OK;
+    }
+    return result;
+}
+
+// We receive the object ID (m_guid) from the stream
+// using ReadClassStm and attach to the shared section
+// that the object ID names
+
+STDMETHODIMP 
+CoSharedObjectBase::UnmarshalInterface(IStream * pStm, REFIID riid, void ** ppv)
+{
+    *ppv = 0;
+    ReadClassStm(pStm, &amp;m_guid);
+    if (AttachToSection())
+        return this-&gt;QueryInterface(riid, ppv);
+    else
+        return E_FAIL;
+}
+
+// since we allocate no new resources in our marshaling code,
+// there is no need to implement anything interesting 
+// in this function
+
+STDMETHODIMP 
+CoSharedObjectBase::ReleaseMarshalData(IStream * pStm)
+{
+// seek past our portion of the marshaling packet
+    LARGE_INTEGER li;
+    LISet32(li, sizeof(m_guid));
+    pStm-&gt;Seek(li, STREAM_SEEK_CUR, 0);
+    return S_OK;
+}
+
+// For the simple case, we do not want the handler to disconnect
+
+STDMETHODIMP 
+CoSharedObjectBase::DisconnectObject(DWORD dwReserved)
+{
+    return S_OK;
+}
+
+
+// AccessSharedData allows derived clients to acquire the mutex. If the
+// section has not been mapped, then this is the first access to the object
+// and causes the object ID to be generated using CoCreateGuid
+// This function and AttachToSection perform most of the work of this class.
+
+void *
+CoSharedObjectBase::AccessSharedData(DWORD dwTimeOut)
+{
+// test for first access to first handler
+    if (m_pvData == 0)
+    {
+        CoCreateGuid(&amp;m_guid);
+        if (!AttachToSection(dwTimeOut))
+            return 0;
+    }
+
+    if (WaitForSingleObject(m_hmutex, dwTimeOut) == WAIT_OBJECT_0)
+        return GetSectionData();
+    else
+        return 0;
+}
+
+// simply release the mutex
+
+void  
+CoSharedObjectBase::ReleaseSharedData()
+{
+    ReleaseMutex(m_hmutex);
+}</PRE>
+<P><img src="OLEQA7.gif"></P>
+<P><B> Figure 7  Sharing State Between Handlers</B></P>
+<P>To identify the section and the mutex that protects it, there needs to be a way to uniquely identify the Win32 kernel objects that the initial handler creates. Since you're fairly immersed in COM, it makes sense to use—you guessed it—a GUID. You can easily create GUIDs at run time by calling the API function CoCreateGuid. You can use the GUID as an object ID. As is shown in <B>Figure 6</B>, CoSharedObjectBase uses CoCreateGuid in AccessSharedData (from SHAREDOB.CPP) to generate the shared object's ID the first time the object is accessed prior to marshaling. CoSharedObjectBase's implementation of MarshalInterface simply transmits the object ID to the receiving client. CoSharedObjectBase's implementation of UnmarshalInterface then reads the object ID in the client's process and opens the section and mutex by calling AttachToSection.</P>
+<P><B>Figure 8</B> demonstrates the CoSharedObject template by implementing a simple object that keeps two ints and a string in shared memory. Note that the implementation of each of the member functions defines an instance of a class SharedThis at the beginning of the method. SharedThis is a nested class in CoSharedObject that provides a typed pointer to the shared state. It also acquires the mutex in its constructor and releases it in its destructor. Declaring an instance of SharedThis in each method guarantees that at most one thread will be accessing the shared object at any time. <B>Figure 9</B> shows several clients accessing a single shared object simultaneously.</P>
+<P><B> Figure 8  CoSharedObject Demo</B></P>
+<P></P>
+<P>SHAREDPO.H</P>
+<P><BR></P>
+<PRE> /////////////////////////////////////////////////////////////
+//
+// SharedPoint.h - 1996 Don Box
+//
+
+#ifndef _SHAREDPOINT_H
+#define _SHAREDPOINT_H
+
+#include "SharedObj.h"
+#include "IPoint.h"
+
+
+// shared data members
+class PointRep {
+    friend class CoSharedPoint;
+    long m_x;
+    long m_y;
+    char m_sz[1024];
+public:
+    PointRep() : m_x(100), m_y(200) { lstrcpyA(m_sz, "Some Other Model?"); }
+    ~PointRep() { OutputDebugString("I am done!\n"); }
+};
+
+// handler class that is instantiated in each process
+class CoSharedPoint 
+            : public CoSharedObject&lt;PointRep,             // Shared state
+                                &amp;CLSID_CoSharedPoint, // this CLSID
+                                IPointAndText,        // Primary interface
+                                &amp;IID_IPointAndText&gt;   // Primary IID
+{
+public:
+// IPointAndText members
+    STDMETHODIMP Set(long x, long y);
+    STDMETHODIMP Get(long FAR* px, long FAR* py);
+    STDMETHODIMP SetText(LPCSTR lpsz);
+    STDMETHODIMP GetText(LPSTR lpsz, int cb);
+};
+
+#endif</PRE>
+<P></P>
+<P>SHAREDPO.CPP</P>
+<P><BR></P>
+<PRE> /////////////////////////////////////////////////////////////
+//
+// SharedPoint.cpp - 1996, Don Box
+//
+
+#include &lt;windows.h&gt;
+#include "sharedpoint.h"
+
+STDMETHODIMP 
+CoSharedPoint::Set(long x, long y)
+{
+    SharedThis pThis(this); // initialize locked pointer to shared state
+    pThis-&gt;m_x = x;         // copy parameters to shared state
+    pThis-&gt;m_y = y;
+    return NOERROR;
+}
+
+STDMETHODIMP 
+CoSharedPoint::Get(long FAR* px, long FAR* py)
+{
+    SharedThis pThis(this); // initialize locked pointer to shared state
+    *px = pThis-&gt;m_x;       // copy parameters from shared state
+    *py = pThis-&gt;m_y;
+    return NOERROR;
+}
+
+STDMETHODIMP 
+CoSharedPoint::SetText(LPCSTR lpsz)
+{
+    SharedThis pThis(this);
+    if (strncpy(pThis-&gt;m_sz, lpsz, sizeof(pThis-&gt;m_sz)))
+        return S_OK;
+    else
+        return E_INVALIDARG;
+}
+
+STDMETHODIMP 
+CoSharedPoint::GetText(LPSTR lpsz, int cb)
+{
+    SharedThis pThis(this);
+    if (strncpy(lpsz, pThis-&gt;m_sz, cb))
+        return S_OK;
+    else
+        return E_INVALIDARG;
+}</PRE>
+<P><img src="OLEQA9.gif"></P>
+<P><B> Figure 9  Multiple clients access a single shared object simultaneously.</B></P>
+<P>The implementation described here achieves performance close to that of an inprocess server for method invocation, as no context switching or marshaling needs to be performed. However, there are some tradeoffs. First, this implementation is extremely memory hungry. While the handler is very small and lightweight, the shared section winds up consuming at least 4KB due to page size granularity. This could be minimized by implementing a shared memory allocator (perhaps using CoSharedObject) and implementing malloc and free on top of the section. A more problematic tradeoff is the fact that the template supports sharing objects that have only instance data members (no pointer members or handles). If you want to share a linked list or file handle as a shared data member, you can look forward to a nontrivial job using the TypingWizard in Visual C++ to implement the pointer chasing and/or handle duplication required to get things to work properly.</P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="221pt" VALIGN="TOP"><COL WIDTH="221pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD COLSPAN="2" VALIGN="TOP"><P> Have a question about programming in OLE? You can mail it directly to Q&amp;A, Microsoft Systems Journal, 825 Eighth Avenue, 18th Floor, New York, New York 10019, or send it to MSJ (re:OLE Q&amp;A) via:</P></TD></TR><TR><TD VALIGN="TOP"><P> <BR>Internet:</P>
+<P><BR>Internet:</P></TD><TD VALIGN="TOP"><P>Don Box<BR>dbox@braintrust.com</P>
+<P>Eric Maffei<BR>ericm@microsoft.com</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P><I>This article is reproduced from Microsoft Systems Journal. Copyright © 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</P>
+<P></P></font></body></HTML>

@@ -1,0 +1,686 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Win32 Q &amp; A</title>
+
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF>
+
+<font face="verdana,arial,helvetica" size="2">
+<h1>
+Win32 Q &amp; A</h1>
+<p>
+Jeffrey Richter</p>
+<p>
+Jeffrey Richter wrote Advanced Windows, Third Edition (Microsoft Press, 1997) and Windows 95: A Developer’s Guide (M&amp;T Books, 1995). Jeff is a consultant and teaches Win32 programming courses (www.solsem.com). He can be reached at www.JeffreyRichter.com.</p>
+<p>
+Q I need a kernel object that works opposite the way that a Win32&reg; semaphore kernel object works: the object should be signaled when its count is zero and not signaled when its count is greater than zero. I anticipate many uses for this type of object. For example, I have a thread that needs to wake up after I have executed an operation 100 times. To pull this off, I want a kernel object that I can initialize to 100. When the kernel object’s count is greater than zero, the object should not be signaled. Each time I execute an operation, I want to decrement the count in the kernel object. When the count reaches zero, the object should be signaled so that my other thread can wake up to process something. I think this is a common problem and that the operating system should provide such a primitive. Does Win32 offer a kernel object that does what I want? <BR>If not, how can I design something that does what I just described?</p>
+<p>
+A I agree with you; this is a common programming prob&shy;&shy;lem and there should be a kernel object that has the reverse behavior of a semaphore. But unfortunately, there is not. Microsoft could make some small modifications to Windows NT&reg; and Windows&reg; 95 so that semaphore objects could accomplish the behavior you desire. If the semaphore’s count is allowed to be negative, you could easily get what you want. You could initialize the semaphore’s count to –99, and then call ReleaseSemaphore after each operation. When the semaphore’s count reaches one, the object would be signaled and your other thread could wake up to do its processing. Alas, Microsoft prohibits a semaphore’s count from being negative, and I don’t anticipate this code changing in the foreseeable future.</p>
+<p>
+However, all is not lost. Several months ago I implemented a set of C++ template classes that give you the behavior you’re looking for plus a whole lot more. The remainder of this column discusses these classes and how to use them. All of these classes are in the Interlocked.h header file, which you may download from the usual places (see page 5 for details).</p>
+<p>
+When I first set out to tackle this problem, I realized that a thread-safe way to manipulate a variable was at <BR>the cornerstone of the solution. I wanted to design an elegant solution that would make code referencing the variable easy to write. Obviously, the easiest way to make a resource thread-safe is to protect that resource with a critical section. Using C++, it’s fairly easy to endow a data object with thread-safeness. All you have to do is create a C++ class that contains the variable you want to protect <BR>and a CRITICAL_SECTION data structure. Then, in the constructor you call InitializeCriticalSection, in the destructor you call DeleteCriticalSection, and in all the <BR>other member variables you call EnterCriticalSec-<BR>tion, manipulate the variable, and then call LeaveCritical&shy;Section. If  you implement a C++ class this way, it’s easy to <BR>write code that accesses a data structure in a thread-safe fashion. This concept is behind all the C++ classes I’ll present here.</p>
+<p>
+The first is a resource guard class called CResGuard <BR>(see Figure 1). This class contains a CRITICAL_SECTION data member and a LONG data member. The LONG <BR>data mem&shy;ber is used to keep track of how many times the owning thread has entered the critical section. This <BR>information can be useful for debugging. The CResGuard object’s constructor and destructor call Initialize&shy;CriticalSection and DeleteCriticalSection, respectively. Since a single thread can only create an object, a C++ object’s constructor and destructor don’t have to be thread-safe. The IsGuarded member function simply returns whether or not EnterCriticalSection has been called at least once against this object. (As I said, this is used for debugging purposes.) Placing a CRITICAL_SECTION inside a C++ object ensures that the critical section is initialized and deleted properly.</p>
+<dl>
+<dt>
+Figure 1  CResGuard</dt>
+<dd>
+// Instances of this class will be accessed by multiple threads. So, <p>
+// all members of this class (except the constructor and destructor) </p>
+<p>
+// must be thread-safe.</p>
+<p>
+class CResGuard {</p>
+<p>
+public:</p>
+<p>
+   CResGuard()  { m_lGrdCnt = 0; InitializeCriticalSection(&amp;m_cs); }</p>
+<p>
+   ~CResGuard() { DeleteCriticalSection(&amp;m_cs); }</p>
+<p>
+   // IsGuarded is used for debugging</p>
+<p>
+   BOOL IsGuarded() const { return(m_lGrdCnt &gt; 0); }</p>
+<p>
+public:</p>
+<p>
+    class CGuard {</p>
+<p>
+    public:</p>
+<p>
+        CGuard(CResGuard&amp; rg) : m_rg(rg) { m_rg.Guard(); };</p>
+<p>
+      ~CGuard() { m_rg.Unguard(); }</p>
+<p>
+    private:</p>
+<p>
+        CResGuard&amp; m_rg;</p>
+<p>
+    };</p>
+<p>
+private:</p>
+<p>
+   void Guard()   { EnterCriticalSection(&amp;m_cs); m_lGrdCnt++; }</p>
+<p>
+   void Unguard() { m_lGrdCnt--; LeaveCriticalSection(&amp;m_cs); }</p>
+<p>
+   // Guard/Unguard can only be accessed by the nested CGuard class.</p>
+<p>
+   friend class CResGuard::CGuard;</p>
+<p>
+private:</p>
+<p>
+   CRITICAL_SECTION m_cs;</p>
+<p>
+   long m_lGrdCnt;   // # of EnterCriticalSection calls</p>
+<p>
+};</p>
+</dd>
+</dl>
+<p>
+The CResGuard class also offers a nested public C++ class: CGuard. A CGuard object contains a reference to a CResGuard object and offers only a constructor and destructor. The constructor calls CResGuard’s Guard member function, which calls EnterCriticalSection. CGuard’s destructor calls the CResGuard’s Unguard member function, which calls LeaveCriticalSection. This way of setting up these classes makes it easy to manipulate a CRIT&shy;ICAL_SECTION. Figure 2 shows a code fragment that uses these classes.</p>
+<dl>
+<dt>
+Figure 2  Using the CGuard Class</dt>
+<dd>
+struct SomeDataStruct {<p>
+   •••</p>
+<p>
+} g_SomeSharedData;</p>
+<p>
+// Create a CResGuard that protects g_SomeSharedData </p>
+<p>
+// Note: The constructor initializes the critical section and </p>
+<p>
+//       the destructor deletes the critical section.</p>
+<p>
+CResGuard g_rgSomeSharedData;</p>
+<p>
+void AFunction () {</p>
+<p>
+   // This function touches the shared data</p>
+<p>
+   // Protect the resource from being accessed from multiple threads.</p>
+<p>
+   CResGuard::CGuard gDummy(g_rgSomeSharedData);&#09;</p>
+<p>
+   // Enters the critical section</p>
+<p>
+   // Touch the g_SomeSharedData resource</p>
+<p>
+   •••</p>
+<p>
+}  // Note: LeaveCriticalSection is called when gDummy goes out of scope</p>
+</dd>
+</dl>
+<p>
+The next C++ class is called CInterlockedType (see Figure 3). This class contains all the parts necessary to create a thread-safe data object. I made CInterlockedType a template class so that it can be used to make any data type thread-safe. For example, you can use this class to make a thread-safe integer, a thread-safe string, or a thread-safe data structure.</p>
+<dl>
+<dt>
+Figure 3 CInterlockedType</dt>
+<dd>
+// Instances of this class will be accessed by multiple threads. So, <p>
+// all members of this class (except the constructor and destructor) </p>
+<p>
+// must be thread-safe.</p>
+<p>
+template &lt;class TYPE&gt;</p>
+<p>
+class CInterlockedType {</p>
+<p>
+public:     // Public member functions</p>
+<p>
+   // Note: Constructors &amp; destructors are always thread-safe</p>
+<p>
+   CInterlockedType() { }</p>
+<p>
+   CInterlockedType(const TYPE&amp; TVal) { m_TVal = TVal; }</p>
+<p>
+   virtual ~CInterlockedType()  { }</p>
+<p>
+   // Cast operator to make writing code that uses </p>
+<p>
+   // thread-safe data type easier</p>
+<p>
+   operator TYPE() const { </p>
+<p>
+#ifdef MUTABLE_SUPPORTED</p>
+<p>
+      CResGuard::CGuard x(m_rg); </p>
+<p>
+#else</p>
+<p>
+      CResGuard::CGuard x(const_cast&lt;CResGuard&amp;&gt;(m_rg)); </p>
+<p>
+#endif</p>
+<p>
+      return(GetVal()); </p>
+<p>
+   }</p>
+<p>
+protected:  // Protected function to be called by derived class</p>
+<p>
+   TYPE&amp; GetVal() { </p>
+<p>
+      assert(m_rg.IsGuarded()); </p>
+<p>
+      return(m_TVal); </p>
+<p>
+   }</p>
+<p>
+   const TYPE&amp; GetVal() const { </p>
+<p>
+      assert(m_rg.IsGuarded()); </p>
+<p>
+      return(m_TVal); </p>
+<p>
+   }</p>
+<p>
+   TYPE SetVal(const TYPE&amp; TNewVal) { </p>
+<p>
+      assert(m_rg.IsGuarded()); </p>
+<p>
+      TYPE&amp; TVal = GetVal();</p>
+<p>
+      if (TVal != TNewVal) {</p>
+<p>
+         TYPE TPrevVal = TVal;</p>
+<p>
+         TVal = TNewVal;</p>
+<p>
+         OnValChanged(TNewVal, TPrevVal);</p>
+<p>
+      }</p>
+<p>
+      return(TVal); </p>
+<p>
+   }</p>
+<p>
+protected:  // Overridable functions</p>
+<p>
+   virtual void OnValChanged(</p>
+<p>
+      const TYPE&amp; TNewVal, const TYPE&amp; TPrevVal) const { </p>
+<p>
+      // Nothing to do here</p>
+<p>
+   }</p>
+<p>
+protected:  </p>
+<p>
+   // Protected guard for use by derived class functions</p>
+<p>
+#ifdef MUTABLE_SUPPORTED</p>
+<p>
+      mutable CResGuard m_rg;</p>
+<p>
+#else</p>
+<p>
+      CResGuard m_rg;</p>
+<p>
+#endif</p>
+<p>
+private:    // Private data members</p>
+<p>
+   TYPE m_TVal;</p>
+<p>
+};</p>
+</dd>
+</dl>
+<p>
+Each instance of a CInterlockedType object contains two data members. The first data member is an instance of the templated data type that you want to make thread-safe. It’s private and can only be manipulated via CInterlockedType’s member functions. The second data member is an instance of a CResGuard object that is used to guard access to the data member. The CResGuard object is a protected data member so that a class derived from CInterlockedType can easily protect its data.</p>
+<p>
+It’s expected that you will always derive a new class using the CInterlockedType class as a base class. Earlier, I said that the CInterlockedType class provides all of the parts necessary to create a thread-safe object, but it is the responsibility of the derived class to use these parts correctly to access the data value in a thread-safe fashion.</p>
+<p>
+The CInterlockedType class offers only four public functions: a constructor that does not initialize the data value, another constructor that does initialize the data value, a virtual destructor that does nothing, and a cast operator. The cast operator simply ensures thread-safe access to the data value by guarding the resource and returning the object’s current value. (The resource is automatically unguarded when the local variable <i>x</i> goes out of scope.) The cast operator makes it easy to examine the data object’s value contained in the class in a thread-safe fashion.</p>
+<p>
+The CInterlockedType class also offers three nonvirtual protected functions that a derived class will want to call. There are two GetVal functions that return the current value of the data object. In debug builds of the file, both of these functions first check to see if the data object is guarded. If the object isn’t guarded, it would be possible to return a value for the object and then have the object change its value (by another thread) before the caller examined the value.</p>
+<p>
+I assume that a caller is getting the value of the object so it can change the value in some way. Because of this assumption, the GetVal functions require that the caller has guarded access to the data value. If the GetVal functions determine that the data is guarded, the current value of the data is returned. The two GetVal functions are identical except that one of them operates on a constant version of the object. The two versions allow you to write code that works with both constant and nonconstant data types without the compiler generating warnings.</p>
+<p>
+The third nonvirtual protected member function is SetVal. When a derived class’s member function wants to modify the data value, it should guard access to the data and then call SetVal. Like the GetVal functions, SetVal first performs a debug check to make sure that the derived class’s code didn’t forget to guard access to the data value. Then, SetVal checks to see if the data value is actually changing. If it is changing, SetVal saves the old value, changes the object to its new value, and then calls a virtual, protected member function, OnValChanged, which is passed the old and new data values. The CInterlockedType class implements an OnValChanged member function, which does nothing. The OnValChanged member function allows me to add some powerful capabilities to my derived class, as you’ll see later when I discuss the CWhenZero class.</p>
+<p>
+Thus far, I’ve shown you a lot of abstract classes and concepts. Now it’s time to see how all of this architecture can be used for the good of mankind. I now present my CInterlockedScalar classæa template class derived from CInterlockType (see Figure 4). The CInterlockedScalar class allows you to create a thread-safe scalar data type such as a byte, a character, a 16-bit integer, a 32-bit integer, a 64-bit integer, a floating point value, and so on. Because the CInterlockedScalar class is derived from the CInterlocked&shy;Type class, it doesn’t have any data members of its own. CInterlockedScalar’s constructor simply calls CInter&shy;&shy;locked&shy;Type’s constructor, passing an initial value for the scalar. Since the CInterlockedScalar class always works with numeric values, I set the default constructor parameter to zero so that the object is always constructed in a known state. CInterlockedScalar’s destructor is very simple and does nothing at all.</p>
+<dl>
+<dt>
+Figure 4  CInterlockedScalar</dt>
+<dd>
+// Instances of this class will be accessed by multiple threads. So, <p>
+// all members of this class (except the constructor and destructor) </p>
+<p>
+// must be thread-safe.</p>
+<p>
+template &lt;class TYPE&gt;</p>
+<p>
+class CInterlockedScalar : </p>
+<p>
+   protected CInterlockedType&lt;TYPE&gt; {</p>
+<p>
+public:</p>
+<p>
+   CInterlockedScalar(TYPE TVal = 0) </p>
+<p>
+      : CInterlockedType&lt;TYPE&gt;(TVal) { </p>
+<p>
+   }</p>
+<p>
+   ~CInterlockedScalar() { /* Nothing to do */ }</p>
+<p>
+   // C++ does not allow operator cast to be inherited.</p>
+<p>
+   operator TYPE() const { </p>
+<p>
+      return(CInterlockedType&lt;TYPE&gt;::operator TYPE()); </p>
+<p>
+   }</p>
+<p>
+   TYPE operator=(TYPE TVal) { </p>
+<p>
+      CResGuard::CGuard x(m_rg); </p>
+<p>
+      return(SetVal(TVal)); </p>
+<p>
+   }</p>
+<p>
+    TYPE operator++(int) {       // Postfix increment operator</p>
+<p>
+      CResGuard::CGuard x(m_rg);</p>
+<p>
+      TYPE TPrevVal = GetVal();</p>
+<p>
+      SetVal(TPrevVal + 1);</p>
+<p>
+      return(TPrevVal);          // Return value BEFORE increment</p>
+<p>
+   }</p>
+<p>
+    TYPE operator--(int) {       // Postfix decrement operator</p>
+<p>
+      CResGuard::CGuard x(m_rg);</p>
+<p>
+      TYPE TPrevVal = GetVal();</p>
+<p>
+      SetVal(TPrevVal - 1);</p>
+<p>
+      return(TPrevVal);          // Return value BEFORE decrement</p>
+<p>
+   }</p>
+<p>
+   TYPE operator += (TYPE op)   </p>
+<p>
+      { CResGuard::CGuard x(m_rg); return(SetVal(GetVal() +  op)); }</p>
+<p>
+   TYPE operator++()            </p>
+<p>
+      { CResGuard::CGuard x(m_rg); return(SetVal(GetVal() +   1)); }</p>
+<p>
+   TYPE operator -= (TYPE op)   </p>
+<p>
+      { CResGuard::CGuard x(m_rg); return(SetVal(GetVal() -  op)); }</p>
+<p>
+   TYPE operator--()            </p>
+<p>
+      { CResGuard::CGuard x(m_rg); return(SetVal(GetVal() -   1)); }</p>
+<p>
+   TYPE operator *= (TYPE op)   </p>
+<p>
+      { CResGuard::CGuard x(m_rg); return(SetVal(GetVal() *  op)); }</p>
+<p>
+   TYPE operator /= (TYPE op)   </p>
+<p>
+      { CResGuard::CGuard x(m_rg); return(SetVal(GetVal() /  op)); }</p>
+<p>
+   TYPE operator %= (TYPE op)   </p>
+<p>
+      { CResGuard::CGuard x(m_rg); return(SetVal(GetVal() %  op)); }</p>
+<p>
+   TYPE operator ^= (TYPE op)   </p>
+<p>
+      { CResGuard::CGuard x(m_rg); return(SetVal(GetVal() ^  op)); }</p>
+<p>
+   TYPE operator &amp;= (TYPE op)   </p>
+<p>
+      { CResGuard::CGuard x(m_rg); return(SetVal(GetVal() &amp;  op)); }</p>
+<p>
+   TYPE operator |= (TYPE op)   </p>
+<p>
+      { CResGuard::CGuard x(m_rg); return(SetVal(GetVal() |  op)); }</p>
+<p>
+   TYPE operator &lt;&lt;=(TYPE op)   </p>
+<p>
+      { CResGuard::CGuard x(m_rg); return(SetVal(GetVal() &lt;&lt; op)); }</p>
+<p>
+   TYPE operator &gt;&gt;=(TYPE op)   </p>
+<p>
+      { CResGuard::CGuard x(m_rg); return(SetVal(GetVal() &gt;&gt; op)); }</p>
+<p>
+};</p>
+</dd>
+</dl>
+<p>
+All of CInterlockedScalar’s remaining member functions change the scalar value. There is one member function for each operation that can be performed on a scalar value. In order for the CInterlockedScalar class to manipulate its data object in a thread-safe fashion, all of these member functions guard the data value before manipulating it. Since the member functions are simple I won’t detail them here; you can examine the code to see what they do.</p>
+<p>
+However, I will show you how to use these classes. The following code demonstrates how to declare a thread-safe BYTE and how to manipulate this BYTE:</p>
+<p>
+CInterlockedScalar&lt;BYTE&gt; b = 5;&#09;// A thread-safe BYTE</p>
+<p>
+BYTE b2 = 10;            // A non-thread-safe BYTE</p>
+<p>
+b2 = b++;                // b2=5, b=6</p>
+<p>
+b *= 4;                  // b=24</p>
+<p>
+b2 = b;                  // b2=24, b=24</p>
+<p>
+b += b;                  // b=48</p>
+<p>
+b %= 2;                  // b=0</p>
+<p>
+Manipulating a thread-safe scalar value is just as simple as manipulating a scalar that isn’t thread-safe. In fact, the code is identical thanks to C++ operator overloading! With the C++ classes I’ve shown you so far, you can easily turn any non-thread-safe variable into a thread-safe one with small changes to your source code. </p>
+<p>
+I had a specific destination in mind when I started design&shy;ing all these classes: I wanted to create an object that works opposite the way a Win32 semaphore works. The C++ class that offers this behavior is my CWhenZero class (see Figure 5). CWhenZero is derived from the CInterlocked&shy;Scalar class. When the scalar value is zero, the CWhenZero object is signaled; when the data value is not zero, the CWhenZero object is not signaled. This is the opposite behavior of a Win32 semaphore.</p>
+<dl>
+<dt>
+Figure 5  CWhenZero</dt>
+<dd>
+// Instances of this class will be accessed by multiple threads. So, <p>
+// all members of this class (except the constructor and destructor) </p>
+<p>
+// must be thread-safe.</p>
+<p>
+template &lt;class TYPE&gt; </p>
+<p>
+class CWhenZero : public CInterlockedScalar&lt;TYPE&gt; {</p>
+<p>
+public:</p>
+<p>
+   CWhenZero(TYPE TVal = 0, BOOL fManualReset = TRUE) </p>
+<p>
+      : CInterlockedScalar&lt;TYPE&gt;(TVal) {</p>
+<p>
+      // The event should be signaled if TVal is 0</p>
+<p>
+      m_hevtZero = CreateEvent(NULL, fManualReset, (TVal == 0), NULL);</p>
+<p>
+      // The event should be signaled if TVal is NOT 0</p>
+<p>
+      m_hevtNotZero = CreateEvent(NULL, fManualReset, (TVal != 0), NULL);</p>
+<p>
+   }</p>
+<p>
+   ~CWhenZero() {</p>
+<p>
+      CloseHandle(m_hevtZero);</p>
+<p>
+      CloseHandle(m_hevtNotZero);</p>
+<p>
+   }</p>
+<p>
+   // C++ does not allow operator= to be inherited.</p>
+<p>
+   TYPE operator=(TYPE x) { </p>
+<p>
+      return(CInterlockedScalar&lt;TYPE&gt;::operator=(x)); </p>
+<p>
+   }</p>
+<p>
+   // Return handle to event signaled when value is zero</p>
+<p>
+   operator HANDLE() const { return(m_hevtZero); }</p>
+<p>
+   // Return handle to event signaled when value is not zero</p>
+<p>
+   HANDLE GetNotZeroHandle() const { return(m_hevtNotZero); }</p>
+<p>
+   // C++ does not allow operator cast to be inherited.</p>
+<p>
+   operator TYPE() const { </p>
+<p>
+      return(CInterlockedScalar&lt;TYPE&gt;::operator TYPE()); </p>
+<p>
+   }</p>
+<p>
+protected:</p>
+<p>
+   void OnValChanged(const TYPE&amp; TNewVal, const TYPE&amp; TPrevVal) const { </p>
+<p>
+      // For best performance, avoid jumping to </p>
+<p>
+      // kernel mode if we don't have to</p>
+<p>
+      if ((TNewVal == 0) &amp;&amp; (TPrevVal != 0)) {</p>
+<p>
+         SetEvent(m_hevtZero);</p>
+<p>
+         ResetEvent(m_hevtNotZero);</p>
+<p>
+      }</p>
+<p>
+      if ((TNewVal != 0) &amp;&amp; (TPrevVal == 0)) {</p>
+<p>
+         ResetEvent(m_hevtZero);</p>
+<p>
+         SetEvent(m_hevtNotZero);</p>
+<p>
+      }</p>
+<p>
+   }</p>
+<p>
+private:</p>
+<p>
+   HANDLE m_hevtZero;      // Signaled when data value is 0</p>
+<p>
+   HANDLE m_hevtNotZero;   // Signaled when data value is not 0</p>
+<p>
+};</p>
+<p>
+#endif   // __INTERLOCKED_H__</p>
+</dd>
+</dl>
+<p>
+As you know, C++ objects cannot be signaled; only Win32 kernel objects can be signaled and used for thread synchronization. So a CWhenZero object must contain some additional data members, which are handles to Win32 event kernel objects. A CWhenZero object contains two data members: m_hevtZero, a handle to an event kernel object that is signaled when the data value is zero, and m_hevt&shy;NotZero, another handle to an event kernel object that is signaled when the data value is not zero.</p>
+<p>
+CWhenZero’s constructor accepts an initial value for the data object and also allows you to specify whether these two event kernel objects should be manual-reset (the default) or autoreset. The constructor then calls CreateEvent to create the two event kernel objects and sets them either to the signaled state or nonsignaled state depending on whether  the data’s initial value is zero. CWhenZero’s destructor is merely responsible for closing the two event handles. Because CWhenZero’s class publicly inherits the CInter&shy;locked&shy;Scalar class, all of the overloaded operator member functions are available to users of a CWhenZero object. </p>
+<p>
+Remember the OnValChanged protected member function declared inside the CInterlockedType class? CWhen&shy;Zero overrides this virtual function, which is responsible for keeping the event kernel objects signaled or not signaled based on the value of the data object. Whenever the data value changes, OnValChanged is called. CWhenZero’s implementation of this function checks to see if the new value is zero. If so, it sets the m_hevtZero event and resets the m_hevtNotZero event. If the new value is not zero, OnVal&shy;Changed does the reverse.</p>
+<p>
+Now, when you want a thread to suspend itself until the data value is zero, just do the following:</p>
+<p>
+CWhenZero&lt;BYTE&gt; b = 0;         // A thread-safe BYTE</p>
+<p>
+WaitForSingleObject(b, </p>
+<p>
+                    INFINITE); // Returns immediately </p>
+<p>
+                               // because b is 0</p>
+<p>
+b = 5;</p>
+<p>
+WaitForSingleObject(b, </p>
+<p>
+                    INFINITE); // Returns only if </p>
+<p>
+                               // another thread sets b </p>
+<p>
+                               // to 0</p>
+<p>
+You can write the call to WaitForSingleObject because CWhenZero also includes a cast operator member function that casts a CWhenZero object to a Win32 kernel object HANDLE. In other words, if you pass a CWhenZero C++ object to any function that expects a Win32 HANDLE object, this cast operator function gets called and its return value is what gets passed to the function. CWhenZero’s HANDLE cast operator function returns the handle of the m_hevtZero event kernel object. Be aware that the data value may no longer be zero by the time WaitForSingle-Object returns.</p>
+<p>
+The m_hevtNotZero event handle inside the CWhenZero class allows you to write code that waits for the data value to not be zero. Unfortunately, I already have a HANDLE cast operator so I can’t have another one that returns the m_hevtNotZero handle. So to get at this handle I added the GetNotZeroHandle member function. Using this function, I can write the following code:</p>
+<p>
+CWhenZero&lt;BYTE&gt; b = 5;        // A thread-safe BYTE</p>
+<p>
+WaitForSingleObject(b.GetNotZeroHandle(), INFINITE);    // Returns immediately because b is not 0</p>
+<p>
+b = 0;</p>
+<p>
+WaitForSingleObject(b.GetNotZeroHandle(), INFINITE);    // Returns only if another thread sets b to not 0</p>
+<p>
+I wrote the IntLockTest program to test all these classes (see Figure 6). The code demonstrates a common programming scenario that goes like this: a thread spawns several worker threads and then initializes a block of memory. After initializing the memory block, the main thread wakes the worker threads so that they can start processing <BR>the memory block. At this point, the main thread must suspend itself until all the worker threads have finished. After all the worker threads have finished, the main thread reinitializes the memory block with new data and then wakes the worker threads to start the process all over&nbsp;again.</p>
+<dl>
+<dt>
+Figure 6  IntLockTest.h</dt>
+<dd>
+/*************************************************************<p>
+Module name: IntLockTest.h</p>
+<p>
+Notices: Written 1997 by Jeffrey Richter</p>
+<p>
+Description: Tests CWhenZero class.</p>
+<p>
+*************************************************************/</p>
+<p>
+#define STRICT</p>
+<p>
+#include &lt;Windows.h&gt;</p>
+<p>
+#include &lt;assert.h&gt;</p>
+<p>
+#include &quot;Interlocked.h&quot;</p>
+<p>
+//////////////////////////////////////////////////////////////</p>
+<p>
+// Set to TRUE when worker threads should terminate cleanly.</p>
+<p>
+BOOL g_fQuit = FALSE;</p>
+<p>
+//////////////////////////////////////////////////////////////</p>
+<p>
+DWORD WINAPI WorkerThread (LPVOID p) {</p>
+<p>
+   CWhenZero&lt;BYTE&gt;&amp; bVal = * (CWhenZero&lt;BYTE&gt; *) p;</p>
+<p>
+   // Should worker thread terminate?</p>
+<p>
+   while (!g_fQuit) {</p>
+<p>
+      // Wait for something to do</p>
+<p>
+      WaitForSingleObject(bVal.GetNotZeroHandle(), INFINITE);</p>
+<p>
+      // If we should quit, quit</p>
+<p>
+      if (g_fQuit) continue;</p>
+<p>
+      // Do something</p>
+<p>
+      MessageBox(NULL, __TEXT(&quot;We have something to do&quot;), </p>
+<p>
+         __TEXT(&quot;Worker thread&quot;), MB_OK);</p>
+<p>
+      bVal--;     // We're done</p>
+<p>
+      // Wait for all worker threads to stop</p>
+<p>
+      WaitForSingleObject(bVal, INFINITE);</p>
+<p>
+   }</p>
+<p>
+   MessageBox(NULL, __TEXT(&quot;Worker is terminating&quot;), </p>
+<p>
+      __TEXT(&quot;Worker thread&quot;), MB_OK);</p>
+<p>
+   return(0);</p>
+<p>
+}</p>
+<p>
+//////////////////////////////////////////////////////////////</p>
+<p>
+int WINAPI WinMain (HINSTANCE hinst, </p>
+<p>
+   HINSTANCE hinstPrev, LPSTR lp, int n) {</p>
+<p>
+   // Initialize to indicate that NO worker threads have anything to do</p>
+<p>
+   CWhenZero&lt;BYTE&gt; bVal = 0;</p>
+<p>
+   // Create the worker threads</p>
+<p>
+   const int nMaxThreads = 2;</p>
+<p>
+   HANDLE hThreads[nMaxThreads];</p>
+<p>
+   for (int nThread = 0; nThread &lt; nMaxThreads; nThread++) {</p>
+<p>
+      DWORD dwThreadId;</p>
+<p>
+      hThreads[nThread] = CreateThread(NULL, 0, </p>
+<p>
+         WorkerThread, (PVOID) &amp;bVal, 0, &amp;dwThreadId);</p>
+<p>
+   }</p>
+<p>
+   do {</p>
+<p>
+      // Find out if there is more work to be done </p>
+<p>
+      // or if the process should terminate</p>
+<p>
+      n = MessageBox(NULL, </p>
+<p>
+         __TEXT(&quot;Yes: Give worker threads something to do\nNo: Quit&quot;), </p>
+<p>
+         __TEXT(&quot;Primary thread&quot;), MB_YESNO);</p>
+<p>
+      // Set the flag so that the worker threads will see</p>
+<p>
+      // that there is no more work to do.</p>
+<p>
+      if (n == IDNO) g_fQuit = TRUE;</p>
+<p>
+      bVal = nMaxThreads;  // Wake the worker threads</p>
+<p>
+      if (n == IDYES) {</p>
+<p>
+         // There is work to do, wait for the worker threads to finish</p>
+<p>
+         WaitForSingleObject(bVal, INFINITE);</p>
+<p>
+      }</p>
+<p>
+   } while (n == IDYES);</p>
+<p>
+   // There is no more work to do, the process wants to die.</p>
+<p>
+   // Wait for the worker threads to terminate</p>
+<p>
+   WaitForMultipleObjects(nMaxThreads, hThreads, TRUE, INFINITE);</p>
+<p>
+   // Close the worker thread handles.</p>
+<p>
+   for (nThread = 0; nThread &lt; nMaxThreads; nThread++)</p>
+<p>
+      CloseHandle(hThreads[nThread]);</p>
+<p>
+   // Tell the user that the process is dying</p>
+<p>
+   MessageBox(NULL, </p>
+<p>
+      __TEXT(&quot;Primary thread is terminating&quot;), </p>
+<p>
+      __TEXT(&quot;Primary thread&quot;), MB_OK);</p>
+<p>
+   return(0);</p>
+<p>
+}</p>
+<p>
+//////////////////////// End Of File /////////////////////////</p>
+</dd>
+</dl>
+<p>
+By looking at the code, you can see how easy it is to solve this common programming problem with readable and maintainable C++ code. The CWhenZero class gives you a whole lot more than behavior that’s opposite what you get from a Win32 semaphore. You now have a thread-safe num&shy;&shy;ber that is signaled when its value is zero! A semaphore allows you to increment its value and decrement its value, but a CWhenZero object allows you to add, subtract, multiply, divide, modulo, set it explicitly to any value, or even perform bit operations on it! This is substantially more powerful than a Win32 semaphore kernel object.</p>
+<p>
+It’s fun to come up with more ideas for these C++ template classes. For example, you could create a CInterlocked&shy;String class derived from the CInterlockedType class. The CInterlockedString class would allow you to manipulate a character string in a thread-safe fashion. Then you could derive a CWhenCertainString class from your CInterlocked&shy;String class, and this would signal an event kernel object when the character string becomes a certain value. The possibilities are endless.</p>
+<p>
+Please let me know if you come up with any more good uses for these classesæI’d love to hear about them.        u</p>
+<p>
+To obtain complete source code listings, see page 5.</p>
+<p>
+Have a question about programming in Win32? Send your questions to Jeffrey Richter at http://www.JeffreyRichter.com.</p>
+</font></font></body>
+</HTML>

@@ -1,0 +1,167 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Handling the DRV_OPEN and DRV_CLOSE Messages</TITLE><META HTTP-EQUIV="CONTENT-TYPE" CONTENT="text/html; charset= iso-8859-1"><style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD><BODY BGCOLOR="#FFFFFF">
+<FONT FACE="verdana,arial,helvetica" SIZE="2">
+<H3>Handling the DRV_OPEN and DRV_CLOSE Messages </H3><P>The following code fragment illustrates the routines the sample device driver uses to handle the DRV_OPEN and DRV_CLOSE messages. This device driver supports only one instance of each video channel. </P>
+<P><BR></P>
+<PRE>PCHANNEL NEAR PASCAL VideoOpen(LPVIDEO_OPEN_PARMS lpOpenParms)
+{
+    PCHANNEL            pChannel;
+    LPDEVICE_INIT       lpDI = &amp;devInit;
+    LPDWORD             lpdwError = &amp;lpOpenParms-&gt;dwError;
+    DWORD               dwFlags = lpOpenParms-&gt;dwFlags;
+
+    // We're passed a DevNode in the VIDEO_OPEN_PARMS, which we'll pass
+    // down to the VxD.  This is really only needed when multiple 
+    // instances of identical hardware are installed, and we want to 
+    // let the application select which instance to use.
+    // The VxD must then compare the DevNode passed in with its internal
+    // list of DevNodes and use the corresponding hardware.
+
+    lpDI-&gt;dnDevNode = lpOpenParms-&gt;dnDevNode;
+
+    //
+    //  if this is the very first open then init the hardware.
+    //
+    AuxDebugEx (2, DEBUGLINE "VideoOpen, RefCount = %d\r\n", gwDriverUsage);
+
+    *lpdwError = DV_ERR_OK;
+
+    // Only initalize the first time opened
+    if (!fDeviceInitialized) {
+
+        // Acquire use of the capture hardware
+        if (!(AcquireVXP500( gpVxDEntry, &amp;devInit ))) {
+            D1("AcquireFailed");
+            *lpdwError = DV_ERR_NOTDETECTED;
+        }
+
+        // Perform hardware initialization
+        if (!HardwareInit(lpDI)) {
+            *lpdwError = DV_ERR_NOTDETECTED;
+            return NULL;
+        }
+
+        ConfigGetSettings();   // Get global hue, sat, channel, zoom.
+
+        if (ConfigInit(lpDI)) {
+            if (TransInit()) {  // Allocate the YUV conversion tables
+                *lpdwError = DV_ERR_NOMEM;
+            } else
+                fDeviceInitialized = TRUE;
+        } else
+            *lpdwError = DV_ERR_NOMEM;
+
+        if (*lpdwError != DV_ERR_OK) {
+            TransFini();
+            HardwareFini();
+            return NULL;
+        }
+    } // end if this is the first open.
+
+    // get instance memory
+    pChannel = (PCHANNEL)LocalAlloc (LPTR, sizeof(CHANNEL));
+    if (pChannel == NULL)
+        return (PCHANNEL) NULL;
+
+    //
+    //  make sure the channel is not already in use
+    //
+    switch (dwFlags &amp; 
+        (VIDEO_EXTERNALIN | VIDEO_EXTERNALOUT | VIDEO_IN | VIDEO_OUT)) {
+
+    case VIDEO_EXTERNALIN:
+        if (gwCaptureUsage &gt;= MAX_CAPTURE_CHANNELS)
+            goto error;
+        gwCaptureUsage++;
+        break;
+
+    case VIDEO_EXTERNALOUT:
+        if ( gwDisplayUsage &gt;= MAX_DISPLAY_CHANNELS)
+            goto error;
+        gwDisplayUsage++;
+        break;
+
+    case VIDEO_IN:
+        if ( gwVideoInUsage &gt;= MAX_IN_CHANNELS)
+            goto error;
+        gwVideoInUsage++;
+        break;
+
+    case VIDEO_OUT:
+        if ( gwVideoOutUsage &gt;= MAX_OUT_CHANNELS)
+            goto error;
+        gwVideoOutUsage++;
+        break;
+
+    default:
+        goto error;
+    }
+
+    //
+    // Now that the hardware is allocated init our instance struct.
+    //
+    pChannel-&gt;fccType = OPEN_TYPE_VCAP;
+    pChannel-&gt;dwOpenType = (dwFlags
+        &amp;(VIDEO_EXTERNALIN | VIDEO_EXTERNALOUT | VIDEO_IN | VIDEO_OUT));
+    pChannel-&gt;dwOpenFlags = dwFlags;
+    pChannel-&gt;lpVHdr = NULL;
+    pChannel-&gt;dwError = 0L;
+
+    gwDriverUsage++;
+    return pChannel;
+
+error:
+    if (pChannel)
+        LocalFree((HLOCAL)pChannel);
+
+    *lpdwError = DV_ERR_ALLOCATED;
+    return NULL;
+}
+
+
+</PRE>
+<P>The following example shows the function used to close the example video capture device driver: </P>
+<P><BR></P>
+<PRE>DWORD NEAR PASCAL VideoClose(PCHANNEL pChannel)
+{
+    // Decrement the channel open counters
+    switch (pChannel-&gt;dwOpenType) {
+
+    case VIDEO_EXTERNALIN:
+        gwCaptureUsage--;
+        break;
+
+    case VIDEO_EXTERNALOUT:
+        gwDisplayUsage--;
+        break;
+
+    case VIDEO_IN:
+        // If started, or buffers in the queue,
+        // don't let the close happen
+        if (gfVideoInStarted || lpVHdrFirst)
+            return DV_ERR_STILLPLAYING;
+        gwVideoInUsage--;
+        break;
+
+    case VIDEO_OUT:
+        gwVideoOutUsage--;
+        break;
+
+    default:
+        break;
+    }
+
+    gwDriverUsage--;        // Decrement overall driver useage count.
+
+    if (gwDriverUsage == 0) {
+        HardwareFini();        // Shut down the device.
+        TransFini();           // Free translation tables.
+        ReleaseVXP500( gpVxDEntry, &amp;devInit );
+        fDeviceInitialized = FALSE;
+    }
+
+    // Free the instance data.
+    LocalFree((HLOCAL)pChannel);
+    return DV_ERR_OK;
+}
+</PRE></FONT></BODY></HTML>

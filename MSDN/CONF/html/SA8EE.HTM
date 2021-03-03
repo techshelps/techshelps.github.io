@@ -1,0 +1,134 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Asynchronous Windows Sockets Calls</TITLE><META HTTP-EQUIV="CONTENT-TYPE" CONTENT="text/html; charset= iso-8859-1"><style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"><style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>	<BODY bgcolor="#FFFFFF" link=#003399 vlink=#996699>
+
+
+	<FONT FACE="Verdana, Arial, Helvetica" SIZE="2">
+
+	<!--TOOLBAR_START-->
+	<!--TOOLBAR_EXEMPT-->
+	<!--TOOLBAR_END-->
+
+<h3>Asynchronous Windows Sockets Calls</H3><p>By default, an application's socket calls will block until the requested operation can be completed. For example, if an application wishes to receive data from another application, its call to the <I>recv()</I> API will not complete until the other application has sent data which can be returned to the calling application. </P>
+<p>This model is sufficient for simple applications, but more sophisticated applications may not wish to block for an arbitrarily long period for a network event. In fact, in Windows 3.1, blocking operations are considered poor programming practice because applications are expected to call <I>PeekMessage() </I>or <I>GetMessage()</I> regularly in order to allow other applications to run and to receive user input.</P>
+<p>To support the sophisticated applications which fit better within the Windows programming paradigm, Windows Sockets supports the concept of "nonblocking sockets." If an application sets a socket to nonblocking, then any operation which may block for an extended period will fail with the error code WSAEWOULDBLOCK. This error indicates to the application that the system was unable to perform the requested operation immediately.</P>
+<p>How, then, does an application know when it can successfully perform certain operations? Polling would be one (poor) solution. The optimal mechanism is to use the asynchronous notification mechanism provided by the <I>WSAAsyncSelect()</I> API. This routine allows an application to notify a Windows Sockets implementation of certain events which are of interest, and to receive a Windows message when the events occur. For example, an application may indicate interest in data arrival with the FD_READ message, and when data arrives the Windows Sockets DLL posts a message to the application's window handle. The application receives this message in a <I>GetMessage() </I>or <I>PeekMessage()</I> call and can then perform the corresponding operation.</P>
+<p>The following code fragment demonstrates how an application opens and connects a TCP socket and indicates that it is interested in being notified when one of three network events occurs:</P>
+<P><ul><li>    data arrives on the socket</P>
+<P><li>    it is possible to send data on the socket</P>
+<P><li>    the remote end has closed the socket</P></ul>
+<P CLASS="spacing"><BR></P>
+<pre><FONT FACE="Courier New" SIZE="3">/* Static IP address for remote server for example. In reality, this would be    
+   specified as a hostname or IP address by the user */
+
+#define    SERVER            "131.107.1.121"        
+
+#define     SOCKET_MESSAGE     WM_USER+1
+#define     SERVER_PORT         4000
+
+struct sockaddr_in        srv_addr;
+SOCKET            cli_sock;
+
+.
+.
+.
+/* Create client-side socket */
+
+cli_sock=socket(PF_INET,SOCK_STREAM,0);
+
+if (cli_sock==INVALID_SOCKET){
+    sprintf(buf, "Windows Sockets error %d: couldn't open socket.",
+         WSAGetLastError());
+    MessageBox(hWnd,buf,"Windows Sockets Error",MB_OK);
+    shutdown_appl();
+}
+
+srv_addr.sin_family = AF_INET;
+srv_addr.sin_addr.s_addr = inet_addr(SERVER);
+srv_addr.sin_port=SERVER_PORT;
+
+/* Connect to server */
+
+if (connect(cli_sock,(LPSOCKADDR)&amp;srv_addr,sizeof(srv_addr))==SOCKET_ERROR){
+
+    sprintf(buf,"Windows Sockets error %d: Couldn't connect socket.",
+         WSAGetLastError());
+    MessageBox (hWnd,buf,"Windows Sockets Error",MB_OK);
+    shutdown_appl();
+}
+
+/* Set up async select on FD_READ, FD_WRITE, and FD_CLOSE events */
+
+err = WSAAsyncSelect(cli_sock, hWnd, SOCKET_MESSAGE, FD_READ|FD_WRITE|FD_CLOSE);
+if (err == SOCKET_ERROR) {
+    sprintf(buf,"Windows Sockets error %d: WSAAsyncSelect failure.",
+         WSAGetLastError());
+    MessageBox (hWnd,buf,"Windows Sockets Error",MB_OK);
+    shutdown_appl();
+}</font></pre>
+<p>When one of the specified network events occurs, the specified window handle <I>hWnd</I> receives a message containing a <I>wMsg</I> of SOCKET_MESSAGE. The <I>wParam</I> field of the message will have the socket handle, and <I>lParam</I> contains two pieces of information: the low word contains the event that occurred (FD_READ, FD_WRITE, or FD_CLOSE) and the high word contains an error code, or 0 if there was no error. Code similar to the following fragment, which would belong in an application's main window procedure, may be used to interpret a message from <I>WSAAsyncSelect()</I>:</P>
+<P CLASS="spacing"><BR></P>
+<pre><FONT FACE="Courier New" SIZE="3">long FAR PASCAL _export WndProc(HWND hWnd, UINT message, UINT wParam, LONG lParam)
+{
+    INT err;
+
+    switch (message) {
+
+    case ...:
+        /* handle Windows messages */
+    .
+    .
+    .
+    case SOCKET_MESSAGE:
+
+        /* A network event has occurred on our socket.  
+           Determine which network event occurred. */
+
+        switch (WSAGETSELECTEVENT(lParam)) {
+        case FD_READ:
+            /* Data arrived.  Receive it. */
+            err = recv(cli_sock, Buffer, BufferLength, 0);
+            if (WSAGetLastError() == WSAEWOULDBLOCK) {
+                /* We have already received the data. */
+                break;
+            }
+            if (err == SOCKET_ERROR) {
+                sprintf(buf, "Windows Sockets error %d: receive error.", WSAGetLastError());
+                MessageBox(hWnd,buf,"Windows Sockets Error",MB_OK);
+                shutdown_appl();
+            }
+            .
+            .
+            /* Do something useful with the data. */
+            .
+            .
+            break;
+
+        case FD_WRITE:
+            /* We can send data. */
+
+            err = send(cli_sock, Buffer, BufferLength, 0);
+            if (err == SOCKET_ERROR) {
+                if (WSAGetLastError() == WSAEWOULDBLOCK) {
+                    /* Send buffers overflowed. */
+                    break;
+                }
+                sprintf(buf, "Windows Sockets error %d: send failed.",
+                     SAGetLastError());
+                MessageBox(hWnd,buf,"Windows Sockets Error",MB_OK);
+                shutdown_appl();
+            }
+            break;
+
+        case FD_CLOSE:
+            /* The remote closed the socket. */
+
+            closesocket(cli_sock);
+            break;
+        }
+
+        break;
+    }
+.</font></pre>
+<p>An important part of the behavior of <I>WSAAsyncSelect()</I> is that after the Windows Sockets DLL has posted a message for a particular network event, the DLL refrains from posting another message for that event until the application has called the "reenabling function" for that event. For example, once an FD_READ has been posted, no more FD_READ messages will be posted until the application calls <I>recv()</I>. This prevents an application's message queue from being overflowed with messages for a single network event.</P>
+<p>Using <I>WSAAsyncSelect()</I> can simplify and improve organization in Windows applications by allowing them to be fully event-driven. Such an application responds to network events in much the same way it responds to user events such as a mouse click. In addition, applications which make use of WSAAsyncSelect() are better behaved Windows applications since they must frequently call <I>PeekMessae() </I>or <I>GetMessage()</I> in order to receive the network messages.</P></BODY></HTML>

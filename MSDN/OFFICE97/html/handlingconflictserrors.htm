@@ -1,0 +1,146 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Handling Conflicts and Errors</title>
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000>
+
+<FONT FACE="Verdana, Arial, Helvetica" SIZE="2">
+<h2><a name="handlingconflictserrors"></a>Handling Conflicts and Errors</h2>
+<p>
+When using database replication, you may occasionally encounter design errors, synchronization conflicts, or synchronization errors. <i>Design errors</i> occur when a design change in the Design Master conflicts with a design change in a replica. The synchronization fails and the content of different replicas starts to diverge. <i>Synchronization conflicts</i> occur when users update the same record at two replicasin the replica set and Microsoft Jet attempts to synchronize the two versions. The synchronization succeeds, but the changes from only one of the replicas are applied to the other. <i>Synchronization errors</i> occur when a change to data in one replica cannot be applied to another replica because it would violate a constraint, such as a referential integrity rule. The synchronization succeeds, but the content of replicas is different.</p>
+<p>
+Synchronization errors and design errors are more significant problems than synchronization conflicts because the replicas no longer share a common design or identical data. This section describes the factors that contribute to conflicts and errors, and suggests ways to prevent or resolve them.</p>
+<h3>Design Errors</h3>
+<p>
+When you make changes to the design of your database, Microsoft Jet records each change in the MSysSchChange system table. When Microsoft Jet applies all the design changes from one replica to another, it applies the changes in the exact order that the changes occurred in the Design Master. This ensures that all replicas become identical to the Design Master.</p>
+<p>
+A design error most often occurs when you attempt to synchronize design changes with a replica that is opened exclusively. A locking error occurs, and the design changes are not transferred to the replica.</p>
+<p>
+A design error can also occur if you set a primary key on a field in your replica and, before you synchronize this change, a user enters a duplicate value in that field in another replica. When you synchronize with the other replica, Microsoft Jet determines that the records do not have unique identifiers and, therefore, the field cannot be used as a primary key.</p>
+<p>
+The MSysSchemaProb table is present only when an error has occurred in updating the design of a replica. The table provides details about the cause of the error, including:
+<ul>
+<li>
+The action that failed (Create Index, Create Table, and so on).</li>
+<li>
+The text of the error message.</li>
+<li>
+The version number of the replica that encountered the problem.</li>
+<li>
+Context information such as table names and field names.</li>
+</ul>
+<p>
+The MSysSchemaProb table is a local table and is not replicated. The records in the MSysSchemaProb table are automatically deleted when the corresponding design change is successfully applied during synchronization.</p>
+<h4>Correcting Design Errors</h4>
+<p>
+To correct design errors, use the MSysSchemaProb table to identify the action that failed and then manually correct the corresponding object in the replica. You always fix the problem at the replica even if a design change in the Design Master caused the error.</p>
+<p>
+For example, to correct a locking error that is caused by trying to synchronize with a replica that is open exclusively, close the replica and try the synchronization again.</p>
+<h3>Synchronization Conflicts</h3>
+<p>
+When you synchronize replicas, conflict between versions is always possible because the same record may be updated at two different locations. If this happens, Microsoft Jet can’t determine which of the two changes should take precedence.</p>
+<p>
+Microsoft Jet accepts the changes from one replica and records the rejected changes in a conflict table in the replica whose changes were not accepted. By default, the record with the most changes since the last synchronization has priority. Microsoft Jet doesn’t look at the content of the data that has changed; instead, it examines the version number of the record. Each time a change is made to the data in a record, the version number increases by one. For example, a record with no changes has a version number of 0. A change to data changes the version number to 1. A second change to the same data, or a change to different data in the record, changes the version number to 2, and so on. The update with the higher version number wins because the Synchronizer assumes that the replica that changed the most frequently is the correct version. When two replicas give an updated record the same version number, Microsoft Jet chooses which update to accept based upon the value of the <b>ReplicaID</b> property. Because you cannot change the algorithm used to decide which changes are accepted and which are rejected, be prepared to manually resolve the errors in any replica.</p>
+<p>
+Conflict tables derive both their names and fields from the underlying tables. Conflict table names are in the form <i>table</i>_conflict, where <i>table</i> is the original table name. For example, if the original table name is Customers, the conflict table name is Customers_conflict. Because conflicts are reported only to the replica that originated the losing update, conflict tables are not replicated.</p>
+<h4>Resolving Synchronization Conflicts</h4>
+<p>
+After synchronizing two replicas, review the database for conflicts and determine whether you need to take any further action. You can determine if a conflict has occurred for a specific table by using the <b>ConflictTable</b> property. This property returns the name of the conflict table that contains the database records that conflicted during synchronization. If there is no conflict table, or if the database is read-only or is a replica, the<b> ConflictTable</b> property returns a zero-length string (&quot;&quot;).</p>
+<p>
+You can then examine the conflicts and work through them record by record, fixing whatever is appropriate. For example, you can:
+<ul>
+<li>
+Manually update the database table with the data from its conflict table.</li>
+<li>
+Leave the database unchanged and delete the record from the conflict table.</li>
+<li>
+Develop a custom conflict resolution routine that always assigns a higher priority to changes in one specific replica over another replica.</li>
+</ul>
+<p>
+Microsoft Access automatically notifies you of a synchronization conflict and provides the <b>Resolve Conflicts</b> command (<b>Tools</b> menu, <b>Replication</b> submenu) that you can use to view conflict tables and manually resolve each conflict.</p>
+<p>
+You can substitute a custom conflict resolution routine for the <b>Resolve Conflicts </b>command. For example, to find the name of the conflict table associated with a table in your database, examine each record conflict, and take action to resolve each conflict, you can use the following code:</p>
+<pre><code>Function ConflictResolver()
+&#09;Dim dbs As Database
+&#09;Dim tdf As TableDef
+&#09;Dim fld As Field
+&#09;Dim rstConflict As Recordset
+&#09;Dim rstSource As Recordset
+
+&#09;Set dbs = CurrentDb
+
+&#09;For Each tdf In dbs.TableDefs
+&#09;&#09;' Check to see if the table has a conflict table.
+&#09;&#09;If (tdf.ConflictTable &lt;&gt; &quot;&quot;) Then
+&#09;&#09;&#09;Set rstConflict = dbs.OpenRecordset(tdf.ConflictTable, dbsOpenTable)
+&#09;&#09;&#09;Set rstSource = dbs.OpenRecordset(tdf.Name, dbOpenTable)
+&#09;&#09;&#09;rstSource.Index = &quot;s_GUID&quot;
+&#09;&#09;&#09;rstConflict.MoveFirst
+&#09;&#09;&#09;' Process the conflict table's records.
+&#09;&#09;&#09;Do While Not rstConflict.EOF
+&#09;&#09;&#09;&#09;rstSource.Seek &quot;=&quot;, rstConflict![s_GUID]
+&#09;&#09;&#09;&#09;If Not rstSource.NoMatch Then
+&#09;&#09;&#09;&#09;&#09;' Check to see if the losing record was more recent.
+&#09;&#09;&#09;&#09;&#09;If rstSource.LastUpdated &lt; rstConflict.LastUpdated Then
+&#09;&#09;&#09;&#09;&#09;&#09;On Error Resume Next
+&#09;&#09;&#09;&#09;&#09;&#09;rstSource.Edit
+&#09;&#09;&#09;&#09;&#09;&#09;' Update fields.
+&#09;&#09;&#09;&#09;&#09;&#09;For each fld in rstSource.Fields
+&#09;&#09;&#09;&#09;&#09;&#09;&#09;rstSource(fld.Name) = rstConflict(fld.Name)
+&#09;&#09;&#09;&#09;&#09;&#09;Next fld
+&#09;&#09;&#09;&#09;&#09;&#09;rstSource.Update
+&#09;&#09;&#09;&#09;&#09;&#09;On Error GoTo 0
+&#09;&#09;&#09;&#09;&#09;End If
+&#09;&#09;&#09;&#09;End If
+&#09;&#09;&#09;&#09;' Delete conflict record.
+&#09;&#09;&#09;&#09;rstConflict.Delete
+&#09;&#09;&#09;&#09;rstConflict.MoveNext
+&#09;&#09;&#09;Loop
+&#09;&#09;&#09;rstConflict.Close
+&#09;&#09;&#09;rstSource.Close
+&#09;&#09;End If
+&#09;Next tdf
+
+End Function
+</code></pre>
+<p>
+<b>See Also</b>&nbsp;&nbsp;&nbsp;For more information on custom conflict resolution code, search the Help index for “ReplicationConflictFunction property.”</p>
+<h3>Synchronization Errors</h3>
+<p>
+There are four sources of potential synchronization errors to consider when building your application:
+<ul>
+<li>
+<b>Table-level validation rules   </b>With Microsoft Jet, you can establish table-level validation rules to restrict the value or type of data entered into a table. However, if you implement a rule without determining that any existing data doesn’t violate the validation rule, you may encounter a synchronization error in the future. To correct the error, you correct the invalid values in the sending replica. You can avoid the error by synchronizing all replicas in the replica set before you apply a table-level validation rule.</li>
+<li>
+<b>Duplicate keys   </b>Duplicate keys can occur when two users at different replicas either simultaneously insert a new record and use the same primary key for their respective records or change the key on two different records when both happen to use the same value. When the replicas are synchronized, the synchronization succeeds, but Microsoft Jet records a duplicate key error in the MSysErrors table for each of the records that couldn’t be inserted or updated. To correct a duplicate key error, change the value of one of the keys or delete the duplicate record.</li>
+<li>
+<b>Referential integrity   </b>Referential integrity preserves the relationship between tables when you’re adding or deleting records. Enforced referential integrity prevents you from adding a record to or deleting a record from a related table if there is no corresponding record in the primary table. In some situations, enforced referential integrity can result in synchronization errors. To reduce referential integrity errors during synchronization, you may want to use the s_GUID field as the primary key in some or all of your replicated tables.</li>
+<li>
+<b>Record locks   </b>If a record is locked when Microsoft Jet attempts to update it during a synchronization, Microsoft Jet retries the update several times. If the record remains locked after repeated attempts, the synchronization fails, and Microsoft Jet records an error in the MSysErrors system table. Although this type of error is exceedingly rare, it may occur in certain multiuser applications. You can ignore errors caused by locked records because Microsoft Jet retries updating the records during the next synchronization. Because it’s unlikely that the same record will be locked during the next synchronization, Microsoft Jet updates the record and removes the error from the MSysErrors table.</li>
+</ul>
+<h4>Correcting Synchronization Errors</h4>
+<p>
+Synchronization errors are recorded in the MSysErrors table and replicated to all replicas in the replica set. This table includes information about the:
+<ul>
+<li>
+Table involved.</li>
+<li>
+Record that encountered the errors.</li>
+<li>
+Replica or replicas where the error was detected.</li>
+<li>
+Replica that last changed the record.</li>
+<li>
+Type of operation that failed.</li>
+<li>
+Reason it failed.</li>
+</ul>
+<p>
+Correct errors as soon as possible, because they indicate that the data in different replicas may be diverging. Be especially careful to correct synchronization errors before you move your database, because the error is recorded against the value of the <b>ReplicaID</b> property at the time the error occurred. If the value of the <b>ReplicaID</b> property changes, Microsoft Jet can’t automatically remove the error records during a subsequent synchronization. If you don’t remove the error record, you get an error each time you open the database even if you have corrected the problem.</p>
+<p>
+In many circumstances, errors are self-correcting during the next synchronization. For example, if you attempt to synchronize a record that another user locked, the update fails. Microsoft Jet records an error and attempts to reapply the update at a later time. If the subsequent update succeeds, the error record is removed. As a general rule, always synchronize all replicas in the replica set before manually correcting synchronization errors. Due to the nature of bidirectional synchronizations, it may take more than one synchronization to clear the error record from the MSysErrors table after the error is corrected. However, Microsoft Jet should clear all corrected errors from the MSysErrors table after two bidirectional synchronizations.</p>
+</FONT></FONT></BODY>
+</HTML>

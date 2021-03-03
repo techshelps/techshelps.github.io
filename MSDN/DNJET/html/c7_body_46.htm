@@ -1,0 +1,105 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Resolving Conflicts by Using DAO</title>
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>	<BODY bgcolor="#FFFFFF" link=#003399 vlink=#996699>
+
+	<FONT FACE="Verdana, Arial, Helvetica" SIZE="2">
+
+	<!--TOOLBAR_START-->
+	<!--TOOLBAR_EXEMPT-->
+	<!--TOOLBAR_END--><h4><a name="jb2resolving_conflicts_by_using_dao"></a>Resolving Conflicts by Using DAO</h4>
+<p>
+After synchronizing two replicas, you should review each conflict to determine whether the correct information was applied to the database. You can determine if a conflict has occurred for a specific table by using the <b>ConflictTable</b> property. This property returns the name of the conflict table that contains the database records that conflicted during synchronization. For example, to find the name of the conflict table and examine and resolve each record conflict, you can use the following code. This is a generic function into which you can plug your own custom conflict-resolution code:</p>
+<pre><FONT FACE="Courier New" SIZE="3">Sub ResolveConflicts(strDbPath As String)
+&#09;Dim dbs As Database
+&#09;Dim tdf As TableDef, rst As Recordset
+&#09;
+&#09;Set dbs = OpenDatabase(strDbPath)
+&#09;For Each tdf In dbs.TableDefs
+&#09;&#09;If (Len(tdf.ConflictTable) &gt; 0) Then
+&#09;&#09;&#09;Set rst = dbs.OpenRecordset(tdf.ConflictTable)
+&#09;&#09;&#09;' Process each record.
+&#09;&#09;&#09;With rst
+&#09;&#09;&#09;&#09;.MoveFirst
+&#09;&#09;&#09;&#09;Do Until .EOF
+&#09;&#09;&#09;&#09;&#09;' Perform conflict resolution.
+&#09;&#09;&#09;&#09;&#09;' Remove conflicting record when finished.
+&#09;&#09;&#09;&#09;&#09;.Delete
+&#09;&#09;&#09;&#09;&#09;.MoveNext
+&#09;&#09;&#09;&#09;Loop
+&#09;&#09;&#09;&#09;.Close
+&#09;&#09;&#09;End With
+&#09;&#09;End If
+&#09;Next tdf
+End Sub</font></pre>
+<p>
+If there is no conflict table, or if the database is nonreplicable, the <b>ConflictTable</b> property returns a zero-length string.</p>
+<p>
+As you review each conflict in the conflict table, you should take the appropriate action. If the record version selected by Microsoft Jet was the correct version and no further action is necessary, you can delete the record from the conflict table. If the record version selected by Microsoft Jet was not the correct version, you might want to:
+<ul>
+<li>
+Manually enter the data from the conflict table in the database.<br><br></li>
+<li>
+Develop a custom conflict-resolution routine that always assigns a higher priority to changes in one specific replica over another replica.<br><br></li>
+<li>
+Consider whether procedural changes regarding how data is entered or changed in records are necessary.</li>
+</ul>
+<p>
+The following code is an example of a custom conflict-resolution procedure. This function compares the conflicting records and determines which one was entered most recently. The most recently entered record wins the conflict. For this procedure to work, each table must have a MostRecentUpdate field that is updated to the current time each time the record is updated.</p>
+<p>
+You would run this procedure after a replica has been synchronized with another replica in the replica set. At this point Microsoft Jet will have performed its conflict resolution, so that the record that was changed the most times or that has the lowest <b>ReplicaID</b> property value “wins” the conflict and is written into the source table in both replicas. The losing record is written into the conflict table in the replica in which the record was originally entered.</p>
+<p>
+This function iterates through each <b>TableDef</b> object in the database, looking to see if it has a conflict table by checking the <b>TableDef</b> object’s <b>ConflictTable</b> property. When a conflict table is found, it opens up recordsets on both the source table and the conflict table. The procedure then moves through each record in the conflict table, and uses the <b>Seek</b> method on the s_GUID field, which exists as a unique index in both tables, to compare the source table record and the conflicting record. It checks the MostRecentUpdate field in both tables, and if the source table (which contains the winning record) was not updated last, this record is replaced by the (former) losing record in the conflict table. Regardless of whether it wins or loses, the conflict record is then deleted.</p>
+<p>
+Note that in order to use this function to resolve conflicts on a table in your replicable database, you must add a Date/Time field named MostRecentUpdate to the table. You must also ensure that every time a user updates a record, the time at which the update occurred is stored in the MostRecentUpdate field.</p>
+<pre><FONT FACE="Courier New" SIZE="3">Function ConflictResolver()
+&#09;Dim dbs As Database
+&#09;Dim tdf As TableDef
+&#09;Dim fld As Field
+&#09;Dim rstConflict As Recordset
+&#09;Dim rstSource As Recordset
+
+&#09;Set dbs = DBEngine(0)(0)
+
+&#09;For Each tdf In dbs.TableDefs
+&#09;&#09;' Check to see if table has a conflict table.
+&#09;&#09;If (tdf.ConflictTable &lt;&gt; &quot;&quot;) Then
+&#09;&#09;&#09;Set rstConflict = dbs.OpenRecordset(tdf.ConflictTable, dbOpenTable)
+&#09;&#09;&#09;Set rstSource = dbs.OpenRecordset(tdf.Name, dbOpenTable)
+&#09;&#09;&#09;rstSource.Index = &quot;s_GUID&quot;
+&#09;&#09;&#09;rstConflict.MoveFirst
+&#09;&#09;&#09;' Scroll through conflict table's records.
+&#09;&#09;&#09;Do While Not rstConflict.EOF
+&#09;&#09;&#09;&#09;rstSource.Seek &quot;=&quot;, rstConflict![s_GUID]
+&#09;&#09;&#09;&#09;' Make sure match was retrieved in source.
+&#09;&#09;&#09;&#09;If Not rstSource.NoMatch Then
+&#09;&#09;&#09;&#09;&#09;' Check to see if loser was more recent.
+&#09;&#09;&#09;&#09;&#09;If rstSource!MostRecentUpdate &lt; rstConflict!MostRecentUpdate Then
+&#09;&#09;&#09;&#09;&#09;&#09;On Error Resume Next
+&#09;&#09;&#09;&#09;&#09;&#09;rstSource.Edit
+&#09;&#09;&#09;&#09;&#09;&#09;' Scroll through fields to update.
+&#09;&#09;&#09;&#09;&#09;&#09;For Each fld In rstSource.Fields
+&#09;&#09;&#09;&#09;&#09;&#09;&#09;rstSource(fld.Name) = rstConflict(fld.Name)
+&#09;&#09;&#09;&#09;&#09;&#09;Next fld
+&#09;&#09;&#09;&#09;&#09;&#09;rstSource.Update
+&#09;&#09;&#09;&#09;&#09;&#09;On Error GoTo 0
+&#09;&#09;&#09;&#09;&#09;End If
+&#09;&#09;&#09;&#09;End If
+&#09;&#09;&#09;&#09;' Delete conflict record.
+&#09;&#09;&#09;&#09;rstConflict.Delete
+&#09;&#09;&#09;&#09;rstConflict.MoveNext
+&#09;&#09;&#09;Loop
+&#09;&#09;&#09;rstConflict.Close
+&#09;&#09;&#09;rstSource.Close
+&#09;&#09;End If
+&#09;Next tdf
+End Function</font></pre>
+<p>
+When this function copies the conflict table data over the source table data, it disables error handling and uses a <b>For Each...Next</b> loop to iterate through all the fields. Because all the replication system fields are read-only, the function can’t update them and would return an error if error handling were enabled.</p>
+<p>
+There are two problems with resolving conflicts so that the most recently updated record is the winner. The first problem is that computer clocks are not synchronized on a network, so you can’t perform a completely accurate comparison to determine which record was updated last. The second problem occurs when your users have replicas in different time zones. If this scheme doesn’t work for your application, there are a variety of different conflict-resolution schemes that you can implement. You can use the function above as a starting point, and develop your own conflict-resolution paradigms, depending on your needs.</p>
+</BODY>
+</HTML>

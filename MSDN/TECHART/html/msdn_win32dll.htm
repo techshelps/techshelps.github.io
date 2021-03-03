@@ -1,0 +1,307 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>DLLs in Win32</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_win32dll"></a></sup>DLLs in Win32</h1>
+<p>
+Randy Kath<br>
+Microsoft Developer Network Technology Group</p>
+<p>
+Created: September 15, 1992</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="277">
+</OBJECT><a href="javascript:sample1.Click()">Click to open or copy the files in the PortTool sample application for this technical article.</a></p>
+<h2>Abstract</h2>
+<p>
+The ability of an application to load and execute code from an external source at run time is one of the most useful features in software technology today. The Win32™ Application Programming Interface (API) provides this functionality through dynamic-link libraries (DLLs). They are implemented as separate source modules that are compiled and linked into libraries, independent of the application that uses them. Also, DLLs are <i>reentrant code</i>, allowing multiple threads of execution to use the same DLL simultaneously. DLLs have been a part of the Microsoft® Windows™ operating system for some time, remaining pretty much the same through Windows version 3.1. In Win32, however, DLLs have been changed to take advantage of new, Win32 memory-management features and to improve the interface between applications and DLLs.</p>
+<p>
+This article explores DLLs in their Win32 form. It describes how DLLs exist in memory when loaded, how to build a DLL, how to use a DLL for sharing memory between processes, and how to dynamically load and execute code in a DLL.</p>
+<p>
+The code examples in this article were extracted from the source code written for the PortTool program. The only exception is the example on using function tables to call functions in a DLL.</p>
+<h2>Win32 Implementation of DLLs</h2>
+<p>
+One of the more significant changes to DLLs for Win32™ is the location in memory where a DLL's code and data reside. In Win32, each application executes within the context of its own 32-bit, linear address space. In this way, every application has its own private address space that can only be addressed from code within this process. (In Win32, each application's private address space is referred to as the <i>process</i> for that application.) All of an application's code, data, resources, and dynamic memory also reside within an application's process. Further, it is not possible for an application to address data or code residing outside of its own process. Because of this, when a DLL is loaded it must somehow reside in the process of the application that loaded the DLL, and if more than one application loads the same DLL, it must reside in each application's process.</p>
+<p>
+So, to satisfy the above requirement—that is, to be reentrant (accessible from more than one thread at a time) and to have only one copy of the DLL physically loaded into memory—Win32 uses memory mapping. Through memory mapping, Win32 is able to load the DLL once into the global heap and then map the address range of the DLL into the address space of each application that loads it. Figure 1 depicts how a DLL is mapped to the address space of two different applications simultaneously. </p>
+<p>
+<img src="win32dll_1.gif" border=0></p>
+<p class=label>
+<b>Figure 1. DLLs are mapped to the address space of the applications that load them.</b></p>
+<p>
+Notice the DLL is physically loaded into the global heap only once, yet both applications share the code and resources of the DLL.</p>
+<p>
+In Microsoft® Windows™ version 3.1 and earlier, DLLs have a common set of data that is shared among all applications that load the DLL. This behavior is one of the more difficult obstacles to writing source code in DLLs. Win32 breaks this barrier by permitting DLLs to have separate sets of data, one for each of the applications that load a DLL. These sets of data are also allocated from the global heap, but they are not shared among applications. Figure 1 depicts each DLL data set and how it is mapped to the application to which it belongs. This new feature makes it much easier to write code for DLLs because the DLL does not have to guard against two applications accessing the same global variable(s).</p>
+<p>
+While it is easier to write code for DLLs shared among different applications, there is still a potential conflict in how global variables are used in a DLL. The scope of a DLL's data is the entire process of the application that loaded the DLL. So each thread in an application with multiple threads can access all the global variables in the DLL's data set. Since each thread executes independently of the others, a potential conflict exists if more than one thread is using the same global variable(s). Exercise caution when using global variables in a DLL that can be accessed by multiple threads in an application, and employ the use of semaphores, mutexes (mutual exclusions), wait events, and critical sections where necessary.</p>
+<p class=indent>
+<B><b>Tip</b></B>&nbsp;&nbsp;&nbsp;Since a DLL is mapped into the process of the application that loaded it, some confusion may exist as to who owns the current process when executing code in a DLL. Calling the <b>GetModuleHandle</b> function with a null module name parameter returns the module handle for the application, not the DLL, when called from the code of a DLL. It is a good idea to keep a copy of the DLL's module handle in a static variable for future reference when accessing the DLL's resources. (The module handle is passed to the <b>DllEntryPoint</b> function. See the "Win32's DllEntryPoint" section later in this article for more information.) The only other way to obtain the handle again is to use <b>GetModuleHandle</b> with a valid string identifying the path and filename of the DLL.</p>
+<p>
+The default behavior in Win32 is for DLLs to be memory-mapped as described and shown above. Yet, if a DLL needs to implement its global variables the way they were in Windows version 3.<i>x</i>, it can override the default behavior by specifying its data as SHARED (specifying data as SHARED is discussed in the "Building DLLs in Win32" section later in this article). It's even possible to create some global variables that are shared between all processes that load the DLL in conjunction with other global variables that are unique to each process. Figure 2 illustrates how memory is mapped among applications with shared global data.</p>
+<p>
+<img src="win32dll_2.gif" border=0></p>
+<p class=label>
+<b>Figure 2. DLLs can, but are not required to, share global variables among processes.</b></p>
+<p>
+For data that is not shared, each application that loads the DLL still gets its own copy of global data, the default behavior described in the previous paragraph. Notice that the variables that are shared are mapped, like the code and resources for the DLL; one copy is created in the global heap and mapped to each process.</p>
+<h2>Loading and Executing DLLs Dynamically</h2>
+<p>
+An application can load a DLL in two ways:
+<ul type=disc>
+<li>
+An application can link to the DLL such that it becomes loaded implicitly when the application is loaded and freed when the application terminates. <br><br></li>
+<li>
+An application can explicitly load a DLL when ready to use it and then free the DLL when finished with it.</li>
+</ul>
+<h3>Implicitly Loading a DLL</h3>
+<p>
+Applications can link to DLLs as though they are static libraries like the C run-time library. In doing so, however, they suffer the side effect that the DLL is loaded for the entire duration that the application is loaded. When a DLL is created, an exports file is produced. This exports file is used by the linker to resolve external references to symbols in the DLL. In this way, an application can simply include prototypes for the functions that a DLL exports in an optional header file supplied with the DLL. Then when an application's object files are linked into an executable image, references to the exported DLL functions are also included in that image. When the DLL is loaded, the references are mapped to their specific addresses as described above. This is an effective method for reducing the size of an executable image file because the actual body of code contained in the DLL is never linked into the application, only references to it are.</p>
+<p>
+Invoking an application that links to a DLL in this manner automatically loads the DLL during the initialization of the process for that application. If the DLL fails its initialization, the entire process initialization fails, and the application does not load. So applications that implicitly link to DLLs are dependent on the DLLs' existence for operation and are unable to load without them. When a process terminates (the result of closing an application), it automatically frees its use of the DLL as well. When all of the applications that are using a single DLL have freed their use of it, the DLL is finally released from memory. In other words, when all mappings of a DLL as depicted in Figures 1 and 2 are closed, the DLL is unloaded.</p>
+<h3>Explicitly Loading a DLL</h3>
+<p>
+Applications can achieve even more mileage from the DLL concept by explicitly loading and unloading DLLs only when they need to use them. DLLs are loaded explicitly by calling the <b>LoadLibrary</b> function. Similarly, they are freed through a call to the <b>FreeLibrary</b> function. Once the DLL is loaded, the application can call any exported function in the DLL by address—just like the functions within the application. Since the DLL is mapped into the address space of the application, the address of each function in the DLL is merely an offset into this process. </p>
+<p>
+An advantage to explicit loading is that an application need only call <b>GetProcAddress</b> to find the offset of the function in the DLL's code. Yet, since the function offset is merely an offset into the application's process, the application could call the function directly if it knew the address of the function. Using this feature, a DLL could set up a table of function addresses for all of its exported functions so that calling one of the functions is as easy as invoking an address specified in the table. All the application would have to do is load the address of the table once and directly address the functions contained within it. The DLL simply has to make the table public by exporting it and initialize the table with function addresses during initialization. As an example, the following two lists demonstrate the steps an application and a DLL must perform to achieve this functionality.</p>
+<h4>DLL code:</h4>
+<ul type=disc>
+<li>
+The DLL must make the function types and table public.<pre><code><b><u>PUBLIC.H
+
+</u></b>typedef BOOL&nbsp; (*F1)(char *, int);
+typedef void&nbsp; (*F2)(HANDLE);
+.
+.
+.
+typedef char *(*Fn)(void);
+
+typedef struct tagFunctionTable
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; F1&nbsp;&nbsp;&nbsp; f1;
+ &nbsp;&nbsp; F2&nbsp;&nbsp;&nbsp; f2;
+ &nbsp;&nbsp; .
+ &nbsp;&nbsp; .
+ &nbsp;&nbsp; .
+ &nbsp;&nbsp; Fn&nbsp;&nbsp;&nbsp; fn;
+ &nbsp;&nbsp; }FUNCTION_TABLE;
+</code></pre>
+</li>
+<li>
+During initialization, the DLL assigns function addresses to the function structure members.<pre><code><b><u>MYDLL.C
+
+</u></b>#include "public.h"
+
+FUNCTION_TABLE&nbsp;&nbsp;&nbsp; Function_Table;
+
+BOOL DllEntryPoint (&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; HANDLE&nbsp;&nbsp;&nbsp; hModule,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; DWORD&nbsp;&nbsp;&nbsp;&nbsp; dwFunction,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; LPVOID&nbsp;&nbsp;&nbsp; lpNot)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+{&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; switch (dwFunction)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case DLL_PROCESS_ATTACH:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Initialize function array.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Function_Table.f1 = (F1)MyFunction_1;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Function_Table.f2 = (F2)MyFunction_2;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Function_Table.fn = (Fn)MyFunction_n;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp; .
+ &nbsp;&nbsp; .
+ &nbsp;&nbsp; .
+}
+</code></pre>
+</li>
+<li>
+Finally, the DLL must export the function table variable to make it visible outside of the DLL code.<pre><code><b><u>MYDLL.DEF
+
+</u></b>exports&nbsp;&nbsp;&nbsp; Function_Table&nbsp;&nbsp;&nbsp;&nbsp; CONSTANT
+</code></pre>
+</li>
+</ul>
+<h4>Application code:</h4>
+<ul type=disc>
+<li>
+The application includes public information from the DLL's header file and allocates space for a pointer to the function table in the DLL.<pre><code><b><u>MYAPP.C
+
+</u></b>#include "public.h"
+
+FUNCTION_TABLE&nbsp;&nbsp;&nbsp; *Function;
+</code></pre>
+</li>
+<li>
+The application gets a handle to the DLL by loading it explicitly, which invokes the <b>DllEntryPoint</b> function in the DLL. The DLL uses this event to initialize the function table, ensuring valid function address entries are present in the function table when the application accesses them.<pre><code>hDLL = LoadLibrary ("MYDLL.DLL");
+</code></pre>
+</li>
+<li>
+Next, the application prepares to call a function in the DLL by loading the address of the function table and then invokes the functions directly by addressing the table entries.<pre><code>Function = (FUNCTION_TABLE *)GetProcAddress (hDLL,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "Function_Table");
+
+// Call function and test return value.
+if (Function-&gt;f1 (szStringParam, strlen (szStringParam)))
+ &nbsp;&nbsp; // Call dependent function.
+ &nbsp;&nbsp; Function-&gt;f2 (hWnd);
+else
+ &nbsp;&nbsp; strcpy (szStringParam, Function-&gt;fn ());
+</code></pre>
+</li>
+</ul>
+<p>
+There are a couple things of interest here. One, Win32 does not require the functions in the DLL to be exported, only the variable through which they are accessed. Two, the actual names of the functions in the DLL are hidden from the application calling them. In fact, they are generic function indexes into the structure. A DLL is then free to change its names internally and recompile without the application knowing the difference.</p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;It was not necessary to typedef each function type in the DLL public header file. This was done to build a layer of support into the interface, using the compiler. Providing these function prototypes informs the compiler of the types and number of parameters being passed to each function. Parameter type and number mismatches can then be flagged by the compiler as warnings.</p>
+<p>
+Another advantage to using explicit loading is that the DLL is loaded only when needed by the application. So if an application can be broken into separate functional groups that are mutually exclusive, these functional groups become prime candidates for DLLs. This way the application only loads this functionality if it is needed (for example, the user selects a command that invokes it). Also, the application can operate effectively without the existence of the DLL; it simply would not be able to access certain functionality that is included only through the inclusion of the DLL. This permits the application to build logic around testing for the existence of DLLs. For example, an application can determine if a DLL is available by loading the DLL. If the <b>LoadLibrary</b> call fails, the application might gray a menu item or disable an option, indicating that the functionality is not available.</p>
+<p class=indent>
+<B><b>Tip</b></B>&nbsp;&nbsp;&nbsp;To localize DLL load failure to the application that calls <b>LoadLibrary</b>, set the error mode to prevent the system from handling the error. The code below illustrates how this is done.</p>
+<pre><code>// Set error mode to let application handle critical errors.
+OldErrMode = SetErrorMode (SEM_FAILCRITICALERRORS);
+if (!(hDLL = LoadLibrary ("PORT.C")))
+ &nbsp;&nbsp; // Error message.
+ &nbsp;&nbsp; ErrorNotify (NULL, IDS_LOADPORTFAILED);
+SetErrorMode (OldErrMode);
+</code></pre>
+<h2>Win32's DllEntryPoint</h2>
+<p>
+Perhaps the biggest improvement to the way DLLs are used in Win32 is the entry point. In Win32 there is a single entry point (<b>DllEntryPoint</b>) that is used for both loading and unloading of DLLs. <b>DllEntryPoint</b> replaces both <b>LibMain</b> and <b>WEP</b> functions in Windows version 3.<i>x</i>.</p>
+<p>
+This is accomplished by passing a parameter, <i>dwReason,</i> whose value indicates exactly which action the entry function should perform. There are currently four distinct actions the <b>DllEntryPoint</b> function gets called to handle, distinguished by the four possible values for <i>dwReason:</i> DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH, DLL_THREAD_ATTACH, and DLL_THREAD_DETACH. The code segment below demonstrates a straightforward implementation of the <b>DllEntryPoint</b> function where the actions it performs are based on the <i>dwReason</i> parameter value.</p>
+<pre><code>BOOL DllEntryPoint (
+ &nbsp;&nbsp; HANDLE&nbsp;&nbsp;&nbsp; hDLL,
+ &nbsp;&nbsp; DWORD&nbsp;&nbsp;&nbsp;&nbsp; dwReason,
+ &nbsp;&nbsp; LPVOID&nbsp;&nbsp;&nbsp; lpReserved)
+{
+ &nbsp;&nbsp; 
+ &nbsp;&nbsp; switch (dwReason)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case DLL_PROCESS_ATTACH:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!InitializeProcess (hDLL))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return FALSE;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case DLL_PROCESS_DETACH:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CleanupProcess (hDLL);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case DLL_THREAD_ATTACH:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case DLL_THREAD_DETACH:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; default:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; return TRUE;
+}
+</code></pre>
+<p>
+Examination of the above code reveals that when <i>dwReason</i> is set to DLL_PROCESS_ATTACH, the DLL performs one-time process initialization. Each time the DLL is loaded—by a new application or, more precisely, by a new process—this function gets called so that the DLL can perform data initialization. Remember, when a DLL is loaded by a second application, it allocates another set of data for use only in that application process. So, even if the DLL has already been loaded once by another application, when loaded the second time the <b>DllEntryPoint</b> function gets called again with the <i>dwReason</i> parameter set to DLL_PROCESS_ATTACH. This is the mechanism that permits a DLL to initialize more than one set of data, one for each process that loads it.</p>
+<p>
+When the DLL is freed, <b>DllEntryPoint</b> is called again with <i>dwReason</i> set to DLL_PROCESS_DETACH. At this time, the DLL releases all of its system resources before the process terminates. DLLs in Win32 behave the same as they do in Windows version 3.<i>x</i> with respect to application reference count. The DLL is not actually released from system memory until all applications that loaded the DLL have freed it. Yet, as each application frees the DLL, the resources allocated for the DLL on behalf of that application are also freed. Figure 3 demonstrates what happens when resources are allocated and freed for a DLL called by more than one application.</p>
+<p>
+<img src="win32dll_3.gif" border=0></p>
+<p class=label>
+<b>Figure 3. DLL data is allocated and freed dynamically for each application that loads the DLL.</b></p>
+<p>
+Since Win32 is multithreaded as well as multitasking, DLLs support reentrancy among multiple threads within a single process. Each thread within a process that calls <b>LoadLibrary</b> invokes the <b>DllEntryPoint</b> function, but with <i>dwReason</i> set to DLL_THREAD_ATTACH. This permits initialization of data and/or resources within a DLL on a per-thread basis. Note that the initial thread in a process that loads a DLL generates the <b>DllEntryPoint</b> function call with <i>dwReason</i> set to DLL_PROCESS_ATTACH, not set to DLL_THREAD_ATTACH. Every other thread in that process generates a <b>DllEntryPoint</b> function call with <i>dwReason</i> set to DLL_THREAD_ATTACH. Similarly, a call to <b>FreeLibrary</b> will release the DLL from that thread. This event causes the <b>DllEntryPoint</b> function to be called with <i>dwReason</i> set to DLL_PROCESS_DETACH if it is the initial process thread or to DLL_THREAD_DETACH if it is any other thread in the process.</p>
+<p>
+A thread may load a DLL more than once (that is, make more than one <b>LoadLibrary</b> call for the same DLL), but the <b>DllEntryPoint</b> function is only invoked the first time it is loaded. Each subsequent <b>LoadLibrary</b> call succeeds, returns a valid DLL module handle, and increments a reference count on the DLL. So for every <b>LoadLibrary</b> call, a corresponding <b>FreeLibrary</b> call must be made on a thread-by-thread basis to decrement the reference count back to zero. Again, only when the count is at zero can the DLL be released from system memory. An exception to this occurs when a process exits. At this time the system automatically resets the reference count to all attached DLLs to zero for that process, enabling them to be released if they are not being accessed by any other process. Under these circumstances, <b>DllEntryPoint</b> is called only once with <i>dwReason</i> set to DLL_PROCESS_DETACH.</p>
+<p>
+Still other circumstances may exist where the <b>DllEntryPoint</b> function does not get called when a process exits. When a process or thread terminates abruptly because of an error condition, attached DLLs receive no indication in their <b>DllEntryPoint</b> function. Similarly, an application or thread halted by a call to either <b>TerminateProcess</b> or <b>TerminateThread</b> will have the same result. The DLL in these cases will not be freed by the application that loaded it, but the system will, in fact, release the DLL when all other processes (if any) are finished using it. Applications should refrain from using these functions to kill processes and threads, except in emergency shutdown situations. Alternatives to the <b>Terminate</b> functions are the <b>ExitProcess</b> and <b>ExitThread</b> functions, which perform a graceful shutdown of DLL process and thread dependents. </p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;There are two conditions in which a DLL may receive a DLL_PROCESS_DETACH entry. In both cases the process that loaded the DLL is exiting, but in one case it is exiting abruptly, potentially without saving any volatile data. This condition occurs when the exiting process calls the <b>ExitProcess</b> function. Win32 distinguishes these two process exit conditions by setting the <i>lpReserved</i> parameter to NULL for normal process exiting, such as a call to <b>FreeLibrary</b>. If the process makes a call to<b> ExitProcess</b>, <i>lpReserved</i> is set to a non-NULL value.</p>
+<h2>Managing Memory in DLLs</h2>
+<p>
+In versions of Windows prior to Win32, sharing memory between applications that loaded a DLL is relatively easy. The DLL simply allocates memory using <b>GlobalAlloc</b> with the memory flag set to GMEM_SHARE (or GMEM_DDESHARE). Then each application calls a function in the DLL to access the global memory. This method is not available in Win32, however, because applications are prevented from sharing memory directly between processes. Instead, any applications wishing to share memory among their processes must use another method known as memory-mapped files. </p>
+<p>
+Memory-mapped files provide support for processes to share memory by allocating memory in the global heap and mapping this memory to unique locations within each process. Like the shared DLL data described earlier, memory-mapped files are allocated once and mapped to each process that requests access to a view of the file. </p>
+<p>
+As it turns out, this technique is easily and efficiently integrated into the mechanics of a DLL. The DLL simply calls <b>CreateFileMapping</b> during its first process initialization. For subsequent process initializations, it opens additional handles to the original file mapping by calling <b>OpenFileMapping</b>. The DLL keeps this handle available (probably as a global variable, but not shared between processes) and maps a view of the file when it needs to access the memory by calling <b>MapViewOfFile</b>. This function returns a pointer that is used to access the memory-mapped file as though it were any other data within the DLL's (or, rather, the application's) process. When the DLL has finished accessing the memory, it calls <b>UnmapViewOfFile</b>. When the DLL is finished using the memory-mapped file, it simply calls <b>CloseHandle</b> on the global memory-mapped file handle. When all DLLs have closed the handle, the memory-mapped file is released from memory.</p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;Since the <b>DllEntryPoint</b> function has no way of indicating whether this call of DLL_PROCESS_ATTACH is the first, logic must be structured to handle this event without regard to when it occurred. Fortunately, Win32 is robust enough to handle this situation by allowing for testing to see if the memory has been mapped. This is done by first attempting to open a presumably existing file mapping, whether it actually exists or not. If the call fails, the memory mapping does not already exist and must be created. Otherwise, the DLL simply uses the handle that is returned. The example below demonstrates this logic.</p>
+<pre><code><b><u>PORT.C
+
+</u></b> &nbsp;&nbsp; LoadString (hDLL, IDS_MAPFILENAME, szMapFileName, MAX_PATH);
+
+ &nbsp;&nbsp; // Attempt to open existing file mapping.
+ &nbsp;&nbsp; if ((hMMFile = OpenFileMapping (FILE_MAP_READ, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; FALSE,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; szMapFileName)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // If successful, initialization has already been performed.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return TRUE;
+
+ &nbsp;&nbsp; if (!GetIniFile (hDLL, szIniFilePath))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return FALSE;
+
+ &nbsp;&nbsp; if ((int)(hFile = (HANDLE)OpenFile (szIniFilePath, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;of, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OF_READ)) == -1)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return FALSE;
+ &nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nFileSize = GetFileSize (hFile, NULL);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CloseHandle (hFile);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; if (!(hMMFile = CreateFileMapping ((HANDLE)0xffffffff,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; PAGE_READWRITE,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nFileSize * 2,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; szMapFileName)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return FALSE;
+</code></pre>
+<p>
+This example is an excerpt of code extracted from the PortTool DLL's process initialization routine. It first attempts to open a handle to an existing memory-mapped file based on a common memory-mapped filename. The name is stored as a string resource among the DLL's module resources. This way each process that attaches to the DLL is able to open a handle to the same memory-mapped file. Then, when an application needs to access the memory-mapped file, the application simply maps a view of the file through the file handle. This technique is remarkably efficient and easily coded. Note that if more than one thread may write to this memory at a time, a mutex (mutual exclusion) may be necessary to avoid contention.</p>
+<p>
+Another method for sharing information between processes that load a DLL is to share the DLL's global data. A provision exists for making a DLL's global data shared, but it is of little use for communicating information between processes. Because the addresses of pointers in one process make no sense to a second process, a second process could not address memory in the first process through global pointers. In fact, the value of the variables themselves is the extent of this communication, and even this is of little use because many values are useless in another process. For instance, a handle to an object such as a memory-mapped file can only be used in the context of the process that created it. Attempting to use that handle in another process results in an error. On the other hand, there are some useful methods for communicating between processes in this manner. For example, a global flag could be set up that indicated status between processes, process control could be managed from a parent process, or perhaps synchronization of independent processes could be achieved in this way. Keep in mind that, if more than one process will be writing to a variable, a critical section should be used to avoid contention.</p>
+<p>
+Still another conflict may arise when using global variables. Win32 is multithreaded, meaning that more than one thread may be accessing a DLL at a time. And if each thread belongs to the same process, they all share the global variables of that process, including the global variables of a DLL. Each thread that calls into the DLL has access to the global variables of that DLL. In some cases, it is desirable for each thread to have its own local set of data. Win32 provides a mechanism called thread local storage (TLS) that allows each thread to have its own set of data without the burden of huge, memory-management code.</p>
+<p>
+Using TLS, a DLL can generically manage memory for one or more threads without requiring the calling thread to keep track of and pass an ID. Win32 internally identifies each thread such that the DLL only needs to keep track of a single TLS index and let the system resolve which thread is calling it. Each process in Win32 is guaranteed at least 64 TLS indexes available. So at least 64 different DLLs that use TLS could be loaded into the same process simultaneously, assuming there were enough memory to support loading 64 DLLs.</p>
+<p>
+To set up and use TLS in a DLL, follow these steps:
+<ol>
+<li>
+Upon process initialization, a DLL allocates a TLS index through <b>TlsAlloc</b>, allocates some dynamic memory for this thread, and stores the address of the memory in the TLS slot through <b>TlsSetValue</b>.<br><br></li>
+<li>
+Upon thread initialization for subsequent threads, the DLL allocates more dynamic memory and stores the address of this memory using <b>TlsSetValue</b> with the TLS index value from before. The system resolves the TLS index and the thread internal ID to a different location than previous threads.<br><br></li>
+<li>
+Anytime the DLL needs to access its dynamic memory, it retrieves the address of that memory through <b>TlsGetValue</b>. Again, the system uses the thread's ID to determine which thread's memory address to return.<br><br></li>
+<li>
+When each thread detaches, it again retrieves the memory address and then explicitly releases the dynamic memory. If it fails to do so, the system does not clean up the memory until the process exits, leaving unavailable resources hanging around.<br><br></li>
+<li>
+When the process detaches from the DLL, the DLL should release the TLS index by calling <b>TlsFree.</b></li>
+</ol>
+<h2>Building DLLs in Win32</h2>
+<p>
+Creating DLLs in Win32 is easier than in Windows version 3.<i>x</i> and earlier. The main reason for this is that DLL code is no longer required to be treated as special-case code. In Win32, segment registers are not used for addressing code and data. Instead, both code and data reside in the same process and are addressed in a 32-bit linear address space. Additionally, the entire C run-time library has been implemented this way for Win32. This means that all of the previous limitations on C run-time functions that could be called in a DLL are no longer present. DLL source code is treated the same as application source code by the compiler. In fact, there are no DLL-specific switches required for compiling a DLL.</p>
+<p>
+Linking DLLs in Win32 requires small changes from standard application linking in Win32. One required change is the addition of a link switch, <b>-DLL</b>. Also, it is necessary to inform the linker of the name of your <b>DllEntryPoint</b> function (the function is documented and referred to as <b>DllEntryPoint</b> in this article, but Win32 allows you to use any name for this function). This is done by linking with the <b>-ENTRY</b> switch and indicating the name of your function.</p>
+<p>
+As was discussed earlier, all or a section of a DLL's data can be designated as SHARED memory. The linker allows explicit section loading instructions to be placed in the link line. To do this, the name of the section is required. The compiler pragma <b>data_seg</b> can be used for this purpose. The exact statement would appear as: </p>
+<pre><code>#pragma data_seg (".port")
+</code></pre>
+<p>
+Once the data section has been named, it can be explicitly linked as shared data using the link option:</p>
+<pre><code>-SECTION:.port,RWS
+</code></pre>
+<p>
+This would indicate that the section named ".port" is designated as READ, WRITE, and SHARED (RWS).</p>
+<p>
+An alternative approach to creating shared data in a DLL is to use the module definition file statement DATA READ WRITE SHARED. The effect of this is similar to explicit linking, but this statement marks all global data in the DLL as READ, WRITE, and SHARED. There is also a module definition file statement called SECTIONS that allows designation of specific named sections as an alternative to using the link option. The SECTIONS statement also requires the data section to be named. Borrowing from the pragma example presented above, the statement would appear as:</p>
+<pre><code>SECTIONS&nbsp; .port&nbsp; READ WRITE SHARED
+</code></pre>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;Win32 adopts a new standard for naming sections of code and data. The use of a single period replaces an underscore as a section prefix. The example above names a section ".port" where previously this would have been called "_port". Naming sections this way is by no means a requirement, simply a convention that makes code and data sections immediately identifiable.</p>
+<p>
+For a complete example of building a DLL—from make file to module definition files—refer to the PortTool source code provided as part of the Windows Win32 Software Development Kit for Windows NT™ and included in the Win32 Software Development Kit, Product Samples section on the Microsoft Developer Network CD.</p>
+</BODY>
+</HTML>

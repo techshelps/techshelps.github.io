@@ -1,0 +1,181 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Names in IStorage</title>
+<link disabled rel=stylesheet href=../../backsdk3.css>
+<style type="text/css">
+@import url(../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h2><a name="_com_names_in_istorage"></a>Names in IStorage</h2>
+<p>
+This is the most complex interoperability issue. In the <b>IPropertySetStorage</b> interface, property sets are identified with FMTIDs, but in <b>IStorage</b>, they are named with strings with a maximum length of 32 characters.</p>
+<p>
+To accomplish this mapping, the first task is to establish a mapping between FMTIDs and strings. Converting in the one direction, you have a FMTID, and need a corresponding string name. First, check whether the FMTID is one of a fixed set of well-known values, and use the corresponding well-known string name if so:</p>
+<table cellspacing=4 cols=3>
+<tr valign=top>
+<th align=left width=45%>FMTID</th>
+<th align=left width=36%>String Name</th>
+<th align=left width=19%>Semantic</th>
+</tr>
+<tr valign=top>
+<td width=45%>F29F85E0-4FF9-1068-AB91-08002B27B3D9</td>
+<td width=36%>"\005SummaryInformation"</td>
+<td width=19%>OLE2 summary information</td>
+</tr>
+<tr valign=top>
+<td width=45%>D5CDD502-2E9C-101B-9397-08002B2CF9AE<p>
+D5CDD505-2E9C-101B-9397-08002B2CF9AE</p>
+</td>
+<td width=36%>"\005DocumentSummaryInformation"</td>
+<td width=19%>Office document summary information and user-defined properties.</td>
+</tr>
+</table><br>
+<p>
+<b>Note</b>&nbsp;&nbsp;The DocumentSummaryInformation property set is special in that it contains two sections. Multiple sections are not permitted in any other property set.&nbsp; This property set is described in more detail in <a href="propsets_2d2s.htm"><b>OLE Serialized Property Set Format</b></a>.</p>
+<p>
+The first was defined as part of COM; the second one was defined by Microsoft Office.</p>
+<p>
+Otherwise, algorithmically form a string name in the following way. First, convert the FMTID to little-endian byte order if necessary. Then, take the 128 bits of the FMTID and consider them as one long bit string by concatenating each of the bytes together. The first bit of the 128 bit value is the least significant bit of the first byte in memory of the FMTID; the last bit of the 128 bit value is the most significant bit of the last byte in memory of the FMTID. Extend these 128 bits to 130 bits by adding two zero bits to the end. Next, chop the 130 bits into groups of five bits; there will be 26 such groups. Consider each group as an integer with reversed bit precedence.  For example, the first of the 128 bits is the least significant bit of the first group of five bits; the fifth of the 128 bits is the most significant bit of the first group.  Map each of these integers as an index into the array of thirty-two characters:</p>
+<p>
+ABCDEFGHIJKLMNOPQRSTUVWXYZ012345</p>
+<p>
+This yields a sequence of 26 Unicode characters that uses only uppercase characters and numerals. Note that no two characters in this range compare equally in a case-insensitive manner in any locale. The final string is the concatenation of the string "\005" onto the front of these 26 characters, for a total length of 27 characters.</p>
+<p>
+The following code illustrates one way to map from FMTID to property string:</p>
+<pre><code>#define CBIT_BYTE        8
+#define CBIT_CHARMASK    5
+#define CCH_MAP          (1 &lt;&lt; CBIT_CHARMASK)    // 32
+#define CHARMASK         (CCH_MAP - 1)           // 0x1f
+ 
+CHAR awcMap[CCH_MAP + 1] = "abcdefghijklmnopqrstuvwxyz012345";
+ 
+WCHAR MapChar(ULONG i) {
+    return((WCHAR) awcMap[i &amp; CHARMASK]);
+    }
+ 
+VOID GuidToPropertyStringName(GUID *pguid, WCHAR awcname[]) {
+    BYTE *pb = (BYTE *) pguid;
+    BYTE *pbEnd = pb + sizeof(*pguid);
+    ULONG cbitRemain = CBIT_BYTE;
+    WCHAR *pwc = awcname;
+ 
+    *pwc++ = ((WCHAR) 0x0005);
+    while (pb &lt; pbEnd) {
+        ULONG i = *pb &gt;&gt; (CBIT_BYTE - cbitRemain);
+        if (cbitRemain &gt;= CBIT_CHARMASK) {
+            *pwc = MapChar(i);
+            if (cbitRemain == CBIT_BYTE &amp;&amp; *pwc &gt;= L'a' &amp;&amp; *pwc &lt;= L'z') {
+                *pwc += (WCHAR) (L'A' - L'a');
+                }
+            pwc++;
+            cbitRemain -= CBIT_CHARMASK;
+            if (cbitRemain == 0) {
+                pb++;
+                cbitRemain = CBIT_BYTE;
+                }
+            }
+        else {
+            if (++pb &lt; pbEnd) {
+                i |= *pb &lt;&lt; cbitRemain;
+                }
+            *pwc++ = MapChar(i);
+            cbitRemain += CBIT_BYTE - CBIT_CHARMASK;
+            }
+        }
+    *pwc = L'\0';
+    }
+ </code></pre>
+<p>
+Converters of property string names to GUIDs should accept lowercase letters as synonymous with their upper case counterparts. The following example shows one way to map from the property string to a FMTID:</p>
+<pre><code>ULONG
+PropertySetNameToGuid(
+    IN ULONG cwcname,
+    IN WCHAR const awcname[],
+    OUT GUID *pguid)
+{
+    ULONG Status = ERROR_INVALID_PARAMETER;
+    WCHAR const *pwc = awcname;
+ 
+    if (pwc[0] == WC_PROPSET0)
+    {
+        //Note: cwcname includes the WC_PROPSET0, and
+        //sizeof(wsz...) includes the trailing L'\0', but
+        //the comparison excludes both the leading
+        //WC_PROPSET0 and the trailing L'\0'.
+ 
+        if (cwcname == sizeof(wszSummary)/sizeof(WCHAR) &amp;&amp;
+            wcsnicmp(&amp;pwc[1], wszSummary, cwcname - 1) == 0)
+        {
+            *pguid = guidSummary;
+            return(NO_ERROR);
+        }
+ 
+        if (cwcname == CWC_PROPSET)
+        {
+            ULONG cbit;
+            BYTE *pb = (BYTE *) pguid - 1;
+ 
+            ZeroMemory(pguid, sizeof(*pguid));
+            for (cbit = 0; cbit &lt; CBIT_GUID; cbit += 
+            CBIT_CHARMASK)
+            {
+                ULONG cbitUsed = cibt % CBIT_BYTE;
+                ULONG cbitStored;
+                WCHAR wc;
+ 
+                if (cbitUsed == 0)
+                {
+                    pb++;
+                }
+                wc = *++pwc - L'A';        //assume uppercase
+                if (wc &gt; CALPHACHARS)
+                {
+                    wc += (WCHAR) (L'A' - L'a')' //try lowercase
+ 
+                    if (wc &gt; CALPHACHARS)
+                    {
+                        wc += L'a' - L'0' + CALPHACHARS; //must 
+                                                      be a digit
+                        if (wc &gt; CHARMASK)
+                        {
+                            goto fail;       //invalid character
+                        }
+                    }
+                }
+                *pb |= (BYTE) (wc &lt;&lt; cbitUsed);
+                cbitStored = min(CBIT_BYTE - cbitUsed, 
+                CBIT_CHARMASK);
+                //If the translated bits wouldn't fit in the 
+                  current byte
+ 
+                if (cbitStored &lt; CBIT_CHARMASK)
+                {
+                    wc &gt;&gt;= CBIT_BYTE - cbitUsed;
+                    if (cbit + cbitStored == CBIT_GUID)
+                    {
+                       if (wc !+0)
+                       {
+                           goto fail;        //extra bits
+                       }
+                       break;
+                    }
+                    pb++;
+                    *pb |= (BYTE) wc;
+                }
+           }
+           Status = NO_ERROR
+      }
+    }
+fail:
+    return(Status);
+}</code></pre>
+<p>
+When attempting to open an existing property set (in <b>IPropertySetStorage::Open</b>) the (root) FMTID in hand is converted to a string as depicted above. If an element of the <b>IStorage</b> of that name exists, it is used. Otherwise, the open fails.</p>
+<p>
+When creating a new property set, the above mapping determines the string name used.</p>
+<p>&nbsp;</p></body>
+</HTML>

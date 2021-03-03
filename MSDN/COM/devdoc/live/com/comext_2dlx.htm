@@ -1,0 +1,93 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Writing a Custom Surrogate</title>
+<link disabled rel=stylesheet href=../../backsdk3.css>
+<style type="text/css">
+@import url(../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h2><a name="_com_writing_a_custom_surrogate"></a>Writing a Custom Surrogate</h2>
+<p>
+While the system-supplied surrogate will be more than adequate for most situations, there are some cases where writing a custom surrogate could be worthwhile. Following are some examples.
+<ul>
+<li>
+A custom surrogate could provide some optimizations or semantics not present in the system surrogate.</li>
+<li>
+If an in-process DLL contains code that depends on being in the same process as the client, the DLL server will not function correctly if it is running in the system surrogate. A custom surrogate could be tailored to a specific DLL to deal with this.</li>
+<li>
+The system surrogate supports a mixed threading model so it can load both free and apartment model DLLs. A custom surrogate might be tailored to load only apartment DLLs for reasons of efficiency, or to accept a command line argument for the type of DLL it is allowed to load.  </li>
+<li>
+A custom surrogate could take extra command line parameters that the system surrogate does not.</li>
+<li>
+The system surrogate calls <a href="api1_8ayh.htm"><b>CoInitializeSecurity</b></a> and tells it to use any existing security settings found under the AppID key in the registry.  A custom surrogate could use another security context.</li>
+<li>
+Interfaces that aren't remoteable (such as those for recent OCX's) will not work with the system surrogate. A custom surrogate could wrap the DLL's interfaces with its own implementation, and use proxy/stub DLLs with a remoteable IDL definition that would allow the interface to be remoted.</li>
+</ul>
+<p>
+The main surrogate thread should typically perform the following setup steps: 
+<ol>
+<li>
+Call <a href="api1_5iyg.htm"><b>CoInitializeEx</b></a> to initialize the thread and set the threading model.</li>
+<li>
+If you want the DLL servers that are to run in the server to be able to use the security settings in the AppID registry key, call <a href="api1_8ayh.htm"><b>CoInitializeSecurity</b></a> with the EOAC_APPID capability. Otherwise, legacy security settings will be used.</li>
+<li>
+Call <a href="api1_4det.htm"><b>CoRegisterSurrogate</b></a> to register the surrogate interface to COM.</li>
+<li>
+Call <a href="if_r2z_8m9e.htm"><b>ISurrogate::LoadDllServer</b></a> for the requested CLSID.</li>
+<li>
+Put main thread in a loop to call <a href="api1_3p2r.htm"><b>CoFreeUnusedLibraries</b></a> periodically.</li>
+<li>
+When COM calls <a href="if_r2z_7ffp.htm"><b>ISurrogate::FreeSurrogate</b></a> , revoke all class factories and exit.</li>
+</ol>
+<p>
+A surrogate process must implement the <a href="if_r2z_7mn9.htm"><b>ISurrogate</b></a> interface.  This interface should be registered when a new surrogate is started and after calling <b>CoInitializeEx</b>.  The <b>ISurrogate</b> interface has two methods that COM calls: <b>LoadDllServer</b>, to dynamically load new DLL servers into existing surrogates, and <b>FreeSurrogate</b> to free the surrogate.</p>
+<p>
+The implementation of <b>ISurrogate::LoadDllServer</b>, which COM calls with a load request, must first create a class factory object that supports <a href="if_r2z_9dwu.htm"><b>IUnknown</b></a>, <a href="if_a2e_9mk9.htm"><b>IClassFactory</b></a>, and <a href="if_f2n_6sh8.htm"><b>IMarshal</b></a>, and then call <a href="api1_6kz8.htm"><b>CoRegisterClassObject</b></a> to register the object as the class factory for the requested CLSID.</p>
+<p>
+The class factory registered by the surrogate process is not the actual class factory implemented by the DLL server, but it is a generic class factory implemented by the surrogate process that supports <b>IClassFactory</b> and <b>IMarshal</b>.  Since it is the surrogate's class factory, rather than that of the DLL server that is being registered, the surrogate's class factory will need to use the real class factory to create an instance of the object for the registered CLSID.  The surrogate's <a href="if_a2e_5k11.htm"><b>IClassFactory::CreateInstance</b></a> should look something like this:</p>
+<pre><code>STDMETHODIMP CSurrogateFactory::CreateInstance(
+IUnknown* pUnkOuter, 
+REFIID iid, 
+void** ppv)
+{
+    void* pcf;
+    HRESULT hr;
+ 
+    hr = CoGetClassObject(clsid, CLSCTX_INPROC_SERVER, NULL, IID_IClassFactory, &amp;pcf);
+    if ( FAILED(hr) )
+        return hr;
+    hr = ((IClassFactory*)pcf)-&gt;CreateInstance(pUnkOuter, iid, ppv);
+    ((IClassFactory*)pcf)-&gt;Release();
+    return hr;
+}
+ </code></pre>
+<p>
+The surrogate's class factory must also support <b>IMarshal</b> because a call to <a href="api1_6yb8.htm"><b>CoGetClassObject</b></a> can request any interface from the registered class factory, not just <b>IClassFactory</b>. Further, since the generic class factory only supports <b>IUnknown</b> and <b>IClassFactory</b>, requests for other interfaces must be directed to the real object.  Thus, there should be a <b>MarshalInterface</b> method which should be similar to the following:</p>
+<pre><code>STDMETHODIMP CSurrogateFactory::MarshalInterface(
+IStream *pStm,
+REFIID riid, void *pv, 
+WORD dwDestContext, 
+void *pvDestContext, 
+DWORD mshlflags )
+{   
+    void * pCF = NULL;
+    HRESULT hr;
+ 
+    hr = CoGetClassObject(clsid, CLSCTX_INPROC_SERVER, NULL, riid, &amp;pCF);
+    if ( FAILED(hr) )
+        return hr;   
+    hr = CoMarshalInterface(pStm, riid, (IUnknown*)pCF, dwDestContext,
+pvDestContext,  mshlflags);
+    ((IUnknown*)pCF)-&gt;Release();
+    return S_OK;
+ </code></pre>
+<p>
+The surrogate that houses a DLL server must publish the DLL server's class object(s) with a call to <a href="api1_6kz8.htm"><b>CoRegisterClassObject</b></a>. All class factories for DLL surrogates should be registered as REGCLS_SURROGATE.  REGCLS_SINGLUSE and REGCLS_MULTIPLEUSE should not be used for DLL servers loaded into surrogates.</p>
+<p>
+Following these guidelines for creating a surrogate process when it is necessary to do so should ensure proper function.</p>
+<p>&nbsp;</p></body>
+</HTML>

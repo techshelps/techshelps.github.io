@@ -1,0 +1,2051 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Windows NT Security</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><a name="msdn_ntprog"></a>Windows NT Security</h1>
+<p>
+Christopher Nefcy</p>
+<p>
+September 1994</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="3175">
+</OBJECT><a href="javascript:sample1.Click()">Click to open or copy the files in the SECURITY sample application for this technical article.</a></p>
+<h2>Abstract</h2>
+<p>
+Microsoft® Windows NT™ security is discussed in detail in the Win32® API Programmer's Reference. The Security Model is very powerful and has many features. Unfortunately, there are very few examples which show the usage of security on an object. Most of the examples show how to add security to an object to allow all users to access that object. However, most programmers want to be able to limit access to an object. This technical article will try to explain how to use the some of the security features and will also show some examples of programming the security features.</p>
+<h2>Security Model</h2>
+<p>
+A brief overview of the Security Model will provide familiarity with relevant concepts and terminology. A more in-depth examination should be done using the Microsoft® Win32® Security API Overviews.</p>
+<p>
+Every Microsoft Windows NT™ object (files, named pipes, registry keys, user objects, kernel objects, private objects, and so on) has its security attributes described by a <i>security descriptor</i> (SD). The security-descriptor contains information about the owner of the object and has an <i>access-control list</i> (ACL), which is a list specifying user and groups and their access permissions on that object.</p>
+<p>
+There are two types of ACLs: <i>discretionary</i> and <i>system</i>. The discretionary ACL (DACL) is controlled by the owner of an object and specifies the access particular users or groups can have to that object. The system ACL (SACL) is controlled by the system administrator, and allows system-level security to be associated with the object. The usage of DACL and SACL APIs is very similar. However, the SACL APIs can only be used by a process with System Administrator privileges. Because most security programming does not involve setting the system-level security, the discussion here will focus on the DACL APIs.</p>
+<p>
+The DACL contains an entry for each user, global group, or local group that is given access permission (whether allowing or denying access) to the object. Each of these entries is in the form of an <i>access-control entry</i> (ACE). An ACE contains an ACE_HEADER structure, along with the access permission for that ACE type, and the <i>security identifier</i> (SID). The ACE_HEADER defines the type of ACE (ACCESS_ALLOWED_ACE_TYPE or ACCESS_DENIED_ACE_TYPE), the size of the ACE, and control flags for the ACE. The access permission will determine the type of permission (that is, Read, Write, and so on) that the user or group has. The user or group is specified using its SID.</p>
+<p>
+When a DACL does not have any ACEs, then no access rights have been explicitly granted. Therefore, access to the object is implicitly denied. However, when an object does not have a DACL, then no protection is assigned to the object and any access request is granted. An SD for an object is initially set to have a DACL with no ACEs, meaning that there is no access for any user. To give access to all users or groups, the DACL for the SD must be explicitly set to NULL.</p>
+<p>
+There are two types of SDs used in the system: <i>absolute</i> or <i>self-relative</i>. The distinction between these two types is very important when programming. An absolute SD contains pointers to the DACL and ACE information, while the self-relative format contains information in a contiguous block of memory, so the DACLs and ACEs are positioned at offsets. The security APIs use both absolute and self-relative formats at different times. When asking for SD information, it is always returned by the system in self-relative format. The program can then walk through the offsets to obtains the proper information. However, when adding to or changing the SD, it must be in absolute format. When programming a change to the SD, for instance, this means that the program must read in SD in one format, convert it and write it back in the other format.</p>
+<p>
+A user of a process is assigned an <i>access token</i>, which contains identifiers that represent the user and any group to which the user belongs. This access token is checked against the SD of an object to determine the permission of the user has with respect to that object. When a Client connects to a Server, the Server process can impersonate the access token of the Client process. This gives the Server the ability to check the access permission of the Client user.</p>
+<h2>Programming</h2>
+<p>
+To manipulate the security on an object, the SD of that object must be retrieved from or set back to the object. There are a number of APIs to perform these functions, depending on the type of object. For example, retrieving object SD APIs include <b>GetFileSecurity</b>, <b>RegGetKeySecurity</b>, <b>GetKernelObjectSecurity</b>, <b>GetUserObjectSecurity</b>, and <b>GetPrivateObjectSecurity</b>. Setting object SD APIs include <b>SetFileSecurity</b>, <b>RegSetKeySecurity</b>, <b>SetKernelObjectSecurity</b>, <b>SetUserObjectSecurity</b>, and <b>SetPrivateObjectSecurity.</b> When getting or setting the SD of an object, the program can limit its access to only certain parts of the security information: OWNER_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, DACL_SECURITY_INFORMATION, and SACL_SECURITY_INFORMATION. It should be noted that only a process with Administrative access privileges can get the SACL_SECURITY_INFORMATION. If the process does not have those privileges, the API will fail when trying to retrieve the object SD.</p>
+<p>
+Another way to get or set the security on an object is to use the SECURITY_ATTRIBUTES structure of that object. This structure contains a pointer to the SD associated with that object, and is returned when the object is created (for example, <b>CreateFile</b>, <b>CreateNamedPipe</b>, and so on). This structure can be manipulated directly by viewing or changing the SD pointer element of the structure. There are reasons for using both methods of manipulating object security.</p>
+<p>
+The programming steps outlined below address some of the more common security tasks: giving everyone access to an object; adding a user or group to a new object; adding another user or group to an object with an existing SD; and checking the access permission of a Client program to an object on a Server. The outline shows the basic steps needed to perform these tasks, although there may also be other considerations. Most of these considerations deal with the size of the elements of the SD, which can be of variable length, and the type (absolute or self-relative) of the SD. These are explained under the subheading "Programming Considerations," below. Examples of coding these functions are shown in the "Sample Code" subheading below.</p>
+<p>
+To give everyone access to an object that was just created (for example, a named pipe), the following actions are necessary:
+<ul type=disc>
+<li>
+Initialize the SD.<br><br></li>
+<li>
+Set the DACL to the SD as a NULL DACL.<br><br></li>
+<li>
+Set the SD to the object.</li>
+</ul>
+<p>
+To give a user or a group specific access to an new object, the following actions are necessary:
+<ul type=disc>
+<li>
+Initialize the SD.<br><br></li>
+<li>
+Initialize the DACL.<br><br></li>
+<li>
+Obtain the user or group SID.<br><br></li>
+<li>
+Add an ACE to the DACL, using the SID and the required access permission.<br><br></li>
+<li>
+Set the DACL to the SD.<br><br></li>
+<li>
+Set the SD to the object.</li>
+</ul>
+<p>
+To add a user or group to an object with an existing SD, the following actions are necessary:
+<ul type=disc>
+<li>
+Get the SID of the new user or group.<br><br></li>
+<li>
+Get the SD of the object.<br><br></li>
+<li>
+Get the DACL of the SD.<br><br></li>
+<li>
+Initialize a new SD to the size required to handle the new SID.<br><br></li>
+<li>
+Initialize a new DACL to the size required to handle the new SID.<br><br></li>
+<li>
+Copy each ACE from the original DACL to the new DACL.<br><br></li>
+<li>
+Add an ACE to the new DACL using the new SID and the required access permission.<br><br></li>
+<li>
+Set the new DACL to the new SD.<br><br></li>
+<li>
+Set the new SD to the object.</li>
+</ul>
+<p>
+To check the access permission of a Client program to an object on the Server (assuming the Client program has already connected to the Server), the following actions are necessary on the Server:
+<ul type=disc>
+<li>
+Get the SD of the object.<br><br></li>
+<li>
+Impersonate the Client to change the access token of the current thread.<br><br></li>
+<li>
+Get the access token of the current thread.<br><br></li>
+<li>
+Check the access token against the SD of the object.<br><br></li>
+<li>
+Revert the thread back to its original access token.</li>
+</ul>
+<h2>Programming Considerations</h2>
+<p>
+One of the considerations of security programming is determining the size of the security structures. The SDs can be of variable length, as can the DACLs, ACEs and the SIDs. Therefore, when obtaining the SD of an object, or creating a new SD, there must be enough memory in the buffer to handle the full SD. The same holds true of the other security structures. The minimum length of an SD is SECURITY_DESCRIPTOR_MIN_LENGTH, which means there are not any ACLs or SIDs associated with that SD. For every ACL that is to be added to the SD, the length of that ACL must be incorporated into the length of the SD. As the DACL requires more buffer space, so too will the SD.</p>
+<p>
+The length of a DACL (or SACL) must be large enough to contain the ACL header and all of the ACEs that are to be stored in the DACL. Each ACE (whether an ACCESS_ALLOWED_ACE_TYPE or an ACCESS_DENIED_ACE_TYPE) has the following structure:</p>
+<pre><code>typedef struct_ACCESS_ALLOWED_ACE
+{
+ &nbsp;&nbsp;&nbsp;&nbsp; ACE_HEADER&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Header;
+ &nbsp;&nbsp;&nbsp;&nbsp; ACCESS_MASK&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Mask;
+ &nbsp;&nbsp;&nbsp;&nbsp; DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SidStart;
+ &nbsp; } ACCESS_ALLOWED_ACE;
+</code></pre>
+<p>
+This means that each ACE added to the DACL requires room for the ACE plus room for its SID, minus the size of the SidStart member (a DWORD). For example, the size of a DACL buffer large enough to contain three ACCESS_ALLOWED_ACE structures is:</p>
+<pre><code>cbDacl = sizeof (ACL) + 3 * ( sizeof ( ACCESS_ALLOWED_ACE) - sizeof ( DWORD) ) +
+GetLengthSid ( pSid1) + GetLengthSid ( pSid2)+ GetLengthSid ( pSid3);
+</code></pre>
+<p>
+There are a number of APIs that return the length of a security structure, given that a pointer to the security structure has already been retrieved. These include <b>GetSecurityDescriptorLength</b> for the SD, <b>GetAclInformation</b> for the DACL, and <b>GetLengthSid</b> for the SID. Sometimes, there is a need to know the length of the security structure before retrieving it (for example, when the memory for the structures is being dynamically allocated throughout the program). Some of the objects have Query APIs, such as <b>RegQueryInfoKey</b>, that will return information about the object, including the length of the SD. Otherwise, APIs that retrieve the SD of an object have to be used (these APIs are listed above). The SD length parameter should be set at 0, the API called, and the return checked for ERROR_INSUFFICIENT_BUFFER. In this last case, the SD length parameter should be set to the length of the SD, so memory can be allocated for the SD, and the API called again to retrieve the SD.</p>
+<p>
+Another programming consideration is whether the SD is in self-relative or absolute format. When retrieving an SD from the system using an API, the SD is always returned in self-relative format. When setting an SD using an API, or adding DACLs to an SD, it must be done in absolute format. When initializing a new SD, it is in absolute format. </p>
+<p>
+This conversion is most needed when adding or deleting a user or group to the existing SD of an object. There are two APIs which convert between self-relative and absolute format (or vice-versa): <b>MakeAbsoluteSD</b> and <b>MakeSelfRelativeSD</b>. However, if another user or group is to be added to the SD, the SD may not have enough buffer space, and this must be taken into account when creating the absolute SD. One method to do this is to:
+<ol>
+<li>
+Retrieve the SD of an object.<br><br></li>
+<li>
+Add the length of the new ACE (corresponds to the length of the SID of the user or group to be added) to the length of the SD and the length of the DACL.<br><br></li>
+<li>
+Create a new SD and a new DACL with this new length.<br><br></li>
+<li>
+Copy all of the ACEs from the DACL to the new DACL.<br><br></li>
+<li>
+Add the new ACE to the new DACL.<br><br></li>
+<li>
+Set the DACL to the new SD.<br><br></li>
+<li>
+Set the new SD to the object.</li>
+</ol>
+<p>
+This is shown in the "Sample Code" section below.</p>
+<h2>Sample Code</h2>
+<p>
+Below are examples of sample code that show some methods to manipulate the security on an object. Also included is a Windows NT service installation program. This program does things such as changing the SD of a registry key, checking if the user who scheduled the process has Administrative privileges, creating local groups on the domain, and creating and setting registry keys and values. It provides some insight into some of the capabilities of NT programming. This code is for example only and is not supported.</p>
+<p>
+The following code would give everyone access to an object that was just created (for example, a named pipe):</p>
+<pre><code>/*------------------------------------------------------------------
+| Name: SetPipeSecurity
+| Desc: sets up security to use on pipe to allow access to everyone;
+|&nbsp;&nbsp; upon return, can use saPipeSecurity to set security on pipe
+|&nbsp;&nbsp; when using CreateNamedPipe
+------------------------------------------------------------------*/
+VOID SetPipeSecurity ( VOID)
+{
+ HANDLE&nbsp;&nbsp;&nbsp; hPipe;
+ SECURITY_ATTRIBUTES saPipeSecurity;
+ PSECURITY_DESCRIPTOR pPipeSD = NULL;
+
+ // security inits
+ memset ( ( VOID *) &amp;saPipeSecurity, 0, sizeof ( SECURITY_ATTRIBUTES) );
+
+ // alloc &amp; init SD
+ if ( ! ( pPipeSD = ( PSECURITY_DESCRIPTOR) 
+ &nbsp;&nbsp;&nbsp; ( malloc ( SECURITY_DESCRIPTOR_MIN_LENGTH)) ) )
+  return;
+
+ if ( ! InitializeSecurityDescriptor ( pPipeSD, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SECURITY_DESCRIPTOR_REVISION) )
+  return;
+
+ // set NULL DACL on the SD
+ if ( ! SetSecurityDescriptorDacl ( pPipeSD, TRUE, ( PACL) NULL, FALSE) )
+  return;
+
+ // now set up the security attributes
+ saPipeSecurity.nLength&nbsp;&nbsp;&nbsp; = sizeof ( SECURITY_ATTRIBUTES);
+ saPipeSecurity.bInheritHandle&nbsp; = TRUE; 
+ saPipeSecurity.lpSecurityDescriptor = pPipeSD;
+
+ // now create named pipe with security
+ hPipe = CreateNamedPipe ( 
+ &nbsp;&nbsp;&nbsp; PIPENAME,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // name of pipe
+ &nbsp;&nbsp;&nbsp; PIPE_ACCESS_DUPLEX |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Open mode
+ &nbsp;&nbsp;&nbsp; FILE_FLAG_OVERLAPPED,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // use overlapped structure
+ &nbsp;&nbsp;&nbsp; PIPE_TYPE_MESSAGE&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // message mode
+ &nbsp;&nbsp;&nbsp; PIPE_READMODE_MESSAGE | 
+ &nbsp;&nbsp;&nbsp; PIPE_WAIT,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // blocking
+ &nbsp;&nbsp;&nbsp; dwMaxNumberOfClients,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Max. number of instances
+ &nbsp;&nbsp;&nbsp; PIPEPKTSIZE,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Size of output buffer 
+ &nbsp;&nbsp;&nbsp; PIPEPKTSIZE,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Size of input buffer 
+ &nbsp;&nbsp;&nbsp; 0L,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Time-out value (use default)
+ &nbsp;&nbsp;&nbsp; &amp;saPipeSecurity );&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // security flag
+
+}
+/* eof - SetPipeSecurity */
+</code></pre>
+<p>
+The following code would give a user or a group specific access to a new object:</p>
+<pre><code>/*------------------------------------------------------------------
+| Name: CreateSDForRegKey
+| Desc: creates SD with access for up to MAX_LIST users or groups
+|&nbsp;&nbsp; passed into function:
+|&nbsp;&nbsp;&nbsp; SID from the group or user
+|&nbsp;&nbsp;&nbsp; permission access requested
+------------------------------------------------------------------*/
+DWORD CreateSDForRegKey ( LPTSTR pszGroupName[], DWORD dwAccessMask)
+{
+#define MAX_LIST 10
+
+ PSID&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pGroupSID [MAX_LIST];
+ DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dwGroupSIDCount = 0;
+ DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cbSID;
+
+ SID_NAME_USE snuGroup;
+
+ DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dwDomainSize = 80;
+ TCHAR&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; szDomainName[80];
+
+ PSECURITY_DESCRIPTOR pAbsSD = NULL;
+
+ PACL&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDACL;
+
+ DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dwSDRevision;
+ DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dwDACLLength = sizeof ( ACL);
+
+ SECURITY_DESCRIPTOR_CONTROL sdcSDControl;
+
+ PACL&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pNewDACL&nbsp; = NULL;
+
+ BOOL&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fAceFound = 0;
+
+ BOOL&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fHasDACL&nbsp; = FALSE;
+ BOOL&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fDACLDefaulted = FALSE; 
+
+ ACCESS_ALLOWED_ACE&nbsp; *pDACLAce;
+
+ DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dwError = 0;
+
+ DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; i;
+
+ // handle for security registry key
+ HKEY&nbsp; hSecurityRegKey = ( HKEY) 0;
+
+
+ // inits
+ for ( i = 0; i &lt; MAX_LIST; i++)
+  pGroupSID[i] = NULL;
+
+ // count number of groups or users to be added; list ends in NULL
+ for ( i = 0; pszGroupName[i] != NULL; i++);
+
+ if ( i &gt; MAX_LIST)
+  return ( ERROR_TOO_MANY_NAMES);
+ else
+  dwGroupSIDCount = i;
+
+ // get SIDs for each group or user passed in
+ for ( i = 0; i &lt; dwGroupSIDCount; i++)
+ {
+  cbSID = GetSidLengthRequired (2);
+
+  pGroupSID[i] = ( PSID) malloc ( cbSID);
+
+  // loop if not enough room for SID; otherwise set to NULL
+  while ( ! LookupAccountName ( NULL, pszGroupName[i], pGroupSID[i],
+ &nbsp;&nbsp;&nbsp; &amp;cbSID, szDomain, &amp;dwDomainSize, &amp;snuGroup) )
+  {
+ &nbsp; dwError = GetLastError();
+
+ &nbsp; if ( dwError == ERROR_INSUFFICIENT_BUFFER)
+ &nbsp;&nbsp; pGroupSID[i] = ( PSID) realloc ( pGroupSID[i], cbSID);
+ &nbsp; else
+ &nbsp; {
+ &nbsp;&nbsp; pGroupSID[i] = NULL;
+
+ &nbsp;&nbsp; break;
+ &nbsp; }
+  }
+</code></pre>
+<pre><code>&nbsp;&nbsp;// check if found group or user
+  if ( pGroupSID[i])
+  {
+ &nbsp; // add to DACL length
+ &nbsp; dwDACLLength += ( sizeof ( ACCESS_ALLOWED_ACE) - 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sizeof ( DWORD) + GetLengthSid ( pGroupSID[i]);
+  }
+ }
+
+ // get memory needed for new DACL
+ if ( ! ( pNewDACL = ( PACL) malloc ( dwDACLLength) ) )
+  return ( GetLastError());
+
+ // get memory for new SD
+ if ( ! ( pAbsSD = ( PSECURITY_DESCRIPTOR) 
+ &nbsp;&nbsp;&nbsp;&nbsp; malloc ( SECURITY_DESCRIPTOR_MIN_LENGTH + dwDACLLength) ) )
+ {
+  dwError = GetLastError();
+
+  goto ErrorExit;
+ }
+
+ // init new SD
+ if ( ! InitializeSecurityDescriptor ( pAbsSD, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SECURITY_DESCRIPTOR_REVISION) )
+ {
+  dwError = GetLastError();
+
+  goto ErrorExit;
+ }
+
+ // init new DACL
+ if ( ! InitializeAcl ( pNewDACL, dwDACLLength, ACL_REVISION) )
+ {
+  dwError = GetLastError();
+
+  goto ErrorExit;
+ }
+
+ // now add new ACEs to new DACL
+ for ( i = 0; i &lt; dwGroupSIDCount; i++)
+ {
+  // if there is a valid SID, then attach to the ACE and add to the DACL
+  if ( pGroupSID[i])
+  {
+ &nbsp; if ( ! AddAccessAllowedAce ( pNewDACL, ACL_REVISION, dwAccessMask,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pGroupSID[i]) )
+ &nbsp; {
+ &nbsp;&nbsp; dwError = GetLastError();
+
+ &nbsp;&nbsp; goto ErrorExit;
+ &nbsp; }
+  }
+ }
+
+ // check if everything went ok
+ if ( ! IsValidAcl ( pNewDACL) )
+ {
+  dwError = GetLastError();
+
+  goto ErrorExit;
+ }
+
+ // now set DACL to the SD
+ if ( ! SetSecurityDescriptorDacl ( pAbsSD, TRUE, pNewDACL, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fDACLDefaulted) )
+ {
+  dwError = GetLastError();
+
+  goto ErrorExit;
+ }
+
+ // check if everything went ok
+ if ( ! IsValidSecurityDescriptor ( pAbsSD) )
+ {
+  dwError = GetLastError();
+
+  goto ErrorExit;
+ }
+
+ // now open reg key to set security 
+ // note: pzsRegKeyName is a global
+ if ( ( dwError = RegOpenKeyEx ( HKEY_LOCAL_MACHINE, pszRegKeyName, 0,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; KEY_ALL_ACCESS, &amp;hSecurityRegKey) ) )
+  goto ErrorExit;
+
+
+ // now set the reg key security (this will overwrite any existing security)
+ dwError = RegSetKeySecurity ( 
+ &nbsp;&nbsp;&nbsp;&nbsp; hSecurityRegKey, 
+ &nbsp;&nbsp;&nbsp;&nbsp; (SECURITY_INFORMATION)( DACL_SECURITY_INFORMATION),
+ &nbsp;&nbsp;&nbsp;&nbsp; pAbsSD);
+
+ // close reg key
+ RegCloseKey ( hSecurityRegKey);
+
+
+ErrorExit:
+
+ // free memory
+ if ( pAbsSD)
+  free ( ( VOID *) pAbsSD);
+ if ( pNewDACL)
+  free ( ( VOID *) pNewDACL);
+
+ return ( dwError);
+}
+/* eof - CreateSDForRegKey */
+</code></pre>
+<p>
+The following code would add a user or group to an object with an existing SD:</p>
+<pre><code>/*------------------------------------------------------------------
+| Name: AddToRegKeySD
+| Desc: adds SID to SD on reg key
+|&nbsp;&nbsp; passed into function:
+|&nbsp;&nbsp;&nbsp; SD in self-relative mode
+|&nbsp;&nbsp;&nbsp; SID from the group or user
+|&nbsp;&nbsp;&nbsp; permission access requested
+------------------------------------------------------------------*/
+DWORD AddToRegKeySD ( PSECURITY_DESCRIPTOR pRelSD, PSID pGroupSID,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DWORD dwAccessMask)
+{
+ PSECURITY_DESCRIPTOR pAbsSD = NULL;
+
+ PACL&nbsp; pDACL;
+
+ DWORD&nbsp; dwSDLength = 0;
+ DWORD&nbsp; dwSDRevision;
+ DWORD&nbsp; dwDACLLength = 0;
+
+ SECURITY_DESCRIPTOR_CONTROL sdcSDControl;
+
+ PACL&nbsp; pNewDACL&nbsp; = NULL;
+ DWORD&nbsp; dwAddDACLLength = 0;
+
+ BOOL&nbsp; fAceFound = 0;
+
+ BOOL&nbsp; fHasDACL&nbsp; = FALSE;
+ BOOL&nbsp; fDACLDefaulted = FALSE; 
+
+ ACCESS_ALLOWED_ACE&nbsp; *pDACLAce;
+
+ DWORD&nbsp; dwError = 0;
+
+ DWORD&nbsp; i;
+
+ // handle for security registry key
+ HKEY&nbsp; hSecurityRegKey = ( HKEY) 0;
+
+ // get SD control bits
+ if ( ! GetSecurityDescriptorControl ( pRelSD, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ( PSECURITY_DESCRIPTOR_CONTROL) &amp;sdcSDControl,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ( LPDWORD) &amp;dwSDRevision) )
+  return ( GetLastError() );
+
+ // check if DACL is present
+ if ( SE_DACL_PRESENT &amp; sdcSDControl)
+ {
+  // get dacl 
+  if ( ! GetSecurityDescriptorDacl ( pRelSD, ( LPBOOL) &amp;fHasDACL,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ( PACL *) &amp;pDACL, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ( LPBOOL) &amp;fDACLDefaulted) )
+ &nbsp; return ( GetLastError());
+
+  // get dacl length
+  dwDACLLength = pDACL-&gt;AclSize;
+
+  // now check if SID's ACE is there
+  for ( i = 0; i &lt; pDACL-&gt;AceCount; i++)
+  {
+ &nbsp; if ( ! GetAce ( pDACL, i, ( LPVOID *) &amp;pDACLAce) )
+ &nbsp;&nbsp; return ( GetLastError());
+
+ &nbsp; // check if group sid is already there
+ &nbsp; if ( EqualSid ( ( PSID) &amp;(pDACLAce-&gt;SidStart), pGroupSID) )
+ &nbsp;&nbsp; break;
+  }
+</code></pre>
+<pre><code>&nbsp;&nbsp;// exit if found (means already has been set)
+  if ( i &lt; pDACL-&gt;AceCount)
+  {
+ &nbsp; dwError = ERROR_GROUP_EXISTS;
+
+ &nbsp; return ( dwError);
+  }
+
+  // get length of new DACL
+  dwAddDACLLength = sizeof ( ACCESS_ALLOWED_ACE) - 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sizeof ( DWORD) + GetLengthSid ( pGroupSID);
+ }
+ else
+  // get length of new DACL
+  dwAddDACLLength = sizeof ( ACL) + sizeof ( ACCESS_ALLOWED_ACE) - 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sizeof ( DWORD) + GetLengthSid ( pGroupSID);
+
+ // get memory needed for new DACL
+ if ( ! ( pNewDACL = ( PACL) malloc ( dwDACLLength + dwAddDACLLength) ) )
+  return ( GetLastError());
+
+ // get the sd length
+ dwSDLength = GetSecurityDescriptorLength ( pRelSD);
+
+ // get memory for new SD
+ if ( ! ( pAbsSD = ( PSECURITY_DESCRIPTOR) 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; malloc ( dwSDLength + dwAddDACLLength) ) )
+ {
+  dwError = GetLastError();
+
+  goto ErrorExit;
+ }
+
+ // change self-relative SD to absolute by making new SD
+ if ( ! InitializeSecurityDescriptor ( pAbsSD, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SECURITY_DESCRIPTOR_REVISION) )
+ {
+  dwError = GetLastError();
+
+  goto ErrorExit;
+ }
+
+ // init new DACL
+ if ( ! InitializeAcl ( pNewDACL, dwDACLLength + dwAddDACLLength, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ACL_REVISION) )
+ {
+  dwError = GetLastError();
+
+  goto ErrorExit;
+ }
+
+ // now add in all of the ACEs into the new DACL (if org DACL is there)
+ if ( SE_DACL_PRESENT &amp; sdcSDControl)
+ { 
+  for ( i = 0; i &lt; pDACL-&gt;AceCount; i++)
+  {
+ &nbsp; // get ace from original dacl
+ &nbsp; if ( ! GetAce ( pDACL, i, ( LPVOID *) &amp;pDACLAce) )
+ &nbsp; {
+ &nbsp;&nbsp; dwError = GetLastError();
+
+ &nbsp;&nbsp; goto ErrorExit;
+ &nbsp; }
+
+ &nbsp; // now add ace to new dacl
+ &nbsp; if ( ! AddAccessAllowedAce ( pNewDACL, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ACL_REVISION, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDACLAce-&gt;Mask,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ( PSID) &amp;(pDACLAce-&gt;SidStart) ) )
+ &nbsp; {
+ &nbsp;&nbsp; dwError = GetLastError();
+
+ &nbsp;&nbsp; goto ErrorExit;
+ &nbsp; }
+  }
+ }
+
+ // now add new ACE to new DACL
+ if ( ! AddAccessAllowedAce ( pNewDACL, ACL_REVISION, dwAccessMask,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pGroupSID) )
+ {
+  dwError = GetLastError();
+
+  goto ErrorExit;
+ }
+
+ // check if everything went ok
+ if ( ! IsValidAcl ( pNewDACL) )
+ {
+  dwError = GetLastError();
+
+  goto ErrorExit;
+ }
+
+ // now set security descriptor DACL
+ if ( ! SetSecurityDescriptorDacl ( pAbsSD, TRUE, pNewDACL, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fDACLDefaulted) )
+ {
+  dwError = GetLastError();
+
+  goto ErrorExit;
+ }
+
+ // check if everything went ok
+ if ( ! IsValidSecurityDescriptor ( pAbsSD) )
+ {
+  dwError = GetLastError();
+
+  goto ErrorExit;
+ }
+</code></pre>
+<pre><code>&nbsp;// now open reg key to set security 
+ // note: pzsRegKeyName is a global
+ if ( ( dwError = RegOpenKeyEx ( HKEY_LOCAL_MACHINE, pszRegKeyName, 0,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; KEY_ALL_ACCESS, &amp;hSecurityRegKey) ) )
+  goto ErrorExit;
+
+
+ // now set the reg key security (this will overwrite any existing security)
+ dwError = RegSetKeySecurity ( 
+ &nbsp;&nbsp;&nbsp;&nbsp; hSecurityRegKey, 
+ &nbsp;&nbsp;&nbsp;&nbsp; (SECURITY_INFORMATION)( DACL_SECURITY_INFORMATION),
+ &nbsp;&nbsp;&nbsp;&nbsp; pAbsSD);
+
+ // close reg key
+ RegCloseKey ( hSecurityRegKey);
+
+
+ErrorExit:
+
+ // free memory
+ if ( pAbsSD)
+  free ( ( VOID *) pAbsSD);
+ if ( pNewDACL)
+  free ( ( VOID *) pNewDACL);
+
+ return ( dwError);
+}
+/* eof - AddToRegKeySD */
+</code></pre>
+<p>
+The following code would obtain the SD from an existing object (i.e.- a registry key):</p>
+<pre><code>/*----------------------------------------------------------------
+| Name: GetRegKeySecurity
+| Desc: gets security registry sec. descriptor
+|&nbsp;&nbsp; pRegKeySD is global of type PSECURITY_DESCRIPTOR; you must free
+|&nbsp;&nbsp; the memory alloc'ed for this when done with the reg key
+-----------------------------------------------------------------*/
+DWORD GetRegKeySecurity ( szRegKey)
+{
+#define PERR(szApi,lError) printf ( "\n%s: Error %d from %s on line %d", \
+ __FILE__, lError, szApi, __LINE__);
+
+
+ HKEY&nbsp; hRegKey;&nbsp;&nbsp; // handle for register key
+ LONG&nbsp; lError = 0L;&nbsp; // reg errors 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // (GetLastError won't work with registry calls)
+
+
+ CHAR&nbsp; szClassName[MAX_PATH] = ""; // Buffer for class name.
+ DWORD dwcClassLen = MAX_PATH;&nbsp; // Length of class string.
+ DWORD dwcSubKeys;&nbsp;&nbsp;&nbsp;&nbsp; // Number of sub keys.
+ DWORD dwcMaxSubKey;&nbsp;&nbsp;&nbsp; // Longest sub key size.
+ DWORD dwcMaxClass;&nbsp;&nbsp;&nbsp; // Longest class string.
+ DWORD dwcValues;&nbsp;&nbsp;&nbsp;&nbsp; // Number of values for this key.
+ DWORD dwcMaxValueName;&nbsp;&nbsp; // Longest Value name.
+ DWORD dwcMaxValueData;&nbsp;&nbsp; // Longest Value data.
+ DWORD dwcSDLength;&nbsp;&nbsp;&nbsp; // Security descriptor length
+ FILETIME ftLastWriteTime;&nbsp;&nbsp; // Last write time.
+
+
+ // open the security key
+ if ( ( lError = RegOpenKey ( HKEY_LOCAL_MACHINE, szRegKey, &amp;hRegKey) ) )
+ {
+  PERR ( "RegOpenKey", lError);
+
+  return ( lError);
+ }
+
+
+
+ // get length of security descriptor
+ if ( ( lError = RegQueryInfoKey ( hRegKey, szClassName, &amp;dwcClassLen, 
+ &nbsp;&nbsp;&nbsp;&nbsp; NULL, &amp;dwcSubKeys, &amp;dwcMaxSubKey, &amp;dwcMaxClass, 
+ &nbsp;&nbsp;&nbsp;&nbsp; &amp;dwcValues, &amp;dwcMaxValueName, &amp;dwcMaxValueData, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;dwcSDLength, &amp;ftLastWriteTime) ) )
+ {
+  PERR ( "RegQueryInfoKey", lError);
+
+  goto CleanUp;
+ }
+
+/* could have used this to get length of SD:
+
+ lError = RegGetKeySecurity ( hRegKey, 
+ &nbsp;&nbsp;&nbsp;&nbsp; (SECURITY_INFORMATION)( OWNER_SECURITY_INFORMATION
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | GROUP_SECURITY_INFORMATION
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | DACL_SECURITY_INFORMATION),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pRegKeySD, &amp;dwcSDLength);
+
+ // check if not enough memory returned
+ if ( lError != ERROR_INSUFFICIENT_BUFFER)
+ {
+  PERR ( "RegGetKeySecurity", lError);
+
+  goto CleanUp;
+ }
+
+*/
+
+ 
+ // get SD memory
+ pRegKeySD = ( PSECURITY_DESCRIPTOR) LocalAlloc ( LPTR, ( UINT)dwcSDLength);
+
+ // now get SD
+ if ( ( lError = RegGetKeySecurity ( hRegKey, 
+ &nbsp;&nbsp;&nbsp;&nbsp; (SECURITY_INFORMATION)( OWNER_SECURITY_INFORMATION
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | GROUP_SECURITY_INFORMATION
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | DACL_SECURITY_INFORMATION),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pRegKeySD, &amp;dwcSDLength) ) )
+ {
+  PERR ( "RegGetKeySecurity", lError);
+
+  goto CleanUp;
+ }
+
+ // check if SD is good
+ if ( ! IsValidSecurityDescriptor ( pRegKeySD))
+ {
+  lError = GetLastError();
+
+  PERR ( "IsValidSecurityDescriptor", lError);
+ }
+
+CleanUp:
+
+ // must close reg key
+ RegCloseKey ( hRegKey);
+
+ return ( lError);
+}
+/* eof - GetRegKeySecurity */
+</code></pre>
+<p>
+The following code would check the access permission of a Client program to an object on the Server (assuming the Client program has already connected to the Server):</p>
+<pre><code>/*------------------------------------------------------------------
+| Name: GetUserNameAccess
+| Desc: gets the client user name and checks their access rights
+------------------------------------------------------------------*/
+DWORD GetUserNameAccess ( HPIPE hPipe)
+{
+#define READ_ACCESS&nbsp; KEY_QUERY_VALUE
+#define WRITE_ACCESS&nbsp; KEY_SET_VALUE
+#define READWRITE_ACCESS&nbsp; KEY_QUERY_VALUE|KEY_SET_VALUE
+
+
+ CHAR&nbsp; szClientName[100];
+
+ DWORD&nbsp; dwCurInstances;
+
+ HANDLE&nbsp; hThread&nbsp; = NULL;
+ HANDLE&nbsp; hThreadToken = NULL;
+
+ DWORD&nbsp; dwDesiredAccess;
+ DWORD&nbsp; dwGrantedAccess;
+
+ SHORT&nbsp; sErrorFlag = 1;
+
+ GENERIC_MAPPING gmMapping;
+ PRIVILEGE_SET psPrivilege;
+ DWORD&nbsp;&nbsp; dwPrivilegeLength;
+ BOOL&nbsp;&nbsp; fStatus;
+ BOOL&nbsp;&nbsp; fReturn;
+
+ // inits 
+ memset ( szClientName, 0, sizeof ( szClientName) );
+
+ dwClientAccessType = 0;
+
+ // get client name from handle info 
+ if ( ! ( GetNamedPipeHandleState ( hPipe, NULL, &amp;dwCurInstances, NULL, 
+ &nbsp;&nbsp;&nbsp; NULL, ( LPTSTR) szClientName, sizeof ( szClientName) ) ) )
+  goto CleanUp;
+
+ // change thread's security with impersonation
+ if ( ! ImpersonateNamedPipeClient ( hPipe) )
+  goto CleanUp;
+
+ // now get token for thread to use with access check
+ hThread = GetCurrentThread ();
+
+ if ( ! OpenThreadToken ( hThread, TOKEN_ALL_ACCESS, FALSE, &amp;hThreadToken))
+  goto CleanUp;
+
+ // if made it here, then no api errors, just access denied return
+ sErrorFlag = 0;
+
+ // check for read/write access
+ dwDesiredAccess = READWRITE_ACCESS;
+ dwPrivilegeLength = sizeof ( psPrivilege);
+
+ fReturn = AccessCheck ( pRegKeySD, hThreadToken, dwDesiredAccess, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;gmMapping, &amp;psPrivilege, &amp;dwPrivilegeLength,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;dwGrantedAccess, &amp;fStatus);
+
+ // if access allowed, set access
+ if ( fReturn &amp;&amp; fStatus)
+ {
+  dwClientAccessType = READWRITE_ACCESS;
+
+  goto CleanUp;
+ }
+
+ // check for read only access
+ dwDesiredAccess = READ_ACCESS;
+ dwPrivilegeLength = sizeof ( psPrivilege);
+
+ fReturn = AccessCheck ( pRegKeySD, hThreadToken, dwDesiredAccess, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;gmMapping, &amp;psPrivilege, &amp;dwPrivilegeLength,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;dwGrantedAccess, &amp;fStatus);
+
+ // if access allowed, set access
+ if ( fReturn &amp;&amp; fStatus)
+ {
+  dwClientAccessType = READ_ACCESS;
+
+  goto CleanUp;
+ }
+
+ // check for write only access
+ dwDesiredAccess = WRITE_ACCESS;
+ dwPrivilegeLength = sizeof ( psPrivilege);
+
+ fReturn = AccessCheck ( pRegKeySD, hThreadToken, dwDesiredAccess, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;gmMapping, &amp;psPrivilege, &amp;dwPrivilegeLength,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;dwGrantedAccess, &amp;fStatus);
+
+ // if access allowed, set access
+ if ( fReturn &amp;&amp; fStatus)
+ {
+  dwClientAccessType = WRITE_ACCESS;
+
+  goto CleanUp;
+ }
+
+CleanUp:
+
+ // put security back to normal
+ RevertToSelf ();
+
+ // close up handles
+ if ( hThreadToken)
+  CloseHandle ( hThreadToken);
+
+ if ( hThread)
+  CloseHandle ( hThread);
+
+ // check for errors
+ if ( sErrorFlag)
+  return ( GetLastError() );
+
+ // check if access flag was set
+ if ( dwClientAccessType)
+  return ( 0);
+ else
+  return ( ERROR_ACCESS_DENIED);
+}
+/* eof - GetUserNameAccess */
+</code></pre>
+<p>
+The following is sample code that installs a service. This code provides many examples detailing different aspects of Win32 programming. Besides installing the service, it also creates registry keys, sets registry parameter values, changes the SD on registry keys, creates local groups on the domain, and checks the user for Administrative privileges.</p>
+<pre><code>/* ---------------------------------------------------------------------
+| file:&nbsp; siaminst.c
+| author:&nbsp; Chris Nefcy
+| date:&nbsp; 7/20/93
+| desc:&nbsp; installs SIAM service for windows NT
+| args:&nbsp; 
+| return:&nbsp; 
+| compiler: dos32x
+| links:&nbsp; see siaminst.mak
+| rev:&nbsp; 
+----------------------------------------------------------------------- */
+#include &lt;windows.h&gt;
+#include &lt;lm.h&gt;
+
+#include &lt;stdio.h&gt;
+
+// defaults (change when necessary)
+// VERSION will change; client s/w needs to match this
+#define VERSION&nbsp; "1.00.00"
+#define TIMEOUT&nbsp; 180
+
+#define DOMAINNAME&nbsp; "MS-INTERNET"
+
+#define SERVICENAME "SiamServer"
+#define SERVICEPROGRAM "siamsrvc.exe"
+#define INSTALLCONFIG "siaminst.cfg"
+
+#define MAXCLIENTS&nbsp; 100
+
+// registry keys
+#define PARAMETERSKEY "SYSTEM\\CurrentControlSet\\Services\\SiamServer\\Parameters"
+#define SECURITYKEY "SYSTEM\\CurrentControlSet\\Services\\SiamServer\\Security"
+#define TCPIPKEY&nbsp; "SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters"
+
+// registry values
+#define VERSIONVALUE "Version"
+#define TIMEOUTVALUE "Timeout"
+#define MAXCLIENTSVALUE "MaxNumberOfClients"
+#define TCPMAXCONNVALUE "TcpMaxConnectAttempts"
+
+// used to limit the connect time to 20-25 seconds
+#define TCPIP_MAXCONN 3
+
+// client access types
+#define READ_ACCESS&nbsp; KEY_QUERY_VALUE
+#define WRITE_ACCESS&nbsp; KEY_SET_VALUE
+#define READWRITE_ACCESS KEY_QUERY_VALUE|KEY_SET_VALUE
+
+// handles
+SC_HANDLE&nbsp; schService;
+SC_HANDLE&nbsp; schSCManager;
+
+// groups
+struct GROUPDESCRIPT
+{
+ CHAR *pszGroupName;
+ LPWSTR lpwszLocalGroupComment;
+ DWORD dwAccessMask;
+} GroupDescript[] = 
+
+ { 
+  { "SIAMFULL", L"SIAM Users with Full Access to Internet", 
+ &nbsp; READWRITE_ACCESS},
+  { "SIAMREAD", L"SIAM Users with Read Only Access to Internet", 
+ &nbsp; READ_ACCESS},
+  { "SIAMWRITE", L"SIAM Users with Write Only Access to Internet", 
+ &nbsp; WRITE_ACCESS},
+
+  { NULL, NULL, 0}
+ };
+
+
+// security descriptors for security registry key
+PSECURITY_DESCRIPTOR pSecurityRegKeySD = NULL;
+
+// handle for security registry key
+HKEY&nbsp; hSecurityRegKey = ( HKEY) 0;
+
+// memory allocs/frees
+LONG lAllocCnt = 0L;
+LONG lFreeCnt = 0L;
+
+
+// routines
+extern DWORD AddGroupsToDomain&nbsp; ( VOID);
+extern DWORD AddToSecurityDACL&nbsp; ( PSECURITY_DESCRIPTOR, PSID, DWORD);
+extern DWORD CheckDomainName&nbsp; ( CHAR *, DWORD);
+extern BOOL CheckForTcpip&nbsp;&nbsp; ( VOID);
+extern VOID CloseRegKeySecurity ( VOID);
+extern VOID DoExitFunction&nbsp;&nbsp; ( DWORD);
+extern VOID ErrorMessage&nbsp;&nbsp; ( DWORD, CHAR *, ...);
+extern VOID FreeMemory&nbsp;&nbsp;&nbsp; ( VOID * );
+extern VOID *_GetMemory&nbsp;&nbsp; ( UINT, CHAR *, UINT);
+extern DWORD GetRegKeySecurity&nbsp; ( CHAR *);
+extern BOOL RunningAsAdministrator ( VOID);
+extern DWORD SetParameters&nbsp;&nbsp; ( VOID);
+</code></pre>
+<pre><code>#define GetMemory(size) _GetMemory(size, __FILE__, __LINE__)
+
+
+// error messages
+#define MSGERRDACLACCESS "ERR: INS1000-Could not add ACE to DACL"
+#define MSGERRDACLACE&nbsp; "ERR: INS1001-Could not get DACL ACE"
+#define MSGERRDACLINFOGET "ERR: INS1002-Could not get DACL information"
+#define MSGERRDACLINFOSET "ERR: INS1003-Could not set DACL information"
+#define MSGERRDACLINIT&nbsp; "ERR: INS1004-Could not initialize new DACL"
+#define MSGERRDACLSECUREGET "ERR: INS1005-Could not get Security Descriptor
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; for DACL"
+#define MSGERRDACLSECURESET "ERR: INS1006-Could not set Security Descriptor
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; with DACL"
+#define MSGERRDACLVALID&nbsp; "ERR: INS1007-DACL is not valid"
+
+#define MSGERRGROUPADD&nbsp; "ERR: INS2000-Group not added to Domain: %s"
+#define MSGERRGROUPCONVERT "ERR: INS2001-Could not change Group Name 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; to UNICODE: %s"
+#define MSGERRGROUPDOMAIN "ERR: INS2002-Some of the Groups have not been
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; added to the Domain correctly"
+#define MSGERRGROUPNAME&nbsp; "ERR: INS2003-Group Name not found: %s"
+#define MSGERRGROUPSECURE "ERR: INS2004-Group not given permission
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; to use SiamServer: %s"
+
+#define MSGERRREGCREATE&nbsp; "ERR: INS3000-Could not create Reg key: %s"
+#define MSGERRREGINFO&nbsp; "ERR: INS3001-Could not get Reg key info: %s"
+#define MSGERRREGINVALID "ERR: INS3002-Invalid Reg key security desc.: %s"
+#define MSGERRREGOPEN&nbsp; "ERR: INS3003-Could not open Reg key: %s"
+#define MSGERRREGSECUREGET "ERR: INS3004-Could not get Reg key security: %s"
+#define MSGERRREGSECURESET "ERR: INS3005-Could not set Reg key security"
+#define MSGERRREGVALUEGET "ERR: INS3006-Could not get Reg value: %s"
+#define MSGERRREGVALUESET "ERR: INS3007-Could not set Reg value: %s"
+
+#define MSGERRSDCONTROLGET "ERR: INS4000-Could not get Security Descriptor
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Control"
+#define MSGERRSDINIT&nbsp; "ERR: INS4001-Could not initialize Security Descriptor"
+#define MSGERRSDVALID&nbsp; "ERR: INS4002-Security Descriptor is not valid"
+
+#define MSGERRUSEADMIN&nbsp; "ERR: INS5000-Must have Administrative privileges
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; to run this program"
+#define MSGERRUSEALLOC&nbsp; "ERR: INS5001-Malloc failed (%u; %s; %u)"
+#define MSGERRUSEDOMAIN&nbsp; "ERR: INS5002-This can only be installed on
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Domain: %s (not: %s)"
+
+#define MSGERRSRVCCREATE "ERR: INS6000-Could not create Service: %s
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (with program: %s)"
+#define MSGERRSRVCSCMGR&nbsp; "ERR: INS6001-Could not open the Service Control
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Manager"
+#define MSGERRSRVCSTART&nbsp; "ERR: INS6002-Could not start Service: %s"
+#define MSGERRSRVCTCPIP&nbsp; "ERR: INS6003-TCP/IP needs to be installed 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; on this system"
+
+#define MSGERRDOMAINCHK&nbsp; "ERR: INS7000-Could not access Domain"
+#define MSGERRDOMAINCTRL "ERR: INS7001-Could not access Domain Controller"
+
+#define MSGERRFILEOPEN&nbsp; "ERR: INS8000-Could not open file: %s"
+#define MSGERRFILEREAD&nbsp; "ERR: INS8001-Could not read file: %s"
+</code></pre>
+<pre><code>/*------------------------------------------------------------------
+| Name: main
+| Desc: main program
+------------------------------------------------------------------*/
+VOID main ( INT argc, CHAR **argv)
+{
+ // change here if want manual start to SERVICE_DEMAND_START
+ DWORD&nbsp; dwStartType = SERVICE_AUTO_START;
+
+ CHAR&nbsp; szExePath[MAX_PATH];
+
+ DWORD&nbsp; dwError = 0;
+
+ // see if user is an administrator
+ if ( ! RunningAsAdministrator () )
+ {
+  ErrorMessage ( ERROR_ACCESS_DENIED, MSGERRUSEADMIN);
+
+  ExitProcess ( ERROR_ACCESS_DENIED);
+ }
+
+ // see if tcpip is installed on system already
+ if ( ! CheckForTcpip ())
+ {
+  ErrorMessage ( ERROR_BAD_ENVIRONMENT, MSGERRSRVCTCPIP);
+
+  ExitProcess ( ERROR_BAD_ENVIRONMENT);
+ }
+
+ // get full service program name
+ GetCurrentDirectory ( sizeof ( szExePath), szExePath);
+
+ strcat ( szExePath, "\\");
+ strcat ( szExePath, SERVICEPROGRAM);
+
+ // print notifications
+ printf ( "\n");
+ printf ( "Installation of the service:\n");
+ printf ( "----------------------------\n");
+
+ printf ( "Service name:&nbsp;&nbsp;&nbsp;&nbsp; %s\n", SERVICENAME);
+ printf ( "Service executable path:&nbsp; %s\n", szExePath);
+ printf ( "Service startup type:&nbsp;&nbsp; %s\n",
+ &nbsp;&nbsp; dwStartType == SERVICE_AUTO_START ? "AutoStart" : "ManualStart");
+
+ // open service control manager
+ if ( !( schSCManager = OpenSCManager ( NULL, NULL, SC_MANAGER_ALL_ACCESS)))
+ {
+  dwError = GetLastError();
+
+  ErrorMessage ( dwError, MSGERRSRVCSCMGR);
+
+  ExitProcess ( dwError);
+ }
+
+ // create the service
+ if ( !( schService = CreateService ( schSCManager, SERVICENAME, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SERVICENAME, SERVICE_ALL_ACCESS, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SERVICE_WIN32_OWN_PROCESS, dwStartType,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SERVICE_ERROR_NORMAL, szExePath, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL, NULL, NULL, NULL, NULL) ) )
+ {
+  dwError = GetLastError();
+
+  ErrorMessage ( dwError, MSGERRSRVCCREATE, SERVICENAME, szExePath);
+
+  ExitProcess ( dwError);
+ }
+
+ SetParameters ();
+
+ printf ( "Starting service:&nbsp;&nbsp;&nbsp; %s\n\n", SERVICENAME);
+
+ if ( ! StartService ( schService, 0, NULL) )
+ {
+  dwError = GetLastError();
+
+  ErrorMessage ( dwError, MSGERRSRVCSTART, SERVICENAME);
+
+  DoExitFunction ( dwError);
+ }
+
+ printf ( "SERVICE STARTED SUCCESSFULLY\n\n");
+
+ // now add groups and set security
+ if ( ( dwError = AddGroupsToDomain() ) )
+  ErrorMessage ( dwError, MSGERRGROUPDOMAIN);
+
+ DoExitFunction ( dwError);
+}
+/* eof - main */
+</code></pre>
+<pre><code>/*----------------------------------------------------------------
+| Name: AddGroupsToDomain
+| Desc: adds all of the groups to domain and sets reg key security
+----------------------------------------------------------------*/
+DWORD AddGroupsToDomain ( VOID)
+{
+ LOCALGROUP_INFO_1&nbsp; LocalGroupInfo1;
+
+ LPWSTR&nbsp;&nbsp;&nbsp; lpwszDomainController;
+
+ WCHAR&nbsp;&nbsp;&nbsp;&nbsp; wszGroupName[MAX_PATH];
+
+ DWORD&nbsp;&nbsp;&nbsp;&nbsp; dwGroupSIDLength = 0;
+ DWORD&nbsp;&nbsp;&nbsp;&nbsp; dwGroupSIDMaxLength = 0;
+
+ PSID&nbsp;&nbsp;&nbsp;&nbsp; pGroupSID = NULL;
+
+ SID_NAME_USE&nbsp;&nbsp; snuGroupSID;
+
+ CHAR&nbsp;&nbsp;&nbsp;&nbsp; szDomainName[80];
+ DWORD&nbsp;&nbsp;&nbsp;&nbsp; dwDomainNameSize = sizeof ( szDomainName);
+
+ DWORD&nbsp;&nbsp;&nbsp;&nbsp; dwError = 0;
+
+ DWORD&nbsp;&nbsp;&nbsp;&nbsp; i;
+
+ printf ( "\n");
+ printf ( "Adding Groups to the Domain:\n");
+ printf ( "----------------------------\n");
+
+ if ( ( dwError = CheckDomainName ( szDomainName, dwDomainNameSize) ) )
+ {
+  ErrorMessage ( dwError, MSGERRDOMAINCHK);
+
+  return ( dwError);
+ }
+
+ printf ( "Domain Name:&nbsp; %s\n", szDomainName);
+
+ // get domain controller server name
+ if ( ( dwError = NetGetDCName ( NULL, NULL, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ( LPBYTE *) &amp;lpwszDomainController) ) )
+ {
+  ErrorMessage ( dwError, MSGERRDOMAINCTRL);
+
+  return ( dwError);
+ }
+
+ printf ( "Domain Controller: %ws\n\n", lpwszDomainController);
+
+
+ // now add groups to domain
+ for ( i = 0; GroupDescript[i].pszGroupName; i++)
+ {
+  // change args to long string
+  if ( ! MultiByteToWideChar ( CP_ACP, MB_PRECOMPOSED, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GroupDescript[i].pszGroupName, -1, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; wszGroupName, sizeof ( wszGroupName) ) )
+  {
+ &nbsp; dwError = GetLastError();
+
+ &nbsp; ErrorMessage ( dwError, MSGERRGROUPCONVERT, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GroupDescript[i].pszGroupName);
+
+ &nbsp; return ( dwError);
+  }
+
+  // set name &amp; comment
+  LocalGroupInfo1.lgrpi1_name = wszGroupName;
+  LocalGroupInfo1.lgrpi1_comment = GroupDescript[i].lpwszLocalGroupComment;
+
+  dwError = NetLocalGroupAdd ( lpwszDomainController, 1, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ( LPBYTE) &amp;LocalGroupInfo1, NULL);
+
+  if ( dwError)
+  {
+ &nbsp; // check if group already there
+ &nbsp; if ( dwError == ERROR_ALIAS_EXISTS)
+ &nbsp; {
+ &nbsp;&nbsp; printf ( "Group already in %s Domain: %s\n", szDomainName,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GroupDescript[i].pszGroupName);
+
+ &nbsp;&nbsp; dwError = 0;
+ &nbsp; }
+ &nbsp; else
+ &nbsp; {
+ &nbsp;&nbsp; ErrorMessage ( dwError, MSGERRGROUPADD, szDomainName,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GroupDescript[i].pszGroupName);
+
+ &nbsp;&nbsp; return ( dwError);
+ &nbsp; }
+  }
+  else
+  {
+ &nbsp; printf ( "Group added to %s Domain: %s\n", szDomainName,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GroupDescript[i].pszGroupName);
+  }
+ }
+
+ NetApiBufferFree ( lpwszDomainController);
+
+ // now need to wait until domain recognizes the group names
+ printf ( "\n\nWaiting for the Groups to be recognized by the %s Domain\n",
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; szDomainName);
+ printf ( "This may take a few minutes ");
+
+ // for each group, wait until recognized by domain
+ for ( i = 0; GroupDescript[i].pszGroupName; i++)
+ {
+  dwGroupSIDLength = 0;
+  dwDomainNameSize = sizeof ( szDomainName);
+
+  // loop until domain recognizes name
+  for ( ; ; )
+  {
+ &nbsp; // should always have an error (sid not big enough)
+ &nbsp; if ( ! LookupAccountName ( NULL, GroupDescript[i].pszGroupName, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pGroupSID, &amp;dwGroupSIDLength, szDomainName, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;dwDomainNameSize, &amp;snuGroupSID) )
+ &nbsp; {
+ &nbsp;&nbsp; dwError = GetLastError();
+
+ &nbsp;&nbsp; printf ( ".");
+
+ &nbsp;&nbsp; if ( dwError == ERROR_MORE_DATA || 
+ &nbsp;&nbsp;&nbsp;&nbsp; dwError == ERROR_INSUFFICIENT_BUFFER)
+ &nbsp;&nbsp;&nbsp; break;
+ &nbsp; }
+  } 
+
+  // check if biggest sid length
+  if ( dwGroupSIDLength &gt; dwGroupSIDMaxLength)
+ &nbsp; dwGroupSIDMaxLength = dwGroupSIDLength;
+ }
+
+ printf ( "\nGroups are now recognized by the %s Domain\n", szDomainName);
+
+ // now add groups to the reg key security
+ printf ( "\n");
+ printf ( "Setting Groups' permissions on the Registry Security Key:\n");
+ printf ( "---------------------------------------------------------\n");
+ printf ( "Registry key: HKEY_LOCAL_MACHINE\\%s\n\n", SECURITYKEY);
+</code></pre>
+<pre><code>&nbsp;// get sid memory
+ if ( ! ( pGroupSID = ( PSID) GetMemory ( dwGroupSIDMaxLength) ) )
+ {
+  dwError = GetLastError();
+
+  return ( dwError);
+ }
+
+ // for each group, wait until recognized by domain
+ for ( i = 0; GroupDescript[i].pszGroupName; i++)
+ {
+  // get security descriptor from reg key
+  if ( ( dwError = GetRegKeySecurity ( SECURITYKEY) ) )
+ &nbsp; return ( dwError);
+
+  dwGroupSIDLength = dwGroupSIDMaxLength;
+  dwDomainNameSize = sizeof ( szDomainName);
+
+  // get account info
+  if ( ! LookupAccountName ( NULL, GroupDescript[i].pszGroupName, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pGroupSID, &amp;dwGroupSIDLength, szDomainName, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;dwDomainNameSize, &amp;snuGroupSID) )
+  {
+ &nbsp; dwError = GetLastError();
+
+ &nbsp; ErrorMessage ( dwError, MSGERRGROUPNAME, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GroupDescript[i].pszGroupName);
+
+ &nbsp; goto ErrorExit;
+  }
+ 
+
+  // now add this group to dacl
+  if ( ( dwError = AddToSecurityDACL ( pSecurityRegKeySD, pGroupSID,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GroupDescript[i].dwAccessMask) ) )
+  {
+ &nbsp; if ( dwError == ERROR_GROUP_EXISTS)
+ &nbsp;&nbsp; printf ( "Group already has permission to use SiamServer: %s\n",
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GroupDescript[i].pszGroupName);
+ &nbsp; else
+ &nbsp; {
+ &nbsp;&nbsp; ErrorMessage ( dwError, MSGERRGROUPSECURE, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GroupDescript[i].pszGroupName);
+
+ &nbsp;&nbsp; goto ErrorExit;
+ &nbsp; }
+  }
+
+  CloseRegKeySecurity();
+
+  printf ( "Group given permission to use SiamServer:&nbsp; %s\n", 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GroupDescript[i].pszGroupName);
+ }
+
+ printf ( "\n");
+
+ErrorExit:
+
+ FreeMemory ( ( VOID *) pGroupSID);
+
+ CloseRegKeySecurity();
+
+ return ( dwError);
+}
+/* eof - AddGroupsToDomain */
+</code></pre>
+<pre><code>/*-----------------------------------------------------------------
+| Name: AddToSecurityDACL
+| Desc: adds SID to SD
+-----------------------------------------------------------------*/
+DWORD AddToSecurityDACL ( PSECURITY_DESCRIPTOR pRelSD, PSID pGroupSID,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DWORD dwAccessMask)
+{
+ PSECURITY_DESCRIPTOR pAbsSD = NULL;
+
+ PACL&nbsp; pDACL;
+
+ DWORD&nbsp; dwSDLength = 0;
+ DWORD&nbsp; dwSDRevision;
+ DWORD&nbsp; dwDACLLength = 0;
+
+ SECURITY_DESCRIPTOR_CONTROL sdcSDControl;
+
+ PACL&nbsp; pNewDACL&nbsp; = NULL;
+ DWORD&nbsp; dwAddDACLLength = 0;
+
+ BOOL&nbsp; fAceFound = 0;
+
+ BOOL&nbsp; fHasDACL&nbsp; = FALSE;
+ BOOL&nbsp; fDACLDefaulted = FALSE; 
+
+ ACCESS_ALLOWED_ACE&nbsp; *pDACLAce;
+
+ DWORD&nbsp; dwError = 0;
+
+ DWORD&nbsp; i;
+
+
+ // get sd control bits
+ if ( ! GetSecurityDescriptorControl ( pRelSD, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ( PSECURITY_DESCRIPTOR_CONTROL) &amp;sdcSDControl,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ( LPDWORD) &amp;dwSDRevision) )
+ {
+  dwError = GetLastError();
+
+  ErrorMessage ( dwError, MSGERRSDCONTROLGET);
+
+  return ( dwError);
+ }
+
+ // check if dacl is present
+ if ( SE_DACL_PRESENT &amp; sdcSDControl)
+ {
+  // get dacl 
+  if ( ! GetSecurityDescriptorDacl ( pRelSD, ( LPBOOL) &amp;fHasDACL,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ( PACL *) &amp;pDACL, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ( LPBOOL) &amp;fDACLDefaulted) )
+  {
+ &nbsp; dwError = GetLastError();
+
+ &nbsp; ErrorMessage ( dwError, MSGERRDACLSECUREGET);
+
+ &nbsp; return ( dwError);
+  }
+
+  // get dacl length
+  dwDACLLength = pDACL-&gt;AclSize;
+
+  // now check if SID ace is there
+  for ( i = 0; i &lt; pDACL-&gt;AceCount; i++)
+  {
+ &nbsp; if ( ! GetAce ( pDACL, i, ( LPVOID *) &amp;pDACLAce) )
+ &nbsp; {
+ &nbsp;&nbsp; dwError = GetLastError();
+
+ &nbsp;&nbsp; ErrorMessage ( dwError, MSGERRDACLACE);
+
+ &nbsp;&nbsp; return ( dwError);
+ &nbsp; }
+
+ &nbsp; // check if group sid is already there
+ &nbsp; if ( EqualSid ( ( PSID) &amp;(pDACLAce-&gt;SidStart), pGroupSID) )
+ &nbsp;&nbsp; break;
+  }
+
+  // exit if found (means already has been set)
+  if ( i &lt; pDACL-&gt;AceCount)
+  {
+ &nbsp; dwError = ERROR_GROUP_EXISTS;
+
+ &nbsp; return ( dwError);
+  }
+
+  // get length of new DACL
+  dwAddDACLLength = sizeof ( ACCESS_ALLOWED_ACE) - 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sizeof ( DWORD) + GetLengthSid ( pGroupSID);
+ }
+ else
+  // get length of new DACL
+  dwAddDACLLength = sizeof ( ACL) + sizeof ( ACCESS_ALLOWED_ACE) - 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sizeof ( DWORD) + GetLengthSid ( pGroupSID);
+
+ // get memory needed for new DACL
+ if ( ! ( pNewDACL = ( PACL) GetMemory ( dwDACLLength + dwAddDACLLength) ) )
+ {
+  dwError = GetLastError();
+
+  goto ErrorExit;
+ }
+
+ // get the sd length
+ dwSDLength = GetSecurityDescriptorLength ( pRelSD);
+
+ // get memory for new sd
+ if ( ! ( pAbsSD = ( PSECURITY_DESCRIPTOR) 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GetMemory ( dwSDLength + dwAddDACLLength) ) )
+ {
+  dwError = GetLastError();
+
+  goto ErrorExit;
+ }
+
+ // change self-relative SD to absolute
+ if ( ! InitializeSecurityDescriptor ( pAbsSD, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SECURITY_DESCRIPTOR_REVISION) )
+ {
+  dwError = GetLastError();
+
+  ErrorMessage ( dwError, MSGERRSDINIT);
+
+  goto ErrorExit;
+ }
+
+ // init new dacl
+ if ( ! InitializeAcl ( pNewDACL, dwDACLLength + dwAddDACLLength, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ACL_REVISION) )
+ {
+  dwError = GetLastError();
+
+  ErrorMessage ( dwError, MSGERRDACLINIT);
+
+  goto ErrorExit;
+ }
+</code></pre>
+<pre><code>&nbsp;// now add in all of the aces into the new dacl (if org dacl is there)
+ if ( SE_DACL_PRESENT &amp; sdcSDControl)
+ { 
+  for ( i = 0; i &lt; pDACL-&gt;AceCount; i++)
+  {
+ &nbsp; // get ace from original dacl
+ &nbsp; if ( ! GetAce ( pDACL, i, ( LPVOID *) &amp;pDACLAce) )
+ &nbsp; {
+ &nbsp;&nbsp; dwError = GetLastError();
+
+ &nbsp;&nbsp; ErrorMessage ( dwError, MSGERRDACLACE);
+
+ &nbsp;&nbsp; goto ErrorExit;
+ &nbsp; }
+
+ &nbsp; // now add ace to new dacl
+ &nbsp; if ( ! AddAccessAllowedAce ( pNewDACL, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ACL_REVISION, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDACLAce-&gt;Mask,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ( PSID) &amp;(pDACLAce-&gt;SidStart) ) )
+ &nbsp; {
+ &nbsp;&nbsp; dwError = GetLastError();
+
+ &nbsp;&nbsp; ErrorMessage ( dwError, MSGERRDACLACCESS);
+
+ &nbsp;&nbsp; goto ErrorExit;
+ &nbsp; }
+  }
+ }
+
+ // now add new ace to new dacl
+ if ( ! AddAccessAllowedAce ( pNewDACL, ACL_REVISION, dwAccessMask,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pGroupSID) )
+ {
+  dwError = GetLastError();
+
+  ErrorMessage ( dwError, MSGERRDACLACCESS);
+
+  goto ErrorExit;
+ }
+
+ // check if everything went ok
+ if ( ! IsValidAcl ( pNewDACL) )
+ {
+  dwError = GetLastError();
+
+  ErrorMessage ( dwError, MSGERRDACLVALID);
+
+  goto ErrorExit;
+ }
+
+ // now set security descriptor dacl
+ if ( ! SetSecurityDescriptorDacl ( pAbsSD, TRUE, pNewDACL, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fDACLDefaulted) )
+ {
+  dwError = GetLastError();
+
+  ErrorMessage ( dwError, MSGERRDACLSECURESET);
+
+  goto ErrorExit;
+ }
+
+ // check if everything went ok
+ if ( ! IsValidSecurityDescriptor ( pAbsSD) )
+ {
+  dwError = GetLastError();
+
+  ErrorMessage ( dwError, MSGERRSDVALID);
+
+  goto ErrorExit;
+ }
+
+ // now set the reg key security
+ if ( ( dwError = RegSetKeySecurity ( hSecurityRegKey, 
+ &nbsp;&nbsp;&nbsp;&nbsp; (SECURITY_INFORMATION)( DACL_SECURITY_INFORMATION),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pAbsSD) ) )
+  ErrorMessage ( dwError, MSGERRREGSECURESET);
+
+ErrorExit:
+
+ // free memory
+ FreeMemory ( ( VOID *) pAbsSD);
+ FreeMemory ( ( VOID *) pNewDACL);
+
+ return ( dwError);
+}
+/* eof - AddToSecurityDACL */
+</code></pre>
+<pre><code>/*-----------------------------------------------------------------
+| Name: CheckDomainName
+| Desc: gets the domain name &amp; checks it is the right one
+-----------------------------------------------------------------*/
+DWORD CheckDomainName ( CHAR *pszDomainName, DWORD dwDomainNameSize)
+{
+// just guessing at using this well known name; 
+// might be a better way to find the domain name
+
+#define CHECKUSERNAME "Domain Users"
+
+ DWORD&nbsp;&nbsp;&nbsp;&nbsp; dwGroupSIDLength = 0;
+
+ PSID&nbsp;&nbsp;&nbsp;&nbsp; psidGroupSID = NULL;
+
+ SID_NAME_USE&nbsp;&nbsp; snuGroupSID;
+
+ HANDLE&nbsp;&nbsp;&nbsp; hConfig;
+
+ CHAR&nbsp;&nbsp;&nbsp;&nbsp; szReadBuffer[MAX_PATH];
+ DWORD&nbsp;&nbsp;&nbsp;&nbsp; dwBytesRead;
+
+ DWORD&nbsp;&nbsp;&nbsp;&nbsp; dwError = 0;
+
+ DWORD&nbsp;&nbsp;&nbsp;&nbsp; i;
+
+ // inits
+ memset ( pszDomainName, 0, dwDomainNameSize);
+
+ // get the domain name
+ if ( ! LookupAccountName ( NULL, CHECKUSERNAME, psidGroupSID, 
+ &nbsp;&nbsp;&nbsp;&nbsp; &amp;dwGroupSIDLength, pszDomainName, 
+ &nbsp;&nbsp;&nbsp;&nbsp; &amp;dwDomainNameSize, &amp;snuGroupSID))
+ {
+  dwError = GetLastError();
+
+  if ( dwError == ERROR_MORE_DATA || 
+ &nbsp;&nbsp; dwError == ERROR_INSUFFICIENT_BUFFER)
+  {
+ &nbsp; dwError = 0;
+
+ &nbsp; // get sid memory
+ &nbsp; if ( ! ( psidGroupSID = ( PSID) GetMemory ( dwGroupSIDLength) ) )
+ &nbsp; {
+ &nbsp;&nbsp; dwError = GetLastError();
+
+ &nbsp;&nbsp; return ( dwError);
+ &nbsp; }
+
+ &nbsp; // now get name
+ &nbsp; if ( ! LookupAccountName ( NULL, CHECKUSERNAME, psidGroupSID, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;dwGroupSIDLength, pszDomainName, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;dwDomainNameSize, &amp;snuGroupSID) )
+ &nbsp;&nbsp; dwError = GetLastError();
+
+ &nbsp; FreeMemory ( ( VOID *) psidGroupSID);
+  }
+
+  if ( dwError)
+  {
+ &nbsp; ErrorMessage ( dwError, MSGERRGROUPNAME, CHECKUSERNAME);
+
+ &nbsp; return ( dwError);
+  }
+ }
+
+ // now get the domain from the config file
+ if ( ( hConfig = CreateFile ( INSTALLCONFIG, GENERIC_READ, FILE_SHARE_READ,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL, OPEN_EXISTING, 0, 0) )
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == INVALID_HANDLE_VALUE)
+ {
+  dwError = GetLastError();
+
+  ErrorMessage ( dwError, MSGERRFILEOPEN, INSTALLCONFIG);
+
+  return ( dwError);
+ }
+
+ if ( ! ReadFile ( hConfig, ( LPVOID) szReadBuffer, sizeof ( szReadBuffer),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;dwBytesRead, NULL) )
+ {
+  dwError = GetLastError();
+
+  ErrorMessage ( dwError, MSGERRFILEREAD, INSTALLCONFIG);
+ }
+
+ CloseHandle ( hConfig);
+
+ if ( dwError)
+  return ( dwError); 
+ 
+ // take out the \n or \r or other non-ascii char
+ for ( i = 0; i &lt; strlen ( szReadBuffer); i++)
+ {
+  if ( szReadBuffer[i] == '\r' || szReadBuffer[i] == '\n')
+  {
+ &nbsp; szReadBuffer[i] = '\0';
+
+ &nbsp; break;
+  }
+ }
+
+ // now check if they are equal
+ if ( stricmp ( szReadBuffer, pszDomainName) )
+ {
+  dwError = ERROR_INVALID_DOMAIN_ROLE;
+
+  ErrorMessage ( dwError, MSGERRUSEDOMAIN, szReadBuffer, pszDomainName);
+ }
+
+ return ( dwError);
+}
+/* eof - CheckDomainName */
+</code></pre>
+<pre><code>/*------------------------------------------------------------------
+| Name: CheckForTcpip
+| Desc: checks if tcpip has been installed on system
+------------------------------------------------------------------*/
+BOOL CheckForTcpip ( VOID)
+{
+ HKEY hTcpipRegKey;
+
+ // open the tcpip parameters key
+ if ( RegOpenKeyEx ( HKEY_LOCAL_MACHINE, TCPIPKEY, 0, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; KEY_ALL_ACCESS, &amp;hTcpipRegKey) )
+  return ( FALSE);
+
+ // close key
+ RegCloseKey ( hTcpipRegKey);
+
+ return ( TRUE);
+}
+/* eof - CheckForTcpip */
+
+
+/*-----------------------------------------------------------------
+| Name: CloseRegKeySecurity
+| Desc: release memory and close reg handle
+-----------------------------------------------------------------*/
+VOID CloseRegKeySecurity ( VOID)
+{
+
+ // free up memory
+ FreeMemory ( ( VOID *) pSecurityRegKeySD);
+
+ // close down reg key
+ if ( hSecurityRegKey)
+  RegCloseKey ( hSecurityRegKey);
+
+ hSecurityRegKey = ( HKEY) 0;
+}
+/* eof - CloseRegKeySecurity */
+
+
+
+/*------------------------------------------------------------------
+| Name: DoExitFunction
+| Desc: exits program
+------------------------------------------------------------------*/
+VOID DoExitFunction ( DWORD dwError)
+{
+ // close service control mgr
+ if ( schSCManager)
+  CloseServiceHandle ( schSCManager);
+
+ // close service handle
+ if ( schService)
+  CloseServiceHandle ( schService);
+
+ // check if error
+ if ( dwError)
+  printf ( "\nSERVICE NOT SUCCESSFULLY INSTALLED\n\n");
+ else
+  printf ( "\nSERVICE SUCCESSFULLY INSTALLED\n\n");
+
+ fflush ( stdout);
+
+ ExitProcess ( dwError);
+}
+/* eof - DoExitFunction */
+</code></pre>
+<pre><code>/*------------------------------------------------------------------
+| Name: ErrorMessage
+| Desc: prints error messages and exits
+------------------------------------------------------------------*/
+VOID ErrorMessage ( DWORD dwError, CHAR *szFormat, ...)
+{
+ CHAR szBuffer[MAX_PATH];
+
+ va_list vaPtr;
+
+ // get formatted string
+ va_start ( vaPtr, szFormat);
+ vsprintf ( szBuffer, szFormat, vaPtr);
+ va_end ( vaPtr);
+
+ // put error code into string
+ if ( dwError)
+  sprintf ( &amp;szBuffer[ strlen ( szBuffer)], " (error = %d)", dwError);
+
+ strcat ( szBuffer, "\r\n");
+ printf ( szBuffer);
+
+// DoExitFunction ( dwError);
+}
+/* eof - ErrorMessage */
+
+
+/*------------------------------------------------------------------
+| Name: FreeMemory
+| Desc: frees memory
+------------------------------------------------------------------*/
+VOID FreeMemory( VOID *vPtr )
+{
+
+ // free memory if it is set
+ if ( vPtr) 
+ {
+  if ( ! LocalFree ( ( HLOCAL) vPtr) )
+ &nbsp; lFreeCnt++;
+  
+  vPtr = NULL;
+ }
+}
+/* eof - FreeMemory */
+</code></pre>
+<pre><code>/*-------------------------------------------------------------------
+| Name: _GetMemory ()
+| Desc: This safe version of malloc provides a quick check that a malloc
+|&nbsp;&nbsp; succeeds; it terminates with an error if malloc does not succeed.
+|&nbsp;&nbsp; Production code, especially for a Windows or Presentation Manager
+|&nbsp;&nbsp; environment, should use a more robust version of SafeMallocFunc().
+|
+|&nbsp;&nbsp; This function is not meant to be called directly. Instead, programs
+|&nbsp;&nbsp; should call the SafeMalloc macro defined in SAMPLES.H as:
+|&nbsp;&nbsp; #define GetMemory(size) _GetMemory(size, __FILE__, __LINE__)
+-------------------------------------------------------------------*/
+VOID *_GetMemory ( UINT cbSize, CHAR *pszFilename, UINT usLine)
+{
+ VOID *vPtr;
+ 
+ if ( ( vPtr = ( VOID *) LocalAlloc ( LPTR, cbSize)) == NULL)
+  ErrorMessage ( GetLastError(), MSGERRUSEALLOC, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cbSize, pszFilename, usLine);
+ else
+  lAllocCnt++; 
+ 
+ return ( vPtr);
+}
+/* eof - GetMemory */
+
+
+/*------------------------------------------------------------------
+| Name: GetRegKeySecurity
+| Desc: gets security registry sec. descriptor
+------------------------------------------------------------------*/
+DWORD GetRegKeySecurity ( CHAR *pszRegKeyName)
+{
+ LONG&nbsp; dwError = 0;&nbsp;&nbsp;&nbsp; // reg errors (GetLastError won't work)
+
+ CHAR&nbsp; szClassName[MAX_PATH] = ""; // Buffer for class name.
+ DWORD dwcClassLen = MAX_PATH;&nbsp; // Length of class string.
+ DWORD dwcSubKeys;&nbsp;&nbsp;&nbsp;&nbsp; // Number of sub keys.
+ DWORD dwcMaxSubKey;&nbsp;&nbsp;&nbsp; // Longest sub key size.
+ DWORD dwcMaxClass;&nbsp;&nbsp;&nbsp; // Longest class string.
+ DWORD dwcValues;&nbsp;&nbsp;&nbsp;&nbsp; // Number of values for this key.
+ DWORD dwcMaxValueName;&nbsp;&nbsp; // Longest Value name.
+ DWORD dwcMaxValueData;&nbsp;&nbsp; // Longest Value data.
+ DWORD dwcSDLength;&nbsp;&nbsp;&nbsp; // Security descriptor length
+ FILETIME ftLastWriteTime;&nbsp;&nbsp; // Last write time.
+
+
+ // open the security key
+ if ( ( dwError = RegOpenKeyEx ( HKEY_LOCAL_MACHINE, pszRegKeyName, 0,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; KEY_ALL_ACCESS, &amp;hSecurityRegKey) ) )
+ {
+  ErrorMessage ( dwError, MSGERRREGOPEN, pszRegKeyName);
+
+  goto ErrorExit;
+ }
+
+ // get length of security descriptor
+ if ( ( dwError = RegQueryInfoKey ( hSecurityRegKey, szClassName, 
+ &nbsp;&nbsp;&nbsp;&nbsp; &amp;dwcClassLen, NULL, &amp;dwcSubKeys, &amp;dwcMaxSubKey, 
+ &nbsp;&nbsp;&nbsp;&nbsp; &amp;dwcMaxClass, &amp;dwcValues, &amp;dwcMaxValueName, 
+ &nbsp;&nbsp;&nbsp;&nbsp; &amp;dwcMaxValueData, &amp;dwcSDLength, &amp;ftLastWriteTime) ) )
+ {
+  ErrorMessage ( dwError, MSGERRREGINFO, pszRegKeyName);
+
+  goto ErrorExit;
+ }
+
+ 
+ // get SD memory
+ if ( ! ( pSecurityRegKeySD = ( PSECURITY_DESCRIPTOR) 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GetMemory ( ( UINT) dwcSDLength) ) )
+ {
+  dwError = GetLastError();
+
+  return ( dwError);
+ }
+
+ // now get SD
+ if ( ( dwError = RegGetKeySecurity ( hSecurityRegKey, 
+ &nbsp;&nbsp;&nbsp;&nbsp; (SECURITY_INFORMATION)( DACL_SECURITY_INFORMATION),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pSecurityRegKeySD, &amp;dwcSDLength) ) )
+ {
+  ErrorMessage ( dwError, MSGERRREGSECUREGET, pszRegKeyName);
+
+  goto ErrorExit;
+ }
+
+ // check if SD is good
+ if ( ! IsValidSecurityDescriptor ( pSecurityRegKeySD))
+ {
+  dwError = GetLastError();
+
+  ErrorMessage ( dwError, MSGERRREGINVALID, pszRegKeyName);
+ }
+
+ErrorExit:
+
+ return ( dwError);
+}
+/* eof - GetRegKeySecurity */
+</code></pre>
+<pre><code>/*------------------------------------------------------------------
+| Name: RunningAsAdministrator
+| Desc: checks if user has administrator privileges
+| Notes: This function returns TRUE if the user identifier associated with 
+|&nbsp;&nbsp; this process is a member of the the Administrators group.
+------------------------------------------------------------------*/
+BOOL RunningAsAdministrator ( VOID)
+{
+ BOOL&nbsp;&nbsp; fAdmin;
+ HANDLE&nbsp; hThread;
+ TOKEN_GROUPS *ptg = NULL;
+ DWORD&nbsp; cbTokenGroups;
+ DWORD&nbsp; dwGroup;
+ PSID&nbsp;&nbsp; psidAdmin;
+
+ SID_IDENTIFIER_AUTHORITY SystemSidAuthority= SECURITY_NT_AUTHORITY;
+
+ // First we must open a handle to the access token for this thread.
+
+ if ( !OpenThreadToken ( GetCurrentThread(), TOKEN_QUERY, FALSE, &amp;hThread))
+ {
+  if ( GetLastError() == ERROR_NO_TOKEN)
+  {
+ &nbsp; // If the thread does not have an access token, we'll examine the
+ &nbsp; // access token associated with the process.
+
+ &nbsp; if (! OpenProcessToken ( GetCurrentProcess(), TOKEN_QUERY, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;hThread))
+ &nbsp; return ( FALSE);
+  }
+  else 
+ &nbsp; return ( FALSE);
+ }
+
+ // Then we must query the size of the group information associated with
+ // the token. Note that we expect a FALSE result from GetTokenInformation
+ // because we've given it a NULL buffer. On exit cbTokenGroups will tell
+ // the size of the group information.
+
+ if ( GetTokenInformation ( hThread, TokenGroups, NULL, 0, &amp;cbTokenGroups))
+  return ( FALSE);
+
+ // Here we verify that GetTokenInformation failed for lack of a large
+ // enough buffer.
+
+ if ( GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+  return ( FALSE);
+
+ // Now we allocate a buffer for the group information.
+ // Since _alloca allocates on the stack, we don't have
+ // to explicitly deallocate it. That happens automatically
+ // when we exit this function.
+
+ if ( ! ( ptg= _alloca ( cbTokenGroups))) 
+  return ( FALSE);
+
+ // Now we ask for the group information again.
+ // This may fail if an administrator has added this account
+ // to an additional group between our first call to
+ // GetTokenInformation and this one.
+
+ if ( !GetTokenInformation ( hThread, TokenGroups, ptg, cbTokenGroups,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;cbTokenGroups) )
+  return ( FALSE);
+
+ // Now we must create a System Identifier for the Admin group.
+
+ if ( ! AllocateAndInitializeSid ( &amp;SystemSidAuthority, 2, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SECURITY_BUILTIN_DOMAIN_RID, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DOMAIN_ALIAS_RID_ADMINS,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0, 0, 0, 0, 0, 0, &amp;psidAdmin) )
+  return ( FALSE);
+
+ // Finally we'll iterate through the list of groups for this access
+ // token looking for a match against the SID we created above.
+
+ fAdmin= FALSE;
+
+ for ( dwGroup= 0; dwGroup &lt; ptg-&gt;GroupCount; dwGroup++)
+ {
+  if ( EqualSid ( ptg-&gt;Groups[dwGroup].Sid, psidAdmin))
+  {
+ &nbsp; fAdmin = TRUE;
+
+ &nbsp; break;
+  }
+ }
+
+ // Before we exit we must explicity deallocate the SID we created.
+
+ FreeSid ( psidAdmin);
+
+ return ( fAdmin);
+}
+/* eof - RunningAsAdministrator */
+</code></pre>
+<pre><code>/*-----------------------------------------------------------------
+| Name: SetParameters
+| Desc: sets registry parameters for service
+-----------------------------------------------------------------*/
+DWORD SetParameters ( VOID)
+{
+ HKEY hRegKey;
+ CHAR *pszVersion&nbsp; = VERSION;
+ DWORD dwTimeout&nbsp;&nbsp; = TIMEOUT;
+ DWORD dwMaxNumOfClients = MAXCLIENTS;
+
+ DWORD dwType;
+ DWORD dwcbData;
+ DWORD dwTcpMaxConn;
+ DWORD dwDisposition;
+
+ DWORD dwError = 0;
+
+ // create or open the parameters key
+ if ( ( dwError = RegCreateKeyEx ( HKEY_LOCAL_MACHINE, PARAMETERSKEY, 0, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "", REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL, &amp;hRegKey, &amp;dwDisposition) ) )
+ {
+  ErrorMessage ( dwError, MSGERRREGCREATE, PARAMETERSKEY);
+
+  goto ErrorExit1;
+ }
+
+ // add version value
+ if ( ( dwError = RegSetValueEx ( hRegKey, VERSIONVALUE, 0, REG_SZ, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ( LPBYTE) pszVersion, strlen ( pszVersion) + 1) ) )
+ {
+  ErrorMessage ( dwError, MSGERRREGVALUESET, VERSIONVALUE);
+
+  goto ErrorExit;
+ }
+
+ // add timeout value
+ if ( ( dwError = RegSetValueEx ( hRegKey, TIMEOUTVALUE, 0, REG_DWORD, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ( LPBYTE) &amp;dwTimeout, sizeof ( DWORD) ) ) )
+ {
+  ErrorMessage ( dwError, MSGERRREGVALUESET, TIMEOUTVALUE);
+
+  goto ErrorExit;
+ }
+
+
+ // add max # of clients value
+ if ( ( dwError = RegSetValueEx ( hRegKey, MAXCLIENTSVALUE, 0, REG_DWORD, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ( LPBYTE) &amp;dwMaxNumOfClients, sizeof ( DWORD) ) ) )
+ {
+  ErrorMessage ( dwError, MSGERRREGVALUESET, MAXCLIENTSVALUE);
+
+  goto ErrorExit;
+ }
+
+ // close key
+ RegCloseKey ( hRegKey);
+
+ printf ( "Service version:&nbsp;&nbsp;&nbsp; %s\n", pszVersion);
+ printf ( "Service timeout:&nbsp;&nbsp;&nbsp; %d\n", dwTimeout);
+ printf ( "Service max. number of clients: %d\n\n", dwMaxNumOfClients);
+
+ // open the tcpip parameters key
+ if ( ( dwError = RegOpenKeyEx ( HKEY_LOCAL_MACHINE, TCPIPKEY, 0,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; KEY_ALL_ACCESS, &amp;hRegKey) ) )
+ {
+  ErrorMessage ( dwError, MSGERRREGOPEN, TCPIPKEY);
+
+  goto ErrorExit1;
+ }
+
+ dwcbData = ( DWORD) sizeof ( dwTcpMaxConn);
+
+ // check what the parameter is set to
+ if ( RegQueryValueEx ( hRegKey, TCPMAXCONNVALUE, NULL, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;dwType, ( LPBYTE) &amp;dwTcpMaxConn, &amp;dwcbData) )
+  dwTcpMaxConn = 0;
+
+ if ( dwTcpMaxConn != TCPIP_MAXCONN)
+ {
+  dwTcpMaxConn = TCPIP_MAXCONN;
+
+  // add version value
+  if ( ( dwError = RegSetValueEx ( hRegKey, TCPMAXCONNVALUE, 0, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; REG_DWORD, ( LPBYTE) &amp;dwTcpMaxConn, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sizeof ( DWORD) ) ) )
+  {
+ &nbsp; ErrorMessage ( dwError, MSGERRREGVALUESET, TCPMAXCONNVALUE);
+
+ &nbsp; goto ErrorExit;
+  }
+
+  printf ( "TcpMaxConnectAttempts changed to: %d\n\n", dwTcpMaxConn);
+ }
+</code></pre>
+<pre><code>ErrorExit:
+
+ // close key
+ RegCloseKey ( hRegKey);
+
+ErrorExit1:
+
+ return ( dwError);
+}
+/* eof - SetParameters */
+</code></pre>
+</BODY>
+</HTML>

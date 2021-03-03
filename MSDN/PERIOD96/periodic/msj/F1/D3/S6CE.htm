@@ -1,0 +1,338 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Under the Hood</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  Under the Hood</H1><P>Matt Pietrek</P>
+<P>Matt Pietrek is the author of <I>Windows 95 System Programming Secrets</I> (IDG Books, 1995) and <I>Windows Internals</I> (Addison-Wesley, 1993). He works at Nu-Mega Technologies Inc., and can be reached via CompuServe: 71774,362.</P>
+<P><OBJECT id=sample1 type="application/x-oleobject"
+classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Backgrounders Samples">
+<PARAM name="Item2" value="4573">
+</OBJECT><a href="javascript:sample1.Click()">
+
+Click to open or copy the MLTINST2 project files.</A></P><P>QYour article and MULTINST example describing how to fool the Windows loader into running more than one instance of a program with multiple data segments worked great for me under Windows® 3.1. It doesn't seem to work under Windows® 95 though, and I can't find any discussion of this on the net or in the latest MSDN CD.</P>
+<P><I>Dave Ripp </I></P>
+<P></P>
+<P>AThe first time I received email telling me that my MULTINST hack-o-rama didn't work under Windows 95, I figured that the writer was just doing something wrong. A bunch of messages later, I knew that something had to be wrong in the program. Lately, I've been totally focused on programming Win32", both at work and in this column. Yet a lot of the mail I receive still relates to 16-bit Windows 3.1-based programs that I've written for MSJ. Obviously, I can't ignore those programmers who either by choice or necessity are still doing 16-bit coding. So I rolled up my sleeves and wandered back into the wilderness of 16-bit programming. This meant digging into the 16-bit New Executable loader code in Windows 95. Before I started this trek, I thought that the changes to the 16-bit loader in Windows 95 (relative to Windows 3.1) would be very minimal. Boy, was I wrong!</P>
+<P>Before I start describing what changed in Windows 95 (and how I was able to work around it), a brief refresher on the problem Dave refers to is in order. In 16-bit Windows, the system prevents you from running more than one instance of an executable that has multiple, writeable data segments. How do you get more than one writeable data segment in your executable? The most common way is to declare data explicitly as "far" data:</P>
+<P> </P>
+<P><BR></P>
+<PRE> char far MyBigArray[0x4000];</PRE>
+<P> </P>
+<P>In older Microsoft C/C++ compilers, just using the large memory model would lead to multiple data segments. Luckily this isn't a problem with Visual C++™ 1.5.</P>
+<P>Why does 16-bit Windows prevent multiple instances of a multi-data-segment program from running? If you examine the code that compilers generate for such an executable, you'll see that the compiler has to create code that explicitly loads the selector values of the non-DGROUP data selectors into the segment registers. (The ES register is most often used for this.) The problem lies in the fact that 16-bit Windows always shares code segments between multiple instances of the same executable. When the first instance of a multiple data segment program loads, the actual selector values for the non-DGROUP data segment selectors are patched into the executable's code segments in memory. If a second instance were allowed to be loaded, the code segments would refer to the data segments belonging to the first instance. (Remember, the second instance would share the code segments with the first instance.) To prevent these problems, the 16-bit loader checks out each EXE before it loads, and if it sees the situation with multiple data segments that I've just described, the loader fails the load with an error code of 0x10.</P>
+<P>As a result of constantly seeing questions about this problem on CompuServe, I wrote a utility called MULTINST for one of my early Q&amp;A columns. The core of MULTINST was a function that you included in your programs with multiple data segments. This function did some disgusting things to fool the Windows loader into thinking that there wasn't a previous instance of the EXE running when the loader did its checking. Well, as Microsoft constantly warns programmers, it's not a good idea to rely on undocumented operating system behavior, since it may change in subsequent releases. In the case of my MULTINST hack, the loader's behavior did change, and the MULTINST code doesn't work under Windows 95. Luckily, I was able to figure out why the MULTINST hack fails under Windows 95, and have come up with an updated solution. I've called my revised solution MLTINST2 (see <B>Figure 1</B>). It's a bit messier than the original MULTINST code, but nobody claimed system-level coding was supposed to be easy.</P>
+<P> Figure 1  MLTINST2</P>
+<P></P>
+<P>MLTINST2.MS</P>
+<P><BR></P>
+<PRE> PROJNAME = MLTINST2
+
+$(PROJNAME).exe: $(PROJNAME).obj $(PROJNAME).res
+  link /ON:N /A:16 $(PROJNAME).obj, $(PROJNAME), , \
+      LIBW.LIB LLIBCEW.LIB PROCHOOK.LIB,$(PROJNAME).def
+  RC $(PROJNAME).res $(PROJNAME).exe
+
+$(PROJNAME).obj: $(PROJNAME).cpp $(PROJNAME).h
+  CL /AL /W3 /GEea /GAs /G2 /c /Zi /YX $(PROJNAME).cpp
+
+$(PROJNAME).res: $(PROJNAME).rc 
+    RC -R -FO $(PROJNAME).res $(PROJNAME).rc</PRE>
+<P></P>
+<P>MLTINST2.BOR</P>
+<P><BR></P>
+<PRE> .AUTODEPEND
+PROJNAME = MLTINST2
+CC_CFG = $(PROJNAME).CFG
+LINK_OPTS = /A=16/x/c/Twe/v
+OBJS = $(PROJNAME).OBJ
+
+$(PROJNAME).EXE: $(OBJS) $(PROJNAME).DEF $(PROJNAME).RC
+  TLINK $(LINK_OPTS) @&amp;&amp;|
+c0wl.obj $(OBJS), $(PROJNAME).EXE, , prochook.lib import.lib cwl.lib
+$(PROJNAME).DEF
+|
+  RC $(PROJNAME).RC $(PROJNAME).EXE
+
+.cpp.obj:
+  bcc -c -2 -w -v -WE -ml {$&lt; }</PRE>
+<P></P>
+<P>MLTINST2.DEF</P>
+<P><BR></P>
+<PRE> NAME MLTINST2
+DESCRIPTION 'Multiple Instance Workaround Demo'
+EXETYPE WINDOWS
+STUB 'winstub.exe'
+CODE MOVEABLE DISCARDABLE PRELOAD
+DATA PRELOAD MOVEABLE
+HEAPSIZE 1024
+STACKSIZE 5120</PRE>
+<P></P>
+<P>MLTINST2.RC</P>
+<P></P>
+<P>MLTINST2.H</P>
+<P><BR></P>
+<PRE> #define IDC_TEXT_HINSTANCE  100
+#define IDC_BUTTON_INVOKE_ANOTHER   101
+#define IDC_BUTTON_ALLOW_ANOTHER    102</PRE>
+<P></P>
+<P>MLTINST2.CPP</P>
+<P><BR></P>
+<PRE> //==================================
+// MULTINST.C - Matt Pietrek 1993
+//==================================
+#include &lt;windows.h&gt;
+#include &lt;string.h&gt;
+#include &lt;ctype.h&gt;
+#pragma hdrstop
+#include "prochook.h"
+#include "mltinst2.h"
+
+#define MAX_PATH 260    // This really should be in WINDOWS.H, but is
+                        // inexplicably hard-coded into the data structures
+
+//########################################################################
+// Prototypes for functions
+//########################################################################                          
+
+BOOL CALLBACK _export MultInstDlgProc(HWND hWndDlg, UINT msg,
+                                      WPARAM wParam, LPARAM lParam);
+int MungeModuleHeader( HINSTANCE hInstance, BOOL fMunge );
+BOOL SetupMultInst95( HINSTANCE hInstance );
+BOOL ShutdownMultInst95(void);
+
+HINSTANCE HInstance;
+int far MyUselessVariable;  // Far data induces multiple data segments
+
+//########################################################################
+// Start of user interface code
+//########################################################################                          
+
+int PASCAL WinMain( HANDLE hInstance, HANDLE hPrevInstance,
+                    LPSTR lpszCmdLine, int nCmdShow )
+{
+    HInstance = hInstance;
+    MyUselessVariable = 0;  // Reference the far variable (just in case)
+
+    FARPROC mpiDialog = MakeProcInstance((FARPROC)MultInstDlgProc, hInstance);
+    DialogBox( hInstance, "MultInstDlg", 0, (DLGPROC)mpiDialog );
+
+    return 0;
+}
+
+//
+// Dialog procedure for the main dialog
+//
+BOOL CALLBACK __export MultInstDlgProc(HWND hWndDlg, UINT msg,
+                                      WPARAM wParam, LPARAM lParam)
+{
+    char buffer[128];
+    
+    if ( msg == WM_INITDIALOG )
+    {
+        wsprintf(buffer, "My hInstance is %04X", HInstance);
+        SetDlgItemText(hWndDlg, IDC_TEXT_HINSTANCE, buffer);
+    }
+    else if ( msg == WM_COMMAND )
+    {
+        if ( wParam == IDC_BUTTON_INVOKE_ANOTHER )
+        {   // Try to invoke another instance of the program
+            GetModuleFileName(HInstance, buffer, sizeof(buffer));
+            if ( WinExec( buffer, SW_NORMAL ) &lt; 32 )
+                MessageBox(hWndDlg, "Unable to exec program", 0, MB_OK);
+        }
+        else if ( wParam == IDC_BUTTON_ALLOW_ANOTHER )
+        {
+            SetupMultInst95( HInstance );
+            EnableWindow( LOWORD(lParam), FALSE );
+        }
+    }
+    else if ( msg == WM_CLOSE )
+    {
+        ShutdownMultInst95();
+        EndDialog(hWndDlg, 0); return FALSE;
+    }
+    
+    return FALSE;
+}
+
+//########################################################################
+// Code that does the real work
+//########################################################################                          
+
+//
+// Central function that modifies a module table to trick the loader
+// into letting a second instance of a multiple data segment program run.
+//
+int MungeModuleHeader( HINSTANCE hInstance, BOOL fMunge )
+{ 
+    HMODULE hModuleSel;
+    LPSTR lpszModName, lpszFileName;
+    BYTE cbModuleName;
+    static BOOL fResidentNamesMunged = FALSE;
+    
+    hModuleSel = SELECTOROF(    // Convert the HINSTANCE to an HMODULE
+                        GlobalLock(GetModuleHandle((LPSTR)MAKELP(0,hInstance))));
+
+    if ( hModuleSel == 0 )      // Make sure we succeeded.
+        return 0;
+
+    //
+    // First, we'll take care of the resident names table
+    //
+    if ( FALSE == fResidentNamesMunged )
+    {
+        // Make pointers to the module name in the resident names table
+        lpszModName = (LPSTR)MAKELP(hModuleSel,
+                                    *(WORD FAR *)MAKELP(hModuleSel, 0x26) );
+
+        // Get the module name length, and advance to the actual string
+        cbModuleName = *lpszModName++;   // First byte is a length byte
+    
+        // Convert the first uppercase letter of the modulename to lowercase
+        while ( cbModuleName )
+        {
+            if ( isupper(*lpszModName) )
+            {
+                *lpszModName = tolower(*lpszModName); break;
+            }
+            cbModuleName--; lpszModName++;
+        }
+
+        if ( cbModuleName == 0 )    // Make sure we succeeded
+            return 0;
+
+        // Remember that we've done this, so that we don't bother doing
+        // it in the future.
+        fResidentNamesMunged = TRUE;
+    }
+
+    //
+    // Now, we'll turn our attention to the module file name in the OFSTRUCT
+    //
+    lpszFileName = (LPSTR)MAKELP(hModuleSel,
+                                 *(WORD FAR *)MAKELP(hModuleSel, 0x0A));
+
+    // Position to the end of the filename. First byte is a length byte
+    lpszFileName += *lpszFileName - 1;
+
+    // If we're munging, added 0x30 to the last character value, otherwise
+    // subtract 0x30.  0x30 is chosen completely at random.
+    if ( fMunge )
+        *lpszFileName += 0x30;
+    else
+        *lpszFileName -= 0x30;
+    
+    return 1;
+}
+
+//########################################################################
+// This section watches calls to LoadModule and munges the EXE's module
+// database as needed.
+//########################################################################
+
+NPHOOKCHILD npHookLoadModule = 0;
+char szOurFileName[MAX_PATH];
+
+HINSTANCE
+WINAPI
+__export MultInst95LoadModule( LPCSTR lpszModuleName,
+                               LPVOID lpvParameterBlock )
+{
+    HINSTANCE retValue;
+
+    // Uppercase the name of the module name that was passed to LoadModule
+    char szNewFileName[MAX_PATH];
+    lstrcpy( szNewFileName, lpszModuleName );
+    strupr( szNewFileName );
+
+    // Compare the incoming filename to our EXE's module name.  If they
+    // don't match, we don't need to bother munging the module database
+    BOOL fSecondInstance = strstr(szOurFileName, szNewFileName) ? TRUE:FALSE;
+
+    // Unhook our LoadModule hook so that we can call the real LoadModule
+    ProcUnhook( npHookLoadModule );
+
+    // Munge module database if needed
+    if ( fSecondInstance )
+        MungeModuleHeader( HInstance, TRUE );
+
+    // Call the original LoadModule code
+    retValue = LoadModule( lpszModuleName, lpvParameterBlock );
+
+    // Unmunge module database if needed
+    if ( fSecondInstance )
+        MungeModuleHeader( HInstance, FALSE );
+
+    // Reinstall our LoadModule hook so that we see future loads
+    ProcHook( npHookLoadModule );
+    
+    return retValue;
+}
+
+BOOL SetupMultInst95( HINSTANCE hInstance )
+{
+    if ( npHookLoadModule )
+        return TRUE;
+
+    // Get the EXE's filename into a global string variable and uppercase it
+    GetModuleFileName( hInstance, szOurFileName, sizeof(szOurFileName) );
+    strupr( szOurFileName );
+
+    // Create a MakeProcInstance thunk so that our callback function
+    // will always be using the correct DS selector
+    FARPROC lpfnMPI
+        = MakeProcInstance( (FARPROC)MultInst95LoadModule, hInstance );
+
+    if ( !lpfnMPI )
+        return FALSE;
+
+    // Call PROCHOOK.DLL to hook calls to LoadModule
+    npHookLoadModule = SetProcAddress(  (FARPROC)LoadModule,
+                                         lpfnMPI, FALSE );
+    
+    return (BOOL)npHookLoadModule;
+}
+
+BOOL ShutdownMultInst95(void)
+{
+    if ( !npHookLoadModule )
+        return FALSE;
+
+    SetProcRelease( npHookLoadModule );
+    npHookLoadModule = 0;
+    
+    return TRUE;
+}</PRE>
+<P>So now let's first dig into the details of how the 16-bit loader works, and how the original MULTINST worked around this behavior. Afterwards, I'll describe how the loaderchangedinWindows95, and various approaches that I tried to circumvent it. </P>
+<P>When you strip away the outer layers, the 16-bit Windows loader consists of the LoadModule function. LoadModule is called by both WinExec and LoadLibrary. Therefore, when I talk about LoadModule in the following text, I'm implicitly also referring to WinExec. Internally, LoadModule uses a variety of helper functions, including a function called LMAlreadyLoaded. The purpose of LMAlreadyLoaded is to compare the EXE or DLL file being loaded to the list list of already loaded EXE/DLL modules. If a match is found, LMAlreadyLoaded returns the HMODULE of the matching EXE/DLL, and the loader doesn't attempt to create a new in-memory module for the new EXE or DLL. Instead, the loader will attempt to start up a second instance of the module, using information from the first instance's module database. Of course, as I've already mentioned above, an EXE with multiple writeable data segments prevents the loader from creating a second instance of the program.</P>
+<P>There are two comparisons that LMAlreadyLoaded makes to see if a module is already loaded. First, the function extracts just the file name and extension for the name of the EXE or DLL passed to LoadModule. LMAlreadyLoaded then compares that name to the file names and extensions of all the previously loaded modules. In Windows 3.1, this comparison was done with a REP CMPSB instruction sequence, which implicitly meant that the name comparison was case-sensitive. If you're wondering where LMAlreadyLoaded obtains the file names of the previously loaded modules, they're kept in an OFSTRUCT at the end of each module database.</P>
+<P>The second test that LMAlreadyLoaded makes is to compare the module name of the file being loaded to the module names of all previously loaded modules. Important point: the module name isn't the same thing as the file name. Rather, the module name is the first entry in an NE file's resident names table. You specify the module name on the NAME line of the DEF file. As with the file name test, the name comparisons are case-sensitive. If a match is found by either of the two comparisons I just mentioned, LMAlreadyLoaded reports to LoadModule that there's already an instance of this module loaded into memory. What LoadModule does with this information depends on if there are multiple, writeable data segments.</P>
+<P>What the original MULTINST code did to circumvent the Windows loader was slightly modify both the module's file name as well as the actual module name. It changed one character in each string from its uppercase version to lowercase. Thus, "FOO.DLL" became "FOO.DLl," and "FOO" became "fOO." Because the string comparisons made by the Windows 3.1 LMAlreadyLoaded function were case-sensitive, the loader was tricked into loading a complete new copy of the module into memory (including all new versions of the module's code segments).</P>
+<P>Now, let's turn the focus to Windows 95, and why my MULTINST code broke. One of the new features of the Windows 95 file system is that file names are now case-preserving (which isn't the same thing as being case-sensitive). In Windows 95, if you create a file with the name "Foo.Exe," its name will be stored in the file system as "Foo.Exe." But you can use "FOO.EXE," "foo.exe," "fOO.eXE," or any other case-insensitive combination to open it later on. In contrast, in MS-DOS 6.x and earlier, all the characters were always uppercased by the file system.</P>
+<P>Because Windows 95 changed the way the file system handles the case of file names, the file name comparison in LMAlreadyLoaded needed to change. In Windows 95, the file names stored in the OFSTRUCT of each module database are stored exactly as in the file system. Since the user may try to load another version of a program using a differently cased version of the name, the file name comparisons need to be done in a case-insensitive manner. LMAlreadyLoaded now performs an on-the-fly uppercasing of the file names in the OFSTRUCTs in the module databases when it does the file name comparisons.</P>
+<P>You can see why MULTINST doesn't work under Windows 95. The Windows 95 LMAlreadyLoaded function effectively blows away my change to the file name in the module database. When I determined that this is what caused my MULTINST code to fail under Windows 95, I considered a variety of simple solutions, but to no avail.</P>
+<P>One idea that I tinkered with was to fool the Windows loader into thinking that the EXE didn't have multiple writeable data segments. When it checks to see if there are multiple, writeable data segments in the EXE, LoadModule doesn't look at the EXE file on disk. Rather, it looks at the segment table that's kept within the in-memory module database. A possible solution that took advantage of this knowledge would locate the in-memory segment table for the first instance of the EXE and change the attributes of the data segments so that they appeared as read-only data segments.</P>
+<P>By changing the data segment attributes to read-only, I could dispense with the grungy MULTINST code for modifying the module and file names in the module database. LMAlreadyLoaded would determine that there was already another instance of the EXE running, but it wouldn't matter, since the EXE wouldn't appear to have multiple, writeable data segments. The flaw with this approach is that when creating a second instance of an EXE file, the 16-bit loader uses the segment attributes from the segment table created for the first instance. Thus, the second instance of the EXE would start up OK, but its data segments would have the read-only attribute. The second instance would then have to modify the selectors for the data segments to make them writeable. All in all, more trouble than it's worth.</P>
+<P>Another potential solution that crossed my mind was to modify the file name within the module database after the EXE is loaded. The modification in this scenario would be more than simply changing the case of a character. Instead, it would be along the lines of changing a character to some other unrelated value; for instance "C:\FOO.EXE" would become "C:\FOO.EXX." This would prevent subsequent invocations of the same EXE from finding a match when LMAlreadyLoaded does its name comparisons.</P>
+<P>Unfortunately, changing the file name in the module database has two fatal flaws. First, it would affect the string returned by GetModuleFileName. More importantly, changing the module's file name would have disastrous effects if there are segments in the EXE that aren't yet loaded into memory. Why? When the 16-bit KERNEL code in Windows 95 receives a segment not-present fault, it may have to open the executable file to read in the raw data for the segment. If you were to modify the name of the executable file in the module database, the segment not-present handler wouldn't be able to open the file, and the program would come crashing down. So much for that idea.</P>
+<P>After a couple hours of thought, the solution I eventually came up with is a combination of the original MULTINST code and the second unworkable solution that I just described. To put it simply, I want to modify the names in the module database so that LMAlreadyLoaded doesn't find a match. However, I want this to happen only during the call to LoadModule, not at any other time. One way to do this is to monitor all calls to LoadModule. Before the LoadModule code gets a chance to execute, my code changes the module and file names in the module database of the EXE that has multiple data segments. After LoadModule returns, my code changes the file name in the original EXE's module database back to its original form. Yes, this isn't pretty, but in an ideal world, such kludges wouldn't be necessary. Instead,theoperatingsystemwouldhaveanoptionforLoadModule that says "I don't care to share my code segments, so it's OK to create a second instance of this program."</P>
+<P>To implement what I've described above, the first thing I needed was a way to easily hook calls to the LoadModule function. In the past, I've used Jim Finnegan's wonderful PROCHOOK.DLL (from "Hook and Monitor Any 16-bit Windows Function with Our ProcHook DLL," MSJ, January 1994) to intercept calls to LoadModule, so I naturally turned to it once again. (Besides, Jim is a good friend of mine,andusingPROCHOOK is a good excuse to chat with him on the phone as opposed to reading the actual PROCHOOKdocumentation.) The way PROCHOOK.DLL works is that you pass it the address of the function that you want to intercept, as well as a callback function address. PROCHOOK intercepts calls to the specified function, and calls your callback function first. In the callback function, you have the option to temporarily unhook the PROCHOOK callback, and call the original function yourself. Doing this lets your code take control both before and after an intercepted function is invoked. This is just what I need. The code that implements this crazy mix of callbacks and kludges is in MLTINST2.CPP, which compiles to MLTINST2.EXE. A significant part of the MLTINST2 code is very similar to my original MULTINST code. There are two big changes though. The first is the addition of the PROCHOOK-related code; the second is in the code that modifies names in the module database. The function that modifies the module database is now called MungeModuleHeader. As parameters, MungeModuleHeader takes an HINSTANCE that specifies which module database to modify and a BOOL, which I've named fMunge. The fMunge parameter is set to TRUE when MungeModuleHeader should change the file name to prevent LMAlreadyLoaded from finding a match. When the fMunge BOOL parameter is set to FALSE, MungeModuleHeader sets the file name back to its original form.</P>
+<P>As you can guess, the MungeModuleHeader header function needs to be called in pairs, first with the fMunge parameter set to TRUE, and again with fMunge set to FALSE. The actual calls to MungeModuleHeader occur inside the PROCHOOK callback which I've called MultInst95LoadModule. In between the two calls to MungeModuleHeader, the MultInst95LoadModule callback function calls the original LoadModule code. Since this callback function is called for every EXE that loads, as well as DLLs that are loaded via LoadLibrary, I added some additional optimization code. This code checks to see if the LoadModule call is attempting to create a second instance of the already loaded EXE. If not, the LoadModule callback function doesn't bother to call the MungeModuleHeader function.</P>
+<P>The remainder of the MLTINST2 code is user interface code. Just like the original MULTINST program, the UI is just a dialog box with two buttons (see <B>Figure 2</B>). The left button makes MLTINST2 call WinExec to attempt to start another instance of the program. If you click this button immediately after starting MLTINST2, the WinExec call fails, since MLTINST2.CPP has multiple data writeable data segments. In order to start a second instance, you need to first click on the right hand button ("Allow Another Instance"). Clicking on this button causes the code to install the PROCHOOK LoadModule callback that I described earlier. Once the LoadModule callback is installed, you can click on the left button to successfully invoke a second instance of MLTINST2.</P>
+<P><img src="HOOD2.gif"></P>
+<P><B> Figure 2  MULTINST2</B></P>
+<P>To finish up this column, I need to point out a few things about the MLTINST2 code. For starters, the nonpreemptive multitasking of 16-bit code running under Windows 95 is the only reason that I'm able to get away with temporarily changing the module's file name in the module database, and then changing it back. I know that during the call to LoadModule, no code in the original instance of the EXE should execute, so in theory I shouldn't have to worry about not-present segment faults. If 16-bit code were allowed to pre-emptively switch between tasks (as 32-bit code is), a task switch at the wrong moment could lead to a not-present segment disaster.</P>
+<P>If you try to use the MLTINST2 code in your own application, pay special attention to the compiler switches in the MAKE files (MLTINST2.MS for Visual C++ 1.5 and MLTINST2.BOR for Borland C++ 4.5). In both cases, I didn't use smart callbacks (that is, loading the DS register from the SS register). Instead, I marked the LoadModule callback function with the __export modifier, and used a MakeProcInstance thunk. In the case of Visual C++, the default behavior for __export functions in application code (using /GA) is to load DS from the SS register. To correctly use MakeProcInstance thunks with Visual C++, you have to also specify /GEea. This tells the compiler to load DS from the AX register, and to make sure that the function appears in the EXE's entry table. The function has to be in the entry table so that the Windows loader will NOP out the initial "MOV AX,DS" instruction that using /GEe puts in. (After getting all these switches working right, I realized yet again how wonderful it is to program in Win32.)</P>
+<P>The final thing you should know if you're going to use this code is when to install the PROCHOOK callbacks. In testing an early version of MLTINST2, I found that I was only able to run two copies of a program with multiple data segments. Trying to start a third copy resulted in a WinExec failure. The problem turned out to be the fact that I was trying to install the PROCHOOK callback in the second instance of the program before the second instance had yielded control back to the task that called LoadModule. In reading the PROCHOOK documentation, it mentions that you can't install a callback for a function if another callback has already been installed for that same function, but is currently in an unhooked state. That's exactly what was happening in my LoadModule callback function. The first instance of MLTINST2 had hooked LoadModule, so the second instance's attempt to hook LoadModule failed.</P>
+<P>The solution is to make sure that you don't install the LoadModule callback until after your code has done its initial window creation and is actively yielding to other tasks. This (in theory) ensures that you won't be attempting to install the callback while another task is in its LoadModule callback. In an ideal world, you wouldn't need to do these horrible things, but for now, this is what we are faced with. If you have improvements to the MLTINST2 code, or have other ideas on how this multiple data segment problem can be worked around, please let me know. I'd be happy to cover them in future columns.</P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="221pt" VALIGN="TOP"><COL WIDTH="221pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD COLSPAN="2" VALIGN="TOP"><P> Have a question about programming in Windows? You can mail it directly to Under The Hood, Microsoft Systems Journal, 825 Eighth Avenue, 18th Floor, New York, New York 10019, or send it to MSJ (re: Under The Hood) via:</P></TD></TR><TR><TD VALIGN="TOP"><P> <BR>CompuServe:</P>
+<P><BR>Internet:</P></TD><TD VALIGN="TOP"><P>Matt Pietrek<BR>71774,362</P>
+<P>Eric Maffei<BR>ericm@microsoft.com</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P><I>This article is reproduced from Microsoft Systems Journal. Copyright © 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</P>
+<P></P></font></body></HTML>

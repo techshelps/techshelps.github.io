@@ -1,0 +1,1080 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Basic OLE DB</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+<h1><a name="ole4odbc_basicole"></a><sup></sup>Basic OLE DB</h1>
+<p>
+This section describes the basic concepts and procedures defined in OLE DB, such as initializing the environment, locating and connecting to a data source, executing a command, and retrieving data from a rowset.</p>
+<h3><a name="ole4odbc_appflow"></a>Application Flow</h3>
+<p>
+The application flow in OLE DB is similar to the application flow in ODBC. In both cases, the application:
+<ol>
+<li>
+Initializes the environment.<br><br></li>
+<li>
+Connects to a data source.<br><br></li>
+<li>
+Creates and executes a command.<br><br></li>
+<li>
+Processes results, if any.<br><br></li>
+<li>
+Cleans up.</li>
+</ol>
+<p>
+A typical OLE DB consumer may look like the following code example. For the complete source code listing, see Appendix A. The individual routines in this sample are described in more detail in the following sections. The flow of control is as follows:
+<ol>
+<li>
+Initializes OLE.<br><br></li>
+<li>
+Connects to a data source object.<br><br></li>
+<li>
+Creates and executes a command.<br><br></li>
+<li>
+Processes the results.<br><br></li>
+<li>
+Releases objects and uninitializes OLE.<pre><code>/********************************************************************
+* General OLE DB application main()
+********************************************************************/
+#define UNICODE
+#define _UNICODE
+#define DBINITCONSTANTS // Initialize OLE constants...
+#define INITGUID&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // ...once in each app.
+
+#include &lt;windows.h&gt;
+
+#include &lt;oledb.h&gt; &nbsp;&nbsp;&nbsp;&nbsp; // OLE DB include files
+#include &lt;oledberr.h&gt; 
+#include &lt;msdaguid.h&gt; &nbsp; // ODBC provider include files
+#include &lt;msdasql.h&gt;
+
+// Global task memory allocator
+IMalloc*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; g_pIMalloc = NULL;
+
+int main()
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; IDBInitialize*&nbsp; pIDBInitialize = NULL;
+ &nbsp;&nbsp; IRowset*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIRowset = NULL;
+
+ &nbsp;&nbsp; // Init OLE and set up the DLLs; see "Initializing the 
+ &nbsp;&nbsp; // Environment."
+ &nbsp;&nbsp; CoInitialize(NULL);
+ &nbsp;&nbsp; // Get the task memory allocator.
+ &nbsp;&nbsp; if (FAILED(CoGetMalloc(MEMCTX_TASK, &amp;g_pIMalloc)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto EXIT;
+
+ &nbsp;&nbsp; // Connect to the data source; see "Initializing a Data Source."
+ &nbsp;&nbsp; if (FAILED(myInitDSO(&amp;pIDBInitialize)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto EXIT;
+
+ &nbsp;&nbsp; // Get a session, set and execute a command; see "Getting a 
+ &nbsp;&nbsp; // Session and Executing a Command."
+ &nbsp;&nbsp; if (FAILED(myCommand(pIDBInitialize, &amp;pIRowset)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto EXIT;
+
+ &nbsp;&nbsp; // Retrieve data from rowset; see "OLE DB Rowsets."
+ &nbsp;&nbsp; myGetData(pIRowset);
+
+EXIT:
+ &nbsp;&nbsp; // Clean up and disconnect.
+ &nbsp;&nbsp; if (pIRowset != NULL)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIRowset-&gt;Release();
+
+ &nbsp;&nbsp; if (pIDBInitialize != NULL)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (FAILED(pIDBInitialize-&gt;Uninitialize()))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Uninitialize is not required, but it will fail if an 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // interface has not been released. We can use it for 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // debugging.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("Someone forgot to release something!");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIDBInitialize-&gt;Release();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; if (g_pIMalloc != NULL)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; g_pIMalloc-&gt;Release();
+
+ &nbsp;&nbsp; CoUninitialize();
+ &nbsp;&nbsp; 
+ &nbsp;&nbsp; return (0);
+ &nbsp;&nbsp; }
+</code></pre>
+</li>
+</ol>
+<h3><a name="ole4odbc_initenviron"></a>Initializing the Environment</h3>
+<p>
+In ODBC, the application generally dynamically links to the ODBC Driver Manager (Odbc32.dll). The Driver Manager loads and directs calls to the appropriate driver.</p>
+<p>
+In OLE DB, initialization of the environment is achieved by a call to <b>OleInitialize</b>, which initializes the OLE library. This is shown in the preceding code example. After the OLE library is initialized, the proper data provider is loaded by the system according to its class ID, and calls are made directly to the provider.</p>
+<h3><a name="ole4odbc_initdata"></a>Initializing a Data Source</h3>
+<p>
+The data source object exposes the <b>IDBInitialize</b> and <b>IDBProperties</b> interfaces that contain the methods to connect to a data source. The authentication information such as user ID, password, and the name of the data source are specified as properties of the data source object by calling <b>IDBProperties::SetProperties.</b> The method <b>IDBInitialize::Initialize</b> uses the specified properties to connect to the data source.</p>
+<p>
+In ODBC, establishing a connection involves the following steps:
+<ol>
+<li>
+Call <b>SQLAllocHandle</b> to allocate a connection handle. <br><br></li>
+<li>
+Build a connection string containing keywords for authentication information, such as user ID, password, and the name of the data source.<br><br></li>
+<li>
+Call <b>SQLDriverConnect,</b> providing the connection string and other information, such as level of prompting and the application's window handle where appropriate.</li>
+</ol>
+<p>
+In OLE DB, the equivalent functionality is achieved by the following steps:
+<ol>
+<li>
+Build an array of property structures describing the authentication information, such as user ID, password, and the name of the data source, as well as the level of prompting and the application's window handle when appropriate.<br><br></li>
+<li>
+Call <b>IDBProperties::SetProperties</b> to set initialization properties. (For more information about properties, see "Getting and Setting Properties," below.)<br><br></li>
+<li>
+Call <b>IDBInitialize::Initialize</b> to initialize the data source object.</li>
+</ol>
+<p>
+As can be seen, the model in OLE DB is similar to the model in ODBC. The primary differences are:
+<ul type=disc>
+<li>
+OLE DB uses a well-defined set of property structures to represent the initialization and connection information, rather than building/parsing keywords within a connection string.<br><br></li>
+<li>
+The set of property structures are used for all of the initialization/connection information.<br><br></li>
+<li>
+The set of available initialization properties can be queried through <b>IDBProperties::GetPropertyInfo</b>.<br><br></li>
+<li>
+Rather than returning a connection string, the user can simply request the current set of initialization property values. <br><br></li>
+<li>
+Setting the initialization properties is separate from actually initializing (connecting) the data source. This allows the consumer to set, persist, and retrieve connection information without initializing (connecting) the data source.</li>
+</ul>
+<p>
+The following code example shows a routine that initializes a data source object. The general flow of control is:
+<ol>
+<li>
+Create an instance of the OLE DB Provider (in this case, the ODBC Provider).<br><br></li>
+<li>
+Set the initialization properties.<br><br></li>
+<li>
+Call <b>Initialize</b> to initialize the data source object, using the supplied properties.<pre><code>/********************************************************************
+* Initialize the data source.
+********************************************************************/
+HRESULT myInitDSO
+ &nbsp;&nbsp; (
+ &nbsp;&nbsp; IDBInitialize** ppIDBInitialize&nbsp;&nbsp;&nbsp; // [out]
+ &nbsp;&nbsp; )
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; // Create an instance of the MSDASQL (ODBC) provider
+ &nbsp;&nbsp; CoCreateInstance(CLSID_MSDASQL, NULL, CLSCTX_INPROC_SERVER,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; IID_IDBInitialize, (void**)ppIDBInitialize);
+
+ &nbsp;&nbsp; if (*ppIDBInitialize == NULL)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return (E_FAIL);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; // See "Getting and Setting Properties."
+ &nbsp;&nbsp; if (FAILED(mySetInitProps(*ppIDBInitialize)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return (E_FAIL);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; if (FAILED((*ppIDBInitialize)-&gt;Initialize()))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("IDBInitialze-&gt;Initialize failed.");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return (E_FAIL);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; return (NOERROR);
+ &nbsp;&nbsp; }
+</code></pre>
+</li>
+</ol>
+<h3><a name="ole4odbc_property"></a>Getting and Setting Properties</h3>
+<p>
+Properties are used in OLE DB to specify options, such as initialization information on the data source object or supported properties of a rowset, as well as to discover properties of certain objects, such as the updatability of a rowset.</p>
+<p>
+Properties in OLE DB are similar to the environment, connection, and statement attributes in ODBC, with the following exceptions:
+<ul type=disc>
+<li>
+In OLE DB, the provider can be queried for a list of all supported properties.<br><br></li>
+<li>
+In OLE DB, properties are grouped into "Property Groups." Property groups are identified by a GUID. This allows third parties to define properties within their own property group, rather than trying to reserve ranges within a single set of attribute values.<br><br></li>
+<li>
+Instead of setting and retrieving properties individually, multiple properties can be set or retrieved from multiple groups in a single call. This is done by building an array of property sets, where each property set contains an array of property structures from a single property group.</li>
+</ul>
+<p>
+OLE DB consumers can:
+<ul type=disc>
+<li>
+Enumerate, set, and retrieve properties on a data source object using <b>IDBProperties</b>.<br><br></li>
+<li>
+Set or retrieve properties on a session using <b>ISessionProperties</b>.<br><br></li>
+<li>
+Set or retrieve properties on a command using <b>ICommandProperties</b>.<br><br></li>
+<li>
+Retrieve properties and information about a rowset using <b>IRowsetInfo</b>.</li>
+</ul>
+<p>
+The following table shows the property groups in OLE DB and their GUIDs.</p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=39%><b>Property group</b></td>
+<td class=label width=61%><b>Property group identifier (GUID)</b></td>
+</tr>
+<tr valign=top>
+<td width=39%>Column</td>
+<td width=61%>DBPROPFLAGS_COLUMN</td>
+</tr>
+<tr valign=top>
+<td width=39%>Data Source</td>
+<td width=61%>DBPROPFLAGS_DATASOURCE</td>
+</tr>
+<tr valign=top>
+<td width=39%>Data Source Creation</td>
+<td width=61%>DBPROPFLAGS_DATASOURCECREATE</td>
+</tr>
+<tr valign=top>
+<td width=39%>Data Source Information</td>
+<td width=61%>DBPROPFLAGS_DATASOURCEINFO</td>
+</tr>
+<tr valign=top>
+<td width=39%>Data Source Initialization</td>
+<td width=61%>DBPROPFLAGS_DBINIT</td>
+</tr>
+<tr valign=top>
+<td width=39%>Index</td>
+<td width=61%>DBPROPFLAGS_INDEX</td>
+</tr>
+<tr valign=top>
+<td width=39%>Rowset</td>
+<td width=61%>DBPROPFLAGS_ROWSET</td>
+</tr>
+<tr valign=top>
+<td width=39%>Session</td>
+<td width=61%>DBPROPFLAGS_SESSION</td>
+</tr>
+<tr valign=top>
+<td width=39%>Table</td>
+<td width=61%>DBPROPFLAGS_TABLE</td>
+</tr>
+</table><br>
+<p>
+The following structure contains an array of values of properties from a single property set:</p>
+<pre><code>typedef struct&nbsp; tagDBPROPSET
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; DBPROP __RPC_FAR* rgProperties;&nbsp;&nbsp;&nbsp; // Pointer to an array of 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // DBPROP structures.
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cProperties;&nbsp;&nbsp;&nbsp;&nbsp; // Count of properties
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // (DBPROPS) in the array.
+ &nbsp;&nbsp; GUID&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; guidPropertySet; // A GUID that identifies the
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // property set to which the 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // properties belong.
+ &nbsp;&nbsp; } DBPROPSET;
+</code></pre>
+<p>
+The following structure contains information about a single property:</p>
+<pre><code>typedef struct&nbsp; tagDBPROP
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; DBPROPID&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dwPropertyID;&nbsp;&nbsp;&nbsp; // ID of property within a
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // property set.
+ &nbsp;&nbsp; DBPROPOPTIONS&nbsp;&nbsp;&nbsp;&nbsp; dwOptions;&nbsp;&nbsp;&nbsp; // Property is required?
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Optional?
+ &nbsp;&nbsp; DBPROPSTATUS&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dwStatus;&nbsp;&nbsp;&nbsp; // Status returned by the
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // provider indicating success 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // or failure in setting or 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // getting the property. 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Enumerated values are: 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp; DBPROPSTATUS_OK
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp; DBPROPSTATUS_NOTSUPPORTED
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp; DBPROPSTATUS_BADVALUE
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp; DBPROPSTATUS_BADOPTION
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp; DBPROPSTATUS_BADCOLUMN
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp; DBPROPSTATUS_NOTALLSETTABLE
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp; DBPROPSTATUS_NOTSET
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp; DBPROPSTATUS_NOTSETTABLE
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp; DBPROPSTATUS_CONFLICTING
+ &nbsp;&nbsp; DBID&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; colid;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Optional, ordinal column
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // property applies to. If the 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // property applies to all 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // columns, colid should be set 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // to DB_NULLID.
+ &nbsp;&nbsp; VARIANT&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vValue;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Value of the property.
+ &nbsp;&nbsp; } DBPROP;
+</code></pre>
+<p>
+The following code example shows how an application sets initialization properties on a data source object. The code sets four properties within a single property group. The general flow of control is:
+<ol>
+<li>
+Allocate an array of property structures. <br><br></li>
+<li>
+Allocate an array of a single property set.<br><br></li>
+<li>
+Initialize common property elements for the properties.<br><br></li>
+<li>
+Fill in the following properties:<ul type=disc>
+<li>
+Level of desired prompting (similar to <i>DriverCompletion</i> argument in <b>SQLDriverConnect</b>)<br><br></li>
+<li>
+Data source name (similar to <i>DSN=</i> element of the ODBC connection string)<br><br></li>
+<li>
+User name (similar to the <i>UID=</i> element of the ODBC connection string)<br><br></li>
+<li>
+Password (similar to the <i>PWD=</i> element of the ODBC connection string)</li>
+</ul>
+</li>
+<li>
+Set the property set to the array of properties and specify that the properties are from the initialization property group.<br><br></li>
+<li>
+Get the <b>IDBProperties</b> interface.<br><br></li>
+<li>
+Call <b>SetProperties</b> on the interface.</li>
+</ol>
+<pre><code>/********************************************************************
+* Set initialization properties on a data source.
+********************************************************************/
+HRESULT mySetInitProps
+ &nbsp;&nbsp; (
+ &nbsp;&nbsp; IDBInitialize*&nbsp; pIDBInitialize&nbsp;&nbsp;&nbsp; // [in]
+ &nbsp;&nbsp; )
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; const ULONG&nbsp;&nbsp;&nbsp;&nbsp; nProps = 4;
+ &nbsp;&nbsp; IDBProperties*&nbsp; pIDBProperties;
+ &nbsp;&nbsp; DBPROP&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; InitProperties[nProps];
+ &nbsp;&nbsp; DBPROPSET&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rgInitPropSet;
+ &nbsp;&nbsp; HRESULT&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hr;
+
+ &nbsp;&nbsp; // Initialize common property options.
+ &nbsp;&nbsp; for (ULONG i = 0; i &lt; nProps; i++ )
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; VariantInit(&amp;InitProperties[i].vValue);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; InitProperties[i].dwOptions = DBPROPOPTIONS_REQUIRED;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; InitProperties[i].colid = DB_NULLID;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; // Level of prompting that will be done to complete the
+ &nbsp;&nbsp; // connection process
+ &nbsp;&nbsp; InitProperties[0].dwPropertyID = DBPROP_INIT_PROMPT;
+ &nbsp;&nbsp; InitProperties[0].vValue.vt = VT_I2;
+ &nbsp;&nbsp; InitProperties[0].vValue.iVal = DBPROMPT_NOPROMPT;
+
+ &nbsp;&nbsp; // Data source name--see the sample source code included with the
+ &nbsp;&nbsp; // OLE DB SDK.
+ &nbsp;&nbsp; InitProperties[1].dwPropertyID = DBPROP_INIT_DATASOURCE;
+ &nbsp;&nbsp; InitProperties[1].vValue.vt = VT_BSTR;
+ &nbsp;&nbsp; InitProperties[1].vValue.bstrVal =
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SysAllocString(OLESTR("OLE_DB_NWind_Jet"));
+
+ &nbsp;&nbsp; // User ID
+ &nbsp;&nbsp; InitProperties[2].dwPropertyID = DBPROP_AUTH_USERID;
+ &nbsp;&nbsp; InitProperties[2].vValue.vt = VT_BSTR;
+ &nbsp;&nbsp; InitProperties[2].vValue.bstrVal = SysAllocString(OLESTR(""));
+
+ &nbsp;&nbsp; // Password
+ &nbsp;&nbsp; InitProperties[3].dwPropertyID = DBPROP_AUTH_PASSWORD;
+ &nbsp;&nbsp; InitProperties[3].vValue.vt = VT_BSTR;
+ &nbsp;&nbsp; InitProperties[3].vValue.bstrVal = SysAllocString(OLESTR(""));
+
+ &nbsp;&nbsp; rgInitPropSet.guidPropertySet = DBPROPSET_DBINIT;
+ &nbsp;&nbsp; rgInitPropSet.cProperties = nProps;
+ &nbsp;&nbsp; rgInitPropSet.rgProperties = InitProperties;
+
+ &nbsp;&nbsp; // Set initialization properties.
+ &nbsp;&nbsp; pIDBInitialize-&gt;QueryInterface(IID_IDBProperties, (void**)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;pIDBProperties);
+ &nbsp;&nbsp; hr = pIDBProperties-&gt;SetProperties(1, &amp;rgInitPropSet);
+
+ &nbsp;&nbsp; SysFreeString(InitProperties[1].vValue.bstrVal);
+ &nbsp;&nbsp; SysFreeString(InitProperties[2].vValue.bstrVal);
+ &nbsp;&nbsp; SysFreeString(InitProperties[3].vValue.bstrVal);
+
+ &nbsp;&nbsp; pIDBProperties-&gt;Release();
+
+ &nbsp;&nbsp; if (FAILED(hr))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("Set properties failed.");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; return (hr);
+ &nbsp;&nbsp; }
+</code></pre>
+<h3><a name="ole4odbc_session"></a>Getting a Session and Executing a Command </h3>
+<p>
+The data source object exposes the <b>IDBCreateSession</b> interface through which a session object can be created. A session defines transaction scope and acts mainly as a command generator by supporting the <b>IDBCreateCommand</b> interface. Commands contain a DML query or a DDL definition. The execution of a row-returning command yields a rowset object. </p>
+<p>
+The session object in OLE DB is similar to the ODBC connection handle. However, the connection handle in ODBC is used for establishing connections as well as scoping transactions, so the application must allocate and connect a separate connection handle for each concurrent transaction. In OLE DB you can have multiple session objects on one initialized data source object, which means you can have multiple concurrent transactions without having to make multiple connections (where necessary, the provider makes additional connections using the connection information provided in the initialization of the data source object).</p>
+<p>
+The command object in OLE DB is similar to the ODBC statement handle in the unexecuted state. Like the ODBC connection handle, which can have several statement handles, a session object can have several command objects. </p>
+<p>
+An ODBC application performs the following steps to execute a command:
+<ol>
+<li>
+Calls <b>SQLAllocHandle</b> to allocate a statement.<br><br></li>
+<li>
+Calls <b>SQLSetStmtAttr</b> to set various attributes that affect how the command is executed (such as query time-out) and how the cursor is opened (such as scrollability, updatability, and so on).<br><br></li>
+<li>
+Calls <b>SQLPrepare</b> if it wants to prepare the statement for repeated execution.<br><br></li>
+<li>
+Calls <b>SQLExecute</b> or <b>SQLExecDirect</b> to execute the query.</li>
+</ol>
+<p>
+To use a command, an OLE DB consumer performs these steps: 
+<ol>
+<li>
+Calls <b>IDBCreateCommand</b> to create a command.<br><br></li>
+<li>
+Calls <b>ICommandProperties::SetProperties</b> to set various attributes that affect how the command is executed (such as query time-out), as well as requesting properties to be supported by the resulting rowset. Typical properties include scrollability, updatability, the number of active row handles a consumer can hold at one time, sensitivity to changes outside the rowset, and so on.<br><br></li>
+<li>
+Calls <b>ICommandText::SetCommandText</b> to specify the command text, along with a GUID representing the command's dialect. The standard dialect for ANSI SQL commands is DBGUID_DBSQL.<br><br></li>
+<li>
+Calls <b>ICommandPrepare::Prepare</b> if it wants to prepare the query for repeated execution.<br><br></li>
+<li>
+Calls <b>ICommandText::Execute</b> to execute the command.</li>
+</ol>
+<p>
+The following code example shows setting and executing a command, and retrieving a rowset. The general flow of control is:
+<ol>
+<li>
+Obtain the <b>IDBCreateSession</b> interface.<br><br></li>
+<li>
+Call <b>CreateSession</b> to create a session object that scopes the transaction boundaries within the current connection.<br><br></li>
+<li>
+Call <b>CreateCommand</b> to create a command object within the transaction.<br><br></li>
+<li>
+Call <b>SetCommandText</b> to set the command text.<br><br></li>
+<li>
+Call <b>Execute</b> to execute the command.<br><br></li>
+<li>
+Release the command object.<br><br></li>
+<li>
+Return the rowset object.<pre><code>/********************************************************************
+* Execute a command, retrieve a rowset interface pointer.
+********************************************************************/
+HRESULT myCommand
+ &nbsp;&nbsp; (
+ &nbsp;&nbsp; IDBInitialize*&nbsp; pIDBInitialize, // [in]
+ &nbsp;&nbsp; IRowset**&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ppIRowset&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // [out]
+ &nbsp;&nbsp; ) 
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; IDBCreateSession*&nbsp;&nbsp; pIDBCreateSession;
+ &nbsp;&nbsp; IDBCreateCommand*&nbsp;&nbsp; pIDBCreateCommand;
+ &nbsp;&nbsp; IRowset*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIRowset;
+ &nbsp;&nbsp; ICommandText*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pICommandText;
+ &nbsp;&nbsp; LPCTSTR&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; wSQLString = OLESTR("SELECT CompanyName,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; City, Phone, Fax")
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OLESTR(" FROM Customers")
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OLESTR(" ORDER BY CompanyName,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; City");
+ &nbsp;&nbsp; LONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cRowsAffected;
+ &nbsp;&nbsp; HRESULT&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hr;
+
+ &nbsp;&nbsp; // Get the DB session object.
+ &nbsp;&nbsp; if (FAILED(pIDBInitialize-&gt;QueryInterface(IID_IDBCreateSession,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (void**) &amp;pIDBCreateSession)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("Session initialization failed.");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return (E_FAIL);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; // Create the session, getting an interface for command creation.
+ &nbsp;&nbsp; hr = pIDBCreateSession-&gt;CreateSession(NULL, IID_IDBCreateCommand,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (IUnknown**) &amp;pIDBCreateCommand);
+ &nbsp;&nbsp; pIDBCreateSession-&gt;Release();
+ &nbsp;&nbsp; if (FAILED(hr))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("Create session failed.");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return (hr);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; // Create the command object.
+ &nbsp;&nbsp; hr = pIDBCreateCommand-&gt;CreateCommand(NULL, IID_ICommandText,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (IUnknown**) &amp;pICommandText);
+ &nbsp;&nbsp; if (FAILED(hr))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("Create command failed.");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return (hr);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; pIDBCreateCommand-&gt;Release();
+ &nbsp;&nbsp; // The command requires the actual text as well as an indicator
+ &nbsp;&nbsp; // of its language and dialect.
+ &nbsp;&nbsp; pICommandText-&gt;SetCommandText(DBGUID_DBSQL, wSQLString);
+
+ &nbsp;&nbsp; // Execute the command.
+ &nbsp;&nbsp; hr = pICommandText-&gt;Execute(NULL, IID_IRowset, NULL,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;cRowsAffected, (IUnknown**) &amp;pIRowset);
+ &nbsp;&nbsp; if (FAILED(hr))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("Command execution failed.");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; pICommandText-&gt;Release();
+
+ &nbsp;&nbsp; *ppIRowset = pIRowset;
+ &nbsp;&nbsp; return (hr);
+ &nbsp;&nbsp; }
+</code></pre>
+</li>
+</ol>
+<h3><a name="ole4odbc_rowset"></a>OLE DB Rowsets</h3>
+<p>
+A rowset provides a standard way to work with a multiset of rows where each row contains one or more columns of data. This provides a standard way for all OLE DB data providers to expose data in tabular form. </p>
+<p>
+A rowset can be obtained in several ways. The first method, supported by all providers, uses the <b>IOpenRowset</b> interface. <b>IOpenRowset</b> provides for the simple case of retrieving all the data from the table. This is equivalent to executing SELECT * FROM <i>table</i>. The second method, supported by SQL providers, involves creating and executing a command to get a rowset that meets a specific criteria, such as SELECT * FROM <i>table</i> WHERE <i>condition</i>. The <b>ICommandProperties</b> interface on the command can be used to specify the interfaces and properties that must be supported by the rowsets returned by <b>ICommand::Execute</b>.</p>
+<p>
+Conceptually, rowsets are similar to result sets in ODBC; their implementation, however, is different. </p>
+<p>
+In ODBC, when the application calls <b>SQLFetch</b> or <b>SQLGetData</b> to retrieve data, the data is read from the database into the application's memory. At that point, the application owns the data; neither the ODBC driver nor other components have access to that data. This model works fine provided that:
+<ul type=disc>
+<li>
+The application is the only client of the data.<br><br></li>
+<li>
+A single component provides all of the functionality needed by the application.<br><br></li>
+<li>
+The application is in an environment in which it can maintain a connection to the database that keeps the state of the application's position within the data, concurrency information for data retrieved, and so on. </li>
+</ul>
+<p>
+OLE DB rowsets are not only designed to provide a high performance solution for the preceding scenarios but are also designed so that:
+<ul type=disc>
+<li>
+Multiple controls can work together on the same data. For example, a grid control and a chart control can model the same results: If the grid control updates the data, the chart control gets a notification and can redraw the graph accordingly.<br><br></li>
+<li>
+Multiple components can work together to add incremental functionality to a single instance of the data. The data does not have to be copied to multiple components, and method calls don't have to go through a hierarchy of components. Each component can operate directly on the data.<br><br></li>
+<li>
+The application can work in a disconnected environment with a stand-alone data object that maintains state, concurrency, and other information.</li>
+</ul>
+<p>
+The OLE DB rowset basically takes the memory buffer out of the application and puts it in a stand-alone, shared data object. Rather than the application buffering data in its own memory, components access data in this shared memory through high-performance binding descriptions known as <i>accessors</i>. Because, in many cases, the application merely retrieves pointers to existing data and multiple components can access the same copy of the data, data access can often be faster than copying the data into the application's own buffers. The rowset object also allows multiple components to coordinate their activities on this shared data object through notifications, and because the components are all sharing the same data, they can immediately see the changes made by other components. The rowset object exposes bookmarks, which let each individual component keep track of its own position, and the rowset object keeps track of concurrency information for deferred updating and optimistic concurrency control.</p>
+<h4>Retrieving data from a rowset</h4>
+<p>
+The main differences between how data is retrieved in ODBC and how data is retrieved in OLE DB are a direct result of the differences between the application-owned data model of ODBC and the shared-data model of OLE DB.</p>
+<p>
+The most basic rowset in OLE DB exposes the following interfaces:
+<ul type=disc>
+<li>
+<b>IColumnsInfo</b>. Provides information about the columns of the rowset (metadata). This is similar to <b>SQLDescribeCol</b> in ODBC.<br><br></li>
+<li>
+<b>IRowsetInfo</b>. Provides information about the rowset. This is similar to <b>SQLGetStmtAttr</b> in ODBC.<br><br></li>
+<li>
+<b>IAccessor</b>. Permits definition of groups of column bindings describing the way in which tabular data is bound to program variables. This is similar to the bindings specified through descriptors by calling <b>SQLSetDescField</b> in ODBC version 3.0.<br><br></li>
+<li>
+<b>IRowset</b>. Contains methods for iterating through the rows in the rowset sequentially. The methods in <b>IRowset</b> are similar to <b>SQLFetch</b> in ODBC.</li>
+</ul>
+<h4>Retrieving rows</h4>
+<p>
+The provider manages the row buffers on behalf of the consumer. Rows are fetched from the data source into this row buffer using methods such as <b>IRowset::GetNextRows</b>, <b>IRowsetLocate::GetRowsAt</b>, and <b>IRowsetLocate::GetRowsByBookmark</b>. These methods are similar to <b>SQLExtendedFetch</b> in ODBC, except that instead of reading the data into the applications buffers, these functions read the data into the shared data object and return row handles (hRows) to the fetched data.</p>
+<p>
+The consumer accesses the data from these row handles using <b>IRowset::GetData</b>. <b>IRowset::GetData</b> takes an accessor that maps fields of the row to and/or from fields in a structure on the consumer side. The types of the fields in the consumer's structure are indicated by the bindings in the accessor, and <b>IRowset::GetData</b> makes any necessary conversions between the buffered data and the consumer's data structure. If <b>GetData</b> encounters an error, it sets the status value for the column to the appropriate error.</p>
+<p>
+To retrieve a row of data from the result set in ODBC, the application: 
+<ol>
+<li>
+Calls <b>SQLBindCol</b> to bind the columns of the result set to storage locations, if not already done.<br><br></li>
+<li>
+Calls <b>SQLFetch</b> to move to the next row and retrieve data for all bound columns.<br><br></li>
+<li>
+Calls <b>SQLGetData</b> to retrieve data from unbound columns.</li>
+</ol>
+<p>
+In OLE DB, the consumer performs the following functions to retrieve data:
+<ol>
+<li>
+Calls <b>IAccessor::CreateAccessor</b> to specify binding information if not already done.<br><br></li>
+<li>
+Calls <b>IRowset::GetNextRows</b> to retrieve the next set of row handles.<br><br></li>
+<li>
+Calls <b>IRowset::GetData</b> to retrieve the data from the row handles according to the bindings specified by the accessor.</li>
+</ol>
+<p>
+<b>IRowset::GetData</b> is similar to <b>SQLGetData</b> in ODBC, except that <b>IRowset::GetData</b>:
+<ul type=disc>
+<li>
+Can be called for any held row handle, not just the current row.<br><br></li>
+<li>
+Allows the retrieval of multiple columns in a single call.<br><br></li>
+<li>
+Can return an interface to a live OLE object, not just a binary large object (BLOB).<br><br></li>
+<li>
+Can be used to return a pointer to data within the provider rather than a copy of the data.<br><br></li>
+<li>
+Returns an interface to a stream over the object rather than retrieve long data through multiple calls to <b>SQLGetData</b>.</li>
+</ul>
+<p>
+The following code example demonstrates data retrieval in OLE DB. The general flow of control is:
+<ol>
+<li>
+Get a description of the rowset.<br><br></li>
+<li>
+Build binding structures based on the description.<br><br></li>
+<li>
+Obtain the <b>IAccessor</b> interface on the rowset object.<br><br></li>
+<li>
+Call <b>CreateAccessor</b> to create an accessor.<br><br></li>
+<li>
+Call <b>GetNextRows</b> to retrieve the next set of row handles.<br><br></li>
+<li>
+Call <b>GetData</b> to access the data for each row.<br><br></li>
+<li>
+Release the set of retrieved row handles.<br><br></li>
+<li>
+Repeat steps 4 through 6 until all the data has been retrieved.<br><br></li>
+<li>
+Release the accessor.<pre><code>/********************************************************************
+* Retrieve data from a rowset.
+********************************************************************/
+void myGetData
+ &nbsp;&nbsp; (
+ &nbsp;&nbsp; IRowset*&nbsp;&nbsp;&nbsp; pIRowset&nbsp;&nbsp;&nbsp; // [in]
+ &nbsp;&nbsp; ) 
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nCols;
+ &nbsp;&nbsp; DBCOLUMNINFO*&nbsp;&nbsp; pColumnsInfo = NULL;
+ &nbsp;&nbsp; OLECHAR*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pColumnStrings = NULL;
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nCol;
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cRowsObtained;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Count of rows
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // obtained
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iRow;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Row count
+ &nbsp;&nbsp; HROW&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rghRows[NUMROWS_CHUNK]; // Row handles
+ &nbsp;&nbsp; HROW*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pRows = &amp;rghRows[0];&nbsp;&nbsp;&nbsp; // Pointer to the row
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // handles
+ &nbsp;&nbsp; IAccessor*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIAccessor;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Pointer to the
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // accessor
+ &nbsp;&nbsp; HACCESSOR&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hAccessor;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Accessor handle
+ &nbsp;&nbsp; DBBINDSTATUS*&nbsp;&nbsp; pDBBindStatus = NULL;
+ &nbsp;&nbsp; DBBINDING*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings = NULL;
+ &nbsp;&nbsp; char*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pRowValues;
+ &nbsp;&nbsp; // Get the description of the rowset for use in binding structure
+ &nbsp;&nbsp; // creation; see "Describing Query Results."
+ &nbsp;&nbsp; if (FAILED(myGetColumnsInfo(pIRowset, &amp;nCols, &amp;pColumnsInfo,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;pColumnStrings)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; // Create the binding structures; see "Elements of an Accessor."
+ &nbsp;&nbsp; myCreateDBBindings(nCols, pColumnsInfo, &amp;pDBBindings,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;pRowValues);
+ &nbsp;&nbsp; pDBBindStatus = new DBBINDSTATUS[nCols];
+
+ &nbsp;&nbsp; // Create the accessor; see "Creating Accessors."
+ &nbsp;&nbsp; pIRowset-&gt;QueryInterface(IID_IAccessor, (void**) &amp;pIAccessor);
+ &nbsp;&nbsp; pIAccessor-&gt;CreateAccessor(
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DBACCESSOR_ROWDATA,// Accessor will be used to retrieve row
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // data
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nCols,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Number of columns being bound
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Structure containing bind info
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Not used for row accessors 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;hAccessor,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Returned accessor handle
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindStatus&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Information about binding validity
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; );
+ &nbsp;&nbsp; // Process all the rows, NUMROWS_CHUNK rows at a time.
+ &nbsp;&nbsp; while (TRUE)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIRowset-&gt;GetNextRows(
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Reserved
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // cRowsToSkip
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NUMROWS_CHUNK,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // cRowsDesired
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;cRowsObtained,&nbsp;&nbsp;&nbsp;&nbsp; // cRowsObtained
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;pRows );&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Filled in w/ row handles.
+
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // All done; there are no more rows left to get.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (cRowsObtained == 0)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Loop over rows obtained, getting data for each.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; for (iRow=0; iRow &lt; cRowsObtained; iRow++)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIRowset-&gt;GetData(rghRows[iRow], hAccessor, pRowValues);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; for (nCol = 0; nCol &lt; nCols; nCol++)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; wprintf(OLESTR("%s%s:"), pColumnsInfo[nCol].pwszName,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; wcslen(pColumnsInfo[nCol].pwszName) &gt; 10 ?
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OLESTR("\t") : OLESTR("\t\t"));
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printf("\t%s\n",
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;pRowValues[pDBBindings[nCol].obValue]);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printf("\n");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Release row handles.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIRowset-&gt;ReleaseRows(cRowsObtained, rghRows, NULL, NULL,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }&nbsp; // End while
+
+ &nbsp;&nbsp; // Release the accessor.
+ &nbsp;&nbsp; pIAccessor-&gt;ReleaseAccessor(hAccessor, NULL);
+ &nbsp;&nbsp; pIAccessor-&gt;Release();
+
+ &nbsp;&nbsp; delete [] pDBBindings;
+ &nbsp;&nbsp; delete [] pDBBindStatus;
+
+ &nbsp;&nbsp; g_pIMalloc-&gt;Free( pColumnsInfo );
+ &nbsp;&nbsp; g_pIMalloc-&gt;Free( pColumnStrings );
+
+ &nbsp;&nbsp; return;
+ &nbsp;&nbsp; }
+</code></pre>
+</li>
+</ol>
+<h3><a name="ole4odbc_query"></a>Describing Query Results</h3>
+<p>
+In ODBC, to describe the results of a query, an application:
+<ul type=disc>
+<li>
+Calls <b>SQLNumResultCols</b> to find out the number of columns in the result set.<br><br></li>
+<li>
+Calls <b>SQLDescribeCol</b> or <b>SQLColAttribute</b> to describe each column in the result set.</li>
+</ul>
+<p>
+In OLE DB, to describe the results of a query, an application calls <b>IColumnsInfo</b> or <b>IColumnsRowset</b> to describe the columns in the rowset.</p>
+<p>
+In OLE DB, the consumer can also call <b>IRowsetInfo</b> to get information about properties supported on the rowset. This is similar to calling <b>SQLGetStmtAttr</b> on an executed statement handle in ODBC.</p>
+<p>
+The following code example shows getting the metadata from the result set. Note that the <b>ColumnsInfo </b>interface passes off ownership of both the DBCOLUMNINFO structure array and the OLECHAR string that holds strings that are part of the rowset's metadata. These strings are freed using the task memory allocation interface, <b>IMalloc</b>.</p>
+<pre><code>/********************************************************************
+* Get the characteristics of the rowset (the ColumnsInfo interface).
+********************************************************************/
+HRESULT myGetColumnsInfo
+ &nbsp;&nbsp; (
+ &nbsp;&nbsp; IRowset*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIRowset,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // [in]
+ &nbsp;&nbsp; ULONG*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pnCols,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // [out]
+ &nbsp;&nbsp; DBCOLUMNINFO**&nbsp; ppColumnsInfo,&nbsp;&nbsp; // [out]
+ &nbsp;&nbsp; OLECHAR**&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ppColumnStrings&nbsp; // [out]
+ &nbsp;&nbsp; )
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; IColumnsInfo*&nbsp;&nbsp; pIColumnsInfo;
+ &nbsp;&nbsp; HRESULT&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hr;
+
+ &nbsp;&nbsp; if (FAILED(pIRowset-&gt;QueryInterface(IID_IColumnsInfo, (void**)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;pIColumnsInfo)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("Query rowset interface for IColumnsInfo failed");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return (E_FAIL);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; hr = pIColumnsInfo-&gt;GetColumnInfo(pnCols, ppColumnsInfo,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ppColumnStrings);
+ &nbsp;&nbsp; if (FAILED(hr))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("GetColumnInfo failed.");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *pnCols = 0;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; pIColumnsInfo-&gt;Release();
+ &nbsp;&nbsp; return (hr);
+ &nbsp;&nbsp; }
+</code></pre>
+<h3><a name="ole4odbc_accessors"></a>OLE DB Accessors</h3>
+<p>
+An accessor contains the binding information for one or more columns or parameters. The bindings supplied by the caller describe a data structure with offsets for each value. The consumer is responsible for correctly calculating the offsets. The consumer specifies the desired data type within the structure and the provider agrees to the binding if the conversion is legal and supported. The accessors are created on the rowset or command and their implementation is specific to the provider. They contain information or code to pack and unpack rows held by the provider. The consumer uses them like handles on the access functions of the row or column. Consumers can use more than one accessor, or a single accessor can define the mapping between a structure and multiple columns or parameters.</p>
+<p>
+Accessors in OLE DB are similar to descriptor handles in ODBC. Each represents a reusable, extensible set of binding information for multiple columns of a result set or parameters to a statement. Multiple accessors can be created for a single rowset, just as multiple descriptors can be used on a single result set. Accessors can be created on a command object so that they can be shared between multiple rowsets the same way that descriptors can be shared between multiple result sets (hStmts).</p>
+<h4>Creating accessors</h4>
+<p>
+In ODBC version 3.0, applications can create reusable descriptor handles that specify extendable binding information for a set of columns. To use a descriptor, the ODBC application:
+<ul type=disc>
+<li>
+Calls <b>SQLAllocHandle</b> to allocate a descriptor handle.<br><br></li>
+<li>
+Calls <b>SQLSetDescField</b> for each piece of binding information on each column.</li>
+</ul>
+<p>
+In OLE DB, consumers create reusable accessor handles that specify binding information for a set of columns. To use an accessor, the consumer:
+<ul type=disc>
+<li>
+Creates an array of binding structures, each describing the binding information for a single column.<br><br></li>
+<li>
+Calls <b>CreateAccessor</b> to create an accessor handle using the binding information.</li>
+</ul>
+<p>
+The main difference between descriptors and accessors is that <b>SQLSetDescField</b> is called multiple times to set individual properties for each column represented by the descriptor, while all of the binding information for an accessor is built into an array of binding structures that is passed in a single call to <b>CreateAccessor</b>. This is partially addressed in ODBC by the presence of&nbsp; "concise" functions, such as <b>SQLBindCol</b> and <b>SQLSetDescRec</b>, which allow the application to specify the most common subset of binding information in a single call per column.</p>
+<h4>Elements of an accessor</h4>
+<p>
+The section of memory bound to a column or parameter must have at least one and can have up to three of the following parts:
+<ul type=disc>
+<li>
+<b>Value.</b> The actual column or parameter value.<br><br></li>
+<li>
+<b>Length.</b> The actual length of the column or parameter data stored in the value part, in bytes.<br><br></li>
+<li>
+<b>Status.</b> This serves a dual purpose. First, it indicates if the value is NULL. Second, it is used to return information about whether the value was successfully passed to or returned from the provider.</li>
+</ul>
+<p>
+It is possible to have columns that are deferred. For a deferred column, the provider is not required to retrieve data until <b>IRowset::GetData</b> is called for that column or, if the column contains an OLE object, until a method used to access the object is called. The advantage of deferred columns is that data retrieval can be postponed until the data is needed, which is very beneficial when the data is large. </p>
+<p>
+The following structure defines the information specified for each column bound by an accessor.</p>
+<pre><code>typedef struct tagDBBINDING
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; ULONG iOrdinal;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Ordinal of column or
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // parameter to bind
+ &nbsp;&nbsp; ULONG obValue;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Offset in consumer's buffer
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // for value.
+ &nbsp;&nbsp; ULONG obLength;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Offset in consumer's buffer
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // for length of value.
+ &nbsp;&nbsp; ULONG obStatus;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Offset in consumer's buffer
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // for status of operation.
+ &nbsp;&nbsp; ITypeInfo __RPC_FAR* pTypeInfo;&nbsp;&nbsp;&nbsp; // Reserved, should be NULL.
+ &nbsp;&nbsp; DBOBJECT __RPC_FAR* pObject;&nbsp;&nbsp;&nbsp; // Pointer to object structure
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Structure describes access 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // to OLE objects in the 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // column.
+ &nbsp;&nbsp; DBBINDEXT __RPC_FAR* pBindExt;&nbsp;&nbsp;&nbsp; // Reserved, should be NULL.
+ &nbsp;&nbsp; DBPART dwPart;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Enumerated parts to bind 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // (value/length/status)
+ &nbsp;&nbsp; DBMEMOWNER dwMemOwner;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Memory is owned by consumer?
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Provider?
+ &nbsp;&nbsp; DBPARAMIO eParamIO;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Parameter type
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // (input/output/not a 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // parameter)
+ &nbsp;&nbsp; ULONG cbMaxLen;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Size of consumer's value
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // buffer if memory is consumer 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // owned
+ &nbsp;&nbsp; DWORD dwFlags;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Reserved, should be 0.
+ &nbsp;&nbsp; DBTYPE wType;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Data type indicator
+ &nbsp;&nbsp; BYTE bPrecision;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Precision for
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // numeric/decimal data types
+ &nbsp;&nbsp; BYTE bScale;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Scale for numeric/decimal
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // data types
+ &nbsp;&nbsp; } DBBINDING;
+</code></pre>
+<p>
+The provider returns column or output parameter data to the consumer and also sets the status value of each column or output parameter.</p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=50%><b>Status value</b></td>
+<td class=label width=50%><b>Meaning</b></td>
+</tr>
+<tr valign=top>
+<td width=50%>DBSTATUS_S_OK</td>
+<td width=50%>Column/parameter value set/retrieved successfully.</td>
+</tr>
+<tr valign=top>
+<td width=50%>DBSTATUS_S_ISNULL</td>
+<td width=50%>Column/parameter value is the NULL value.</td>
+</tr>
+<tr valign=top>
+<td width=50%>DBSTATUS_S_TRUNCATED</td>
+<td width=50%>Column/parameter truncated.</td>
+</tr>
+<tr valign=top>
+<td width=50%>DBSTATUS_S_DEFAULT</td>
+<td width=50%>The provider should use the parameter's default value.</td>
+</tr>
+<tr valign=top>
+<td width=50%>DBSTATUS_E_BADACCESSOR</td>
+<td width=50%>The accessor used to read/write the value was invalid.</td>
+</tr>
+<tr valign=top>
+<td width=50%>DBSTATUS_E_CANTCONVERT</td>
+<td width=50%>The accessor specified an invalid conversion.</td>
+</tr>
+<tr valign=top>
+<td width=50%>DBSTATUS_E_CANTCREATE</td>
+<td width=50%>The provider could not create a storage object for large data.</td>
+</tr>
+<tr valign=top>
+<td width=50%>DBSTATUS_E_DATAOVERFLOW</td>
+<td width=50%>The conversion failed due to a data overflow.</td>
+</tr>
+<tr valign=top>
+<td width=50%>DBSTATUS_E_INTEGRITYVIOLATION</td>
+<td width=50%>The data value violated an integrity constraint.</td>
+</tr>
+<tr valign=top>
+<td width=50%>DBSTATUS_E_PERMISSIONDENIED</td>
+<td width=50%>The data value could not be set due to insufficient permissions.</td>
+</tr>
+<tr valign=top>
+<td width=50%>DBSTATUS_E_SCHEMAVIOLATION</td>
+<td width=50%>The data value violated the Schema for the column.</td>
+</tr>
+<tr valign=top>
+<td width=50%>DBSTATUS_E_SIGNMISMATCH</td>
+<td width=50%>The data value had the incorrect sign.</td>
+</tr>
+<tr valign=top>
+<td width=50%>DBSTATUS_E_UNAVAILABLE</td>
+<td width=50%>The data was not available.</td>
+</tr>
+</table><br>
+<p>
+The following code example shows traversing a DBCOLUMNINFO structure array obtained from a rowset and creating a set of bindings based on that information. An accessor is created from the binding structure array in the previous code sample.</p>
+<pre><code>/********************************************************************
+* Create binding structures from column information. Binding
+* structures will be used to create an accessor that allows row value 
+* retrieval.
+********************************************************************/
+void myCreateDBBindings
+ &nbsp;&nbsp; (
+ &nbsp;&nbsp; ULONG nCols,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // [in]
+ &nbsp;&nbsp; DBCOLUMNINFO* pColumnsInfo,&nbsp; // [in]
+ &nbsp;&nbsp; DBBINDING** ppDBBindings,&nbsp;&nbsp;&nbsp; // [out]
+ &nbsp;&nbsp; char** ppRowValues&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // [out]
+ &nbsp;&nbsp; )
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nCol;
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cbRow = 0;
+ &nbsp;&nbsp; DBBINDING*&nbsp; pDBBindings;
+ &nbsp;&nbsp; char*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pRowValues;
+
+ &nbsp;&nbsp; pDBBindings = new DBBINDING[nCols];
+
+ &nbsp;&nbsp; for (nCol = 0; nCol &lt; nCols; nCol++)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].iOrdinal = nCol+1;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].obValue = cbRow;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].obLength = 0;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].obStatus = 0;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].pTypeInfo = NULL;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].pObject = NULL;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].pBindExt = NULL;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].dwPart = DBPART_VALUE;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].dwMemOwner = DBMEMOWNER_CLIENTOWNED;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].eParamIO = DBPARAMIO_NOTPARAM;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].cbMaxLen = pColumnsInfo[nCol].ulColumnSize;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].dwFlags = 0;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].wType = pColumnsInfo[nCol].wType;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].bPrecision = pColumnsInfo[nCol].bPrecision;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].bScale = pColumnsInfo[nCol].bScale;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cbRow += pDBBindings[nCol].cbMaxLen;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; pRowValues = new char[cbRow];
+
+ &nbsp;&nbsp; *ppDBBindings = pDBBindings;
+ &nbsp;&nbsp; *ppRowValues = pRowValues;
+
+ &nbsp;&nbsp; return;
+ &nbsp;&nbsp; }
+</code></pre>
+<h3><a name="ole4odbc_adrowset"></a>Advanced Rowset Topics</h3>
+<p>
+OLE DB rowset interfaces and properties expose database cursor and bookmark support to the developer. In addition, OLE DB exposes support for client use of database resources such as scrollbar interface support.</p>
+<p>
+The OLE DB cursor model is derived from that implemented in ODBC and includes support for cursor type, cursor scrolling capability, and transaction isolation levels.</p>
+<h4>Block cursors </h4>
+<p>
+OLE DB supports block cursors by specifying the number of rows desired in the <b>IRowset::GetNextRows</b> method. In ODBC, a block cursor is defined by specifying the rowset size using the SQL_ATTR_ROW_ARRAY_SIZE attribute in a call to <b>SQLSetStmtAttr</b> prior to calling <b>SQLFetchScroll</b>.</p>
+<h4>Sequential rowsets</h4>
+<p>
+Sequential rowsets do not support locating specific rows, or fetching rows already retrieved. <b>GetNextRows</b> can retrieve one or more rows, but the rows must all be released before another <b>GetNextRows</b> call is permitted. This restriction is known as strict sequential cursor. This is similar to the forward-only cursor supported by ODBC. A more flexible model, relaxed sequential, allows prior rows to be held, but <b>GetNextRows</b> is still sequential, and the consumer cannot revisit earlier parts of the rowset. The relaxed sequential model also allows changes and updates to rows that have already been passed but have been held. Sequential rowsets do not implement the <b>IRowsetLocate</b> interface.</p>
+<p>
+<b>GetNextRows</b> is positional; that is, it fetches rows sequentially, at all times keeping track of the previous position. It can move forward, or backward if the rowset supports reversible direction. <b>IRowset::RestartPosition</b> repositions the next fetch position to the start of the rowset. <b>GetNextRows</b> keeps track of the next fetch position so that a sequence of calls to this method with no skips and no change of direction reads the entire rowset. This position is not connected to or disturbed by any other method that gets rows. Rowsets that support the property DBPROP_CANFETCHBACKWARDS can take a negative number for the count of requested rows. If the count of requested rows is negative, then the fetch direction is backwards. <b>GetNextRows</b> increases the reference count of each row for which it returns a handle. <b>ReleaseRows</b> must be called to release the handles that have been retrieved.</p>
+<p>
+<b>GetNextRows</b> is the same as calling <b>SQLFetch</b> in ODBC with no columns bound, except that it can move forward or backward relative to the current position and can return multiple row handles.</p>
+<h4>Scrollable rowsets</h4>
+<p>
+Scrollable rowsets support <b>IRowsetLocate</b>. <b>IRowsetLocate</b> is equivalent to ODBC <b>SQLFetchScroll</b>. Scrollable rowsets are not positional; the consumer uses bookmarks to fetch relative to a previous position.</p>
+<p>
+<b>IRowsetLocate</b> supports the following scrolling options:
+<ul type=disc>
+<li>
+Forward or backward<br><br></li>
+<li>
+To the beginning or end of the rowset<br><br></li>
+<li>
+Relative to a specific row</li>
+</ul>
+<h4>Bookmarks</h4>
+<p>
+A bookmark is a value that the consumer can use to quickly and easily reposition to a row in the result set without incurring the overhead of holding on to the row. Bookmarks are valid only during the lifetime of the rowset to which they refer. An application retrieves a bookmark as column zero, in the same way it retrieves data from any other column in the rowset.</p>
+<p>
+Bookmark columns have the DBCOLUMNFLAG_ISBOOKMARK flag set in their column information. A bookmark may have a data type indicator of DBTYPE_I4 or DBTYPE_STR. </p>
+<p>
+OLE DB provides some standard bookmarks:
+<ul type=disc>
+<li>
+DBBMK_INVALID. The bookmark is invalid. This is generally used for initializing variables. <br><br></li>
+<li>
+DBBMK_FIRST. Indicates the first row of the rowset.<br><br></li>
+<li>
+DBBMK_LAST. Indicates the last row of the rowset. </li>
+</ul>
+<p>
+A bookmark becomes invalid if the row it points to is deleted, if it is based on a primary key and some of those key values were changed, or if the row it points to is no longer in the keyset. The validity of bookmarks after a transaction has been committed or aborted depends on the property DBPROP_COMMIT_PRESERVE. If this is set to <b>true</b>, then bookmarks remain valid; otherwise, they do not. </p>
+<h4>Scrollbar support</h4>
+<p>
+<b>IRowsetScroll</b> is the interface for moving to approximate locations in a moveable rowset. This method can be used for cases where precise positioning is not critical. <b>IRowsetScroll</b> supports the following interfaces: 
+<ul type=disc>
+<li>
+<b>IRowsetScroll::GetApproximatePosition</b>. Gets the position of the row corresponding to the specified bookmark.<br><br></li>
+<li>
+<b>IRowsetScroll::GetRowsAtRatio</b>. Gets rows starting from a fractional position in the rowset.</li>
+</ul>
+<h4>Cursor types </h4>
+<p>
+OLE DB support for scrollable cursors is provided and determined by the values of the rowset properties.</p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=50%><b>Property</b></td>
+<td class=label width=50%><b>Meaning</b></td>
+</tr>
+<tr valign=top>
+<td width=50%>DBPROP_CANSCROLLBACKWARDS</td>
+<td width=50%>The rowset can return to previously read rows.</td>
+</tr>
+<tr valign=top>
+<td width=50%>DBPROP_OWNINSERT</td>
+<td width=50%>The rowset can see its own inserts.</td>
+</tr>
+<tr valign=top>
+<td width=50%>DBPROP_OTHERINSERT</td>
+<td width=50%>The rowset can see inserts made outside of the rowset.</td>
+</tr>
+<tr valign=top>
+<td width=50%>DBPROP_OWNUPDATEDELETE</td>
+<td width=50%>The rowset can see its own changes and deletions.</td>
+</tr>
+<tr valign=top>
+<td width=50%>DBPROP_OTHERUPDATEDELETE</td>
+<td width=50%>The rowset can see changes and deletions made outside of the rowset.</td>
+</tr>
+</table><br>
+<p>
+These options are used to specify the characteristics of the static, keyset, and dynamic cursors defined in ODBC as follows:
+<ul type=disc>
+<li>
+<b>Static cursor </b><p class=tl>
+In a static cursor, the membership, ordering, and values of the rowset is fixed after the rowset is opened. Rows updated, deleted, or inserted after the rowset is opened are not visible to the rowset until the command is re-executed. </P><p class=tl>
+To obtain a static cursor, the application sets the properties:</P><ul type=disc>
+<li>
+DBPROP_CANSCROLLBACKWARDS to VARIANT_TRUE<br><br></li>
+<li>
+DBPROP_OTHERINSERT to VARIANT_FALSE<br><br></li>
+<li>
+DBPROP_OTHERUPDATEDELETE to VARIANT_FALSE</li>
+</ul>
+<p class=tl>
+In ODBC, this is equivalent to specifying SQL_CURSOR_STATIC for the SQL_ATTR_CURSOR_TYPE attribute in a call to <b>SQLSetStmtAttr</b>.</P></li>
+<li>
+<b>Keyset-driven cursor </b><p class=tl>
+In a keyset-driven cursor, the membership and ordering of rows in the rowset are fixed after the rowset is opened. However, values within the rows can change after the rowset is opened, including the entire row that is being deleted. Updates to a row are visible the next time the row is fetched, but rows inserted after the rowset is opened are not visible to the rowset until the command is reexecuted.</P><p class=tl>
+To obtain a keyset-driven cursor, the application sets the properties:</P><ul type=disc>
+<li>
+DBPROP_CANSCROLLBACKWARDS to VARIANT_TRUE<br><br></li>
+<li>
+DBPROP_OTHERINSERT to VARIANT_FALSE<br><br></li>
+<li>
+DBPROP_OTHERUPDATEDELETE to VARIANT_TRUE</li>
+</ul>
+<p class=tl>
+In ODBC, this is equivalent to specifying SQL_CURSOR_KEYSET_DRIVEN for the SQL_ATTR_CURSOR_TYPE attribute in a call to <b>SQLSetStmtAttr</b>.</P></li>
+<li>
+<b>Dynamic cursor</b><p class=tl>
+In a dynamic cursor, the membership, ordering, and values of the rowset can change after the rowset is opened. The row updated, deleted, or inserted after the rowset is opened is visible to the rowset the next time the row is fetched.</P><p class=tl>
+To obtain a dynamic cursor, the application sets the properties:</P><ul type=disc>
+<li>
+DBPROP_CANSCROLLBACKWARDS to VARIANT_TRUE<br><br></li>
+<li>
+DBPROP_OTHERINSERT to VARIANT_TRUE<br><br></li>
+<li>
+DBPROP_OTHERUPDATEDELETE to VARIANT_TRUE</li>
+</ul>
+<p class=tl>
+In ODBC, this is equivalent to specifying SQL_CURSOR_DYNAMIC for the SQL_ATTR_CURSOR_TYPE attribute in the call to <b>SQLSetStmtAttr</b>.</P></li>
+<li>
+<b>Cursor sensitivity</b><p class=tl>
+If the rowset property DBPROP_OWNINSERT is set to VARIANT_TRUE, the rowset can see its own inserts; if the rowset property DBPROP_OWNUPDATEDELETE is set to VARIANT_TRUE, the rowset can see its own updates and deletes. These are equivalent to the presence of the SQL_CASE_SENSITIVITY_ADDITIONS bit and a combination of the SQL_CASE_SENSITIVITY_UPDATES and SQL_CASE_SENSITIVITY_DELETIONS bits that are returned in the ODBC SQL_STATIC_CURSOR_ATTRIBUTES2 <b>SQLGetInfo </b>request.</P></li>
+</ul>
+</BODY>
+</HTML>

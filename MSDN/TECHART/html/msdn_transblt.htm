@@ -1,0 +1,221 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Bitmaps with Transparency</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_transblt"></a></sup>Bitmaps with Transparency</h1>
+<p>
+Ron Gery<br>
+Microsoft Developer Network Technology Group</p>
+<p>
+Created: June 1, 1992</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="261">
+</OBJECT><a href="javascript:sample1.Click()">Click to open or copy the files in the TRANSBLT sample application for this technical article.</a></p>
+<h2>Abstract</h2>
+<p>
+This article discusses several methods for performing transparency and masking effects with bitmaps in the Microsoft® Windows™<small> </small>graphical environment, both through simulations and by using special driver functionality. Included is a small sample application, TRANSBLT, that demonstrates most of the techniques discussed in this article.</p>
+<h2>Introduction</h2>
+<p>
+By using the TRANSPARENT background mode (set with the <b>SetBkMode</b> function), an application can draw with transparent text, transparent styled lines, and transparent hatched brushes. Sadly, the Microsoft® Windows™ graphical environment does not provide a simple interface for transparent bitmaps. (Well, it does, but it is not widely supported, as mentioned in "Easy Bitmap Transparency" below.) Fortunately, an application can simulate this effect by using a mask bitmap and several calls to <b>BitBlt</b> with carefully chosen raster operations.</p>
+<p>
+Exactly what is a transparent bitmap? It is a bitmap through which a part of the destination can still be seen. A simple example is a Windows-based icon such as the Control Panel icon. The Control Panel icon itself is basically a rectangle. When it's minimized, the desktop can be seen through parts of the rectangular icon bitmap. In idealized terms, the icon bitmap is designed as a rectangle with certain pixels designated as transparent so that when the bitmap is blted to the screen, those pixels do not obscure the destination. Transparent bitmaps can get even more interesting with moving, nonrectangular images. The simulation methods described below can be used to accomplish these transparency effects.</p>
+<h2>Notation</h2>
+<p>
+This article uses the terms <i>transparent</i> and <i>opaque</i> to describe pixels in the source bitmap. Transparent pixels are pixels that do not affect the destination. Opaque pixels are pixels that draw on the destination, replacing whatever was there.</p>
+<p>
+The colors white and black are assumed to have values with all 1s and all 0s, respectively. This is true on all known Windows display drivers, including palette devices.</p>
+<p>
+The basic operation involves blting from a source to a destination, and additional blts are needed that involve a monochrome mask. The source and the destination, represented by their device contexts (DCs)—<i>hdcSrc</i> and <i>hdcDest</i>—can be either bitmaps or the device surface itself. The mask, referenced with <i>hdcMask</i>, is assumed to be a monochrome bitmap selected into a compatible DC.</p>
+<h2>Background Concepts</h2>
+<p>
+Before discussing the actual transparency simulation, we should define and review some basic graphics concepts.</p>
+<h3>Raster Operations</h3>
+<p>
+The last parameter of the <b>BitBlt</b> function specifies a <i>raster operation</i> (ROP) that defines exactly how to combine the bits of the source, the destination, and the pattern (as defined by the currently selected brush) to form the destination. Because a bitmap is nothing more than a collection of bit values, the ROP is simply a Boolean equation that operates on the bits. Depending on the device being used, the bits in the bitmap represent different things:
+<ul type=disc>
+<li>
+On monochrome devices, each pixel is represented by one bit: 0 for black and 1 for white.<br><br></li>
+<li>
+On many color devices, each pixel is represented by a collection of bits, which either form an index into a color table or directly represent a color.</li>
+</ul>
+<p>
+For all device types, the ROP simply acts on the bits present without regard to their actual meaning. </p>
+<p>
+The trick is, of course, to combine the bits in a meaningful manner. Appendix A in the Microsoft Windows version 3.1 Software Development Kit (SDK) <i>Programmer's Reference, Volume 3: Messages, Structures, and Macros</i> lists the 256 possible ternary ROPs. ROPs provide a variety of ways to combine bitmap data, and you can often achieve the desired effect in more than one way. This article only deals with four of the possibilities.</p>
+<table border=1 cellpadding=5 cols=3 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=25%><b>Predefined name</b></td>
+<td class=label width=25%><b>Boolean operation</b></td>
+<td class=label width=50%><b>Use in transparency simulations</b></td>
+</tr>
+<tr valign=top>
+<td width=25%>SRCCOPY</td>
+<td width=25%>src</td>
+<td width=50%>Copies the source directly to the destination.</td>
+</tr>
+<tr valign=top>
+<td width=25%>SRCAND</td>
+<td width=25%>src AND dest</td>
+<td width=50%>Blacks out sections of the destination that correspond to the black areas in the source and leaves sections that line up with white areas in the source untouched.</td>
+</tr>
+<tr valign=top>
+<td width=25%>SRCINVERT</td>
+<td width=25%>src XOR dest</td>
+<td width=50%>Inverts the source onto the destination. When used twice, restores destination to its original state. Can also be used instead of SRCPAINT under certain conditions.</td>
+</tr>
+<tr valign=top>
+<td width=25%>SRCPAINT</td>
+<td width=25%>src OR dest</td>
+<td width=50%>Paints the nonblack sections of the source onto the destination. Black sections of the source do not alter the destination. Black sections of the destination are painted by the source.</td>
+</tr>
+</table><br>
+<p>
+Some printers do not support certain ROPs, especially those ROPs that involve the destination. For this reason, the techniques described in this article specifically target displays and may not necessarily work on some printer devices, such as PostScript® printers.</p>
+<h3>Transparency Masks</h3>
+<p>
+In this article, the term <i>mask</i> does not refer to the thing Batman wears on his face. Instead, it refers to a bitmap that limits the visible portion of another bitmap. The mask has two components, the opaque part (black) where the source bitmap is visible and the transparent part (white) where the destination remains untouched. Because the mask is composed of only two colors, it can be conveniently represented as a monochrome bitmap, although it can also be a black-and-white color bitmap. As discussed below in "The True Mask Method" and "The Black Source Method," a blting mask is used as a part of a multiple blt process; it sets up the destination for the final transparent blting of the source bitmap. The TRANSBLT sample application uses monochrome masks with transparent pixels set to 1 and opaque pixels set to 0; if desired, the application can invert these two values and compensate during the monochrome-to-color conversion described later in this section.</p>
+<p>
+In addition to providing for transparency, masks are very useful for simulating complex clipping operations that cannot be handled efficiently using regions. The net effect of a masked blt is to clip out a section of the source bitmap. For example, to show only a circular region of a source bitmap, create a mask of the same size as the source and draw a circle of transparent bits in the appropriate area. Mechanisms for performing a masked blt are described later in "The True Mask Method" and "The Black Source Method." </p>
+<h3>Monochrome-to-Color Conversion</h3>
+<p>
+Transparency simulation can also involve the Windows-based mechanism for converting monochrome bitmaps to color bitmaps and vice versa. The Windows-based notion of a text (foreground) color and a background color is used to map between the two formats. During a blt operation with a color destination, a monochrome source bitmap (and/or a brush when applicable) is converted to color on the fly before the actual ROP is carried out on the bits. The 0 (black) pixels in the monochrome bitmap are converted to the destination's text (foreground) color, and the 1 (white) pixels are converted to the background color. Conversely, Windows converts a color source into monochrome when the destination is monochrome. In this situation, all pixels in the color bitmap that are the same color as the background color become 1s, and all the other pixels are converted to 0s. Because all of the examples below use monochrome masks, it is critical for an application to properly set the foreground and background colors (using <b>SetTextColor</b> and <b>SetBkColor</b>) before performing the blt operations.</p>
+<h3>Performance and Screen Flicker</h3>
+<p>
+Intensive bitmap operations tend to be on the slow side due to the sheer number of bits that are affected. This is compounded by the reality that when the work is done directly to the screen, some flicker results. Things only get worse as the size of the affected area grows. Although there is no way to magically improve the speed, the visual flickering can be eliminated by using shadow bitmaps. First, the application copies the section of the screen that is to be affected to a memory bitmap. Then the application carries out the bitmap operation (for example, the transparency effect) on the shadow bitmap instead of on the screen. Finally, the shadow is copied back to the screen. The result is that only one blt affects the screen, so there is no flicker. Obviously, the two extra blt operations cause a slowdown (although on some devices memory blts could be faster than blts that have to access the screen), but depending on the size of the bitmap and the exact operation, the operation might be <i>perceived</i> to be quicker because the flicker is gone. Things also look a lot cleaner without the confusing flicker. Whether shadowing is appropriate depends on the specific needs of the application.</p>
+<h2>The True Mask Method</h2>
+<p>
+True mask blting does not need any modification on the part of the source bitmap to be useful. The masked blt involves a three-step process and a mask that has all transparent pixels set to 1 and all opaque pixels set to 0. The following is the basic code involved:</p>
+<pre><code>// Set up destination for monochrome blt (only needed for monochrome 
+// mask). These are the default values and may not need to be 
+// changed. They should also be restored.
+SetBkColor(hdcDest, RGB(255, 255, 255));&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // 1s --&gt; 0xFFFFFF
+SetTextColor(hdcDest, RGB(0, 0, 0));&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // 0s --&gt; 0x000000
+
+// Do the real work.
+BitBlt(hdcDest, x, y, dx, dy, hdcSrc, x0, y0, SRCINVERT);
+BitBlt(hdcDest, x, y, dx, dy, hdcMask, 0, 0, SRCAND);
+BitBlt(hdcDest, x, y, dx, dy, hdcSrc, x0, y0, SRCINVERT);
+</code></pre>
+<p>
+The three steps in the masked blt process are as follows:
+<ol>
+<li>
+The first step (<b>BitBlt</b> with SRCINVERT) XORs the source bitmap onto the destination. This looks a bit funny, but the second XOR has the effect of restoring the destination to its original state. <br><br></li>
+<li>
+The second step (<b>BitBlt</b> with SRCAND) is the masking operation. When the mask is ANDed to the destination, all of the transparent pixels leave the destination pixels unchanged, while the opaque pixels set the destination to black. Now the destination has a blacked-out image of the opaque part of the source and an XORed image of itself in the transparent part. <br><br></li>
+<li>
+The third step (<b>BitBlt</b> with SRCINVERT) XORs the source to the destination. The transparent pixels are restored to their original state (two XORs do make it right), and the opaque pixels are copied directly from the source (value XOR black = value).</li>
+</ol>
+<p>
+Unfortunately, as the steps are performed, the destination does tend to look rather ugly for a while, and performing three blts directly to the screen is on the flashy side.</p>
+<h2>The Black Source Method</h2>
+<p>
+With a little more planning put into the creation of the source bitmap, the transparency blt can be reduced to only two calls. The mask remains unchanged from the example above, but the source must have black pixels wherever the mask has white pixels (yes, that makes the source and the mask integrally linked). The masked blt code involved looks like this:</p>
+<pre><code>// Set up destination for monochrome blt. These are the default 
+// values and may not need to be changed. They should also be 
+// restored.
+SetBkColor(hdcDest, RGB(255, 255, 255));&nbsp;&nbsp;&nbsp; // 1s --&gt; 0xFFFFFF
+SetTextColor(hdcDest, RGB(0, 0, 0));&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // 0s --&gt; 0x000000
+
+// Do the real work.
+BitBlt(hdcDest, x, y, dx, dy, hdcMask, 0, 0, SRCAND);
+BitBlt(hdcDest, x, y, dx, dy, hdcSrc, x0, y0, SRCPAINT);
+</code></pre>
+<p>
+Once again, the mask is used to black out the opaque pixels and leave the rest as is. The source is then ORed on top of this, drawing on the now-black sections of the destination. Because the source has only black pixels where transparency is desired, the OR operation leaves the destination intact in those transparent zones. Notice that the SRCINVERT ROP could be used for the second <b>BitBlt</b> call instead of SRCPAINT with the same effect. The source-mask setup eliminated the possibility of a (1 XOR 1), which is the only case where XOR varies from OR.</p>
+<p>
+The on-screen flashing is much less noticeable with this method, and once the source is set up with black in the correct places, transparency looks very good. This mechanism is the one used by Windows to display icons on the screen. The icons are stored in .ICO files as two parts, the "XOR mask" and the bitmap itself. For bitmaps as small as icons, transparency is achieved very smoothly.</p>
+<h2>Bitmap Transparency</h2>
+<p>
+Bitmap transparency usually refers to the process of taking a bitmap and making one of the colors in the bitmap transparent, so that when the bitmap is blted to the screen, the destination can be seen "through" the bitmap's transparent color. An application can simulate the operation by building an appropriate mask and using the masking techniques described earlier in "The True Mask Method" and "The Black Source Method." The following sections describe how to simulate bitmap transparency for display devices not capable of performing a transparent blt.</p>
+<h3>Building a Mask</h3>
+<p>
+Building a monochrome mask from a color bitmap is quite simple because <b>BitBlt</b>'s built-in color-to-monochrome conversion automatically does all of the work. The goal is a mask with all opaque pixels set to 0 and all transparent pixels set to 1; setting the background color to the transparent color does this exactly. There is no need to set the text (foreground) color because it is not used in the color-to-monochrome conversion (all nonbackground pixels are set to 0). The code below accomplishes this:</p>
+<pre><code>SetBkColor(hdcSrc, rgbTransparent);
+BitBlt(hdcMask, 0, 0, dx, dy, hdcSrc, x0, y0, SRCCOPY);
+</code></pre>
+<p>
+The code builds a mask with 1s where the source is equal to the transparent color and 0s everywhere else. This duplicates the masks used above. </p>
+<h3>Using the Mask</h3>
+<p>
+Now it's time to use the masking methods described above. The true mask method requires no additional work: The mask is built and the source needs no manipulation. The three blts do cause on-screen flicker, but there are only three of them.</p>
+<p>
+The black source method, on the other hand, requires some additional work on the source bitmap to achieve the proper input scenario—the transparent bits need to be made black. Of course, if the transparent color was black to begin with, the bitmap is ready to go. Blacking out the transparent pixels on the source is very similar to blacking out the opaque pixels on the destination and is done using the mask, as follows:</p>
+<pre><code>SetBkColor(hdcSrc, RGB(0,0,0));&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // 1s --&gt; black (0x000000)
+SetTextColor(hdcSrc, RGB(255,255,255));&nbsp; // 0s --&gt; white (0xFFFFFF)
+BitBlt(hdcSrc, x0, y0, dx, dy, hdcMask, 0, 0, SRCAND);
+</code></pre>
+<p>
+Now the two blts are used for the transparent blt.</p>
+<p>
+Once the actual transparent blt is completed, the source bitmap should be restored to its original coloring:</p>
+<pre><code>SetBkColor(hdcSrc, rgbTransparent);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // 1s --&gt; transparent color
+SetTextColor(hdcSrc, RGB(0,0,0));&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // 0s --&gt; black (0x000000)
+BitBlt(hdcSrc, x0, y0, dx, dy, hdcMask, 0, 0, SRCPAINT);
+</code></pre>
+<p>
+Because the source bitmap must be altered and then restored, the total number of blts involved is four. This makes the process slower, but because two of the blts are done to a memory bitmap instead of to the screen, the on-screen flicker is reduced in comparison to the true mask method. If the source bitmap can be maintained with the transparent bits set to black, the two conversion blts can be avoided altogether, and only two blts are needed for the operation; this is virtually a necessity for animation. </p>
+<h3>Easy Bitmap Transparency </h3>
+<p>
+Some device drivers support transparent blts directly. A driver indicates this capability using the C1_TRANSPARENT bit of the CAPS1 capability word returned by the <b>GetDeviceCaps</b> function. A special background mode, NEWTRANSPARENT, indicates that subsequent blts are transparent blts. The current background color of the destination is the transparent color. When this capability is available on the driver, the basic transparent blt operation can be performed as follows:</p>
+<pre><code>// Only attempt this if device supports functionality.
+if(GetDeviceCaps(hdcDest, CAPS1) &amp; C1_TRANSPARENT)
+{
+ &nbsp; // Special transparency background mode
+ &nbsp;&nbsp;&nbsp;&nbsp; oldMode = SetBkMode(hdcDest, NEWTRANSPARENT);
+ &nbsp;&nbsp;&nbsp;&nbsp; rgbBk = SetBkColor(hdcDest, rgbTransparent);
+ &nbsp; // Actual blt is a simple source copy; transparency is automatic.
+ &nbsp;&nbsp;&nbsp;&nbsp; BitBlt(hdcDest, x, y, dx, dy, hdcSrc, x0, y0, SRCCOPY);
+ &nbsp;&nbsp;&nbsp;&nbsp; SetBkColor(hdcDest, rgbBk);
+ &nbsp;&nbsp;&nbsp;&nbsp; SetBkMode(hdcDest, oldMode);
+}
+</code></pre>
+<p>
+This sure makes things easy. Unfortunately, not many device drivers support transparent blts at the present time—those shipped with Windows version 3.1 do not have the functionality. This should change in the near future.</p>
+<p>
+Also, at the present time, WINDOWS.H does not contain the definitions for any of these new constants. Instead, the definitions are provided in the MMSYSTEM.H file, which can be found in the Windows version 3.1 SDK.</p>
+<h3>Transparency with DIBs</h3>
+<p>
+If the source bitmap is in the device-independent bitmap (DIB) format, the whole masking process can be greatly simplified by using one DIB as both the source and the mask and simply manipulating the color table. The process is identical to that discussed above, except that the application can perform all of the color-to-monochrome and monochrome-to-color conversions by changing the color table, as follows:</p>
+<pre><code>save a copy of the color table;
+// Build the mask.
+for (every color in the color table)
+{
+ &nbsp;&nbsp; if (color == rgbTransparent)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; color = white;
+ &nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; color = black;
+}
+// Prepare destination by blting the mask.
+StretchDIBits(hdcDest, lpDIB, SRCAND);&nbsp;&nbsp;&nbsp;&nbsp; // (Yes, there are more 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // parameters.)
+
+// Now prepare "blacked out" source for the mask blt.
+for (every color in the color table)
+{
+ &nbsp;&nbsp; if (color == white)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // (white from above change)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; color = black;
+ &nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; color = original color from color table;
+}
+// Transparently blt the source.
+StretchDIBits(hdcDest, lpDIB, SRCPAINT);&nbsp;&nbsp; // (Yes, there are more 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // parameters.)
+
+// To restore DIB to original state, restore original color table.
+</code></pre>
+<p>
+The key thing to note in this method is that only one copy of the bitmap is needed because it serves as both the mask and the source by virtue of the color table conversion. The overhead penalty of converting the DIB format to a device-dependent format still exists, though.</p>
+</BODY>
+</HTML>

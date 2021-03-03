@@ -1,0 +1,949 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>The Visual Programmer</title>
+<style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000 dir=ltr>
+<Font face="verdana,arial,helvetica" size="2">
+<h1><a name="thevisualprogrammer"></a>The Visual Programmer</h1>
+<p class=indent>
+by George Shepherd and Scot Wingo</p>
+<p>
+IntelliMouse® support was added  to the CScrollView class in version  4.21 of MFC, the version that ships with Visual C++® 5.0. If you look at the implementation of the IntelliMouse support in the MFC source code (src\viewscrl.cpp), you will see this comment:</p>
+<pre><code>BOOL CScrollView::OnMouseWheel(           UINT fFlags, short zDelta, 
+          CPoint point)
+{
+    // we don’t handle anything     // but scrolling just now
+    if (fFlags &amp; (MK_SHIFT |                   MK_CONTROL))
+        return FALSE;
+</code></pre>
+<p>
+Then the CScrollView handles the message and implements IntelliMouse scrolling by mapping the turns of the mouse wheel to scrolls in the CScrollView.</p>
+<p>
+But what about the MK_SHIFT and MK_CONTROL settings that CScrollView::OnMouseWheel is ignoring? A quick search of the IntelliMouse guidelines at http://www.microsoft.com/intellimouse yields the following table that details the support required to obtain Office 97 compatibility certification.</p>
+<pre></pre>
+<p>
+Mouse ControlOperation</p>
+<p>
+Wheel rotationScrolling</p>
+<p>
+Ctrl+wheel rotationZooming</p>
+<p>
+Shift+wheel rotationDatazoom</p>
+<p>
+Wheel button click and dragPanning</p>
+<p>
+Wheel button clickAutoscroll</p>
+<pre></pre>
+<p>
+You’ve probably already heard of Scrolling and zooming,  but what about datazoom, panning, and autoscroll? Microsoft suggests using datazoom to explore hierarchical data. For example, Word and PowerPoint® use datazoom in outline view to expand and contract nodes. Microsoft Internet Explorer (IE) 4.0 uses datazoom to go back and forth between Web pages.</p>
+<h3>IntelliMouse Panning</h3>
+<p>
+Panning is a really nice feature. You move around your document by holding down the mouse wheel and moving the mouse to “pan” the document in the direction of the mouse movement. In Microsoft Excel, panning lets you zip to the bottom-right corner of your spreadsheet very quickly without ever having to click a scroll bar. The speed of the pan is controlled by the distance of the cursor from where you started panning. Try panning in Microsoft Excel or Word and you’ll see what we mean.</p>
+<p>
+As part of the IntelliMouse specification, Microsoft also defines a variety of cursors to be used in IntelliMouse panning. For example, when a user clicks the mouse wheel to initiate scrolling or  moves the cursor back to the neutral zone (the area around the panning origin), one of three standard cursors appears, telling the user what level of panning support is provided.</p>
+<p>
+Indicates when two-dimensional panning is supported.</p>
+<p>
+Indicates that vertical-only, one-dimensional panning is available.</p>
+<p>
+Indicates that horizontal-only, one-dimensional panning is available.</p>
+<p>
+During panning there are four cursors (eight if you support diagonal panning) that show the direction of the panning: </p>
+<p>
+East </p>
+<p>
+West </p>
+<p>
+North </p>
+<p>
+South</p>
+<p>
+The panning support in many Microsoft IntelliMouse-compatible applications  is dramatically different. For example, Microsoft Excel and IE 4.0 implement panning by creating the panning origin wherever the mouse happens to be (see Figure 1). Word, on the other hand, implements only vertical panning and moves the panning origin relative to the vertical scroll bar (see Figure 2). If you plan on supporting only vertical scrolling, it may be a good idea to create a CScrollBar derivative that handles the panning and scrolling so you can isolate the support from your application. It seems like this is the approach taken by the Word team. </p>
+<p>
+<img src="vp1212_fig01.gif" border=0></p>
+<p>
+<b>Figure 1: Panning in IE 4.0</b></p>
+<p>
+<img src="vp1212_fig02.gif" border=0></p>
+<p>
+<b>Figure 2: Panning in Word</b></p>
+<h3>IntelliMouse AutoScroll </h3>
+<p>
+In the IntelliMouse specification, an application should enter Autoscroll mode when the user clicks the mouse wheel but doesn’t drag it. IE 4.0 has the smoothest implementation of this. It basically lets the user start the windows scrolling and then continues to scroll until the user moves the mouse or clicks another button. This is useful for applications like Word where the user may want to read large volumes of vertical text, but does not want to scroll manually.</p>
+<p>
+CScrollView meets only one requirement of the IntelliMouse specification—that the view scrolls when the user moves the mouse wheel. This is largely because CScrollView does not support zooming or panning. This month we will implement a CScrollView derivative called MSJSuperView that supports zooming and panning with the IntelliMouse. Before we can add IntelliMouse zooming and panning support, however, we need to add zooming and panning support to the CScrollView. </p>
+<h3>CScrollView Zooming </h3>
+<p>
+The most common method for implementing GDI-level zooming is via mapping mode and viewport manipulations. Implementing complex zooming is much easier in MM_ ANISOTROPIC mapping mode because of origin placement and viewport flexibility. MSJSuperView requires that the view be drawn in ANISOTROPIC mode, which won’t affect most applications unless they have a dependency on another mapping mode. </p>
+<p>
+MSJSuperView implements simple zooming by adding the members shown in Figure 3 to a vanilla CScrollView derivative. The declaration and implementation of these MSJSuperView zooming members can be found in Figure 4.</p>
+<p>
+<b>Figure 3: MSJSuperView Zooming Members</b></p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td width=236>float m_fZoomScale</td>
+<td width=356>A float used to store the current zoom level. 1.00 is 100 percent and .50 is 50 percent zoom. </td>
+</tr>
+<tr valign=top>
+<td width=236>CSize m_szOrigTotalDev</td>
+<td width=356>The original device coordinates stored in a CSize data member. This data member is used to  calculate the new viewport settings (see OnPrepareDC). </td>
+</tr>
+<tr valign=top>
+<td width=236>CSize m_szOrigPageDev</td>
+<td width=356>Stores the original device coordinates before a zoom for the page scroll amount.</td>
+</tr>
+<tr valign=top>
+<td width=236>CSize m_szOrigLineDev</td>
+<td width=356>Stores the device coordinates before a zoom for the scroll amount of a line.</td>
+</tr>
+<tr valign=top>
+<td width=236>SetZoomLevel/GetZoomLevel</td>
+<td width=356>Accessor member functions that store/retrieve the argument in m_fZoomScale.</td>
+</tr>
+<tr valign=top>
+<td width=236>ZoomIn</td>
+<td width=356>Zooms in on a certain point by a given zoom factor. This function uses the zoom factor to update m_fZoomScale.</td>
+</tr>
+<tr valign=top>
+<td width=236>ZoomOut</td>
+<td width=356>Zooms out from a given point. Updates the m_fZoomScale accordingly.</td>
+</tr>
+<tr valign=top>
+<td width=236>OnPrepareDC</td>
+<td width=356>CScrollView derivative that is the heart of the zooming implementation.  This function takes the calculations stored in the data members and updated via UpdateViewport and calls SetWindowExt/SetViewportExt in the current drawing CDC to implement the zooming by manipulating the window extent and viewport extent.</td>
+</tr>
+<tr valign=top>
+<td width=236>RecalcBars</td>
+<td width=356>Used to recalculate the position and size of the scroll bars.</td>
+</tr>
+<tr valign=top>
+<td width=236>SetScrollSizes</td>
+<td width=356>A CScrollView override that initializes the mapping mode and the position of the scroll bars.</td>
+</tr>
+<tr valign=top>
+<td width=236>CenterOnLogicalPoint</td>
+<td width=356>Centers the view on a logical point (useful in zooming to make sure that you don’t always zoom into the right corner).</td>
+</tr>
+<tr valign=top>
+<td width=236>GetLogicalCenterPoint</td>
+<td width=356>Calculates the center of the view for zooming. This function is used if a point to zoom in on is not specified.</td>
+</tr>
+<tr valign=top>
+<td width=236>ViewDPtoLP/ViewLPtoDP</td>
+<td width=356>Convenience functions for converting logical and device coordinates using the new mapping modes </td>
+</tr>
+<tr valign=top>
+<td width=236></td>
+<td width=356>and viewport.</td>
+</tr>
+<tr valign=top>
+<td width=236>UpdateViewport</td>
+<td width=356>Updates the data members that store the viewport, which will be set in OnPrepareDC.</td>
+</tr>
+</table><br>
+<p>
+<b>Figure 4: MSJSuperView Zooming Implementation</b></p>
+<pre><code>// Declaration of MSJSuperView for Visual Developer Column.
+// Scot Wingo and George Shepherd
+
+class MSJSuperView : public CScrollView
+{
+    DECLARE_DYNAMIC(MSJSuperView);
+public:
+// Construction    
+protected:
+    MSJSuperView(); // protected constructor used by dynamic creation
+    
+// Operations
+public:
+    // Overridden CScrollView member functions
+
+    void   SetScrollSizes(int nMapMode, SIZE sizeTotal, 
+                          const SIZE&amp; sizePage = sizeDefault,
+                          const SIZE&amp; sizeLine = sizeDefault);
+
+    //For centering.
+    CPoint GetLogicalCenterPoint(void);
+    void   CenterOnLogicalPoint(CPoint ptCenter);
+    
+    // Zooming functions
+    float GetZoomLevel() {return m_fZoomScale;};
+    void  ZoomIn    (CPoint *point = NULL, float delta = 1.25);
+    void  ZoomOut   (CPoint *point = NULL, float delta = 1.25);
+    
+    // Zooming utility functions
+    void      ViewDPtoLP (LPPOINT lpPoints, int nCount = 1);
+    void      ViewLPtoDP (LPPOINT lpPoints, int nCount = 1);
+    void      ClientToDevice(CPoint &amp;point);
+
+    //Panning member functions.
+    BOOL DoScroll(int nDirection, int nSize);
+    void MySetCursor(int nCursor);
+
+#ifdef _DEBUG
+    void AssertValid() const;
+#endif //_DEBUG
+
+// Overrideables
+protected:
+    // Override this to get zoom scale change notifications.
+    virtual void ZoomLevelChanged(void) {};
+    virtual void SetZoomLevel(float);
+
+// Implementation
+protected:
+    virtual ~MSJSuperView();
+
+    virtual void OnDraw(CDC* pDC) = 0; // Pass on Pure Virtual from CScrollView
+    virtual void OnPrepareDC(CDC* pDC, CPrintInfo* pInfo = NULL);
+    
+     // Printing support
+    virtual BOOL OnPreparePrinting(CPrintInfo* pInfo);
+
+protected:
+    void      PersistRatio(const CSize &amp;orig, CSize &amp;dest, CPoint &amp;remainder);
+    void      ReCalcBars(void);
+    void      UpdateViewport(CPoint * ptNewCenter);
+    
+    // Private member variables
+    CSize     m_szOrigTotalDev;  // Original total size in device units
+    CSize     m_szOrigPageDev;   // Original page scroll size in device units
+    CSize     m_szOrigLineDev;   // Original line scroll size in device units
+    float     m_fZoomScale;      // Current ratio between device/logical units
+
+    // Mouse Wheel members
+    BOOL m_bMouseWheelDrag;
+    int m_nMouseWheelTimer;
+    CPoint m_ptMouseWheelOrg;
+    MSJMouseWheelOriginWnd * m_pWndDrag;
+    
+public:
+    // Generated message map functions
+    //{{AFX_MSG(SECZoomView)
+    afx_msg BOOL OnMouseWheel(UINT nFlags, short zDelta, CPoint );
+    afx_msg void OnMButtonDown(UINT nFlags, CPoint point);
+    afx_msg void OnMButtonUp(UINT nFlags, CPoint point);
+    afx_msg void OnMouseMove(UINT nFlags, CPoint point);
+    afx_msg void OnTimer(UINT nIDEvent);
+    //}}AFX_MSG
+    DECLARE_MESSAGE_MAP();
+};
+
+void MSJSuperView::SetZoomLevel(float fNewScale)
+{
+    m_fZoomScale = fNewScale;
+
+}
+void MSJSuperView::ZoomIn (
+    CPoint *point,   // point in logical coordinates
+    float  delta)    // scale factor
+{
+    SetZoomLevel(m_fZoomScale + delta);
+    UpdateViewport(point);
+    return;
+} 
+
+//    ZoomOut
+void MSJSuperView::ZoomOut (
+    CPoint *point,   // point in logical coordinates
+    float  delta)    // scale factor
+{
+    // Decrease the zoom scale.
+    SetZoomLevel(m_fZoomScale - delta);
+    UpdateViewport(point);
+    
+    return;
+} 
+
+//    CenterOnLogicalPoint
+//    Same as CScrollView::CenterOnPoint, but for log point.
+void MSJSuperView::CenterOnLogicalPoint(CPoint pt)
+{
+    ViewLPtoDP(&amp;pt);
+    ClientToDevice(pt);
+    CScrollView::CenterOnPoint(pt);
+} 
+
+//    GetLogicalCenterPoint
+CPoint MSJSuperView::GetLogicalCenterPoint (void)  
+{
+    CPoint pt;
+    CRect rect;
+
+    GetClientRect(&amp;rect);
+    pt.x = (rect.Width()  / 2);
+    pt.y = (rect.Height() / 2);
+
+    ViewDPtoLP(&amp;pt);
+    return pt;
+} 
+
+//    ViewDPtoLP. Same as DPtoLP, but uses Client DC.
+void MSJSuperView::ViewDPtoLP (LPPOINT lpPoints, int nCount)
+{
+    CWindowDC dc(this);
+    OnPrepareDC(&amp;dc);
+    dc.DPtoLP(lpPoints, nCount);
+} 
+
+//    Same as LPtoDP, but uses Client DC
+void MSJSuperView::ViewLPtoDP (LPPOINT lpPoints, int nCount)
+{
+    CWindowDC dc(this);
+    OnPrepareDC(&amp;dc);
+    dc.LPtoDP(lpPoints, nCount);
+} 
+
+//    UpdateViewport
+//    Called after the scale factor has changed, calculates center if needed,
+//    then updates the viewport and updates the scroll bars.
+void MSJSuperView::UpdateViewport(CPoint * ptNewCenter)
+{
+    CPoint ptCenter;
+
+    if (!ptNewCenter)
+        ptCenter = GetLogicalCenterPoint();
+    else 
+        ptCenter = *ptNewCenter;
+    
+    // Modify the Viewport extent
+    m_totalDev.cx = (int) ((float) m_szOrigTotalDev.cx * m_fZoomScale);
+    m_totalDev.cy = (int) ((float) m_szOrigTotalDev.cy * m_fZoomScale);
+    ReCalcBars();
+    
+    // Set the current center point.
+    CenterOnLogicalPoint(ptCenter);
+    
+    // Notify the class that a new zoom scale was done
+    ZoomLevelChanged();
+    return;
+}
+
+void MSJSuperView::SetScrollSizes (int nMapMode, SIZE sizeTotal,
+                                   const SIZE&amp; sizePage /* = sizeDefault */,                                    const SIZE&amp; sizeLine /* = sizeDefault */) 
+{
+
+    // Set up the defaults
+    if (sizeTotal.cx == 0 &amp;&amp; sizeTotal.cy == 0){
+        sizeTotal.cx = 1;
+        sizeTotal.cy = 1;
+    }
+    
+    m_nMapMode    = MM_ANISOTROPIC; // mandatory for arbitrary scaling
+    m_totalLog    = sizeTotal;
+    
+    // Setup default Viewport extent to be conversion of Window extent
+    // into device units.
+    
+    //BLOCK for DC
+    {
+    CWindowDC dc(NULL);
+    dc.SetMapMode(m_nMapMode);
+    
+    // total size
+    m_totalDev = m_totalLog;
+    dc.LPtoDP((LPPOINT)&amp;m_totalDev);
+    } // Release DC here
+    
+    m_szOrigTotalDev = m_totalDev;
+    m_szOrigPageDev  = sizePage;
+    m_szOrigLineDev  = sizeLine;
+    ReCalcBars();
+    
+    ZoomLevelChanged(); //Notify app that there's a new zoom level 1.0f.   
+}
+
+//    OnPrepareDC. Does all the work for MSJSuperView.
+
+void MSJSuperView::OnPrepareDC ( CDC* pDC, CPrintInfo* pInfo)
+{
+    pDC-&gt;SetMapMode(m_nMapMode);
+    pDC-&gt;SetWindowExt(m_totalLog);  //Set up the logical window
+
+    //Now figure out the origin for the viewport, depends on
+    //This code is from CSCrollView
+    CPoint ptVpOrg;
+    pDC-&gt;SetViewportExt(m_totalDev); // in device coordinates
+    
+    // by default shift viewport origin in negative direction of scroll
+    ASSERT(pDC-&gt;GetWindowOrg() == CPoint(0,0));
+    ptVpOrg = -GetDeviceScrollPosition();
+    
+    // Set the new viewport origin, call CView for printing behavior
+    pDC-&gt;SetViewportOrg(ptVpOrg);
+    CView::OnPrepareDC(pDC, pInfo);
+} 
+
+//    MSJSuperView::ReCalcBars
+//    Since we're changing the viewport around, we'll need to modify the 
+//    scrollbars where CScrollView just sets them up at start of day and scrolls.
+
+void MSJSuperView::ReCalcBars (void)
+{
+    {  // BLOCK for DC
+      CWindowDC dc(NULL);
+      dc.SetMapMode(m_nMapMode);
+
+      // Calculate new device units for scrollbar
+      // Start with original logical units from SetScrollPos
+      m_pageDev = m_szOrigPageDev;
+      dc.LPtoDP((LPPOINT)&amp;m_pageDev);
+      m_lineDev = m_szOrigLineDev;
+      dc.LPtoDP((LPPOINT)&amp;m_lineDev);
+   } // Free DC
+
+   // Make sure of the range
+   if (m_pageDev.cy &lt; 0)  m_pageDev.cy = -m_pageDev.cy;
+   if (m_lineDev.cy &lt; 0)  m_lineDev.cy = -m_lineDev.cy;
+
+   // If none specified - use one tenth, Just like CScrollView
+     
+   if (m_pageDev.cx == 0) m_pageDev.cx = m_totalDev.cx / 10;
+   if (m_pageDev.cy == 0) m_pageDev.cy = m_totalDev.cy / 10;
+   if (m_lineDev.cx == 0) m_lineDev.cx = m_pageDev.cx  / 10;
+   if (m_lineDev.cy == 0) m_lineDev.cy = m_pageDev.cy  / 10;
+
+   // Now update the scrollbars
+   if (m_hWnd != NULL) {
+      UpdateBars();
+      Invalidate(TRUE); // Zoom scale changed, redraw all
+   }
+}
+</code></pre>
+<h3>CScrollView Panning</h3>
+<p>
+The key to adding panning support is implementing  a scrolling routine that knows how to scroll the view in  a given direction by a given amount. We implemented a MSJSuperView member function called DoScroll that takes a directional flag (based on a simple enumeration for up/down/left/right) and an amount to scroll in the given direction. This method calculates the new x and y of the view and the new scroll range and then performs a scroll operation  on the view. Figure 5 has the source code for the panning implementation.</p>
+<p>
+Now that we have basic zooming and panning in MSJSuperView, let’s map the IntelliMouse actions for zooming and panning.</p>
+<p>
+<b>Figure 5: MSJSuperView Panning Implementation</b></p>
+<pre><code>BOOL MSJSuperView::DoScroll(int nDirection, int nSize)
+
+{
+    int xOrig, x, xMax;
+    int yOrig, y, yMax;
+
+    CScrollBar* pBar;
+    DWORD dwStyle = GetStyle();
+    //If no scroll bars, don't do anything
+
+    pBar = GetScrollBarCtrl(SB_VERT);
+    if ((pBar != NULL &amp;&amp; !pBar-&gt;IsWindowEnabled()) ||
+    (pBar == NULL &amp;&amp; !(dwStyle &amp; WS_VSCROLL)))
+        nSize = 0;
+    
+    pBar = GetScrollBarCtrl(SB_HORZ);
+    if ((pBar != NULL &amp;&amp; !pBar-&gt;IsWindowEnabled()) ||
+    (pBar == NULL &amp;&amp; !(dwStyle &amp; WS_HSCROLL)))
+        nSize = 0;
+    
+    // Adjust current x position based on scroll bar constraints.
+    xOrig = x = GetScrollPos(SB_HORZ);
+    
+    xMax = GetScrollLimit(SB_HORZ);
+    if (nDirection == MSJ_LEFT || nDirection == MSJ_RIGHT)
+    {
+        if (nDirection == MSJ_LEFT)
+            x -= nSize;
+        else 
+            x += nSize;
+
+        //Sanity checks.
+        if (x &lt; 0)
+            x = 0;
+        else if (x &gt; xMax)
+            x = xMax;
+    }
+    
+    // Adjust current y position based on scroll bar constraints.
+    yOrig = y = GetScrollPos(SB_VERT);
+    yMax = GetScrollLimit(SB_VERT);
+   
+    if (nDirection == MSJ_UP ||nDirection == MSJ_DOWN)
+    {
+        if (nDirection == MSJ_UP)
+            y -= nSize;
+        else
+            y += nSize;    
+
+        //Sanity checks.
+        if (y &lt; 0)
+            y = 0;
+        else if (y &gt; yMax)
+            y = yMax;
+    }
+
+    // If nothing changed, just return, no work to do.
+    if (x == xOrig &amp;&amp; y == yOrig)
+        return FALSE;
+    
+    //Now do the scroll and update the scrollbars.
+    if (x != xOrig)
+        SetScrollPos(SB_HORZ, x);
+    if (y != yOrig)
+        SetScrollPos(SB_VERT, y);
+    ScrollWindow(-(x-xOrig), -(y-yOrig));
+    
+    UpdateWindow();
+
+    return TRUE;
+}
+</code></pre>
+<h3>IntelliMouse Zooming</h3>
+<p>
+To add zooming, you first need to override the OnMouseWheel message that is already partially implemented by CScrollView. In our OnMouseWheel handler, we need to add zooming support. Once zooming is implemented, this maps to our zooming functions with only a couple of lines of code: </p>
+<pre><code>BOOL MSJSuperView::OnMouseWheel(UINT nFlags,                            short zDelta, CPoint ptMouse)
+{
+    //Special logic for CONTROL and mousewheel     // which means to zoom.</code></pre>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;if (nFlags == MK_CONTROL)
+    {
+        float fCurrentZoom = m_fZoomScale;
+        if (zDelta &gt; 0)
+            ZoomIn(&amp;ptMouse,.10f );
+        else 
+            ZoomOut(&amp;ptMouse,.10f);
+        return TRUE;
+    }
+    return CScrollView::OnMouseWheel(nFlags, zDelta,   
+                                     ptMouse);
+}
+</code></pre>
+<p>
+If the control flag is set, we intercept the message and  call either ZoomIn or ZoomOut depending on whether the zDelta message argument is positive or negative. Notice that the mouse position is passed into the ZoomIn/ZoomOut call so that the zoom will take place exactly where the mouse is positioned. Finally, we give a zooming delta of .10, or 10 percent for every click of the mouse wheel. This gives a pretty smooth zooming action, but it could be customized.</p>
+<p>
+Figure 6 shows the before and after zooming effects of a sample application that draws circles and uses MSJSuperView for zooming with the IntelliMouse. The window on the left is at 100 percent zoom and the pane on the right is at 400 percent zoom.</p>
+<p>
+<img src="vp1212_fig06.gif" border=0></p>
+<p>
+<b>Figure 6: Zooming in Action</b></p>
+<h3>IntelliMouse Panning</h3>
+<p>
+The tricky part about implementing IntelliMouse panning is the display of the panning cursors. You have to display both the origin and directional cursors while the user is panning. Since Windows® has only one cursor, this is pretty daunting. To solve this problem, let’s use the normal Windows cursor for the directional panning and then create a special window to display the origin.</p>
+<p>
+The origin window is called MSJMouseWheelOriginWnd (see Figure 7). It is basically a very small CWnd derivative that implements some custom painting to draw a transparent origin bitmap so that the bitmap can be seen through and doesn’t affect scrolling.</p>
+<p>
+<b>Figure 7: MSJMouseWheelOriginWnd Declaration</b></p>
+<pre><code>// Declaration and implementation of MSJMouseWheelOriginWnd.
+
+//Predeclaration for global helper function.
+void MSJDrawTransparentBitmap(CDC* pDC, CBitmap* pBitmap, int xStart,
+    int yStart, COLORREF cTransparentColor);
+
+//Window class to help us with drawing of cursor.
+class MSJMouseWheelOriginWnd: public CWnd
+{
+public:
+    MSJMouseWheelOriginWnd(int nID);
+    BOOL CreateWnd(CWnd* pParent);
+    CBitmap m_bmOrigin;
+    CSize m_size;
+
+    // Generated message map functions
+protected:
+    //{{AFX_MSG(CGXDragLineWnd)
+    afx_msg void OnPaint();
+    //}}AFX_MSG
+    DECLARE_MESSAGE_MAP()
+};
+
+MSJMouseWheelOriginWnd::MSJMouseWheelOriginWnd(int nID)
+{
+
+    m_bmOrigin.LoadBitmap(nID);
+}
+
+BOOL MSJMouseWheelOriginWnd::CreateWnd(CWnd* pParent)
+{
+    if (!CreateEx(0, AfxRegisterWndClass(CS_SAVEBITS), NULL, 
+                  WS_CLIPSIBLINGS|WS_CHILD, 0, 0, 1, 1, 
+                  pParent-&gt;GetSafeHwnd(), NULL))
+    {
+        TRACE0("Failed to create window in CreateWnd\n");
+        ASSERT(0);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+BEGIN_MESSAGE_MAP(MSJMouseWheelOriginWnd, CWnd)
+    //{{AFX_MSG_MAP(MSJMouseWheelOriginWnd)
+    ON_WM_PAINT()
+    //}}AFX_MSG_MAP
+END_MESSAGE_MAP()
+
+void MSJMouseWheelOriginWnd::OnPaint()
+{
+    CPaintDC dc(this); // device context for painting
+
+    CRect rect;
+    GetClientRect(rect);
+
+    // choose bitmap for the header
+    CBitmap* pBitmap = &amp;m_bmOrigin;
+    CDC* pDC = &amp;dc;
+
+    if (pBitmap)
+    {
+        // Bitmap size
+        BITMAP     bm;
+        pBitmap-&gt;GetObject(sizeof(BITMAP), (LPSTR)&amp;bm);
+
+        CPoint     ptSize;
+        ptSize.x = bm.bmWidth;        // Get width of bitmap
+        ptSize.y = bm.bmHeight;       // Get height of bitmap
+        pDC-&gt;DPtoLP(&amp;ptSize, 1);      // Convert from device to logical points
+
+        // Draw bitmap
+        if (rect.Width() &gt;= ptSize.x &amp;&amp; rect.Height() &gt;= ptSize.x)
+        {
+            // must have at least the first bitmap loaded before calling DrawItem
+            ASSERT(pBitmap-&gt;m_hObject != NULL);     // required
+
+            int x = rect.left + max(1, (rect.Width()-ptSize.x)/2);
+            int y = rect.top + max(1, (rect.Height()-ptSize.y)/2);
+
+            MSJDrawTransparentBitmap(pDC, // The destination DC.
+                pBitmap,                  // The bitmap to be drawn.
+                x,                        // X coordinate.
+                y,                        // Y coordinate.
+                RGB(255,0,0));            // The color for transparent
+                                          // pixels (white grey).
+
+        }
+    }
+}
+
+// MSJDrawTransparentBitmap
+// This function lets you draw transparent bitmaps. The parameter 
+// cTransparentColor specifies the color for transparent pixels. All pixels in 
+// the bitmap which should be transparent should be marked with this color.
+// The function was copied and adapated from knowledge base article Q79212
+// Title: Drawing Transparent Bitmaps
+
+void MSJDrawTransparentBitmap(CDC* pDC, CBitmap* pBitmap, int xStart,                               int yStart, COLORREF cTransparentColor)
+{
+   CBitmap    bmAndBack, bmAndObject, bmAndMem, bmSave;
+   CDC        dcMem, dcBack, dcObject, dcTemp, dcSave;
+
+   dcTemp.CreateCompatibleDC(pDC);
+   dcTemp.SelectObject(pBitmap);          // Select the bitmap
+
+
+   BITMAP     bm;
+   pBitmap-&gt;GetObject(sizeof(BITMAP), (LPSTR)&amp;bm);
+
+   CPoint     ptSize;
+   ptSize.x = bm.bmWidth;                // Get width of bitmap
+   ptSize.y = bm.bmHeight;               // Get height of bitmap
+   dcTemp.DPtoLP(&amp;ptSize, 1);            // Convert from device
+                                         // to logical points
+
+   // Create some DCs to hold temporary data.
+   dcBack.CreateCompatibleDC(pDC);
+   dcObject.CreateCompatibleDC(pDC);
+   dcMem.CreateCompatibleDC(pDC);
+   dcSave.CreateCompatibleDC(pDC);
+
+   // Create a bitmap for each DC. DCs are required for a number of GDI functions.
+
+   // Monochrome DC
+   bmAndBack.CreateBitmap(ptSize.x, ptSize.y, 1, 1, NULL);
+
+   // Monochrome DC
+   bmAndObject.CreateBitmap(ptSize.x, ptSize.y, 1, 1, NULL);
+
+   bmAndMem.CreateCompatibleBitmap(pDC, ptSize.x, ptSize.y);
+   bmSave.CreateCompatibleBitmap(pDC, ptSize.x, ptSize.y);
+
+   // Each DC must select a bitmap object to store pixel data.
+   CBitmap* pbmBackOld   = dcBack.SelectObject(&amp;bmAndBack);
+   CBitmap* pbmObjectOld = dcObject.SelectObject(&amp;bmAndObject);
+   CBitmap* pbmMemOld    = dcMem.SelectObject(&amp;bmAndMem);
+   CBitmap* pbmSaveOld   = dcSave.SelectObject(&amp;bmSave);
+
+   // Set proper mapping mode.
+   dcTemp.SetMapMode(pDC-&gt;GetMapMode());
+
+   // Save the bitmap sent here, because it will be overwritten.
+   dcSave.BitBlt(0, 0, ptSize.x, ptSize.y, &amp;dcTemp, 0, 0, SRCCOPY);
+
+   // Set the background color of the source DC to the color
+   // contained in the parts of the bitmap that should be transparent
+   COLORREF cColor = dcTemp.SetBkColor(cTransparentColor);
+
+   // Create the object mask for the bitmap by performing a BitBlt
+   // from the source bitmap to a monochrome bitmap.
+   dcObject.BitBlt(0, 0, ptSize.x, ptSize.y, &amp;dcTemp, 0, 0, SRCCOPY);
+
+   // Set the background color of the source DC back to the original
+   // color.
+   dcTemp.SetBkColor(cColor);
+
+   // Create the inverse of the object mask.
+   dcBack.BitBlt(0, 0, ptSize.x, ptSize.y, &amp;dcObject, 0, 0, NOTSRCCOPY);
+
+   // Copy the background of the main DC to the destination.
+   dcMem.BitBlt(0, 0, ptSize.x, ptSize.y, pDC, xStart, yStart, SRCCOPY);
+
+   // Mask out the places where the bitmap will be placed.
+   dcMem.BitBlt(0, 0, ptSize.x, ptSize.y, &amp;dcObject, 0, 0, SRCAND);
+
+   // Mask out the transparent colored pixels on the bitmap.
+   dcTemp.BitBlt(0, 0, ptSize.x, ptSize.y, &amp;dcBack, 0, 0, SRCAND);
+
+   // XOR the bitmap with the background on the destination DC.
+   dcMem.BitBlt(0, 0, ptSize.x, ptSize.y, &amp;dcTemp, 0, 0, SRCPAINT);
+
+   // Copy the destination to the screen.
+   pDC-&gt;BitBlt(xStart, yStart, ptSize.x, ptSize.y, &amp;dcMem, 0, 0, SRCCOPY);
+
+   // Place the original bitmap back into the bitmap sent here.
+   dcTemp.BitBlt(0, 0, ptSize.x, ptSize.y, &amp;dcSave, 0, 0, SRCCOPY);
+
+   // Reset the memory bitmaps.
+   dcBack.SelectObject(pbmBackOld);
+   dcObject.SelectObject(pbmObjectOld);
+   dcMem.SelectObject(pbmMemOld);
+   dcSave.SelectObject(pbmSaveOld);
+
+   // Memory DCs and Bitmap objects will be deleted automatically
+}
+</code></pre>
+<p>
+The MSJMouseWheelOrigin takes the resource ID for the bitmap to draw at the origin. It also implements a CreateWnd that creates a borderless window. The meat of the class lives in the OnPaint handler, which does some basic geometry calculations and then calls the MSJDrawTransparentBitmap helper function.</p>
+<p>
+MSJDrawTransparentBitmap (see Figure 8) is a utility function that every Windows programmer should have in their library. We found it long ago in KnowledgeBase. It takes a bitmap and turns it into a mask so that it is transparently drawn over the painting surface. A very handy function to have when you’re implementing panning.</p>
+<p>
+<b>Figure 8: MSJDrawTransparentBitmap Implementation</b></p>
+<pre><code>// MSJDrawTransparentBitmap
+
+// The function was copied and adapted from Knowledgebase article Q79212
+// Title: Drawing Transparent Bitmaps
+
+void MSJDrawTransparentBitmap(CDC* pDC, CBitmap* pBitmap, int xStart,                               int yStart, COLORREF cTransparentColor)
+{
+   CBitmap    bmAndBack, bmAndObject, bmAndMem, bmSave;
+   CDC        dcMem, dcBack, dcObject, dcTemp, dcSave;
+
+   dcTemp.CreateCompatibleDC(pDC);
+   dcTemp.SelectObject(pBitmap);   // Select the bitmap
+
+   BITMAP     bm;
+   pBitmap-&gt;GetObject(sizeof(BITMAP), (LPSTR)&amp;bm);
+
+   CPoint     ptSize;
+   ptSize.x = bm.bmWidth;           // Get width of bitmap
+   ptSize.y = bm.bmHeight;          // Get height of bitmap
+   dcTemp.DPtoLP(&amp;ptSize, 1);       // Convert from device to logical points
+
+   // Create some DCs to hold temporary data.
+   dcBack.CreateCompatibleDC(pDC);
+   dcObject.CreateCompatibleDC(pDC);
+   dcMem.CreateCompatibleDC(pDC);
+   dcSave.CreateCompatibleDC(pDC);
+
+   // Create a bitmap for each DC. DCs are required for a number of GDI functions.
+
+   // Monochrome DC
+   bmAndBack.CreateBitmap(ptSize.x, ptSize.y, 1, 1, NULL);
+
+   // Monochrome DC
+   bmAndObject.CreateBitmap(ptSize.x, ptSize.y, 1, 1, NULL);
+
+   bmAndMem.CreateCompatibleBitmap(pDC, ptSize.x, ptSize.y);
+   bmSave.CreateCompatibleBitmap(pDC, ptSize.x, ptSize.y);
+
+   // Each DC must select a bitmap object to store pixel data.
+   CBitmap* pbmBackOld   = dcBack.SelectObject(&amp;bmAndBack);
+   CBitmap* pbmObjectOld = dcObject.SelectObject(&amp;bmAndObject);
+   CBitmap* pbmMemOld    = dcMem.SelectObject(&amp;bmAndMem);
+   CBitmap* pbmSaveOld   = dcSave.SelectObject(&amp;bmSave);
+
+   // Set proper mapping mode.
+   dcTemp.SetMapMode(pDC-&gt;GetMapMode());
+
+   // Save the bitmap sent here, because it will be overwritten.
+   dcSave.BitBlt(0, 0, ptSize.x, ptSize.y, &amp;dcTemp, 0, 0, SRCCOPY);
+
+   // Set the background color of the source DC to the color
+   // contained in the parts of the bitmap that should be transparent
+   COLORREF cColor = dcTemp.SetBkColor(cTransparentColor);
+
+   // Create the object mask for the bitmap by performing a BitBlt
+   // from the source bitmap to a monochrome bitmap.
+   dcObject.BitBlt(0, 0, ptSize.x, ptSize.y, &amp;dcTemp, 0, 0, SRCCOPY);
+
+   // Set the background color of the source DC back to the original color.
+   dcTemp.SetBkColor(cColor);
+
+   // Create the inverse of the object mask.
+   dcBack.BitBlt(0, 0, ptSize.x, ptSize.y, &amp;dcObject, 0, 0, NOTSRCCOPY);
+
+   // Copy the background of the main DC to the destination.
+   dcMem.BitBlt(0, 0, ptSize.x, ptSize.y, pDC, xStart, yStart, SRCCOPY);
+
+   // Mask out the places where the bitmap will be placed.
+   dcMem.BitBlt(0, 0, ptSize.x, ptSize.y, &amp;dcObject, 0, 0, SRCAND);
+
+   // Mask out the transparent colored pixels on the bitmap.
+   dcTemp.BitBlt(0, 0, ptSize.x, ptSize.y, &amp;dcBack, 0, 0, SRCAND);
+
+   // XOR the bitmap with the background on the destination DC.
+   dcMem.BitBlt(0, 0, ptSize.x, ptSize.y, &amp;dcTemp, 0, 0, SRCPAINT);
+
+   // Copy the destination to the screen.
+   pDC-&gt;BitBlt(xStart, yStart, ptSize.x, ptSize.y, &amp;dcMem, 0, 0, SRCCOPY);
+
+   // Place the original bitmap back into the bitmap sent here.
+   dcTemp.BitBlt(0, 0, ptSize.x, ptSize.y, &amp;dcSave, 0, 0, SRCCOPY);
+
+   // Reset the memory bitmaps.
+   dcBack.SelectObject(pbmBackOld);
+   dcObject.SelectObject(pbmObjectOld);
+   dcMem.SelectObject(pbmMemOld);
+   dcSave.SelectObject(pbmSaveOld);
+
+   // Memory DCs and Bitmap objects will be deleted automatically
+}
+</code></pre>
+<p>
+Now that we have the cursor situation all straightened out, we need to add some handlers to take care of starting, performing, and stopping the pan.</p>
+<p>
+The first handler starts the pan when the user presses the IntelliMouse mouse wheel, which generates a WM_MBUTTONDOWN message. Figure 9 shows the implementation of our OnMButtonDown handler.</p>
+<p>
+<b>Figure 9: OnMButtonDown Implementation</b></p>
+<pre><code>void MSJSuperView::OnMButtonDown(UINT nFlags, CPoint point) 
+{
+    BOOL bCtl = GetKeyState(VK_CONTROL) &amp; 0x8000;
+    
+    // If the user presses control, don't do anything - verify that      // this is a MK_MBUTTON message.
+    if (!bCtl &amp;&amp; nFlags == MK_MBUTTON)
+    {
+        GetCursorPos(&amp;point);
+        point -= CPoint(15,15);
+        SetCursorPos(point.x, point.y);
+        ScreenToClient(&amp;point);
+        
+        m_bMouseWheelDrag = TRUE;
+        m_ptMouseWheelOrg = point;
+        SetCapture();
+        m_nMouseWheelTimer = SetTimer(999, 10, NULL);
+
+        m_pWndDrag = new MSJMouseWheelOriginWnd(MSJ_IDB_ORIGIN_ALL);
+        m_pWndDrag-&gt;CreateWnd(this);
+        m_pWndDrag-&gt;MoveWindow(CRect(m_ptMouseWheelOrg.x, m_ptMouseWheelOrg.y, 
+                                     m_ptMouseWheelOrg.x+30,
+                                     m_ptMouseWheelOrg.y+30));
+        m_pWndDrag-&gt;ShowWindow(SW_SHOW);
+
+    }
+    else
+        CScrollView::OnMButtonDown(nFlags, point);
+}
+</code></pre>
+<p>
+After verifying that the middle button is indeed down by checking the flags passed, the OnMButtonDown handler captures the mouse and calculates where to draw the origin window. Next, the handler stores the starting cursor position in the m_ptMouseWheelOrg data member and sets m_bMouseWheelDrag to TRUE so that other member functions know we are in a drag state. Then OnMButtonDown sets a timer to fire every 10 milliseconds (good value for smooth panning). The ID of the timer is stored in the m_nMouseWheelTimer data member. Finally, OnMButtonDown creates, places, and shows an instance of our handy MSJMouseWheelOriginWnd window that draws the origin bitmap at the position where the cursor should be.</p>
+<p>
+When the user moves the mouse with the mouse wheel depressed to pan, instead of handling every mouse move message, we perform panning in the handler for the timer: MSJSuperView::OnTimer. Figure 10 shows the OnTimer handler. It first validates that it has received a timer with the same ID we set in OnMButtonDown and that m_bMouseWheel Drag is set to TRUE. If this is the case, we are handling an IntelliMouse pan, so OnTimer gets the current cursor position and calculates an offset from the last cursor position stored in m_ptMouseWheelOrg. Once the offset has been calculated, OnTimer uses this to calculate the direction and amount of the pan. </p>
+<p>
+<b>Figure 10: OnTimer</b></p>
+<pre><code>void MSJSuperView::OnTimer(UINT nIDEvent) 
+{
+    if (nIDEvent == 999 &amp;&amp; m_bMouseWheelDrag)
+    {
+            CPoint ptCur;
+            GetCursorPos(&amp;ptCur);
+            ScreenToClient(&amp;ptCur);
+
+            CPoint pt = ptCur - m_ptMouseWheelOrg;
+
+            int direction;
+            int nScroll;
+
+            if (abs(pt.x) &gt; abs(pt.y))
+            {
+                    direction = pt.x &gt; 0 ? MSJ_RIGHT : MSJ_LEFT;
+                    nScroll = abs(pt.x) /8;
+            }
+            else
+            {
+                    direction = pt.y &gt; 0 ? MSJ_DOWN : MSJ_UP;
+                    nScroll = abs(pt.y) /8;
+            }
+
+            if (nScroll &gt; 0)
+            {
+                    m_pWndDrag-&gt;ShowWindow(SW_HIDE);
+                    DoScroll(direction, nScroll);
+                    m_pWndDrag-&gt;MoveWindow(CRect(m_ptMouseWheelOrg.x,
+                                                 m_ptMouseWheelOrg.y, 
+                                                 m_ptMouseWheelOrg.x+30, 
+                                                 m_ptMouseWheelOrg.y+30));
+                    m_pWndDrag-&gt;ShowWindow(SW_SHOW);
+                    m_pWndDrag-&gt;UpdateWindow();
+            }
+
+            if (nScroll == 0 &amp;&amp; abs(pt.x) &lt; 5 &amp;&amp; abs(pt.y) &lt; 5)
+                    direction = -1;
+                
+            int nCursor;
+            switch (direction)
+            {
+            case MSJ_RIGHT: nCursor = MSJ_IDC_IMR; break;
+            case MSJ_LEFT: nCursor = MSJ_IDC_IML; break;
+            case MSJ_UP: nCursor = MSJ_IDC_IMU; break;
+            case MSJ_DOWN: nCursor = MSJ_IDC_IMD; break;
+            default: nCursor = MSJ_IDC_IMA; break;
+            }
+        
+            MySetCursor(nCursor);
+
+    }
+    else
+            CScrollView::OnTimer(nIDEvent)
+}
+</code></pre>
+<p>
+For example, if the user moved a short distance from the original position cursor, then the panning is slow. If the user moved the mouse far away from the original position, then the panning speeds up. This gives the user a variable panning speed similar to that implemented in IE 4.0. After OnTimer calculates the direction and amount of the scroll, it calls MSJSuperView::DoScroll to actually pan the window, then it moves the MSJMouseWheelOriginWnd to the new origin location so it doesn’t get scrolled off the screen.</p>
+<p>
+Panning stops when the user releases the mouse wheel; this is handled in the MSJSuperView OnMButtonUp handler (see Figure 11). OnMButtonUp verifies that panning is active by again checking m_bMouseWheelDrag, and then deletes the MSJMouseWheelOriginWnd object. Next, it sets m_bMouseWheelDrag to FALSE, indicating that the drag operation is over. Finally, OnMButtonUp releases the mouse capture, kills the timer, and sets the cursor back to the original cursor type and position. </p>
+<p>
+<b>Figure 11: OnMButtonUp Implementation</b></p>
+<pre><code>void MSJSuperView::OnMButtonUp(UINT nFlags, CPoint point) 
+{
+    TRACE("MBUTTONUP\n");
+    if (m_bMouseWheelDrag)
+    {
+            delete m_pWndDrag;
+            m_bMouseWheelDrag = FALSE;
+            ReleaseCapture();
+            KillTimer(m_nMouseWheelTimer);
+            SetCursor(NULL);
+
+            GetCursorPos(&amp;point);
+            point += CPoint(15,15);
+            SetCursorPos(point.x, point.y);
+            ScreenToClient(&amp;point);
+    }
+    CScrollView::OnMButtonUp(nFlags, point);
+}
+</code></pre>
+<p>
+Figure 12 shows the final MSJSuperView IntelliMouse panning support at work in the circle-drawing sample.</p>
+<p>
+<img src="vp1212_fig12.gif" border=0></p>
+<p>
+<b>Figure 12: Panning Support</b></p>
+<h3>Conclusion</h3>
+<p>
+MSJSuperView provides complete IntelliMouse support that you can start using and extending immediately. We have included the source code for the circle sample with the download files so you can experiment with your IntelliMouse and MSJSuperView.</p>
+<p>
+To obtain complete source code listings, see the MSJ Web site at  http://www.microsoft.com/msj.</p>
+<p>
+If you have questions about the Microsoft Visual tools, please email them to George and Scot via visual_developer@stingsoft.com. </p>
+</font></BODY>
+</HTML>

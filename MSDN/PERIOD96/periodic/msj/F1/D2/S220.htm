@@ -1,0 +1,183 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Under the Hood</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  Under the Hood</H1><P>Matt Pietrek</P>
+<P>Matt Pietrek is the author of <I>Windows 95 System Programming Secrets</I> (IDG Books, 1995) and <I>Windows Internals</I> (Addison-Wesley, 1993). He works at Nu-Mega Technologies Inc., and can be reached via CompuServe: 71774,362.</P>
+<P><OBJECT id=sample1 type="application/x-oleobject"
+classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Backgrounders Samples">
+<PARAM name="Item2" value="4566">
+</OBJECT><a href="javascript:sample1.Click()">
+
+Click to open or copy the DEADLOCK project files.</A></P><P>As someone who writes debuggers and de-bugging tools for a living, I spend more than my share of time tracking down really nasty bugs. You know, the bugs that take days or weeks to hunt down. Of all the bugs I've had to go after, the worst are those that involve operating system behaviors that are ignored by the documentation or are obscurely mentioned at best. This month I'll look at just such a case. (The sample code shown here to illustrate the problem is much simpler than the original code I debugged.)</P>
+<P>One of the many great features in Windows® 95 and Windows NT™ is multiple threads. The power of multithreaded programming requires responsible programming. It's up to you to ensure that the CPU switching between threads won't cause bad things to happen. For example, you might have data (such as a linked list) that can be accessed by more than one thread. Your code needs to ensure that a thread switch at the wrong moment won't leave your data in an inconsistent state.You prevent thread-switching problems by using synchronization objects.</P>
+<P>In Win32®, there are four types of synchronization objects. For synchronizing threads in the same or different processes, the Win32 API provides mutexes, events, and semaphores. The fourth type of synchronization object, critical sections, works only for threads within the same process. The problem I'm examining involves critical sections and an operating system behavior that's not mentioned in any documentation I've ever come across.</P>
+<H2><A NAME="sec0"></A>  Critical Sections</H2><P>Critical sections provide a quick and easy way for program code to ensure that one and only one thread is executing through a given region of code at a given point in time. The advantage of critical sections is that they are less CPU-intensive than the other synchronization methods. To use a critical section to guard a particular piece of code, you call EnterCriticalSection and pass in the address of a CRITICAL_SECTION structure. At the end of the code to be guarded, you call LeaveCriticalSection, passing in the same address of the CRITICAL_SECTION structure used earlier. You also need to initialize and destroy the critical section, but these two actions only need to occur once per instance of the program. Incidentally, the CRITICAL_SECTION structure that you pass to the critical section functions has to be either a global variable or in an allocated memory block. Don't try to be clever like me and declare your CRITICAL_SECTION structure as a local variable within a function.</P>
+<P>A thread that successfully calls EnterCriticalSection is said to own the critical section. The thread continues to own the critical section until it calls LeaveCriticalSection. If a second thread comes along and calls code that's guarded by a critical section, the second thread will block inside the call to EnterCriticalSection.  The only way for the second thread to continue executing is for the first thread to give up ownership of the critical section by calling LeaveCriticalSection. In this way, critical sections are able to ensure that only one thread at a time can execute through the guarded region of code.</P>
+<P>Now let's turn our attention to deadlock, the dreaded black hole of multithreaded programming. A deadlock occurs when two or more threads each already own a synchronization object (such as a critical section), and need to acquire another synchronization object to continue executing. Deadlocks inspire much fear and loathing, as they're usually timing dependent, and are often notoriously difficult to reproduce consistently. They're usually the result of logic flaws in your programming, so traditional debugging tools aren't much help in tracking them down.</P>
+<P>As part of learning how to use multiple threads correctly, we programmers are supposed to constantly be on the lookout for logic flaws in our code where a deadlock can occur. To paraphrase Gordon Letwin, one of the original Microsoft architects of OS/2, "Always assume that the worst possible thing will happen with regards to thread switching." When reviewing your code, always try to imagine how a thread switch at the wrong moment could throw a monkey wrench into the works. You're then supposed to guard against these problems with the appropriate use of synchronization objects. However, in using synchronization objects, it's all too easy to fall into the other trap of multithreaded programming, the deadlock.</P>
+<H2><A NAME="sec1"></A>  The Hidden Critical Section</H2><P>With deadlocks, it takes at least two to tango. In other words, you need at least two synchronization objects and two threads to get into a deadlock. What I'm going to show you here is a program that on the surface uses two threads but only one critical section. Under the hood, it turns out that there's a second critical section. This critical section is brought into the picture by the operating system itself. That's right, a program that on paper looks completely innocent can still deadlock because the operating system has introduced a second synchronization object into the equation. Alas, nowhere in any documentation that I've seen is there any mention of this operating system critical section. Because the scenario in which this hidden operating system critical section behavior occurs is somewhat complex, I'm going to construct the scenario in a few steps, adding a bit more complexity at each step. Let's start out with a single thread (thread 1) that initializes a critical section, and enters that critical section by calling EnterCriticalSection. I'll call the critical section MyCritSect. Next, thread 1 starts a second thread. Finally, after creating the second thread, thread 1 leaves MyCritSect. Nothing too complicated here. Just one thread starting another thread while the first thread owns a critical section.</P>
+<P>Now, let's make the scenario a bit more complex. As you may know, whenever a new thread starts, the DllMain routines of all DLLs in the process are called. When this happens, the "reason" parameter to DllMain is set to DLL_THREAD_ATTACH. In the above scenario, let's have a DLL that has a DllMain routine. Within the DllMain code for handing a DLL_THREAD_ATTACH, the code will call EnterCriticalSection, passing the address of MyCritSect. Immediately afterwards, the DllMain routine calls LeaveCriticalSection, again passing MyCritSect as the parameter. Remember, DllMain is executed in the context of thread 2. At first glance, this might appear to be a potential deadlock situation. Since thread 1 owns MyCritSect, thread 2 will be blocked on the call to EnterCriticalSection, and not be able to execute.</P>
+<P>Never fear, though. Time invariably marches on, and eventually the scheduler gives a time slice to thread 1. Thread 1 eventually calls LeaveCriticalSection, thereby giving up ownership of MyCritSect. This allows thread 2 to unblock from its call to EnterCriticalSection and continue. There may be a slight delay while both threads wait to get their time slices in the right order, but everything eventually untangles. <B>Figure 1</B> shows the flow of control in this scenario.</P>
+<P><img src="HOOD1.gif"></P>
+<P><B> Figure 1  Control Flow for Scenario 1</B></P>
+<P>Now, let's add just a wee bit more complexity to what I've described and watch it deadlock. In thread 1, after starting the second thread but before calling LeaveCriticalSection for MyCritSect, let's have thread 1 call GetProcAddress. This shouldn't affect anything, right? After all, you wouldn't think that GetProcAddress would have any need for thread synchronization. And even if it did, GetProcAddress certainly doesn't know anything about MyCritSect. Yet by adding a call to GetProcAddress at the right spot in thread 1, the program deadlocks on both Windows 95 and Windows NT. Nasty, eh?</P>
+<H2><A NAME="sec2"></A>  What Gives?</H2><P>At this point, I'll need to dig into the operating system to see what's causing the deadlock. What I'll describe here is what happens under Windows 95. (I discussed this problem with someone on the Windows NT team at Microsoft who confirmed this same behavior on Windows NT.) In Windows 95, each process has a critical section implicitly associated with it. In fact, this critical section lies within the main data structure that Windows 95 uses to represent the process. I'll call this critical section the process critical section. At various points within its code, KERNEL32.DLL calls the moral equivalent of EnterCriticalSection for the process critical section. One of the occasions where KERNEL32 holds the process critical section is while calling each DllMain in the various DLLs with the DLL_THREAD_ATTACH notification. That's right! Whenever you're executing in a DllMain routine and handling the DLL_THREAD_ATTACH notification, your process is implicitly inside a critical section: the process critical section. I did a very close reading of the documentation for the DllEntryPoint function in the Win32 API help file, and nowhere was this little gem mentioned.</P>
+<P>Returning back to my scenario, you can see how the final ingredient, the call to GetProcAddress, makes the combination deadly. Upon entry to GetProcAddress, KERNEL32.DLL's code tries to acquire the process critical section of the current process. There's your deadlock in a nutshell. When thread 1 calls GetProcAddress, thread 1 already owns MyCritSect, but needs to acquire the process critical section. Thread 2 (blocked inside the DllMain routine) owns the process critical section, but is blocked, waiting to acquire MyCritSect. Neither thread is going anywhere in a hurry.</P>
+<P>To show this scenario in a minimal program, I wrote the DEADLOCKEXE program (see <B>Figure2</B>). DEADLOCKEXE.EXE consists of just a call to the FunctionInADLL routine in DEADLOCKDLL.DLL. This DLL is where all the action occurs. I've added some more code beyond the scenario that I described above to make it more obvious what's going on. The extra code is mostly calls to printf to indicate where in the sequence the threads are. There's also some calls to the Win32 Sleep function to make sure that the two threads have enough time to deadlock.</P>
+<P><B> Figure 2  DEADLOCK.EXE</B></P>
+<P></P>
+<P>DEADLOCK.MAK</P>
+<P><BR></P>
+<PRE> CC_OPTS = /MT /D_MT /O2 /c /YX
+
+all: deadlockexe.exe
+
+deadlockdll.lib: deadlockdll.dll
+
+deadlockdll.dll: deadlockdll.obj
+    link /DLL /IMPLIB:deadlockdll.lib /EXPORT:FunctionInADLL deadlockdll.obj
+
+deadlockdll.obj: deadlockdll.h deadlockdll.cpp
+    cl $(CC_OPTS) deadlockdll.cpp
+
+deadlockexe.exe: deadlockdll.lib deadlockexe.obj
+    link deadlockexe.obj deadlockdll.lib
+
+deadlockexe.obj: deadlockdll.h deadlockexe.cpp
+    cl $(CC_OPTS) $(DLLIMPORT) deadlockexe.cpp</PRE>
+<P></P>
+<P>DEADLOCKDLL.H</P>
+<P><BR></P>
+<PRE> __declspec(dllexport) int __stdcall FunctionInADLL(void);</PRE>
+<P></P>
+<P>DEADLOCKDLL.CPP</P>
+<P><BR></P>
+<PRE> #include &lt;windows.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;process.h&gt;
+#pragma hdrstop
+#include "deadlockdll.h"
+
+CRITICAL_SECTION MyCritSect;
+
+void SecondThreadFunction(void * p);    // prototype the second thread function
+
+// Called in the context of the main thread
+__declspec(dllexport) int __stdcall FunctionInADLL(void)
+{
+    // Inform user of our startup status
+    printf( "In primary thread\n" );
+
+    // Initialize and enter a run of the mill critical section
+    InitializeCriticalSection( &amp;MyCritSect );
+    EnterCriticalSection( &amp;MyCritSect );
+
+    // Start up a second thread, which will cause DllMain to be invoked in
+    // the context of the new thread.
+    printf( "Starting second thread\n" );
+    _beginthread( SecondThreadFunction, 0, 0 );
+
+    // Make the main thread sleep, thereby giving the second thread enough
+    // time to execute through DllMain and deadlock
+    printf( "Sleeping(1) in primary thread\n" );
+    Sleep( 2000 );                                  
+    printf("Done sleeping(1) in primary thread\n");
+
+    // At this point, thread 1 owns MyCritSect, while thread 2 is blocked
+    // inside DllMain, waiting for MyCritSect.  Unfortunately, thread
+    // 2 holds the process critical section, which GetProcAddress neeeds.
+    #if 1
+    printf( "Before calling GetProcAddress in primary thread\n" );
+    GetProcAddress( GetModuleHandle("KERNEL32.DLL"), "XYZ" );
+    printf( "After calling GetProcAddress in primary thread\n" );
+    #endif
+
+    // If the process critical section didn't deadlock us, we'd release the
+    // app critical section, and the 2nd thread would execute OK.
+    LeaveCriticalSection( &amp;MyCritSect );
+
+    // Make the main thread sleep again, thereby ensuring that the second
+    // thread has time to complete before the first thread exits
+    printf( "Sleeping(2) in primary thread\n" );
+    Sleep( 2000 );                              
+    printf("Done sleeping(2) in primary thread\n");
+
+    DeleteCriticalSection( &amp;MyCritSect );       // Cleanup code
+
+    printf( "Returning from primary thread\n" );
+    return 0;
+}
+
+void SecondThreadFunction(void * p)
+{
+    printf("  In SecondThreadFunction\n" );
+}
+
+int WINAPI DllMain( HANDLE hInst, ULONG reason, LPVOID lpReserved )
+{
+    if ( reason == DLL_THREAD_ATTACH )
+    {
+        printf("  In DllMain of 2nd thread - Before EnterCriticalSection\n" );
+        EnterCriticalSection( &amp;MyCritSect );
+        printf("  In DllMain of 2nd thread - After EnterCriticalSection\n" );
+        LeaveCriticalSection( &amp;MyCritSect );
+        printf("  In DllMain of 2nd thread - After LeaveCriticalSection\n" );
+    }
+
+    return 1;
+}</PRE>
+<P></P>
+<P>DEADLOCKEXE.CPP</P>
+<P><BR></P>
+<PRE> #include "deadlockdll.h"
+
+int main()
+{
+    return FunctionInADLL() + 2;  // kludge required to prevent
+}                                 // compiler from optimizing a
+                                  // call to jmp</PRE>
+<P>The FunctionInADLL routine begins by initializing a critical section (MyCritSect), then entering it. The code then starts a second thread by calling the _beginthread function. Thread 1 then goes to sleep for 2 seconds. Upon waking up, thread 1 calls GetProcAddress, which causes the deadlock to occur. If thread 1 didn't call GetProcAddress, thread 1 would continue on, and call LeaveCriticalSection. Thread 1 would then sleep for another two seconds, giving thread 2 ample time to finish executing before thread 1 returns to the main EXE code and the program terminates.</P>
+<P>The first place where you see the second thread executing is in the DllMain function in DEADLOCKDLL.CPP. After printing out a message that it's in the DllMain function, thread 2 calls EnterCriticalSection, passing in MyCritSect as the parameter. Since thread 1 already owns MyCritSect, thread 2 will be stuck in this call to EnterCriticalSection until thread 1 wakes up and calls LeaveCriticalSection. Of course, if thread 1 makes the fatal call to GetProcAddress, thread 1 will never make it to the LeaveCriticalSection call, dooming thread 2 to an eternity inside the EnterCriticalSection call.</P>
+<P>Without the call to GetProcAddress in thread 1, the output from DEADLOCKEXE would look like this:</P>
+<P> </P>
+<P><BR></P>
+<PRE> In primary thread 
+Starting second thread 
+Sleeping(1) in primary thread
+  In DllMain of 2nd thread-Before EnterCriticalSection
+Done sleeping(1) in primary thread
+Sleeping(2) in primary thread
+  In DllMain of 2nd thread-After EnterCriticalSection
+  In DllMain of 2nd thread-After LeaveCriticalSection
+  In SecondThreadFunction
+Done sleeping(2) in primary thread
+Returning from primary thread</PRE>
+<P> </P>
+<P>The output from thread 2 is indented to make it easier to see which output line is from which thread. As you can see, all of the output from thread 2 occurs while thread 1 is sleeping. It's a twisty dance of synchronization, but everything eventually executes properly.</P>
+<P>Now, let's see what the output looks like with the call to GetProcAddress in thread 1. (You can enable or disable the call to GetProcAddress by changing the #if I put in the code right before the call to GetProcAddress, then recompiling.) With the GetProcAddress call in thread 1, the total program output is this:</P>
+<P> </P>
+<P><BR></P>
+<PRE> In primary thread
+Starting second thread
+Sleeping(1) in primary thread
+  In DllMain of 2nd thread-Before EnterCriticalSection
+Done sleeping(1) in primary thread
+Before calling GetProcAddress in primary thread</PRE>
+<P> </P>
+<P>Like those roach motels, GetProcAddress checks in, but it doesn't check out. Under Windows 95, I can terminate the program by hitting Ctrl-c or Ctrl-Break. Under Windows NT, I have to force the entire command shell session to terminate to end the program.</P>
+<P> </P>
+<H2><A NAME="sec3"></A>  Why Do I Care?</H2><P>OK, let's take a step back and examine what this all means. For starters, I don't want to unfairly pick on GetProcAddress here. In digging around in Windows 95, I found several other places where the KERNEL32 acquires the process critical section. The following functions also acquire the process critical section: CreateProcess, GetModuleFileName, LoadLibrary, and FreeLibrary. There may be others; these are the functions that I was positively able to identify as needing the process critical section. The moral here is that there is a class of functions that implicitly need to acquire thread synchronization objects, although there's no mention of what these functions are in the documentation.</P>
+<P>A more important lesson to take away from this is that your DllMain function should be written with care. Try to avoid operations inside your DllMain that require using thread synchronization. Conventional wisdom says that the DllMain routine should be kept as small as possible, and do as little as possible. Still, in all my reading, I've never come across these warnings in print. Those of you who programmed in Windows 3.x knew that there were restrictions on what you could do in your DLL's LibMain and WEP routines. Alas, these rules were never formally specified. It appears that DllMain functions (the Win32 equivalent of LibMain and WEP) also have restrictions. Alas, there doesn't seem to be any formal description of the do's and don'ts when writing a DllMain routine.</P>
+<P>As a final note, if you're interested in a problem related to what I've described here, refer to Jeffrey Richter's December 1994 MSJ Win32 Q&amp;A column. In that column, Jeff also describes a deadlock situation, and mentions that Windows NT serializes calls to the DllMain routine so that only one thread at a time is in DllMain. The process critical section that I've described in this column is one of the means by which the operating system enforces this serialization of calls to the DllMain routine.   </P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="221pt" VALIGN="TOP"><COL WIDTH="221pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD COLSPAN="2" VALIGN="TOP"><P> Have a question about programming in Windows? You can mail it directly to Under The Hood, Microsoft Systems Journal, 825 Eighth Avenue, 18th Floor, New York, New York 10019, or send it to MSJ  (re: Under The Hood) via:</P></TD></TR><TR><TD VALIGN="TOP"><P> <BR>CompuServe:</P>
+<P><BR>Internet:</P></TD><TD VALIGN="TOP"><P>Matt Pietrek<BR>71774,362</P>
+<P>Eric Maffei<BR>ericm@microsoft.com</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P><I>This article is reproduced from Microsoft Systems Journal. Copyright © 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</P>
+<P></P></font></body></HTML>

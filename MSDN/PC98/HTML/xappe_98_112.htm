@@ -1,0 +1,269 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>UUID Reference Implementation</title>
+<style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000>
+
+<font face="verdana, arial, helvetica" size="2"><h1>
+UUID Reference Implementation</h1>
+<pre><code>/*
+** Copyright (c) 1990- 1993, 1996 Open Software Foundation, Inc.
+** Copyright (c) 1989 by Hewlett-Packard Company, Palo Alto, Ca. &amp;
+** Digital Equipment Corporation, Maynard, Mass.
+** To anyone who acknowledges that this file is provided "AS IS"
+** without any express or implied warranty: permission to use, copy,
+** modify, and distribute this file for any purpose is hereby 
+** granted without fee, provided that the above copyright notices and 
+** this notice appears in all source code copies, and that none of 
+** the names of Open Software Foundation, Inc., Hewlett-Packard 
+** Company, or Digital Equipment Corporation be used in advertising 
+** or publicity pertaining to distribution of the software without 
+** specific, written prior permission.  Neither Open Software 
+** Foundation, Inc., Hewlett-Packard Company, nor Digital Equipment 
+** Corporation makes any representations about the suitability of 
+** this software for any purpose.
+*/
+#include &lt;sys/types.h&gt;
+#include &lt;sys/time.h&gt;
+
+typedef unsigned long   unsigned32;
+typedef unsigned short  unsigned16;
+typedef unsigned char   unsigned8;
+typedef unsigned char   byte;
+
+#define CLOCK_SEQ_LAST              0x3FFF
+#define RAND_MASK                   CLOCK_SEQ_LAST
+
+typedef struct _uuid_t {
+    unsigned32          time_low;
+    unsigned16          time_mid;
+    unsigned16          time_hi_and_version;
+    unsigned8           clock_seq_hi_and_reserved;
+    unsigned8           clock_seq_low;
+    byte                node[6];
+} uuid_t;
+
+typedef struct _unsigned64_t {
+    unsigned32          lo;
+    unsigned32          hi;
+} unsigned64_t;
+
+/*
+**  Add two unsigned 64-bit long integers.
+*/
+#define ADD_64b_2_64b(A, B, sum) \
+    { \
+        if (!(((A)-&gt;lo &amp; 0x80000000UL) ^ ((B)-&gt;lo &amp; 0x80000000UL))) { \
+            if (((A)-&gt;lo&amp;0x80000000UL)) { \
+                (sum)-&gt;lo = (A)-&gt;lo + (B)-&gt;lo; \
+                (sum)-&gt;hi = (A)-&gt;hi + (B)-&gt;hi + 1; \
+            } \
+            else { \
+                (sum)-&gt;lo  = (A)-&gt;lo + (B)-&gt;lo; \
+                (sum)-&gt;hi = (A)-&gt;hi + (B)-&gt;hi; \
+            } \
+        } \
+        else { \
+            (sum)-&gt;lo = (A)-&gt;lo + (B)-&gt;lo; \
+            (sum)-&gt;hi = (A)-&gt;hi + (B)-&gt;hi; \
+            if (!((sum)-&gt;lo&amp;0x80000000UL)) (sum)-&gt;hi++; \
+        } \
+    }
+
+/*
+**  Add a 16-bit unsigned integer to a 64-bit unsigned integer.
+*/
+#define ADD_16b_2_64b(A, B, sum) \
+    { \
+        (sum)-&gt;hi = (B)-&gt;hi; \
+        if ((B)-&gt;lo &amp; 0x80000000UL) { \
+            (sum)-&gt;lo = (*A) + (B)-&gt;lo; \
+            if (!((sum)-&gt;lo &amp; 0x80000000UL)) (sum)-&gt;hi++; \
+        } \
+        else \
+            (sum)-&gt;lo = (*A) + (B)-&gt;lo; \
+    }
+
+/*
+**  Global variables.
+*/
+static unsigned64_t     time_last;
+static unsigned16       clock_seq;
+
+static void 
+mult32(unsigned32 u, unsigned32 v, unsigned64_t *result)
+{
+    /* Following the notation in Knuth, Vol. 2. */
+    unsigned32 uuid1, uuid2, v1, v2, temp;
+
+    uuid1 = u &gt;&gt; 16;
+    uuid2 = u &amp; 0xFFFF;
+    v1 = v &gt;&gt; 16;
+    v2 = v &amp; 0xFFFF;
+    temp = uuid2 * v2;
+    result-&gt;lo = temp &amp; 0xFFFF;
+    temp = uuid1 * v2 + (temp &gt;&gt; 16);
+    result-&gt;hi = temp &gt;&gt; 16;
+    temp = uuid2 * v1 + (temp &amp; 0xFFFF);
+    result-&gt;lo += (temp &amp; 0xFFFF) &lt;&lt; 16;
+    result-&gt;hi += uuid1 * v1 + (temp &gt;&gt; 16);
+}
+
+static void 
+get_system_time(unsigned64_t *uuid_time)
+{
+    struct timeval tp;
+    unsigned64_t utc, usecs, os_basetime_diff;
+
+    gettimeofday(&amp;tp, (struct timezone *)0);
+    mult32((long)tp.tv_sec, 10000000, &amp;utc);
+    mult32((long)tp.tv_usec, 10, &amp;usecs);
+    ADD_64b_2_64b(&amp;usecs, &amp;utc, &amp;utc);
+
+    /* Offset between UUID formatted times and Unix formatted times.
+     * UUID UTC base time is October 15, 1582.
+     * Unix base time is January 1, 1970. */
+    os_basetime_diff.lo = 0x13814000;
+    os_basetime_diff.hi = 0x01B21DD2;
+    ADD_64b_2_64b(&amp;utc, &amp;os_basetime_diff, uuid_time);
+}
+
+/*
+** See "The Multiple Prime Random Number Generator" by Alexander 
+** Hass pp. 368-381, ACM Transactions on Mathematical Software,
+** 12/87.
+*/
+static unsigned32 rand_m;
+static unsigned32 rand_ia;
+static unsigned32 rand_ib;
+static unsigned32 rand_irand;
+
+static void 
+true_random_init(void)
+{
+    unsigned64_t t;
+    unsigned16 seed;
+
+ /* Generating our 'seed' value Start with the current time, but,
+  * since the resolution of clocks is system hardware dependent and
+  * most likely coarser than our resolution (10 usec) we 'mixup' the
+  * bits by xor'ing all the bits together.  This will have the effect
+  * of involving all of the bits in the determination of the seed
+  * value while remaining system independent.  Then for good measure
+  * to ensure a unique seed when there are multiple processes 
+  * creating UUIDs on a system, we add in the PID.
+  */
+    rand_m = 971;
+    rand_ia = 11113;
+    rand_ib = 104322;
+    rand_irand = 4181;
+    get_system_time(&amp;t);
+    seed  =  t.lo        &amp; 0xFFFF;
+    seed ^= (t.lo &gt;&gt; 16) &amp; 0xFFFF;
+    seed ^=  t.hi        &amp; 0xFFFF;
+    seed ^= (t.hi &gt;&gt; 16) &amp; 0xFFFF;
+    rand_irand += seed + getpid();
+}
+
+static unsigned16 
+true_random(void)
+{
+    if ((rand_m += 7) &gt;= 9973)
+        rand_m -= 9871;
+    if ((rand_ia += 1907) &gt;= 99991)
+        rand_ia -= 89989;
+    if ((rand_ib += 73939) &gt;= 224729)
+        rand_ib -= 96233;
+    rand_irand = (rand_irand * rand_m) + rand_ia + rand_ib;
+    return (rand_irand &gt;&gt; 16) ^ (rand_irand &amp; RAND_MASK);
+}
+
+/*
+**  Startup initialization routine for the UUID module.
+*/
+void 
+uuid_init(void)
+{
+    true_random_init();
+    get_system_time(&amp;time_last);
+#ifdef NONVOLATILE_CLOCK
+    clock_seq = read_clock();
+#else
+    clock_seq = true_random();
+#endif
+}
+
+static int
+time_cmp(unsigned64_t *time1, unsigned64_t *time2)
+{
+    if (time1-&gt;hi &lt; time2-&gt;hi) return -1;
+    if (time1-&gt;hi &gt; time2-&gt;hi) return 1;
+    if (time1-&gt;lo &lt; time2-&gt;lo) return -1;
+    if (time1-&gt;lo &gt; time2-&gt;lo) return 1;
+    return 0;
+}
+
+static void new_clock_seq(void)
+{
+    clock_seq = (clock_seq + 1) % (CLOCK_SEQ_LAST + 1);
+    if (clock_seq == 0) clock_seq = 1;
+#ifdef NONVOLATILE_CLOCK
+    write_clock(clock_seq);
+#endif
+}
+
+void uuid_create(uuid_t *uuid)
+{
+    static unsigned64_t     time_now;
+    static unsigned16       time_adjust;
+    byte                    eaddr[6];
+    int                     got_no_time = 0;
+
+    get_ieee_node_identifier(&amp;eaddr);      /* TO BE PROVIDED */
+
+    do {
+        get_system_time(&amp;time_now);
+        switch (time_cmp(&amp;time_now, &amp;time_last)) {
+        case -1:
+            /* Time went backwards. */
+            new_clock_seq();
+            time_adjust = 0;
+            break;
+        case 1:
+            time_adjust = 0;
+            break;
+        default:
+            if (time_adjust == 0x7FFF)
+                /* We're going too fast for our clock; spin. */
+                got_no_time = 1;
+            else
+                time_adjust++;
+            break;
+        }
+    } while (got_no_time);
+
+    time_last.lo = time_now.lo;
+    time_last.hi = time_now.hi;
+
+    if (time_adjust != 0) {
+        ADD_16b_2_64b(&amp;time_adjust, &amp;time_now, &amp;time_now);
+    }
+
+    /* Construct a uuid with the information we've gathered
+     * plus a few constants. */
+    uuid-&gt;time_low = time_now.lo;
+    uuid-&gt;time_mid = time_now.hi &amp; 0x0000FFFF;
+    uuid-&gt;time_hi_and_version = (time_now.hi &amp; 0x0FFF0000) &gt;&gt; 16;
+    uuid-&gt;time_hi_and_version |= (1 &lt;&lt; 12);
+    uuid-&gt;clock_seq_low = clock_seq &amp; 0xFF;
+    uuid-&gt;clock_seq_hi_and_reserved = (clock_seq &amp; 0x3F00) &gt;&gt; 8;
+    uuid-&gt;clock_seq_hi_and_reserved |= 0x80;
+    memcpy(uuid-&gt;node, &amp;eaddr, sizeof uuid-&gt;node);
+}
+</code></pre>
+
+</font></BODY>
+</HTML>

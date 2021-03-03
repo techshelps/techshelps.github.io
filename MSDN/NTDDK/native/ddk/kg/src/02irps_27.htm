@@ -1,0 +1,129 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML>
+<HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>2.5.6  Floppy Driver’s Device Objects</TITLE>
+<style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD>
+<BODY BGPROPERTIES="FIXED" TEXT="#000000" BGCOLOR="#FFFFFF">
+
+<FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<H3><A NAME="DDK_Floppy_Drivers_Device_Objects_KG"></A>2.5.6  Floppy Driver’s Device Objects</H3>
+<P>
+<A NAME="DDK_Figure_2..24_KG"></A>Figure 2.24 illustrates the device objects that
+represent the floppy drives shown previously in <A HREF="02irps_18.htm#DDK_Figure_2..15_KG">Figure
+2.15</A>. The floppy driver shown in <A HREF="02irps_18.htm#DDK_Figure_2..16_KG">Figure 2.16</A>
+creates these device objects by calling an I/O support routine.
+<P>
+<B><IMG SRC="../art/2flpysw.gif" BORDER=0></B>
+<P>
+<B>Figure 2.24    Floppy Device Objects</B>
+<P>
+An adapter object represents the system DMA controller channel to which the
+floppy controller is connected, as already shown in <A HREF="02irps_18.htm#DDK_Figure_2..15_KG">Figure
+2.15</A>. Like the sound driver described in <A HREF="02irps_25.htm">Section
+2.5.4</A>, this driver has an AdapterControl routine, as shown previously in <A HREF="02irps_5.htm#DDK_Figure_2..4_KG">Figure
+2.4</A>.
+<P>
+However, much of the system floppy controller driver’s work is done by a
+device-dedicated thread. Because programming the floppy controller takes a
+long time between interrupts (and some controller operations don’t even cause
+an interrupt), the system floppy controller driver sets up its own kernel-mode
+thread that is “blocked” (waiting on the semaphore object shown in <A HREF="#DDK_Figure_2..24_KG">Figure
+2.24</A>) until the floppy driver is called to carry out an I/O operation. Then,
+the floppy driver inserts incoming IRPs into an interlocked queue shared with
+its device-dedicated thread and sets the semaphore object to the Signaled
+state, thereby “unblocking” the floppy thread.
+<P>
+When it is run, the floppy thread removes an IRP from the queue, starts the
+requested operation on the device, and waits on the event object shown in <A HREF="#DDK_Figure_2..24_KG">Figure
+2.24</A>. The floppy driver handles interrupts from the controller, queueing a
+DpcForIsr routine that notifies the floppy thread (by setting the event to the
+Signaled state) to complete I/O processing and the IRP.
+<P>
+Unlike most NT drivers, the system floppy controller driver does not have a
+StartIo routine because it sets up an interlocked queue and manages its own
+queuing of IRPs. Using an interlocked queue prevents the floppy driver and
+thread from simultaneous attempts to insert and remove IRPs in the queue. The
+NT Executive Support component supplies routines for managing entries in an
+interlocked queue, and the driver allocates the storage for an executive spin
+lock, which is required to use an interlocked queue. Executive Support
+routines manage access to entries in such an interlocked queue with the spin
+lock as follows:
+<UL>
+<LI>
+While a support routine holds the spin lock for the system floppy controller
+driver, the floppy thread cannot remove an IRP from the queue.
+<P>
+<LI>
+While another support routine holds the spin lock for the floppy thread, the
+floppy driver cannot insert an IRP into the queue.
+</UL>
+<P>
+Spin locks are opaque synchronization mechanisms, which NT drivers can use for
+operations that must be atomic or to protect driver-defined data, device
+registers, or driver-allocated resources from simultaneous access at raised
+IRQL by more than one driver routine, particularly in an SMP machine. Every
+lowest-level NT driver with an ISR also uses a spin lock that is associated
+with its interrupt object(s).
+<P>
+The NT Kernel supplies support routines for initializing spin locks, for
+acquiring and releasing spin locks, for synchronizing access to data protected
+by an interrupt spin lock (because the data is shared between the driver’s ISR
+and other driver routines), and for creating and using the event and semaphore
+objects shown in <A HREF="#DDK_Figure_2..24_KG">Figure 2.24</A>. For more
+information about using spin locks, see also <A HREF="16issues.htm">Chapter
+16</A>.
+<P>
+Note that only an NT thread can wait for a nonzero interval on Kernel-defined
+dispatcher objects, which include semaphore, event, mutex, and timer objects,
+as well as thread objects. However, every NT driver’s DriverEntry routine
+executes within a system thread context, so NT drivers can wait for nonzero
+intervals on dispatcher objects when they initialize themselves.
+<P>
+The system floppy controller driver’s thread allocates and uses the contiguous
+buffer shown in <A HREF="#DDK_Figure_2..24_KG">Figure 2.24</A>&nbsp;to contain data for
+format operations. The NT Memory Management component provides support
+routines for allocating contiguous and/or noncached memory, for explicitly
+locking down user buffers, and for mapping virtual and physical addresses.
+<P>
+However, the I/O Manager or an NT file system takes care of user buffer
+locking and address mappings for most NT mass-storage drivers. The I/O Manager
+buffers user data and takes care of address mappings for certain other NT
+device and higher-level drivers.
+<P>
+As <A HREF="#DDK_Figure_2..24_KG">Figure 2.24</A>&nbsp;shows, the system floppy
+controller driver is somewhat like the NT file system shown previously in <A HREF="02irps_3.htm#DDK_Figure_2..3_KG">Figure
+2.3</A>, because it uses a (device-dedicated) system thread. The NT Process
+Structure component supplies a support routine for creating device-dedicated
+system threads. However, NT file system drivers usually have worker-thread
+callback routines so they call routines provided by the Executive Support
+component to use system worker threads, rather than setting up
+driver-dedicated threads of their own.
+<P>
+Most NT device and intermediate drivers avoid setting up driver-dedicated
+threads or a device-dedicated thread like the system floppy controller driver.
+Most avoid using system worker threads, as well. Only drivers for devices that
+carry out long operations without notifying the driver should use a
+device-dedicated thread to wait for nonzero (and possibly indefinite)
+intervals on NT dispatcher objects.
+<P>
+Without a device-dedicated thread, the driver for such a device would have to
+stall, polling its device for device-state changes while executing in the
+context of some arbitrary thread, possibly the original user-mode calling
+thread that requested the I/O operation, a file system’s thread, or some other
+thread that happened to be current. Such a driver would waste the quantum
+allotted to the current thread, which could get no work done while the driver
+kept control. Such a driver would also waste many CPU cycles that could be
+better used by other NT kernel-mode components, including other drivers.
+<P>
+Thus, the system floppy controller driver improves overall system performance
+and I/O throughput at a cost to its own performance: context switches to the
+floppy thread. NT drivers for newer and faster devices can usually wait for
+device-state changes without any noticeable impact on system performance.
+<P>
+See <A HREF="16issues.htm">Chapter 16</A>&nbsp;for more
+information about polling a device and for general guidelines about whether to
+implement a driver with device-dedicated thread(s).
+<P></FONT>
+</BODY>
+</HTML>

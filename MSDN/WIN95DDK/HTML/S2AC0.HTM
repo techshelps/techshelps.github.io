@@ -1,0 +1,263 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Driver Architecture</TITLE><META HTTP-EQUIV="CONTENT-TYPE" CONTENT="text/html; charset= iso-8859-1"><style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD><BODY BGCOLOR="#FFFFFF">
+<FONT FACE="verdana,arial,helvetica" SIZE="2">
+<H3>Driver Architecture </H3><P>Windows 95 extends the Windows 3.1 multimedia driver architecture by including support for Plug and Play configuration and device arrival or removal notifications. Although Windows 95 requires a supporting virtual device driver (VxD) to interact with the Configuration Manager, the implementation of the primary functionality of Windows 95 multimedia drivers uses 16-bit protected-mode code. </P>
+<P>The term "virtual device driver" often suggests the concept of device virtualization, however, Windows 95 also uses VxDs to implement 32-bit "supervisor mode" or "trusted mode" code. For multimedia device drivers, VxDs serve two primary purposes: interacting with the Configuration Manager and managing hardware contention between Windows applications and MS-DOS applications. </P>
+<P>Although it is not required, you may also decide to implement some of the core driver functionality in the supporting VxD and create a private interface from the 16-bit driver to the VxD. </P>
+<H4><A NAME="sec0"></A>Plug and Play Driver Notification </H4><P>The Configuration Manager (CONFIGMG.VXD) controls the creation, deletion, and resource allocation of the Device Nodes. </P>
+<P>When a bus enumerator requests a new device node, the Configuration Manager locates the device ID of the device node in the system registry and loads the driver(s) using the registered device loader, if the necessary entries are present. After loading the device driver, the Configuration Manager sends a PnP_New_DevNode message to the driver's control procedure. </P>
+<P>Note that if the new device node is the result of the "first insertion" event, the device node is setup during "appy-time." After successful installation of the device software, the Configuration Manager continues the startup sequence. </P>
+<P>On receipt of the PnP_New_DevNode message, the device driver registers a "Config Handler" procedure with the multimedia device loader (MMDEVLDR.VXD), using the <B>MMDEVLDR_Register_Device_Driver</B> service. The Config Handler processes all subsequent CONFIG_ type messages from the Configuration Manager. </P>
+<P>The Configuration Manager attempts to satisfy the resource requirements of the new device. If the device is a "floating" configuration, it may filter its logical configurations during the CONFIG_FILTER message processing. When the Configuration Manager can satisfy the resource requirements for the device node, it starts the device by sending a CONFIG_START message to the Config Handler. </P>
+<P>A typical Config Handler processes the configuration state messages and applies the configuration by allocating resources such as IRQ virtualization, I/O trapping and memory space from the virtual machine manager (VMM). </P>
+<P>The following procedure is a portion of the Config Handler used by MSMPU401.VXD. During the CONFIG_START message processing, the Config Handler queries the Configuration Manager for the allocated resources and then calls <B>MSMPU401_Set_Config</B> (an external private function defined by the specific device) to put the configuration into effect. </P>
+<P><BR></P>
+<PRE>//---------------------------------------------------------------------
+//  
+// MSMPU401_Config_Handler
+//  
+//---------------------------------------------------------------------
+
+CONFIGRET MSMPU401_Config_Handler
+(
+    CONFIGFUNC      cfFuncName,
+    SUBCONFIGFUNC   scfSubFuncName,
+    DEVNODE         dn,
+    DWORD           dwRefData,
+    ULONG           ulFlags
+)
+{
+   // Switch the function (aka command)
+
+   DPF( "MSMPU401: Config_Handler\r\n" ) ;
+
+   switch (cfFuncName)
+   {
+      // In this code snippet, we've removed all function processing
+      // except CONFIG_START, please see the DDK samples for the 
+      // complete example.
+
+      case CONFIG_START:
+      {
+         // This command is sent to instruct the driver that
+         // it can start using the resources that have been
+         // allocated to it. This is the meat of this
+         // DriverConfigMan.
+         //
+         // We get our resource allocation by calling the
+         // configuration manager (CM) using the devnode that
+         // was passed to us.
+         //
+         // If all has gone well, we should not have been given
+         // a resource allocation that we can't use. Ideally
+         // this command should always succeed. However, every
+         // now and then life throws you a curve ball, so we
+         // should still verify that we are happy with the
+         // resources we have been given.
+
+         CMCONFIG    ccb ;
+         CONFIGRET   cr ;
+         WORD        wBaseMPU401 ;
+         WORD        wIRQ ;
+
+         // Get our resource allocation from CM. if
+         // this fails, we have no choice but to fail
+         // the CONFIG_START. We'll return the same
+         // error that the CM_Get_Alloc_Config returned.
+
+         if (CR_SUCCESS != 
+               (cr = CM_Get_Alloc_Log_Conf( &amp;ccb, dn, 0 )))
+            return cr ;
+
+         // Extract the information of interest from the config buffer
+         // that we got from CM_Get_Alloc_Config.
+
+         wBaseMPU401 = (WORD) -1 ;
+
+         if (ccb.wNumIOPorts != 1)
+         {
+            DPF( "MSMPU401: Invalid config.\r\n" ) ;
+            return CR_FAILURE ;
+         }
+                                 
+         wBaseMPU401 = ccb.wIOPortBase[ 0 ] ;
+
+         if (ccb.wNumIRQs)
+            wIRQ = ccb.bIRQRegisters[ 0 ] ;
+         else
+            wIRQ = (WORD) -1 ;
+
+         if (-1 == wBaseMPU401)
+            return CR_FAILURE ;
+
+         // OK, now do whatever else is necessary to put this
+         // configuration into effect.
+
+         cr = MSMPU401_Set_Config( dn, wBaseMPU401, wIRQ ) ;
+
+         return cr ;
+      }
+   }
+} // MSMPU401_Config_Handler()
+</PRE>
+<H4><A NAME="sec1"></A>Multimedia Subsystem Driver Notification </H4><P>After the VxD has successfully processed the CONFIG_START message, the multimedia device loader notifies the multimedia subsystem (MMSYSTEM.DLL) that a device node has successfully started. MMSYSTEM loads each of the associated ring-3 drivers and sends a device arrival notification. The ring-3 drivers query the supporting VxD for configuration information and complete the initialization necessary to support the device. The multimedia subsystem is designed to accommodate device nodes that have multiple function traits, such as music synthesis, digital sound support, hardware compression and/or decompression, and mixer support. When a device node is started, MMSYSTEM locates the registry entries for device node and loads the drivers for each supported class. </P>
+<P></P>
+<P><B>Note </B></P>
+<P>The changes and additions to the Window 3.1 multimedia device driver model as described below are specific to Windows 95 Plug and Play device drivers. Multimedia drivers loaded using the Windows 3.1 SYSTEM.INI entries will not experience these changes. </P>
+<P></P>
+<P>A device node might support four driver classes: <B>wave</B>, <B>midi</B>, <B>aux</B> and <B>mixer</B>. Each class may have multiple drivers. MMSYSTEM loads all drivers for all active classes when the device successfully starts. MMSYSTEM loads each module only once and increments reference counts as necessary (standard <B>LoadLibrary</B>() behavior); therefore, a multimedia ring-3 device driver's <B>DriverProc</B>() receives only one DRV_LOAD message when it is first loaded and only one DRV_FREE message when the last reference to the device is released. </P>
+<P>A ring-3 device driver should maintain separate data structures for each device node and if the device driver supports multiple classes it should maintain reference counts for each active class. To assist in this task, Windows 95 introduces new parameters for the <I>xxxx</I><B>_</B>INIT, <I>xxxx</I><B>_</B>GETNUMDEVS, <I>xxxx</I><B>_</B>GETDEVCAPS and <I>xxxx</I><B>_</B>OPEN messages, and introduces new messages: DRVM_ENABLE, DRVM_DISABLE and DRVM_EXIT. </P>
+<P>MMSYSTEM sends the <I>xxxx</I><B>_</B>INIT, DRVM_ENABLE, DRVM_DISABLE and DRVM_EXIT message to each message procedure of each class of device when the corresponding activity has taken place for the device node. </P>
+<P>Below is a description of these messages and the appropriate driver response: </P>
+<UL><LI>     MMSYSTEM issues the <I>xxxx</I><B>_</B>INIT message when the device is first started. Generally, a device driver allocates the instance structure or increments a usage reference count for this message. </LI><LI>     MMSYSTEM issues the DRVM_ENABLE message when the device node becomes active. The device driver should increment an enable count. The first time the device driver receives this notification it should perform hardware initialization as well as allocate other device support structures such as mixer structures, interrupt service thunks and so. </LI><LI>     MMSYSTEM issues the DRVM_DISABLE message when the device node becomes disabled. The device driver should decrement the enable count and when the enable count is zero, it should release hardware resources and free the structures allocated during the DRVM_ENABLE message processing. MMSYSTEM halts all application to driver message traffic is except <I>xxxx</I>_UNPREPARE, <I>xxxx</I>_RESET, <I>xxxx</I>_STOP and <I>xxxx</I>_CLOSE messages, allowing a driver to clean up remaining data associated with the device handle The Configuration Manager unloads the device node's VxD when the device enable count is zero and after the driver responds to this message. </LI><LI>     MMSYSTEM issues the DRVM_EXIT message after the device has been disabled and when there are no open handles to the device driver. The device driver should free the instance structure when the usage reference count is zero. Additionally, MMSYSTEM may dispatch another DRVM_ENABLE and DRVM_DISABLE pair before dispatching the DRVM_EXIT. This is particularly true for the case of device reconfiguration or PCMCIA removal and immediate re-insertion. </LI></UL><P></P>
+<P>When the driver vendor follows the appropriate handling of these messages it is possible to accomplish any or all of the following: </P>
+<UL><LI>     Change the configuration of software configurable hardware when a device handle remains open by a passive application (such as a mixer application). </LI><LI>     Seamlessly respond to portable docking and undocking situations. </LI><LI>     Handle PCMCIA hot-plugging events without additional code. </LI></UL><P></P>
+<P>The code example below is the output wave device message handler from the Windows Sound System ring-3 driver. It demonstrates the appropriate handling of these new and modified messages. </P>
+<P><BR></P>
+<PRE>DWORD FAR PASCAL _loadds wodMessage
+(
+    UINT            uDevId,
+    WORD            msg,
+    DWORD           dwUser,
+    DWORD           dwParam1,
+    DWORD           dwParam2
+)
+{
+   NPWAVEALLOC         pClient ;
+   PHARDWAREINSTANCE   phwi ;
+
+   // take care of init time messages...
+
+   switch (msg)
+   {
+      case WODM_INIT:
+      {
+         DPF( 3, "WODM_INIT" ) ;
+
+         if (gwGlobalStatus)
+         {
+            DisplayConfigErrors() ;
+            return 0L ;
+         }
+         else
+         {
+            // dwParam2 == PnP DevNode
+
+            return (AddDevNode( dwParam2 )) ;
+         }
+      }
+      break ;
+
+      case DRVM_ENABLE:
+      {
+         DPF( 3, "WODM_ENABLE" ) ;
+
+         // dwParam2 == PnP DevNode
+
+         return (EnableDevNode( dwParam2 )) ;
+
+      }
+      break ;
+
+      case DRVM_DISABLE:
+      {
+         DPF( 3, "WODM_DISABLE" ) ;
+
+         // dwParam2 == PnP DevNode
+
+         return (DisableDevNode( dwParam2 )) ;
+
+      }
+      break ;
+
+      case DRVM_EXIT:
+      {
+         DPF( 3, "WODM_EXIT" ) ;
+
+         // dwParam2 == PnP DevNode
+
+         return (RemoveDevNode( dwParam2 )) ;
+
+      }
+      break ;
+
+      case WODM_GETNUMDEVS:
+      {
+         DPF( 3, "WODM_GETNUMDEVS" ) ;
+
+         if (NULL == (phwi = DevNodeToHardwareInstance( dwParam1 )))
+            return MAKELONG( 0, MMSYSERR_INVALPARAM ) ;
+
+         if (dwParam1)
+         {
+            if (phwi -&gt; fEnabled)
+               return 1L ;
+            else
+               return 0L ;
+         }
+         else
+            return 0L ;
+      }
+      break ;
+
+      case WODM_OPEN:
+      {
+         DWORD  dn ;
+
+         DPF( 3, "WODM_OPEN" ) ;
+
+         if (uDevId &gt; 1)
+            return MMSYSERR_BADDEVICEID ;
+
+         dn = ((LPWAVEOPENDESC) dwParam1) -&gt; dnDevNode ;
+
+         if (NULL ==
+               (phwi = DevNodeToHardwareInstance(dn)))
+         {
+            DPF( 1, "devnode not associated with hardware instance???" ) ;
+            return MMSYSERR_BADDEVICEID ;
+         }
+
+         if (!phwi -&gt; fEnabled)
+            return MMSYSERR_NOTENABLED ;
+
+         return (wodOpen(phwi,
+                         dwUser,
+                         (LPWAVEOPENDESC) dwParam1,
+                         dwParam2 )) ;
+      }
+      break ;
+
+      case WODM_GETDEVCAPS:
+      {
+         DPF( 3, "WODM_GETDEVCAPS" ) ;
+
+         if (uDevId &gt; 1)
+            return MMSYSERR_BADDEVICEID ;
+
+         if (NULL ==
+               (phwi = DevNodeToHardwareInstance( dwParam2 )))
+         {
+            DPF( 1, "devnode not associated with hardware instance???" ) ;
+            return MMSYSERR_BADDEVICEID ;
+         }
+
+         if (!phwi -&gt; fEnabled)
+            return MMSYSERR_NOTENABLED ;
+
+         wodGetDevCaps( phwi, (MDEVICECAPSEX FAR *) dwParam1 ) ;
+         return MMSYSERR_NOERROR ;
+      }
+      break ;
+   }
+}
+   // Note that the remaining cases for this procedure have
+   // been removed from this code example. Please see the 
+   // MSSNDSYS.DRV example in the DDK for a complete sample.
+</PRE>
+<P>The procedure of unloading the drivers for a device node is the inverse of the load procedure. That is, the ring-3 drivers are notified and unloaded and then MMDEVLDR issues the CONFIG_STOP message to the virtual device driver. </P>
+<H4><A NAME="sec2"></A>Multiple Hardware Instances </H4><P>The device driver samples shipped with Windows 95 support multiple instances of the hardware in a single machine. For example, it is possible to install three sound cards in the same machine. If there are enough free resources, all three devices will start and use the same driver set but remain independently installed devices. </P>
+<P>MMSYSTEM considers each device node a separate device installation. The device driver should respond with the appropriate information for that specific instance of the hardware. For example, given two sound cards and each supports one wave output device, the driver should respond with "1" to the WODM_GETNUMDEVS message for each device node. </P>
+<P>Additionally, to properly support multiple device instances the device drivers must perform the following tasks: </P>
+<UL><LI>     Maintain hardware instance specific data structures using the device node as the key. </LI><LI>      "Thunk" I/O trapping procedures to easily determine device node association. </LI><LI>     Create copies of the ring-3 ISR code for each hardware instance. </LI><LI>     Modify private interfaces to understand multiple hardware instances. </LI><LI>     Avoid the use of global variables. </LI></UL><P></P>
+<P>The DDK code samples demonstrate all of these techniques. Most developers will use one of the sample device drivers and associated VxDs as their device driver base. </P></FONT></BODY></HTML>

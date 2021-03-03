@@ -1,0 +1,547 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>An Applied Example: The 'Downloader' Control</title>
+<style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000 dir=ltr>
+<h1><a name="anappliedexamplethedownloadercontrol"></a>An Applied Example: The 'Downloader' Control</h1>
+<p>
+Let's put some of these interfaces and APIs to work. We'll create an ActiveX control that you can use to download and install components over the intranet. We'll be encapsulating in an ATL based component all of the APIs and interfaces we've described above. Through COM based code reuse, we can avoid the required elaborate coding each time we need the download and install functionality. The implementation of the control is skeletal in nature, in order to keep things simple. The reader can easily modify and enhance the control for specific situations.</p>
+<h2>The ILoadlate Interface</h2>
+<p>
+Our completed component will support an <b><code>ILoadlate</code></b> interface. This is a dual interface that we've defined. The methods for this interface are:</p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=blue width=200><b><code>ILoadlate </code>Method Name</b></td>
+<td class=blue width=341><b>Description</b></td>
+</tr>
+<tr valign=top>
+<td width=200><b><code>QueryInterface()</code></b></td>
+<td width=341>Standard <b><code>IUnknown</code></b> requirement.</td>
+</tr>
+<tr valign=top>
+<td width=200><b><code>AddRef()</code></b></td>
+<td width=341>Standard <b><code>IUnknown</code></b> requirement.</td>
+</tr>
+<tr valign=top>
+<td width=200><b><code>Release()</code></b></td>
+<td width=341>Standard <b><code>IUnknown</code></b> requirement.</td>
+</tr>
+<tr valign=top>
+<td width=200><b><code>GetFactory([out, retval] LPUNKNOWN* itf)</code></b></td>
+<td width=341>Called after the download and installation is completed in order to obtain the <b><code>IClassFactory</code></b> interface from the newly downloaded (and instantiated) object.</td>
+</tr>
+<tr valign=top>
+<td width=200><b><code>GetLatest([in] BSTR bstrCLSID, [in] BSTR bstrURL)</code></b></td>
+<td width=341>Called to start the code download, install, and object creation process. <b><code>bstrCLSID</code></b> should contain the string representation of the CLSID of the object; <b><code>bstrURL</code></b> should contain the URL to download the object from.</td>
+</tr>
+<tr valign=top>
+<td width=200><b><code>PollResult([out] long * current, [out] long * max, [out,retval] BSTR * bstrStatus)</code></b></td>
+<td width=341>Called periodically during download to get the current status of the download. <b><code>bstrStatus</code></b> is a status message indicating the current progress. <b><code>current</code></b> may contain the number of bytes downloaded and <b><code>max</code></b> may contain the number of bytes of the object being downloaded (this depends on the server and the URL used).</td>
+</tr>
+</table><br>
+<p>
+This is the only interface that our ActiveX control will provide. Essentially, it encapsulates all the calls necessary for code download and installation, and it also changes the 'callback' model that the <b><code>CoGetClassObjectFromURL()</code></b> calls to an easier-to-use polling model for the client. </p>
+<h2>Coding the Downloader Control</h2>
+<p>
+Use the Visual C++5 ATL COM AppWizard to create a new DLL based project. In the project, use the ATL Object Wizard to put a Simple COM object into the project. Call this object <b><code>CLoadlate</code></b>, call the interface <b><code>ILoadlate</code></b>, select Apartment model threading and create dual interfaces.</p>
+<p>
+When the basic code generation is completed, add the three methods according to the <b><code>ILoadlate</code></b> interface description earlier in this section.</p>
+<p>
+Next, add the implementation for these methods:</p>
+<pre><code>STDMETHODIMP CLoadlate::PollResult( long * current, long * max, BSTR * bstrStatus)
+{
+   *bstrStatus = SysAllocString(m_bstrStatus);
+   *current = m_lLoaded;
+   *max = m_lTotal;
+   return S_OK;
+}</code></pre>
+<p>
+The implementation of <b><code>ILoadlate::PollResult()</code></b> simply copies the value of a set of member variables to the return values. We'll see how these variables get updated later.</p>
+<p>
+The <b><code>ILoadlate::GetFactory()</code></b> implementation is:</p>
+<pre><code>STDMETHODIMP CLoadlate::GetFactory(LPUNKNOWN * ift)
+{
+   *ift = m_myFactory;
+   return S_OK;
+}</code></pre>
+<p>
+Again, we assume that the caller will be calling after the download/binding is completed. We simply copy the member variable's value to the return value.</p>
+<p>
+Most of the work is done in the <b><code>ILoadlate::GetLatest()</code></b> implementation:</p>
+<pre><code>STDMETHODIMP CLoadlate::GetLatest(BSTR bstrCLSID, BSTR bstrURL)
+{
+   HRESULT hr;
+ 
+   hr = CLSIDFromString(bstrCLSID, &amp;m_clsid);
+   if (FAILED(hr))
+      return S_FALSE;
+</code></pre>
+<p>
+Here, we recover the CLSID from its string representation. This will be used later in the <b><code>CoGetClassObjectFromURL()</code></b> call. We'll store it in the <b><code>m_clsid</code></b> member variable for now.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;m_bstrUrl = bstrURL;
+   m_pbsc = new CBindStatusCallback(this);
+   if (m_pbsc == NULL)
+      return S_FALSE;   
+</code></pre>
+<p>
+We then save the value of the URL in the <b><code>m_bstrUrl</code></b> variable, and create a <b><code>CBindStatusCallback()</code></b> object (which implements the <b><code>IBindStatusCallback</code></b> interface), storing a pointer to it in the <b><code>m_pbsc</code></b> member variable.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;hr = CreateAsyncBindCtx(0, m_pbsc,NULL, &amp;m_pbc);
+   if (FAILED(hr))
+      return S_FALSE;
+</code></pre>
+<p>
+Next, we create a bind context object by calling <b><code>CreateAsyncBindCtx()</code></b> using the <b><code>CBindStatusCallback</code></b> object we created earlier. The resulting bind context is assigned to a <b><code>m_pbc</code></b> member variable (of the point-to-<b><code>IBindCtx</code></b> type). Finally, we're ready to call <b><code>CoGetClassObjectFromURL()</code></b>.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;LPUNKNOWN tpInf;
+
+   hr = CoGetClassObjectFromURL(m_clsid,
+      m_bstrUrl,
+      0xffffffff,
+      0xffffffff,
+      NULL,
+      m_pbc,
+      CLSCTX_INPROC_SERVER,
+      NULL,IID_IClassFactory,
+      (void * *)&amp;tpInf);
+   
+   if (!FAILED(hr))
+      m_myFactory = tpInf;
+   
+   return hr;
+}</code></pre>
+<p>
+Note that we used <b><code>0xfffffff</code></b> for both version numbers to ensure that the control will download the latest version of the requested object. The reader may customize this for actual deployment. When called successfully, this call will return <b><code>MK_S_ASYNCHRONOUS</code></b> which indicates that the download and install will be taking place asynchronously.</p>
+<p>
+We used a few member variables in the code above without declaring them. Now we must add these variables to the <b><code>CLoadlate</code></b> class. Add the following variables and make them all public.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;WCHAR                m_bstrStatus[100];
+   CComBSTR             m_bstrUrl;
+   IUnknown*            m_myFactory;
+   long                 m_lLoaded;
+   long                 m_lTotal;
+   uuid_t               m_clsid;
+   IBindCtx*            m_pbc;
+   IBindStatusCallback* m_pbsc;</code></pre>
+<p>
+This completes our <b><code>CLoadlate</code></b> class. However, we see above that we must also define the <b><code>CBindStatusCallback</code></b> class. This class is defined in the <b><code>.H</code></b> file as:</p>
+<pre><code>class CLoadlate;
+
+class CBindStatusCallback : public IBindStatusCallback 
+{
+public:
+    // IUnknown methods
+    STDMETHODIMP    QueryInterface(REFIID riid,void ** ppv);
+    STDMETHODIMP_(ULONG)    AddRef()    { return m_cRef++; }
+    STDMETHODIMP_(ULONG)    Release()   { if (--m_cRef == 0) { delete this; return 0; } return m_cRef; }
+
+    // IBindStatusCallback methods
+    STDMETHODIMP    OnStartBinding(DWORD dwReserved, IBinding* pbinding);
+    STDMETHODIMP    GetPriority(LONG* pnPriority);
+    STDMETHODIMP    OnLowResource(DWORD dwReserved);
+    STDMETHODIMP    OnProgress(ULONG ulProgress, ULONG ulProgressMax, ULONG ulStatusCode,
+                        LPCWSTR pwzStatusText);
+    STDMETHODIMP    OnStopBinding(HRESULT hrResult, LPCWSTR szError);
+    STDMETHODIMP    GetBindInfo(DWORD* pgrfBINDF, BINDINFO* pbindinfo);
+    STDMETHODIMP    OnDataAvailable(DWORD grfBSCF, DWORD dwSize, FORMATETC *pfmtetc,
+                        STGMEDIUM* pstgmed);
+    STDMETHODIMP    OnObjectAvailable(REFIID riid, IUnknown* punk);
+
+    // constructors/destructors
+    CBindStatusCallback(CLoadlate * pLate);
+    ~CBindStatusCallback();
+ 
+    // data members
+    CLoadlate      * m_ptrLate;
+    DWORD           m_cRef;
+    IBinding*       m_pbinding;
+    CCodeInstall    * m_CodeInstall;
+};</code></pre>
+<p class=indent>
+Note: If you use the <u>N</u>ew Class... menu option to add this and the following class, then you need to add a generic class derived from the interface. Then in the <b><code>.CPP</code></b> file you'll find a <b><code>#define</code></b> for <b><code>new</code></b> to <b><code>DEBUG_NEW</code></b>. This needs to be removed as it's for MFC projects only.</p>
+<p>
+We can see that this class implements the <b><code>IBindStatusCallback</code></b> interface through its member functions. It also has a member which holds a pointer to the <b><code>CLoadlate</code></b> class which instantiates it (in order to update the member variables of the <b><code>CLoadlate</code></b> class during status call back). It also has the <b><code>m_pbinding</code></b> member to hold an <b><code>IBinding</code></b> interface during the binding process. Since we need to support installation, there's also a <b><code>CCodeInstall</code></b> object reference (we'll describe this class later).</p>
+<p>
+The implementation of this class (in the <b><code>.CPP</code></b> file) is simple. The constructor initializes member variables, and the destructor does nothing.</p>
+<p>
+&nbsp;</p>
+<pre><code>CBindStatusCallback::CBindStatusCallback(CLoadlate * pLate):m_ptrLate(pLate)
+{
+   m_ptrLate-&gt;m_lLoaded = 0;
+   m_ptrLate-&gt;m_lTotal = 0;
+   m_ptrLate-&gt;m_myFactory = NULL;
+   m_cRef = 1;
+   m_pbinding = NULL;
+}  // CBindStatusCallback</code></pre>
+<pre><code>CBindStatusCallback::~CBindStatusCallback()
+{
+}  // ~CBindSt</code></pre>
+<p>
+Several functions return trivially with <b><code>E_NOTIMPL</code></b>:</p>
+<pre><code>STDMETHODIMP CBindStatusCallback::GetPriority(LONG* pnPriority)
+{
+   return E_NOTIMPL;
+} 
+STDMETHODIMP CBindStatusCallback::OnLowResource(DWORD dwReserved)
+{
+   return E_NOTIMPL;
+} 
+STDMETHODIMP CBindStatusCallback::OnDataAvailable(DWORD grfBSCF, DWORD dwSize, FORMATETC* pfmtetc, STGMEDIUM* pstgmed)
+{
+   return E_NOTIMPL;
+}</code></pre>
+<p>
+In <b><code>QueryInterface()</code></b>, we handle request for our own <b><code>IBindStatusCallback</code></b>, as well as <b><code>ICodeInstall</code></b> since we support installation.</p>
+<pre><code>STDMETHODIMP CBindStatusCallback::QueryInterface(REFIID riid, void** ppv)
+{
+   *ppv = NULL;
+   if (riid==IID_ICodeInstall)
+   {
+      m_CodeInstall = new CCodeInstall();
+      *ppv = (ICodeInstall *) m_CodeInstall;
+      m_CodeInstall-&gt;AddRef();
+      return S_OK;
+   }
+   if (riid==IID_IUnknown || riid==IID_IBindStatusCallback)
+   {
+      *ppv = this;
+      AddRef();
+      return S_OK;
+   }
+   return E_NOINTERFACE;
+}  </code></pre>
+<p>
+Notice that above we create a new <b><code>CCodeInstall</code></b> object if the query interface for <b><code>ICodeInstall</code></b> is called.</p>
+<p>
+Before download (binding) begins, the <b><code>GetBin()</code></b> member will be called by the system to determine how to bind. We set the flags to indicate an asynchronous bind/download, and that the newest version should be fetched.</p>
+<pre><code>STDMETHODIMP CBindStatusCallback::GetBindInfo(DWORD* pgrfBINDF, BINDINFO* pbindInfo)
+{
+   *pgrfBINDF = BINDF_ASYNCHRONOUS 
+      | BINDF_ASYNCSTORAGE |BINDF_GETNEWESTVERSION ;
+   return S_OK;
+}</code></pre>
+<p>
+When download (binding) begins, the <b><code>OnStartBinding()</code></b> member will be called by the system. We're obliged to grab hold of a binding object at this time:</p>
+<pre><code>STDMETHODIMP CBindStatusCallback::OnStartBinding(DWORD dwReserved, IBinding* pbinding)
+{
+   if (m_pbinding != NULL)
+      m_pbinding-&gt;Release();
+   m_pbinding = pbinding;
+   if (m_pbinding != NULL)
+   {
+      m_pbinding-&gt;AddRef();
+   }
+   return S_OK;
+} </code></pre>
+<p>
+During the binding/download, the <b><code>OnProgress()</code></b> member will be called regularly. We take this opportunity to update the status variables of the <b><code>CLoadlate</code></b> class.</p>
+<pre><code>STDMETHODIMP CBindStatusCallback::OnProgress(ULONG ulProgress, ULONG ulProgressMax, ULONG ulStatusCode, LPCWSTR szStatusText)
+{
+   wcscpy(m_ptrLate-&gt;m_bstrStatus, szStatusText);
+   m_ptrLate-&gt;m_lLoaded = ulProgress;
+   m_ptrLate-&gt;m_lTotal = ulProgressMax;
+   return S_OK;
+} </code></pre>
+<p>
+When the binding/download is completed, the <b><code>OnStopBinding()</code></b> method is called. Here we release the binding object we seized earlier in <b><code>OnStartBinding()</code></b>. We also signify to our client that the binding is completed by setting the <b><code>m_bstrStatus</code></b> of the <b><code>CLateload</code></b> member to <b><code>“DONE!”</code></b>.</p>
+<pre><code>STDMETHODIMP CBindStatusCallback::OnStopBinding(HRESULT hrStatus, LPCWSTR pszError)
+{
+   wcscpy(m_ptrLate-&gt;m_bstrStatus, L"DONE!");
+   if (m_pbinding)
+   {
+      m_pbinding-&gt;Release();
+      m_pbinding = NULL;
+   }
+
+   return S_OK;
+}  </code></pre>
+<p>
+When installation is completed and the requested <b><code>IClassFactory</code></b> interface is available, the <b><code>OnObjectAvailable()</code></b> member will be called. Here, we simply assign the pointer to our member variable, ready for the client to fetch.</p>
+<pre><code>STDMETHODIMP CBindStatusCallback::OnObjectAvailable(REFIID riid, IUnknown* punk)
+{
+   m_ptrLate-&gt;m_myFactory = punk;
+   return S_OK;
+}</code></pre>
+<p>
+This is all that's required for the <b><code>CBindStatusCallback</code></b> class to implement the <b><code>IBindStatusCallback</code></b>. Next, we'll examine the <b><code>ICodeInstall</code></b> interface (and the <b><code>CCodeInstall</code></b> class) that we'll need. The <b><code>CCodeInstall</code></b> class is defined in the <b><code>.H</code></b> file as:</p>
+<pre><code>class CCodeInstall:public ICodeInstall
+{
+public:
+   // IUnknown methods
+   STDMETHODIMP    QueryInterface(REFIID riid,void ** ppv);
+   STDMETHODIMP_(ULONG)    AddRef()    { return m_cRef++; }
+   STDMETHODIMP_(ULONG)    Release()   { if (--m_cRef == 0) { delete this; return 0; } return m_cRef; }
+   STDMETHODIMP    GetWindow(REFGUID ab, HWND *pwnd);
+   STDMETHODIMP    OnCodeInstallProblem(ULONG ulStatus, LPCWSTR szDest, LPCWSTR szSrc, DWORD dwRes);
+   CCodeInstall();
+   ~CCodeInstall();
+protected:
+   DWORD           m_cRef;
+};
+</code></pre>
+<p>
+<b><code>ICodeInstall</code></b> only has two new member functions. In the <b><code>.CPP</code></b> file, constructor and destructor are implemented trivially.</p>
+<pre><code>CCodeInstall::CCodeInstall():m_cRef(1)
+{
+}
+
+CCodeInstall::~CCodeInstall()
+{
+}</code></pre>
+<p>
+<b><code>ICodeInstall::QueryInterface()</code></b> is also implemented in a standard fashion.</p>
+<pre><code>STDMETHODIMP CCodeInstall::QueryInterface(REFIID riid, void** ppv)
+{
+   *ppv = NULL;
+   if (riid==IID_IUnknown || riid==IID_ICodeInstall)
+   {
+      *ppv = this;
+      AddRef();
+      return S_OK;
+   }
+   return E_NOINTERFACE;
+}
+</code></pre>
+<p>
+<b><code>ICodeInstall::GetWindow()</code></b> asks for a parent window to display some user interface. We return <b><code>NULL</code></b> which indicates that the desktop window should be used.</p>
+<pre><code>STDMETHODIMP CCodeInstall::GetWindow(REFGUID ab, HWND *pwnd)
+{
+   *pwnd = NULL; 
+   return S_OK; 
+}</code></pre>
+<p>
+To implement <b><code>ICodeInstall::OnCodeInstallProblem()</code></b>, we return <b><code>S_OK</code></b> for all the reported problems which we would ignore, and return <b><code>E_ABORT</code></b> for all other problems (e.g. out of disk space).</p>
+<pre><code>STDMETHODIMP CCodeInstall::OnCodeInstallProblem(ULONG ulStatus, LPCWSTR szDest, LPCWSTR szSrc, DWORD dwRes)
+{
+   switch(ulStatus)
+   {
+   case CIP_OLDER_VERSION_EXISTS:
+   case CIP_NAME_CONFLICT:
+   case CIP_TRUST_VERIFICATION_COMPONENT_MISSING:
+   case CIP_NEWER_VERSION_EXISTS:
+      return S_OK;
+   default:
+      return E_ABORT;
+   }
+}</code></pre>
+<p>
+Finally, we need to include the definitions for the two interfaces we're implementing as well as linking in the relevant library. The best place to add the required header is in <b><code>StdAfx.h</code></b>:</p>
+<pre><code>...
+#include &lt;atlbase.h&gt;
+//You may derive a class from CComModule and use it if you want to override
+//something, but do not change the name of _Module
+extern CComModule _Module;
+#include &lt;atlcom.h&gt;
+#include &lt;urlmon.h&gt;
+...</code></pre>
+<p>
+&nbsp;</p>
+<p>
+In the Link tab of the Project Setting dialog, you need to add <b><code>Urlmon.lib</code></b> to the list of library modules:</p>
+<p>
+<img src="03750932.gif" border=0></p>
+<p>
+This completes our implementation of the 'downloader' control. You can now compile, link, and register the control.</p>
+<h2>Coding the Test Client</h2>
+<p>
+Typically, a client of this object will:</p>
+<OL>
+<li>
+Call <b><code>ILoadlate::GetLatest()</code></b> with information for the object to download and install. This call will return immediately while the download and installation occurs asynchronously.<br><br></li>
+<li>
+Handle user interface or perform other tasks, while intermittently calling the <b><code>ILoadlate::PollResult()</code></b> looking for a status string of <b><code>“DONE!”</code></b>. It can also update the user on the progress of the download if desired.<br><br></li>
+<li>
+After <b><code>ILoadlate::PollResult()</code></b> returns <b><code>“DONE!”</code></b> for status, call <b><code>ILoadlate::GetFactory()</code></b> to obtain the class factory interface of the object.<br><br></li>
+<li>
+Use the class factory to create the object, and release the class factory.<br><br></li>
+<li>
+Proceed to use the newly created object.</li>
+</ol>
+<p>
+Let's follow these five steps and quickly code our test client. First, create a new Win32 application project in Visual C++ 5. We called ours 'lotestw'. Create a blank C++ source file in the project and start entering the code:</p>
+<pre><code>#include &lt;assert.h&gt;
+#include &lt;comdef.h&gt;
+#include "resource.h"
+
+#import "codeload.tlb" no_namespace
+#import "atldept.tlb" no_namespace
+</code></pre>
+<p>
+Here, we're using the native COM support of the Visual C++ 5 compiler again. In the two <b><code>#import</code></b> directives, we obtain the type information (and smart pointer definitions) for our <b><code>Atldept.dll</code></b>, as well as the type information from our new 'downloader' ActiveX control. Next, we have a few constant declarations.</p>
+<pre><code>const char szURLofObject[] = "http://PENTIUM1/ATLDEPT.DLL";
+const unsigned TIMER_DURATION = 200; // refresh every 200 ms
+const int TIMER_ID = 1001;</code></pre>
+<p>
+Since the <b><code>ILoadlate</code></b> interface supports polling, we'll be creating a Windows timer to activate our polling during the download. <b><code>TIMER_DURATION</code></b> is the interval time between each pool, the <b><code>TIMER_ID</code></b> is used to identify the timer in Win32 API calls. Next, we define a custom Windows message. This message is posted by the timer handler after receiving <b><code>“DONE!”</code></b> from the control; the handler for this message will get the <b><code>IClassFactory </code></b>interface and create an object from it.</p>
+<pre><code>#define   WM_CUSTOM1   WM_USER+100
+</code></pre>
+<p>
+The next section is the COM exception handling required by the native COM support. We aren't going to implement the details here, but you're free to do so.</p>
+<pre><code>void dump_com_error(_com_error &amp;e)
+{
+// handle error intelligently in here
+}</code></pre>
+<p>
+The <b><code>WinMain()</code></b> function is quite straightforward:</p>
+<pre><code>int WINAPI WinMain(HINSTANCE hinst, HINSTANCE hinstPrev, LPSTR szCmdLine, int nCmdShow)
+{
+   HRESULT  hr;
+   hr = CoInitialize(NULL);
+   if (FAILED(hr))
+      return hr;
+   DialogBox(hinst, MAKEINTRESOURCE(IDD_DIALOG1), HWND_DESKTOP, (FARPROC)&amp;DialogProc);
+   CoUninitialize();
+   return 0;
+}</code></pre>
+<p>
+In the above code, we simply call <b><code>CoInitialize()</code></b>, create a dialog box, then call <b><code>CoUninitialize()</code></b> and quit. Making the desktop window the parent for the dialog box means we don't need to create any window in <b><code>WinMain()</code></b> (however, <b><code>CoInitialize()</code></b>will actually create a hidden window). </p>
+<p>
+Let's take a look at the dialog box; create this using the resource editor in Visual C++ 5 and name it <b><code>IDD_DIALOG1</code></b> (the default).</p>
+<p>
+<img src="03750933.gif" border=0></p>
+<p>
+Use the default dialog generated by the resource editor, and change the text of the OK button to Install Object Asynchronously and the Cancel button to Exit. Create a read-only edit and name it <b><code>IDC_EDIT1</code></b>.</p>
+<p>
+Now, we're ready to examine our dialog procedure, where all of the testing logic resides. If you're keying in the code, make sure this goes before the <b><code>WinMain()</code></b> in the file.</p>
+<pre><code>BOOL CALLBACK DialogProc(HWND hwndDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+   static ILoadlatePtr  pIC;
+   long current, max;
+   BSTR bstrStatus;</code></pre>
+<p>
+We declare a smart pointer to our <b><code>ILoadlate</code></b> interface as static, so we would not recreate the object on every message. <b><code>Current</code></b>, <b><code>max</code></b>, and <b><code>bstrStatus</code></b> are to hold the results from <b><code>ILoadlate::PollResult()</code></b> for reporting to the end user. Next, we're into the message decoding loop portion:</p>
+<pre><code>&nbsp;&nbsp;&nbsp;switch(message)
+   {
+   case WM_INITDIALOG:
+      try
+      {
+         pIC.CreateInstance("Loadlate.Loadlate.1");
+      }
+      catch (_com_error &amp;e)
+      {
+         dump_com_error(e);
+      }
+      break;</code></pre>
+<p>
+In the <b><code>WM_INITDIALOG</code></b> message (sent only once after the creation of dialog box), we instantiate a 'downloader' control, and obtain the <b><code>ILoadlate </code></b>interface through the smart pointer using the <b><code>CreateInstance()</code></b> member. </p>
+<pre><code>&nbsp;&nbsp;&nbsp;case WM_TIMER:
+      {
+         bstrStatus =  pIC-&gt;PollResult(&amp;current, &amp;max);
+         char    sz[255];
+         if(bstrStatus!=NULL)
+            WideCharToMultiByte(CP_ACP, 0, bstrStatus,-1, sz, 255, 0,0);
+         char    msg[100];
+         wsprintf(msg,"Loading: %s %d of %d ", sz, current, max);
+         SetWindowText(GetDlgItem(hwndDlg,IDC_EDIT1), msg);
+         if (wcscmp(bstrStatus, L"DONE!") == 0)
+         {
+            KillTimer(hwndDlg, TIMER_ID);
+            PostMessage(hwndDlg, WM_CUSTOM1, 0, 0);
+         }
+       }
+       break;</code></pre>
+<p>
+The next message handled here is the timer message. We call the <b><code>ILoadlate::PollResult()</code></b> method through the smart pointer <b><code>pIC</code></b> and then fill the edit box in the dialog with the status. We convert the string from wide character <b><code>BSTR</code></b> to MBCS in order to format the output using <b><code>wsprintf()</code></b>. If the download is completed, we stop the timer messages and then post our custom message <b><code>WM_CUSTOM1</code></b>.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;case WM_CUSTOM1:
+      {
+         HRESULT hr;
+         IClassFactory * tpF = (IClassFactory *) pIC-&gt;GetFactory();
+         IUnknown * tp2;
+         tpF-&gt;CreateInstance(NULL, IID_IUnknown, (void **) &amp;tp2);
+         if (!FAILED(hr))
+            SetWindowText(GetDlgItem(hwndDlg, IDC_EDIT1), "Object Created!");
+         else
+            SetWindowText(GetDlgItem(hwndDlg, IDC_EDIT1), "Cannot create obj!");
+         tpF-&gt;Release();
+         tp2-&gt;Release();
+      }
+      break;</code></pre>
+<p>
+Handling of the <b><code>WM_CUSTOM1</code></b> message is straightforward. At this time, the download has been completed. We obtain the <b><code>IClassFactory</code></b> interface by calling <b><code>ILoadlate::GetFactory()</code></b> through the smart pointer. We then use <b><code>IClassFactory::CreateInstance()</code></b> to create an instance of the ATLDept object. If this is successful, we print the message Object Created! in the dialog box. In any case, we release the class factory and the object before returning.</p>
+<p>
+We come now to the button handling messages:</p>
+<pre><code>&nbsp;&nbsp;&nbsp;case WM_COMMAND:
+      {
+         switch (LOWORD(wParam))
+         {
+         case IDOK:
+            {
+               _bstr_t bstrUrl(szURLofObject);
+               _bstr_t bstrStatus;
+               try
+               {
+                  LPOLESTR  ab;
+                  CLSID myID = __uuidof(ATLDept1);
+   
+                  StringFromCLSID(myID, &amp;ab);
+                  _bstr_t bstrProgID(ab);
+
+                  pIC-&gt;GetLatest(bstrProgID, bstrUrl);
+               }
+               catch (_com_error &amp;e)
+               {
+                  dump_com_error(e);
+               };
+               SetTimer(hwndDlg, TIMER_ID, TIMER_DURATION, NULL);
+            }
+            break;</code></pre>
+<p>
+When the Install Object Asynchronously button (OK button) is pressed, we call <b><code>ILoadlate::GetLatest()</code></b>. This is done by calling <b><code>StringFromCLSID()</code></b> on the CLSID of the ATLDept object that we want to create to get a <b><code>BSTR</code></b> parameter. We also start the timer for refreshing the status edit box during the download.</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;case IDCANCEL:
+            pIC.Release();
+            EndDialog(hwndDlg,0);
+            return 1;
+         }
+         break;
+      }
+   }
+   return 0;
+}</code></pre>
+<p>
+Finally, if the user presses the Exit button, we release the interface encapsulated within our smart pointer and exit from the application.</p>
+<p>
+This is all the code required to download and install the ATLDept object. Thanks to the 'downloader' control and its <b><code>ILoadlate</code></b> interface, the code for this client is very simple and uncluttered. </p>
+<p>
+You can now compile the test program. Make sure that you have updated the URL embedded in the test program so that it points to your own web server.</p>
+<h2>Testing the Downloader Control</h2>
+<p>
+The following is the procedure for testing the 'downloader' control with the test program.</p>
+<OL>
+<li>
+Unregister the current ATLDept1 object by going to the directory where <b><code>Atldept.dll</code></b> resides, and perform a <b><code>REGSVR32 /U ATLDEPT.DLL</code></b>.<br><br></li>
+<li>
+Use <b><code>Oleview.exe</code></b> to ensure that the ATLDept1 object no longer shows up (i.e. removed from the registry).<br><br></li>
+<li>
+Copy <b><code>Atldept.dll</code></b> to the location of the URL. In our case, we have it at <b><code>C:\Webshare\Wwwroot\Atldept.dll</code></b>. The Personal Web Server for Windows 95 is set to point to the directory <b><code>\Webshare\Wwwroot</code></b> as the root directory. Our URL is <b><code>http://PENTIUM1/ATLDEPT.DLL</code></b>.<br><br></li>
+<li>
+Make sure your web server is working properly.<br><br></li>
+<li>
+Start the test program, <b><code>Lotestw.exe</code></b>.<br><br></li>
+<li>
+Press the Install Object Asynchronously button.</li>
+</ol>
+<p>
+If everything is working properly, you should start to see the status appearing in the read-only edit of the dialog box. You should also see or hear some disk activity. It will report the download progress (but this probably won't be for too long since <b><code>Atldept.dll</code></b> is so small in size). After the download, the following security dialog will pop up asking if it's all right to install a component:</p>
+<p>
+<img src="03750934.gif" border=0></p>
+<p>
+If you click <u>Y</u>es, the installation will complete, and you should see the Object Created! message in the dialog. This indicates a successful object creation using <b><code>CoGetClassObjectFromURL()</code></b> call.</p>
+<p>
+To convince yourself, use the <b><code>Oleview.exe</code></b> program to see that now the ATLDept1 class is registered again. Click on the class entry to create an instance and notice that it is now working.</p>
+<p>
+If you like to repeat the test, you must first remove the newly registered DLL. </p>
+<OL>
+<li>
+Go to the <b><code>\Windows\Occache</code></b> directory.<br><br></li>
+<li>
+Do a <b><code>REGSVR32 /U ATLDEPT.DLL</code></b> to remove the registry entries. <br><br></li>
+<li>
+Delete <b><code>Atldept.dll</code></b> to remove the downloaded DLL.<br><br></li>
+<li>
+Restart the test program and try download/install again.</li>
+</ol>
+<p>
+The 'downloader' ActiveX control substantially simplifies the calls to perform automated code download and install. It can also be called from C++ or other clients (i.e. Visual Basic). While the Internet Explorer itself provides automation capability similar to the 'downloader' control, the control provides the function with a significantly smaller code and runtime memory footprint.</p>
+</BODY>
+</HTML>

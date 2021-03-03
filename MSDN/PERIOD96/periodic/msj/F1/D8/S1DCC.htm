@@ -1,0 +1,589 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>C++ Q &amp; A</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  C++ Q &amp; A</H1><P>Paul DiLascia</P>
+<P>Paul DiLascia is a freelance software consultant specializing in training and software development in C++ and Windows. He is the author <I>of Windows++: Writing Reusable Code in C++</I> (Addison-Wesley, 1992).</P>
+<P><font size="6" face="verdana,arial,helvetica">Q</font>I am trying to fill a list box with filenames using the MFC function CWnd:: DlgDirList. I am using MFC 4.0 and Windows<FONT FACE="Symbol">"</FONT> 95. The list box fills fine, but instead of long filenames I get the short MS-DOS names. How can I get long filenames in my list box?</P>
+<P>Charles Parker</P>
+<P><font size="6" face="verdana,arial,helvetica">A</font>CWnd::DlgDirList is a wrapper for the Windows API DlgDirList. Under Microsoft<FONT FACE="Symbol">"</FONT> Windows 95, this function thunks down to the 16-bit version of DlgDirList in USER.EXE. In other words, DlgDirList is really a 16-bit function inherited from Windows 3.1. Because DlgDirList was never ported, it displays the old MS-DOS filenames. (The version of DlgDirList in Windows NT<FONT FACE="Symbol">"</FONT> works fine, as you would expect, since Windows NT has only long filenames.) PRB report Q131286 in the MSDN CD suggests converting your path spec to its short name by calling GetShortPathName before you pass the file spec to DlgDirList, but the PRB doesn't say how to make long names appear in your list box. In other words, the friendly Redmondtonians have cleverly spun the problem as not recognizing long filename specs rather than not displaying long filenames. They admit the flaw and then assert in their typically cryptic fashion, "this behavior is by design," without giving any reason. I suspect it has something to do with compatibility with old apps; maybe they were afraid some old programs that allocated thirteen bytes for 8.3 filenames (plus a zero at the end) would break when the list box got back too many characters under Windows 95. You'd think they'd at least give you a new flag or something to get the long filenames.</P>
+<P>In any case, the question is what can you do about it? Frankly, not much. You have to forget about DlgDirList and generate the list yourself. Fortunately, it's pretty easy. Two API functions provide all the interface you need to navigate the files in a directory that match a file spec like *.* or *.txt: _findfirst and _findnext, both defined in &lt;io.h&gt;. (Yes, it still exists, even in the land of Windows.) These functions fill a C struct called _finddata_t.</P>
+<P> </P>
+<P><BR></P>
+<PRE> struct _finddata_t {
+    unsigned    attrib;
+    time_t    time_create; /*-1forFATfilesystems*/
+    time_t    time_access; /*-1forFATfilesystems */
+    time_t    time_write;
+    _fsize_t  size;
+    char    name[260];
+};</PRE>
+<P> </P>
+<P>The attrib member is a flag field that may contain any combination of the following flags:</P>
+<P> </P>
+<P><BR></P>
+<PRE> _A_NORMAL /* Normalfile-Noread/writerestrictions */
+_A_RDONLY /* Read only file */
+_A_HIDDEN /* Hidden file */
+_A_SYSTEM /* System file */
+_A_SUBDIR /* Subdirectory */
+_A_ARCH   /* Archive file */</PRE>
+<P> </P>
+<P>The various time_t members are what you'd expect; _fsize_t is the size of the file, and "name" is the filename relative to the current working directory. To use the findfile functions, you first call _findfirst with a file spec. </P>
+<P> </P>
+<P><BR></P>
+<PRE> _finddata_t fdata;
+long ffhandle = _findfirst(*.txt, &amp;fdata);</PRE>
+<P> </P>
+<P>This fills fdata with information about the first file in the current directory that matches *.txt. If such a file exists, its information is stored in the _finddata_t struct and ffhandle gets a value other than –1. Usually, you'll examine the attribute bytes to skip over files such as directories or hidden/system files—unless that's what you're interested in—and then call _findnext repeatedly to get information about other files that match your file spec. When there are no more files, _findnext returns a nonzero value, which is your cue to call _findclose to release the ffhandle. _findfirst and company are old functions that you probably know and love from MS-DOS, but they're still important, at times even essential, in Windows. </P>
+<P>Since this is a C++ column, I wrote a C++ class, CFileSpec, that encapsulates the findfile API (see<B> </B><B>Figure 1</B>). CFileSpec is entirely self contained; it has nothing to do with list boxes. I use CFileSpec all the time, usually in MS-DOS-shell utility programs that do things with files. For example, I wrote a Unix-like wc (word count) utility using CFileSpec that counts pages as well as lines, words, and characters.</P>
+<P>CFileSpec is implemented entirely within a single header file, filespec.h, so all I have to do is #include it in any app that uses it. I don't have to worry about linking with an object file or library.</P>
+<P><B> Figure 1  FILESPEC.H</B></P>
+<P><BR></P>
+<PRE> #include &lt;string.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;io.h&gt;
+
+#ifndef BOOL
+typedef int BOOL;
+#endif
+
+//////////////////
+// Class to to navigate files that match a spec with wildcards
+//
+class CFileSpec : public _finddata_t {
+      long            m_hfile;            // handle from findfirst
+
+public:
+       CFileSpec() {
+            m_hfile = -1;
+      }
+
+      ~CFileSpec() {
+            if (m_hfile&gt;=0)
+                  _findclose(m_hfile);
+      }
+
+      BOOL First(const char* filespec) {
+            if (m_hfile&gt;=0)
+                  _findclose(m_hfile);
+            return (m_hfile=_findfirst((char*)filespec, this)) != -1;
+      }
+
+      BOOL Next() {
+            return m_hfile&gt;=0 &amp;&amp; _findnext(m_hfile, this)==0;
+      }
+};</PRE>
+<P> </P>
+<P>The implementation itself is mostly straightforward.  There are only two tricks you may not notice right away. First, I derived CFileSpec from _finddata_t, which is why CFileSpec::First and Next pass the this pointer as the second argument to _findfirst and _findnext. I use this tactic only because it makes accessing the information in _finddata_t easier. For example, you can write filespec.attrib to get the attribute byte or filespec.name to get the filename. This is marginally easier than writing something like  filespec.data.name, which is what it would be if I made _finddata_t a member instead of a base class.</P>
+<P>The second trick is that there's no Close function to mirror _findclose. Instead, CFileSpec closes the handle in its destructor. Generally, I use CFileSpec to enumerate the files matching a single spec. However, just in case someone tries to call First with another file spec, CFileSpec::First also closes the findfile handle if it's already open.</P>
+<P>To test CFileSpec, I wrote a program called DIRLIST  that compares the filenames generated by ::DlgDirList and CFileSpec (see <B>Figure 2</B>). As you can see from <B>Figure 3</B>, DlgDirList produces the short MS-DOS names, whereas CFileSpec gives you the long filenames. The main action in DIRLIST occurs when the dialog is initialized. The dialog's OnInitDialog handler subclasses the list boxes and calls CListBox::DlgDirList (actually it's in CWnd) for one list box. It uses CFileSpec to fill the other:</P>
+<P> </P>
+<P><BR></P>
+<PRE> CFileSpec spec;
+for (BOOL more=spec.First("*.*"); more; more=spec.Next()) {
+    if(!(spec.attrib&amp;(_A_SUBDIR|_A_HIDDEN|_A_SYSTEM)))
+    m_lb2.AddString(spec.name);
+}</PRE>
+<P> </P>
+<P><B> Figure 2  DIRLIST.CPP</B></P>
+<P><BR></P>
+<PRE> ////////////////////////////////////////////////////////////////
+// DIRLIST Copyright 1996 Microsoft Systems Journal. 
+// If this program works, it was written by Paul DiLascia.
+// If not, I don't know who wrote it.
+//
+// DIRLIST illustrates how to fill a list box with long filenames.
+
+
+#include "stdafx.h"
+#include "resource.h"
+#include "filespec.h"
+
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#undef THIS_FILE
+static char THIS_FILE[] = __FILE__;
+#endif
+
+////////////////////////////////////////////////////////////////
+// Dialog class
+//
+class CMyDialog : public CDialog {
+      CListBox m_lb1;
+      CListBox m_lb2;
+public:
+      CMyDialog();
+      virtual BOOL OnInitDialog();
+      DECLARE_MESSAGE_MAP()
+};
+
+BEGIN_MESSAGE_MAP(CMyDialog, CDialog)
+END_MESSAGE_MAP()
+
+CMyDialog::CMyDialog() : CDialog(IDD_DIALOG1)
+{
+}
+
+////////////////
+// Initialize dialog: Subclass the edit controls
+//
+BOOL CMyDialog::OnInitDialog()
+{
+      BOOL bRet = CDialog::OnInitDialog();
+      m_lb1.SubclassDlgItem(IDC_LIST1, this);
+      m_lb2.SubclassDlgItem(IDC_LIST2, this);
+
+      // Initialize list box #1 using DlgDirList
+      char dir[128] = "*.*";
+      DlgDirList(dir, IDC_LIST1, 0, DDL_READWRITE);
+
+      // Initialize list box #2 using CFileSpec
+      CFileSpec spec;
+      for (BOOL more=spec.First("*.*"); more; more=spec.Next()) {
+            if (spec.attrib &amp; (_A_SUBDIR|_A_HIDDEN|_A_SYSTEM))
+                  continue;
+            m_lb2.AddString(spec.name);
+      }
+      return bRet;
+}
+
+////////////////////////////////////////////////////////////////
+// Application class </PRE>
+<P></P>
+<P><img src="cqa3.gif"></P>
+<P><B> Figure 3  Long filenames ahoy!</B></P>
+<P>This code adds all the "normal" files in the current directory to my list box. That is, names that do not represent hidden or system files or the names of subdirectories. It's a little more work than calling DlgDirList, but at least you get the long filenames. </P>
+<P>As an enhancement to CFileSpec, you could add another argument to CFileSpec::First that represents an attribute mask, which you would use to filter out files the way DlgDirList does. With this added functionality, you wouldn't have to check the attribute byte in your app since it would be part of CFileSpec. You could even derive a general-purpose enumerator class from CFileSpec. Such a class would have a function CFileEnumerator::Enumerate(const char* filespec)—perhaps with an attribute mask—and would do the First/Next enumeration, calling some other virtual function (something like CFileEnumerator::Action) for each filename. CFileEnumerator::Action would be abstract; that is, there would be no implementation in CFileEnumerator. Programmers using the file enumerator would have to derive from CFileEnumerator and implement their own Action function to do whatever they want with each file. Such enumerator classes are common in many C++ class libraries. In this case it seems more trouble than it's worth, since CFileSpec is already so simple.</P>
+<P></P>
+<P></P>
+<P><font size="6" face="verdana,arial,helvetica">Q</font>I'm having a tough time trying to figure out how to change the colors of CEdit controls on a dialog box when the focus comes to them, then change back to normal when the focus is lost. I'm building a data-entry application with MFC 4.0. My application contains several dialog boxes and my client wants the current data-entry field to be a different color from the others (for example, white-on-red) so users can more easily see where they are on the form. When the user tabs to the next field, the first one loses focus and reverts to the common background color and the next one gets the focus and changes to the new "data entry color."</P>
+<P>This is trivial in Visual Basic<FONT FACE="Symbol">"</FONT> 4.0, so I figured it would be easy in MFC too. But I've tried different things and I can't get the (expletive deleted) CEdit controls to do my bidding. Am I just a klutz or is there something wrong with MFC?</P>
+<P>Don F. Ridgway</P>
+<P>Tampa, FL</P>
+<P></P>
+<P><font size="6" face="verdana,arial,helvetica">A</font>No, you're not a klutz, and no, there's nothing wrong with MFC. The difficulty you're having setting control colors is an artifact of Windows itself, and your question is one of the most common I get from readers. I've answered it in previous issues, but since MFC has a new mechanism you can use for setting colors (as of release 4.0), I thought I'd revisit the topic.</P>
+<P>In Windows, there are no simple properties for setting the foreground and background colors of an edit control (or any other dialog control). In Visual Basic, you can simply write, </P>
+<P> </P>
+<P><BR></P>
+<PRE> Edit1.BackColor = Yellow
+Edit1.ForeColor = Red</PRE>
+<P> </P>
+<P>but behind the scenes, Visual Basic goes through a lot of rigamarole to make this work. The mechanics for setting the color of a Windows control require handling the special message WM_CTLCOLOR, which Windows sends when it's about to paint a control. I won't go into a detailed explanation here, as this topic is covered in the Win32<FONT FACE="Symbol">"</FONT> documentation for WM_CTLCOLOR and numerous articles in MSDN (including some of my own, probably). I'll just give you the quick recap for edit controls. To set the color of an edit control, you must first handle WM_CTLCOLOR and check for the code CTLCOLOR_EDIT, in which case you must return the brush you want to use for the background. Second, you must call SetBkColor and SetTextColor on the HDC that Windows passes as part of the WM_CTLCOLOR message. If you think all this is strange, you're in good company. </P>
+<P>At this point, I need to make a clarification. All of what I just said applies to 16-bit Windows only; in Win32, each of the WM_CTLCOLOR messages have been broken out into its own message. For example, there's WM_CTLCOLOREDIT for edit controls and WM_CTLCOLORBTN for buttons. However, MFC repackages these messages into old-style WM_CTLCOLOR messages, so if you implement your code using WM_CTLCOLOR (as opposed to WM_CTLCOLOREDIT), it'll work in either 16 or 32-bit Windows, which is why I've done it that way. If you only plan to use Win32, you can modify my code to handle WM_CTLCOLOREDIT directly and you won't need to check for the subcode CTLCOLOR_EDIT. Now, on with our regular programming. . .</P>
+<P>Aside from the obvious weirdness, one problem in particular with this scheme is that WM_CTLCOLOR is not sent to the control as you might hope or even expect. No, Windows sends WM_CTLCOLOR to the parent window—in this case your dialog—which means you now come to a fork in the road. You can implement the solution either as part of the parent dialog or as part of the control (by using a new technique called message reflection). The approach you choose depends on whether you consider the "data entry color" feature to be a feature of the edit control or of the dialog. I'll show you both solutions and describe the pros and cons of each.</P>
+<P>Let's start with the "data entry color" feature as part of the edit control. For this scenario, you want the edit control—that is, your program's CEdit-derived class—to implement the color feature. This is where the new MFC 4.x message reflection feature comes in. A sample program, called COLDLG1, shows how it works (see<B> </B><B>Figure 4</B>). <B>Figure 5</B> shows COLDLG1 in action with the focus control highlighted by red-on-yellow text. </P>
+<P><B> Figure 4  COLDLG1</B></P>
+<P><BR></P>
+<PRE> </PRE>
+<P>DLGCOLOR.CPP</P>
+<P><BR></P>
+<PRE> ////////////////////////////////////////////////////////////////
+// DLGCOLOR Copyright 1996 Microsoft Systems Journal. 
+// If this program works, it was written by Paul DiLascia.
+// If not, I don't know who wrote it.
+//
+// DLGCOLOR illustrates how to implement edit controls that change
+// color when they receive focus.
+// This implementation uses MFC message reflection.
+
+#include "stdafx.h"
+#include "resource.h"
+#include "dlg.h"
+
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#undef THIS_FILE
+static char THIS_FILE[] = __FILE__;
+#endif
+
+////////////////
+// Standard application class 
+//
+class CMyApp : public CWinApp {
+public:
+   CMyApp();
+   virtual BOOL InitInstance();
+   //{{AFX_MSG(CMyApp)
+   //}}AFX_MSG
+   DECLARE_MESSAGE_MAP()
+};
+
+CMyApp NEAR theApp;
+
+BEGIN_MESSAGE_MAP(CMyApp, CWinApp)
+   //{{AFX_MSG_MAP(CMyApp)
+   //}}AFX_MSG_MAP
+END_MESSAGE_MAP()
+
+CMyApp::CMyApp()
+{
+}
+
+BOOL CMyApp::InitInstance()
+{
+   CMyDialog dlg;
+   m_pMainWnd = &amp;dlg;
+   dlg.DoModal();
+   return FALSE;
+}
+
+</PRE>
+<P>DITCLR.H</P>
+<P><BR></P>
+<PRE> #include "stdafx.h"
+
+//////////////////
+// Edit control that changes colors when it has focus.
+//
+class CColorEdit : public CEdit {
+public:
+   CColorEdit() { }
+   afx_msg HBRUSH CtlColor(CDC* pDC, UINT nCtlColor);
+   afx_msg void OnSetFocus(CWnd* pOldWnd);
+   afx_msg void OnKillFocus(CWnd* pNewWnd);
+   DECLARE_MESSAGE_MAP()
+};
+
+</PRE>
+<P>EDITCLR.CPP</P>
+<P><BR></P>
+<PRE> #include "stdafx.h"
+#include "editclr.h"
+
+//////////////////
+// You could make these user-customizable.
+//
+const COLORREF BK_COLOR = RGB(255,255,0); // yellow
+const COLORREF FG_COLOR = RGB(255,0,0);   // red
+
+BEGIN_MESSAGE_MAP(CColorEdit, CEdit)
+   ON_WM_CTLCOLOR_REFLECT()
+   ON_WM_SETFOCUS()  
+   ON_WM_KILLFOCUS() 
+END_MESSAGE_MAP()
+
+/////////////////
+// Handle WM_CTLCOLOR reflected from parent:
+// If I have the focus, return the "highlight color."
+// Must also set text and background colors, that's a Windows thing.
+// 
+HBRUSH CColorEdit::CtlColor(CDC* pDC, UINT nCtlColor)
+{
+   // If I have the focus, use fg/bg color; else do nothing
+   //
+   if (CWnd::GetFocus()==this) {
+      // By making the brush static, only one is used for all
+      // instances of CColorEdit. The compiler doesn't initialize it
+      // until the first time CColorEdit::CtlColor is called
+      //
+      static CBrush s_brush(BK_COLOR);
+
+      pDC-&gt;SetBkColor(BK_COLOR);    // required for edit controls
+      pDC-&gt;SetTextColor(FG_COLOR);  // ditto
+      return s_brush;               // return background brush
+   } 
+   return NULL;
+}
+
+//////////////////
+// I got focus: force repaint
+//
+void CColorEdit::OnSetFocus(CWnd* pOldWnd)
+{
+   Invalidate();           // invalidate client area
+   UpdateWindow();         // force repaint now
+   CEdit::OnSetFocus(pOldWnd);
+}
+
+//////////////////
+// I lost focus: force repaint
+//
+void CColorEdit::OnKillFocus(CWnd* pNewWnd)
+{
+   Invalidate();           // invalidate client area
+   UpdateWindow();         // force repaint now
+   CEdit::OnKillFocus(pNewWnd);
+}
+
+</PRE>
+<P>DLG.H</P>
+<P><BR></P>
+<PRE> #include "stdafx.h"
+#include "resource.h"
+#include "editclr.h"
+
+////////////////////////////////////////////////////////////////
+// Dialog class
+//
+class CMyDialog : public CDialog {
+   CColorEdit  m_edit1;       // three edit controls
+   CColorEdit  m_edit2;
+   CColorEdit  m_edit3;
+public:
+   CMyDialog();
+   virtual BOOL OnInitDialog();
+   DECLARE_MESSAGE_MAP()
+};
+
+</PRE>
+<P>DLG.CPP</P>
+<P><BR></P>
+<PRE> #include "stdafx.h"
+#include "resource.h"
+#include "dlg.h"
+
+BEGIN_MESSAGE_MAP(CMyDialog, CDialog)
+END_MESSAGE_MAP()
+
+CMyDialog::CMyDialog() : CDialog(IDD_DIALOG1)
+{
+}
+
+////////////////
+// Initialize dialog: Subclass the edit controls
+//
+BOOL CMyDialog::OnInitDialog()
+{
+   BOOL bRet = CDialog::OnInitDialog();
+   m_edit1.SubclassDlgItem(IDC_EDIT1, this);
+   m_edit2.SubclassDlgItem(IDC_EDIT2, this);
+   m_edit3.SubclassDlgItem(IDC_EDIT3, this);
+   return bRet;
+}</PRE>
+<P><img src="cqa5.gif"></P>
+<P><B> Figure 5  COLDLG1</B></P>
+<P>Message reflection lets child windows handle certain messages that would normally go to the parent. For example, WM_CTLCOLOR. In the old days, there was no way to implement a nice, self-contained, object-oriented edit control that could handle its own colors. You had no choice except to handle WM_CTLCOLOR in the dialog. Later, MFC (and I can't remember exactly which version, but one of the early ones) gave us a virtual function, OnChildNotify, that provided a hook for child controls to handle certain parent messages. MFC routed several messages (WM_CTLCOLOR, WM_DRAWITEM, WM_COMMAND, and WM_NOTIFY, to name a few) to the child window's OnChildNotify before the parent got a chance to process them, so all you had to do was override OnChildNotify in your child control. </P>
+<P> </P>
+<P><BR></P>
+<PRE> BOOL CMyEdit:OnChildNotify(UINT msg, 
+                           WPARAM wParam, 
+                           LPARAM lParam, 
+                           LRESULT* pResult)
+{
+    if (msg==WM_CTLCOLOR) {
+        // handle it
+        return TRUE;    // handled
+    }
+    return FALSE; // let parent handle it
+}</PRE>
+<P> </P>
+<P>That was pretty good, but it still resembled the old style of programming for Windows with message codes and switch statements. MFC 4.0 carried the idea one step further with message reflection. This is just a fancy name for the ability to handle child-based messages though message maps instead of OnChildNotify.</P>
+<P> </P>
+<P><BR></P>
+<PRE> BEGIN_MESSAGE_MAP(CColorEdit, CEdit)
+    ON_WM_CTLCOLOR_REFLECT()</PRE>
+<P> ·</P>
+<P>·</P>
+<P>·</P>
+<P><BR></P>
+<PRE>     
+END_MESSAGE_MAP()
+
+/////////////////
+// Handle WM_CTLCOLOR reflected from parent:
+// 
+HBRUSH CColorEdit::CtlColor(CDC* pDC, UINT nCtlColor)
+{
+    // handle it</PRE>
+<P> ·</P>
+<P>·</P>
+<P>·</P>
+<P><BR></P>
+<PRE>     return NULL;    // (or brush to use)
+}</PRE>
+<P> </P>
+<P>As with other message-map macros, the name of the handler function, in this case CtlColor, is hardwired into the macro; you must use this name. The point is that, with the new message-map entry, WM_CTLCOLOR is handled by CColorEdit instead of its parent dialog. The CColorEdit control can set its own colors appropriately when the focus changes. With this information, you should be able to understand how COLDLG1 works—except for one little kludge.</P>
+<P>Normally, Windows doesn't repaint an edit control when it gains or loses focus. To make your colors effective, you must tell the edit control to repaint itself. Fortunately, this is trivial: when your edit control gets a WM_SETFOCUS or WM_KILLFOCUS, just Invalidate it and call UpdateWindow. Invalidate/UpdateWindow is the way in Windows  to force any window to repaint itself. The dialog instantiates the three CColorEdit controls and the OnInitDialog handler subclasses them, whereupon the CColorEdit message map does its thing. As you'd expect, MFC provides other message reflection macros besides ON_WM_CTLCOLOR_REFLECT. <B>Figure 6</B> shows the full list. For more information, read MFC Technical Note 62.</P>
+<P><B> Figure 6  MFC Message Reflection Macros</B></P>
+<P><BR></P>
+<PRE> ON_WM_CTLCOLOR_REFLECT()
+ON_WM_DRAWITEM_REFLECT()
+ON_WM_MEASUREITEM_REFLECT()
+ON_WM_DELETEITEM_REFLECT()
+ON_WM_CHARTOITEM_REFLECT()
+ON_WM_VKEYTOITEM_REFLECT()
+ON_WM_COMPAREITEM_REFLECT()
+ON_WM_HSCROLL_REFLECT()
+ON_WM_VSCROLL_REFLECT()
+ON_WM_PARENTNOTIFY_REFLECT()
+ON_CONTROL_REFLECT(wNotifyCode, memberFxn)
+ON_CONTROL_REFLECT_EX(wNotifyCode, memberFxn)
+ON_NOTIFY_REFLECT(wNotifyCode, memberFxn)
+ON_NOTIFY_REFLECT_EX(wNotifyCode, memberFxn) 
+ON_UPDATE_COMMAND_UI_REFLECT(memberFxn)</PRE>
+<P> </P>
+<P>Now, you may not consider this "data entry color" feature to be a property of the edit controls. You may instead consider it a property of the dialog. Suppose you add a new edit control to the dialog—should you really have to add a new m_edit4 and subclass it in CMyDialog::OnInitDialog? It might be nicer if the dialog detected edit controls automatically and set their colors appropriately.</P>
+<P><B>Figure 7</B> shows my sample program rewritten with a dialog-based implementation. As you would expect, it's a lot simpler. Since Windows already sends WM_CTLCOLOR to the dialog, there's no need to reflect it to the control. In fact, in this implementation, there's no CColorEdit class at all because the dialog handles WM_CTLCOLOR. It sets the appropriate color based on whether or not the edit control has focus. The dialog does the same Invalidate/UpdateWindow trick to repaint edit controls as they gain or lose focus. However, instead of handling WM_SET/KILLFOCUS, the dialog handles WM_COMMAND with notification codes EN_SET/KILLFOCUS since that's how the message arrives from Windows.</P>
+<P> </P>
+<P><BR></P>
+<PRE> BEGIN_MESSAGE_MAP(CMyDialog, CDialog)
+    ON_WM_CTLCOLOR()
+    ON_CONTROL_RANGE(EN_SETFOCUS,  0, 0xFFFFFFFF,<BR>                     OnEnSetFocus)
+    ON_CONTROL_RANGE(EN_KILLFOCUS, 0, 0xFFFFFFFF,<BR>                     OnEnKillFocus)
+END_MESSAGE_MAP()</PRE>
+<P> </P>
+<P><B> Figure 7  COLDLG2</B></P>
+<P><BR></P>
+<PRE> </PRE>
+<P>DLGCOLOR.CPP</P>
+<P><BR></P>
+<PRE> ////////////////////////////////////////////////////////////////
+// DLGCOLOR Copyright 1996 Microsoft Systems Journal. 
+// If this program works, it was written by Paul DiLascia.
+// If not, I don't know who wrote it.
+//
+// DLGCOLOR illustrates how to implement edit controls that change
+// color when they receive focus.
+// This implementation uses the dialog, not the edit control, to implement
+// the colors.
+
+#include "stdafx.h"
+#include "resource.h"
+#include "dlg.h"
+
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#undef THIS_FILE
+static char THIS_FILE[] = __FILE__;
+#endif
+
+////////////////
+// Standard application class 
+//
+class CMyApp : public CWinApp {
+public:
+   CMyApp();
+   virtual BOOL InitInstance();
+   //{{AFX_MSG(CMyApp)
+   //}}AFX_MSG
+   DECLARE_MESSAGE_MAP()
+};
+
+CMyApp NEAR theApp;
+
+BEGIN_MESSAGE_MAP(CMyApp, CWinApp)
+   //{{AFX_MSG_MAP(CMyApp)
+   //}}AFX_MSG_MAP
+END_MESSAGE_MAP()
+
+CMyApp::CMyApp()
+{
+}
+
+BOOL CMyApp::InitInstance()
+{
+   CMyDialog dlg;
+   m_pMainWnd = &amp;dlg;
+   dlg.DoModal();
+   return FALSE;
+}
+
+</PRE>
+<P>DLG.H</P>
+<P><BR></P>
+<PRE> #include "stdafx.h"
+#include "resource.h"
+
+////////////////
+// Dialog class
+//
+class CMyDialog : public CDialog {
+   void  RepaintIfEdit(CWnd* pWnd);
+public:
+   CMyDialog();
+   afx_msg void   OnEnSetFocus(UINT nID);
+   afx_msg void   OnEnKillFocus(UINT nID);
+   afx_msg HBRUSH OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor);
+   DECLARE_MESSAGE_MAP()
+};
+
+</PRE>
+<P>DLG.CPP</P>
+<P><BR></P>
+<PRE> #include "stdafx.h"
+#include "resource.h"
+#include "dlg.h"
+
+BEGIN_MESSAGE_MAP(CMyDialog, CDialog)
+   ON_WM_CTLCOLOR()
+   ON_CONTROL_RANGE(EN_SETFOCUS,  0, 0xFFFFFFFF, OnEnSetFocus)
+   ON_CONTROL_RANGE(EN_KILLFOCUS, 0, 0xFFFFFFFF, OnEnKillFocus)
+END_MESSAGE_MAP()
+
+CMyDialog::CMyDialog() : CDialog(IDD_DIALOG1)
+{
+}
+
+//////////////////
+// Handle EN_SETFOCUS notification. Repaint the edit control.
+//
+void CMyDialog::OnEnSetFocus(UINT nID)
+{
+   RepaintIfEdit(GetDlgItem(nID));
+}
+
+//////////////////
+// Handle EN_KILLFOCUS notification. Repaint the edit control.
+// Note: This could be the same actual function as OnEnSetFocus,
+// but I separated them for clarity.
+//
+void CMyDialog::OnEnKillFocus(UINT nID)
+{
+   RepaintIfEdit(GetDlgItem(nID));
+}
+
+/////////////////
+// Helper function to repaint control if it's an edit control.
+// Required because other kinds of controls could use the 
+// same notification ID as EN_SET/KILLFOCUS.
+//
+void CMyDialog::RepaintIfEdit(CWnd* pWnd)
+{
+   char classname[80]="";
+   ::GetClassName(pWnd-&gt;GetSafeHwnd(), classname, sizeof(classname));
+   if (strcmp(classname,"Edit")==0) { // if edit control:
+      pWnd-&gt;Invalidate();     // invalidate edit control
+      pWnd-&gt;UpdateWindow();   // force repaint now
+   }
+}
+
+const COLORREF BK_COLOR = RGB(255,255,0); // yellow
+const COLORREF FG_COLOR = RGB(255,0,0);   // red
+
+//////////////////
+// Handle WM_CTLCOLOR: If edit control, return appropriate color
+//
+HBRUSH CMyDialog::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor)
+{
+
+   if (nCtlColor==CTLCOLOR_EDIT &amp;&amp; 
+      // Be sure to use HWND to check for window identity
+      pWnd-&gt;m_hWnd==CWnd::GetFocus()-&gt;GetSafeHwnd()) {
+
+      // By making the brush static, only one is used for all
+      // instances of CColorEdit. The compiler doesn't initialize it
+      // until the first time CColorEdit::CtlColor is called.
+      //
+      // For a user-customizable color, you could make this an application
+      // class member (app global) and set it when the user customizes
+      // the color.
+      //
+      static CBrush s_brush(BK_COLOR);
+      pDC-&gt;SetBkColor(BK_COLOR);    // required for edit controls
+      pDC-&gt;SetTextColor(FG_COLOR);  // ditto
+      return s_brush;               // return background brush
+   }
+   return NULL;
+}
+</PRE>
+<P></P>
+<P>By using ON_CONTROL_RANGE with a range from zero to infinity, CMyDialog effectively handles all EN_SET/KILLFOCUS notifications for all edit controls. While this approach is guaranteed to trap all EN_SET/KILLFOCUS notifications, there's a slight problem: it's not guaranteed to weed out spurious notifications from other kinds of non-edit controls if they send notification codes that match EN_SETFOCUS or EN_KILLFOCUS. Remember, control notifications are unique only to a particular kind of control. Buttons or combo boxes or flibbertiwidgets are free to use the same numeric values for their notifications as those used by other controls. When my dialog gets EN_SET/KILL_FOCUS, I must check that the control sending the notification is in fact an edit control before I repaint it. I do this by examining the name of its window class, which should be "Edit". The only alternative would be coding separate ON_EN_SET/KILLFOCUS message map entries for each edit control—but you'd have to add a message map entry every time you add a new edit control to your form, which defeats the purpose of a dialog that implements the color feature automatically.</P>
+<P>Personally, I think the second solution—changing the color as a property of the dialog—is the proper way to go for your app, but I've shown you both solutions because the first one is better in other situations. For example, if you had a special edit control for currency or a Social Security number that did something different with colors. Then, the behavior really is a property of the specific control, not of the dialog. You don't want every edit control to represent currency. </P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="66pt" VALIGN="TOP"><COL WIDTH="376pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD COLSPAN="2" VALIGN="TOP"><P> Have a question about programming in C++? You can mail it directly to C++ Q&amp;A, Microsoft Systems Journal, 825 Eighth Avenue, 18th Floor, New York, New York 10019, or send it to MSJ (re: C++ Q&amp;A) via:</P></TD></TR><TR><TD VALIGN="TOP"><P> <BR>Internet:</P></TD><TD VALIGN="TOP"><P>Paul DiLascia<BR>72400.2702@compuserve.com</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P><I>This article is reproduced from Microsoft Systems Journal. Copyright </I>©<I> 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P><I>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</I></P>
+<P></P></font></body></HTML>

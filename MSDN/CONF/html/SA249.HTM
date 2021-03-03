@@ -1,0 +1,108 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Parsing and Compiling RTF</TITLE><META HTTP-EQUIV="CONTENT-TYPE" CONTENT="text/html; charset= iso-8859-1"><style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"><style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>	<BODY bgcolor="#FFFFFF" link=#003399 vlink=#996699>
+
+
+	<FONT FACE="Verdana, Arial, Helvetica" SIZE="2">
+
+	<!--TOOLBAR_START-->
+	<!--TOOLBAR_EXEMPT-->
+	<!--TOOLBAR_END-->
+
+<h3>Parsing and Compiling RTF</H3><p>Most of our content files are kept in RTF format. Even the tags are embedded within an RTF stream. To effectively deal with these content files, our compiler has to be able to:</P>
+<P><ul><li>    Recognize and parse the standard RTF header information</P>
+<P><li>    Sort out text from formatting.</P>
+<P><li>    Move chunks of text larger than Visual Basic's maximum string variable size</P></ul>
+<H4> </A>Processing the RTF Header</H4><p>Of the types of information Windows Word stores above the text in an RTF file, we are concerned only with the RTF definition, the font table, and the color table. Upon opening an input file, the compiler reads information until it comes to the end of the RTF header and then passes the header to this routine:</P>
+<P CLASS="spacing"><BR></P>
+<pre><FONT FACE="Courier New" SIZE="3">Function bProcessFrontMatter (sRtfBuff As String) As Integer
+  Dim nStartFont As Integer
+  Dim nStartColor As Integer
+  Dim nStartStyle As Integer
+
+  Rem get define and char set
+  nStartFont = InStr(sRtfBuff, "{\fonttbl")
+  If nStartFont = 0 Then
+    bProcessFrontMatter = False
+    MsgBox "Font table not found in RTF file"
+    Exit Function
+  End If
+  msRtfStarter = Left$(sRtfBuff, nStartFont - 1)
+
+  Rem get font table
+  nStartColor = InStr(sRtfBuff, "{\colortbl")
+  If nStartColor = 0 Then
+    bProcessFrontMatter = False
+    MsgBox "Color table not found in RTF file"
+    Exit Function
+  End If
+  
+  msRtfFontTable = Mid$(sRtfBuff, nStartFont, nStartColor - nStartFont)
+  'kill alt fonts which our control can't handle
+  msRtfFontTable = sReplaceString(msRtfFontTable, "{\*\falt^?}", "")
+  
+  Rem get color table
+  nStartStyle = InStr(sRtfBuff, "{\stylesheet")
+  If nStartStyle = 0 Then
+    bProcessFrontMatter = False
+    MsgBox "Stylesheet not found in RTF file"
+    Exit Function
+  End If
+  msRtfColorTable = Mid$(sRtfBuff, nStartColor, nStartStyle - nStartColor)
+  
+  bProcessFrontMatter = True
+End Function</font></pre>
+<p>The routine does simple string manipulations to segment the RTF header into usable chunks. Later, as text content is added to memo fields in the Screen and Item tables, this header information is prepended to form a complete RTF stream in each field. Note that this routine assumes that there is no file table stored in the RTF file.</P>
+<H4> </A>Reading in Paragraphs and Large Data Chunks</H4><p>Once the header information has been processed, the compiler reads the input file one paragraph at a time. A paragraph is the right amount of data to read (as opposed to a line or a fixed number of bytes) because that is how data is marked in the RTF stream. In RTF, paragraphs are separated by a "\par" token.</P>
+<p>The following routine reads characters from the input file until the paragraph token is found, the number of characters in the paragraph exceeds 20,000, or the end of the file is reached.</P>
+<P CLASS="spacing"><BR></P>
+<pre><FONT FACE="Courier New" SIZE="3">Function sGetALine (hInFile As Integer) As String
+  Dim sBuff As String
+  Dim nchars As Integer
+  Do While Right$(sBuff, 5) &lt;&gt; "\par "
+    sBuff = sBuff &amp; Input(1, #hInFile)
+    If nchars &gt; 20000 Then
+      Exit Do
+    End If
+    nchars = nchars + 1
+    If EOF(hInFile) Then Exit Do
+  Loop
+  sGetALine = sBuff
+End Function</font></pre>
+<p>In most cases, the paragraph does not exceed 20,000 characters and the routine returns a full paragraph. However, our system allows embedded OLE objects (mostly images). Which can drive the size of a paragraph past the maximum size of a Visual Basic string variable. To handle these cases we exit the routine without a full paragraph and use the AppendChunk method to temporarily cache data while it was moved from the source file to the database.</P>
+<p>Paragraphs are buffered in a string variable until the size of the variable exceeds 20,000. At that point, the buffer is flushed to temporary storage in the database. </P>
+<P CLASS="spacing"><BR></P>
+<pre><FONT FACE="Courier New" SIZE="3">If Len(sRtfBuffer) + Len(sCurrLine) &gt; 20000 Then
+  FlushToTmp(sRtfBuffer)
+  sRtfBuffer = ""
+End If
+sRtfBuffer = sRtfBuffer + sCurrLine &amp; gsCR</font></pre>
+<p>The advertised maximum size of a string variable is 65K. From experience we have found that 20,000 characters is about the maximum we can buffer in this manner without causing a string error in Visual Basic.</P>
+<p>The FlushToTmp routine simply appends the information it is passed to a pre-defined temporary holding place in the database.</P>
+<P CLASS="spacing"><BR></P>
+<pre><FONT FACE="Courier New" SIZE="3">Sub FlushToTmp (sText As String)
+  mtbTmp("Text").AppendChunk sText
+End Function</font></pre>
+<p>Later, when the paragraph buffer is ready to be saved to it's correct place in the database, the application checks to see if there is anything in the temporary location. If there is, it is transferred to from the temporary to the permanent location in the database.</P>
+<H4> </A>Dealing with Character Formatting</H4><p>An RTF file is a series of embedded clauses. Each clause begins and ends with curly brackets ({}). For example, to make the words "My Computer" bold the RTF stream could bracket the words with a bold clause:</P>
+<P CLASS="spacing"><BR></P>
+<pre><FONT FACE="Courier New" SIZE="3">{\b My Computer}</font></pre>
+<p>If only the "o" is bolded the clause could look like this:</P>
+<P CLASS="spacing"><BR></P>
+<pre><FONT FACE="Courier New" SIZE="3">My C{\b o}mputer</font></pre>
+<p>If an author applies character formatting (such as bold) across a paragraph boundary then the opening curly bracket will be in the first paragraph and the closing curly bracket will be in the second paragraph. Because our compiler brakes RTF files at paragraph boundaries we need to make sure that no character formatting crosses these boundaries. Also, if an author embeds character formatting within one of the tags in the file, then the compiler may not recognize it as a valid tag.</P>
+<p>The easiest way to assure that tags contain no embedded formatting and that character formatting does not cross the last paragraph boundary in a series of paragraphs is to use WordBasic to remove character formatting form the crucial areas. </P>
+<p>The following WordBasic routine finds the boundaries between screens in an input file and removes any character formatting.</P>
+<P CLASS="spacing"><BR></P>
+<pre><FONT FACE="Courier New" SIZE="3">Sub NixFormat
+StartOfDocument
+EditFind .Find = "..SCREEN:", .Direction = 0, .Format = 0, .Wrap = 0
+While EditFindFound()
+    ParaUp
+    CharLeft
+    ParaDown 2, 1
+    ResetChar
+    ParaDown
+    EditFind
+Wend
+End Sub</font></pre></BODY></HTML>

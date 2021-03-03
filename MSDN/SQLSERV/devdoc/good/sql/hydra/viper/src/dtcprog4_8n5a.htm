@@ -1,0 +1,205 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>A DB-Library-based Application</title>
+<link disabled rel=stylesheet href=../../../../../backsdk3.css>
+<style type="text/css">
+@import url(../../../../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h2><a name="_a_db.2d.library_.96_.based_application"></a>A DB-Library-based Application</h2>
+<p>
+This example shows the steps that a C or C++ application takes to use DB-Library to update two SQL Servers within an MS DTC transaction. It shows the OLE transaction calls for initiating and committing MS DTC transactions as well as the DB-Library call to propagate an MS DTC transaction from the application to SQL Server. Note that the complete DB-Library example is not shown here but it can be found in the Microsoft SQL Server Programmer's Toolkit. </p>
+<p>
+These are the steps that the application performs: 
+<ol>
+<li>
+The application first declares variables and completes initialization. Note that it is not necessary for the application to call either <b>CoInitialize </b>or <b>OleInitialize</b>. MS DTC<b> </b>does not depend on these calls. </li>
+<li>
+The application connects to MS DTC and obtains an interface pointer to the transaction dispenser object by calling <b>DtcGetTransactionManager</b>. </li>
+<li>
+The application uses standard DB-Library calls to connect to two databases under the control of different SQL Servers. </li>
+<li>
+The application begins an MS DTC transaction by calling the <b>ITransactionDispenser::BeginTransaction </b>method on the transaction dispenser object. <b>BeginTransaction</b> initiates a new transaction and returns a transaction object that represents the transaction. </li>
+<li>
+The application calls the DB-Library <b>dbenlisttrans</b> function to associate the transaction with each of the DB-Library database connections. All further work performed on the DB-Library connections is performed within the MS DTC transaction.  <p>
+The application passes two parameters to <b>dbenlisttrans</b>. The first parameter is the database process structure (DBPROC),<b> </b>which identifies the SQL Server connection. The second parameter is a pointer to the MS DTC transaction object. To learn more about <b>dbenlisttrans</b>, see <i>What's New in SQL Server 6.5</i>. 
+</li>
+<li>
+The application uses standard DB-Library calls to associate a statement handle with each DB-Library database connection. The application then updates each of the databases. </li>
+<li>
+The application calls <b>ITransaction::Commit </b>on the transaction object. MS DTC performs the two-phase commit protocol to commit the transaction. If any SQL Server database is unable to commit the transaction, the transaction is aborted, and the transaction's effects are undone from all databases that were modified. When the transaction completes, the application releases the transaction dispenser object. <p>
+You cannot use the DB-Library database connections until <b>ITransaction::Commit </b>completes and you call <b>dbenlisttrans</b> to enlist in a new MS DTC transaction. If you reuse the DB-Library connection before doing this, an error will result. 
+<p>
+<b>Note</b>  If you have used a DB-Library connection with an MS DTC transaction and you want to use the same DB-Library connection with a local SQL Server transaction, you must first call <b>dbenlisttrans</b> and pass a NULL transaction. By passing a NULL transaction to the DB-Library <b>dbenlisttrans</b> function, you instruct SQL Server to use local SQL Server transactions. 
+</li>
+<li>
+When no more transactions are needed, the application releases the transaction dispenser object and closes all DB-Library connections. <pre>void main(int argc, char **argv)
+{
+<b><i>  </i></b>
+ITransactionDispenser    *pTransactionDispenser;
+ITransaction                *pTransaction;
+HRESULT                    hr = S_OK ;
+TCHAR                    SqlStatement[STR_LEN*2];
+<b><i>  </i></b>
+<b><i>  </i></b>
+// Initialize globals &amp; validate command line arguments
+InitGlobals(argc,argv);
+<b><i>  </i></b>
+// set error/msg handlers for this program
+dbmsghandle((DBMSGHANDLE_PROC)msg_handler);
+dberrhandle((DBERRHANDLE_PROC)err_handler);
+<b><i>  </i></b>
+// initialize LOGINREC structure
+login = dblogin();
+<b><i>  </i></b>
+// Obtain the ITransactionDispenser Interface pointer
+// by calling DtcGetTransactionManager()
+hr = DtcGetTransactionManager(
+        NULL,                 // LPTSTR pszHost,
+        NULL,                // LPTSTR pszTmName,
+        IID_ITransactionDispenser,    // REFIID rid,
+        0,                    // DWORD dwReserved1,
+        0,                    // WORD wcbReserved2,
+        0,                    // void FAR * pvReserved2,
+        (void **)&amp;pTransactionDispenser     // void**    ppvObject) ;
+if (FAILED (hr))
+{
+printf("DtcGetTransactionManager failed: %x\n", hr);
+       exit (1);
+}
+<b><i>  </i></b>
+// Establish connection to database on server#1
+LogonToDB(&amp;dbproc_server1,&amp;gSrv1);
+ 
+// Establish connection to database on server#2
+LogonToDB(&amp;dbproc_server2,&amp;gSrv2);
+<b><i>  </i></b>
+// Loop performing distributed transactions
+for (INT i = 0; i &lt; 5; i++)
+{
+<b><i>  </i></b>
+// Initiate an MS DTC transaction
+hr = pTransactionDispenser-&gt;BeginTransaction(
+            NULL,                // IUnknown __RPC_FAR *punkOuter,
+            ISOLATIONLEVEL_ISOLATED,    // ISOLEVEL isoLevel,
+            ISOFLAG_RETAIN_DONTCARE,    // ULONG isoFlags,
+            NULL,                // ITransactionOptions *pOptions 
+            &amp;pTransaction        //  ITransaction **ppTransaction) ;
+
+if (FAILED (hr))
+{    
+printf("BeginTransaction failed: %x\n",hr);
+exit(1);
+}
+<b><i>  </i></b>
+// Enlist each of the data sources on the transaction
+Enlist(&amp;gSrv1,dbproc_server1,pTransaction);
+Enlist(&amp;gSrv2,dbproc_server2,pTransaction);
+<b><i>  </i></b>
+// Generate the SQL statement to execute on each
+// of the databases
+sprintf(SqlStatement,
+  "update authors set address = '%s_%d' where au_id = '%s'",
+  gNewAddress,i,gAuthorID);
+
+// Perform updates on both of the DBs participating
+// in the transaction
+ExecuteStatement(&amp;gSrv1,dbproc_server1,SqlStatement);
+ExecuteStatement(&amp;gSrv2,dbproc_server2,SqlStatement);
+<b><i>  </i></b>
+// Commit the transaction 
+hr = pTransaction-&gt;Commit(0,0,0);
+if (FAILED(hr))
+{
+printf("pTransaction-&gt;Commit() failed: %x\n",hr);
+exit(1);
+}
+<b><i>  </i></b>
+// At end of each transaction, pTransaction-Release()
+// must be called.
+hr = pTransaction-&gt;Release();
+if (FAILED(hr))
+{
+printf("pTransaction-&gt;Release() failed: %x\n",hr);
+exit(1);
+}
+<b><i>  </i></b>
+printf("Successfully committed Transaction #%d\n",i);
+<b><i>  </i></b>
+} // for 
+<b><i>  </i></b>
+<b><i>  </i></b>
+// release the transaction dispenser
+pTransactionDispenser-&gt;Release();
+<b><i>  </i></b>
+// release DBLib resources and exit
+dbexit();
+}
+<b><i>  </i></b>
+<b><i>  </i></b>
+void LogonToDB(DBPROCESS **dbp, DBCONN *ptr)
+{
+<b><i>  </i></b>
+DBSETLUSER(login, ptr-&gt;pszUser);
+DBSETLPWD(login, ptr-&gt;pszPasswd);
+DBSETLAPP(login, "example");
+<b><i>  </i></b>
+*dbp = dbopen (login, ptr-&gt;pszSrv);
+if (*dbp == NULL)
+{
+printf ("\nLogin to server: %s failed, exiting!\n",ptr-&gt;pszSrv);
+exit (ERREXIT);
+}
+<b><i>  </i></b>
+/* Use the "pubs" database. */
+dbuse(*dbp, "pubs");
+}
+<b><i>  </i></b>
+<b><i>  </i></b>
+void Enlist(DBCONN *ptr, DBPROCESS *dbp, ITransaction *pTransaction)
+{
+RETCODE rc = 0;
+
+rc = dbenlisttrans (dbp, pTransaction);
+
+if (FAIL == rc) 
+{
+printf("\ndbenlisttrans() failed: %x\n",rc);
+exit(1);
+}
+<b><i>  </i></b>
+}
+<b><i>  </i></b>
+<b><i>  </i></b>
+void ExecuteStatement(DBCONN *ptr, DBPROCESS *dbp, char *pszBuf)
+{
+RETCODE rc = 0;
+<b><i>  </i></b>
+dbcmd(dbp,pszBuf);
+
+rc = dbsqlexec(dbp);
+if (FAIL == rc)
+{
+printf("dbsqlexec() failed\n");
+exit(1);
+}
+<b><i>  </i></b>
+rc = dbresults(dbp);
+if (rc != SUCCEED)
+{
+printf("dbresults() failed: %x\n",rc);
+exit(1);
+}
+}
+<b><i>  </i></b>
+<b><i>  </i></b></pre>
+</li>
+</ol>
+<p>
+</p>
+<p>&nbsp;</p></body>
+</HTML>

@@ -1,0 +1,186 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Server-side Asynchronous Pipe Handling</title>
+<link disabled rel=stylesheet href=../../../backsdk3.css>
+<style type="text/css">
+@import url(../../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h2><a name="_rpc_server_side_asynchronous_pipe_handling"></a>Server-side Asynchronous Pipe Handling</h2>
+<p>
+The manager routine of an asynchronous function always receives the asynchronous handle as the first parameter. The server uses this handle to send the reply and to send the <b>out</b> pipe data as it becomes available. The handle remains valid until <a href="pr-func1_6pnw.htm"><b>RpcAsyncCompleteCall</b></a> is called on it, the call is aborted by <a href="pr-func1_8nl8.htm"><b>RpcAsyncAbortCall</b></a>, or an exception occurs in the manager routine. The application must keep track of the all top level pointers for the <b>out</b> and <b>in, out</b> parameters, in order to update them before completing the call. The application must also keep track of the <b>in </b>and <b>out </b>pipes. </p>
+
+<h4><a name="_rpc_s_sending_asynchronous_pipe_data"></a>Sending asynchronous pipe data</h4>
+<p>
+The server sends asynchronous pipe data in the same manner as the client. See <a href="ov-async_5vxj.htm">Client-side Asynchronous Pipe Handling</a>.</p>
+
+<h4><a name="_rpc_s_receiving_asynchronous_pipe_data"></a>Receiving asynchronous pipe data</h4>
+<p>
+The server receives asynchronous pipe data in the same manner as the client. If the receive mechanism is asynchronous procedure calls (APCs), the server must specify a thread handle (in pAsync-&gt;u.APC.hThread) and register the asynchronous handle with the runtime. </p>
+<h4>Example</h4>
+<p>
+In this example, the server manager routine, MyAsyncPipeFunc, handles the remote procedure call from the client. </p>
+<pre><code>typedef struct {
+PRPC_ASYNC_STATE pAsync;
+ASYNC_INTPIPE *inpipe;
+ASYNC_INTPIPE *outpipe;
+int i;
+int *b;
+int PipeBuffer[ASYNC_CHUNK_SIZE];
+} PIPE_CALL_COOKIE;
+ 
+void MyAsyncPipeFunc (IN PRPC_ASYNC_STATE pAsync,
+                     IN RPC_BINDING_HANDLE hBinding,
+                     IN int a,
+                     IN ASYNC_INTPIPE *inpipe,
+                     OUT ASYNC_INTPIPE *outpipe,
+                     OUT int *b)
+{
+unsigned long ThreadIdentifier;
+HANDLE HandleToThread;
+PIPE_CALL_COOKIE *PipeCallCookie;
+ 
+PipeCallCookie = new PIPE_CALL_COOKIE;
+PipeCallCookie-&gt;pAsync = pAsync;
+PipeCallCookie-&gt;inpipe = inpipe;
+PipeCallCookie-&gt;outpipe = outpipe;
+PipeCallCookie-&gt;b = b;
+ 
+pAsync-&gt;u.APC.hThread = 0;
+pAsync-&gt;u.APC.hThread = CreateThread(0, DefaultThreadStackSize,
+                                     (LPTHREAD_START_ROUTINE)   
+                                               ThreadProcPipes,
+                                      PipeCallCookie, 0,
+                                      &amp;ThreadIdentifier);
+}// endMyAsyncPipeFunc
+ 
+//Sending pipe data
+//This APC routine is called when a pipe send completes, 
+//or when an asynchronous call complete. 
+ 
+//This thread routine receives pipe data, processes the call, 
+//sends the reply back to the client and 
+//completes the asynchronous call.
+ 
+void ThreadProcPipes(IN PIPE_CALL_COOKIE  *Cookie)
+{
+int *ptr ;
+int  n ;
+int retval ;
+ 
+while (pAsync-&gt;u.APC.hThread == 0)
+  {
+  Sleep(10);
+  }
+ 
+pAsync-&gt;Flags = RPC_C_NOTIFY_ON_SEND_COMPLETE;
+pAsync-&gt;UserInfo = (void *) PipeCallCookie;
+pAsync-&gt;NotificationType = RpcNotificationTypeApc;
+pAsync-&gt;u.APC.NotificationRoutine = MyAsyncPipeAPCRoutine;
+pAsync-&gt;u.APC.hThread = HandleToThread;
+ 
+RpcAsyncRegisterHandle(pAsync);
+ 
+while (!fDone)
+  {
+  Cookie-&gt;inpipe-&gt;pull(Cookie-&gt;inpipe.state,
+                      (int *) Cookie-&gt;PipeBuffer,
+                          ASYNC_CHUNK_SIZE,
+                          &amp;num_elements);
+    switch (Status)
+      {
+      case RPC_S_ASYNC_CALL_PENDING:
+      if (SleepEx(INFINITE, TRUE) != WAIT_IO_COMPLETION)
+          {
+          RpcRaiseException(APP_ERROR) ;
+          }
+        break;
+ 
+case RPC_S_OK:
+if (num_elements == 0)
+{
+fDone = 1;
+}
+else
+{
+// process the received data
+}
+break;
+ 
+default:
+fDone = 1;
+break;
+}
+}
+ 
+Cookie-&gt;i = 1;
+Cookie-&gt;outpipe-&gt;push(
+Cookie-&gt;outpipe.state,
+0,
+Cookie-&gt;PipeBuffer,
+ASYNC_CHUNK_SIZE) ;
+ 
+while (Cookie-&gt;i &lt; ASYNC_NUM_CHUNKS+1)
+{
+if (SleepEx(INFINITE, TRUE) != WAIT_IO_COMPLETION)
+{
+RpcRaiseException (APP_ERROR);
+}
+}
+// sending non pipe reply
+*(Cookie-&gt;b) = 10;
+Status = RpcAsyncCompleteCall (Cookie-&gt;pAsync, &amp;retval);
+    }
+ 
+void MyAsyncPipeAPCRoutine (IN PRPC_ASYNC_STATE pAsync,
+                            IN void *Context,
+                            IN unsigned int Flags)
+{
+PIPE_CALL_COOKIE *Cookie = (PIPE_CALL_COOKIE *) pAsync-&gt;UserInfo;
+ 
+if (Flags &amp; RPC_ASYNC_PIPE_SEND_COMPLETE)
+  {
+  if (Cookie-&gt;i &lt;ASYNC_NUM_CHUNKS)
+    {
+    Cookie-&gt;outpipe-&gt;push(Cookie-&gt;outpipe.state,
+                          0,
+                          (int *) Cookie-&gt;PipeBuffer,
+                          ASYNC_CHUNK_SIZE);
+    Cookie-&gt;i++ ;
+    }
+  else
+    {
+    pAsync-&gt;Flags = 0;
+    Cookie-&gt;outpipe-&gt;push(Cookie-&gt;outpipe.state, 0, 0, 0);
+    Cookie-&gt;i++;
+    }
+  }
+} // end MyAsyncPipeAPCRoutine
+ </code></pre>
+<h4>See Also</h4>
+<p>
+<object id=alink_1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="../../../notopic_0pk4.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="_rpc_pipes">
+</object><a href=JavaScript:alink_1.Click()>Pipes</a>, <object id=alink_2 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="../../../notopic_0pk4.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="_rpc_async">
+</object><a href=JavaScript:alink_2.Click()><b>async</b></a>, <a href="ov-async_917n.htm">Server-side Asynchronous RPC</a> </p>
+<p>
+</p>
+<p>
+</p>
+<p>
+</p>
+<p>&nbsp;</p></body>
+</HTML>

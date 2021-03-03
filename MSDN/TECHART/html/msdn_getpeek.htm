@@ -1,0 +1,238 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>GetMessage and PeekMessage Internals</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><a name="msdn_getpeek"></a>GetMessage and PeekMessage Internals</h1>
+<p>
+Bob Gunderson<br>
+Microsoft Developer Network Technology Group</p>
+<p>
+Created: December 11, 1992</p>
+<h2>Abstract</h2>
+<p>
+This article explains the inner workings of <b>GetMessage</b> and <b>PeekMessage</b> and is the foundation for a set of articles that deal with messaging and its effect on tasking in the 16-bit MS-DOS®/Microsoft® Windows™ environment. The following topics are discussed:
+<ul type=disc>
+<li>
+System and application queues<br><br></li>
+<li>
+<b>GetMessage</b> and <b>PeekMessage</b> functions<br><br></li>
+<li>
+<b>PeekMessage</b> options<br><br></li>
+<li>
+Message filtering<br><br></li>
+<li>
+WM_QUIT message<br><br></li>
+<li>
+Yielding and sleeping<br><br></li>
+<li>
+Problems with <b>Yield</b><br><br></li>
+<li>
+<b>WaitMessage</b></li>
+</ul>
+<p>
+There are significant differences between the 16-bit MS-DOS/Windows environment and the 32-bit Win32™/Windows NT™ environment. These differences are not covered here, but are left as topics for future articles.</p>
+<h2>The Queues</h2>
+<p>
+To understand the operation of <b>GetMessage</b> and <b>PeekMessage</b>, one must first know how the Microsoft® Windows™ operating system stores events and messages. Two types of queues in Windows serve this purpose: the system queue and message queues.</p>
+<h3>Hardware Input: The System Queue</h3>
+<p>
+Windows has drivers that are responsible for servicing interrupts from the mouse and keyboard hardware. The keyboard and mouse drivers call, at interrupt time, special entry points in USER.EXE to report the occurrence of an event. The pen driver in Windows for Pen Computing also calls these entry points with raw pen events.</p>
+<p>
+All keyboard, mouse, and pen events are stored in a queue called the system queue, as shown in Figure 1. All running applications share the single system queue. The system queue never contains window messages; its sole duty is to record hardware events as they happen at interrupt time. The only way to get an event into the system queue is to call the special event entry points in USER.EXE.</p>
+<p>
+<img src="48630.gif" border=0></p>
+<p class=label>
+<b>Figure 1. Flow of hardware events into the system queue</b></p>
+<p>
+In Windows version 3.1, the system queue is a fixed-length queue with space for 120 entries, which under normal circumstances is plenty of room. If an application hangs or neglects to process messages and events for long periods of time, it is possible for the system queue to fill up. If this happens, any attempt to add new events to the queue will cause the system to beep.</p>
+<h3>Posted Messages and Application Queues</h3>
+<p>
+When an application is started, a queue is created on its behalf. This application queue (sometimes referred to as a task queue) is used to store messages that have been posted to one of the application's windows. The only messages that ever reside in an application's queue are those that are explicitly posted using <b>PostMessage</b> or <b>PostAppMessage</b>.<b> </b>(<b>SendMessage</b> never uses the system queue.) The <b>PostQuitMessage</b> function does not post a message to an application queue. (The WM_QUIT message will be discussed later.)</p>
+<p>
+By default, each application queue can hold eight messages. Normally, this is quite adequate because <b>PostMessage</b> is used infrequently. But there are times when an application design forces numerous <b>PostMessage</b> calls to an application. For these applications, the queue size can be increased using the <b>SetMessageQueue</b> function. The <b>SetMessageQueue</b> function must be used with care, however. It deletes the current application queue and creates a new one with the desired size. Any messages in the old queue are destroyed. Because of this, it must be called in your <b>WinMain</b> routine before any other Windows application programming interface (API) or after the application has explicitly emptied the queue with <b>PeekMessage</b>.</p>
+<h2>How GetMessage and PeekMessage Work</h2>
+<p>
+Internally to Windows, <b>GetMessage</b> and <b>PeekMessage</b> execute the same code. The major difference between the two is in the case where there are no messages to be returned to the application. In this case, <b>GetMessage</b> puts the application to sleep while <b>PeekMessage</b> returns to the application with a NULL value. There are a few other differences that will be described later, but they are fairly minor.</p>
+<h3>GetMessage and PeekMessage Logic</h3>
+<p>
+A step-by-step description of the common <b>GetMessage</b> and <b>PeekMessage</b> code in Windows version 3.1 follows.</p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;The order of the steps presented below dictates the priority of a type message. That is, posted messages are always returned before keyboard and mouse messages; keyboard and mouse messages are returned before paint messages; and so on.
+<ol>
+<li>
+Check to see if there are any messages in the application queue for the active task. If there are any, remove the message at the head of the queue and return it to the application. <b>GetMessage</b> and <b>PeekMessage</b> calls made from dynamic-link library (DLL) code retrieve messages from the application queue of the application that called the DLL. Remember that only messages posted using <b>PostMessage</b> ever reside in this queue.<br><br></li>
+<li>
+Check the message against any message or window handle filters. (See the "Message-Range and Window-Handle Filtering" section below.) If the message does not match the specified filter, leave the message in the queue and look at the next message in the application queue, if any.<br><br></li>
+<li>
+If there were no messages in the application queue, scan the system queue for events. This process is quite complex and is covered in detail in "Scanning the System Queue" below. In general, if the event at the head of the system queue is intended for this application, convert it into a message and return the message to the application (it is not placed in the application queue first). Note that the process of scanning the system queue may cause the currently active application to yield control to another application.<br><br></li>
+<li>
+If there are no events in the system queue waiting to be processed, check all windows associated with the current application (task) for update regions. Whenever a portion of a window needs to be repainted, an update region is created for that portion of the window. This region is then combined with any existing update region for the window and stored in the internal window structure. If <b>GetMessage</b> or <b>PeekMessage</b> finds any windows in this task with outstanding update regions, a WM_PAINT message is created and returned to the application for that window. WM_PAINT never resides in any queue. An application continues to receive WM_PAINT messages for a window until the update region is cleared using <b>BeginPaint/EndPaint</b>, <b>ValidateRect</b>, or <b>ValidateRgn</b>.<br><br></li>
+<li>
+If no windows for this task need to be updated, <b>GetMessage</b> and <b>PeekMessage</b> yield control at this point, unless <b>PeekMessage</b> was called with the PM_NOYIELD option. This yield is done to prevent applications with fast timers (checked next) from hogging all the CPU time. (Remember, we are dealing with a nonpreemptive multitasking system.)<br><br></li>
+<li>
+When the yield returns, check to see if any timers started for the current task have expired. If so, create a WM_TIMER message and return. This happens both for timers that return a WM_TIMER message to a window as well as timers that call a timer callback procedure. For more information, see "Timers and Timing in Microsoft Windows" on the Microsoft Developer Network CD (Technical Articles, Windows Articles, Kernel and Drivers Articles).<br><br></li>
+<li>
+If there are no timer events to service for this application and an application has terminated, the code attempts to shrink the local heap of the graphics device interface (GDI). Some applications, such as drawing and painting applications (like Paintbrush™), allocate lots of GDI objects. Freeing these objects when the application terminates can leave GDI's local heap bloated with free space. To recover this wasted space, <b>LocalShrink</b> is called on GDI's heap at this point in the <b>GetMessage</b>/<b>PeekMessage</b> processing. This is done once, each time an application terminates.<br><br></li>
+<li>
+At this point, the code has either returned with a valid message, or there truly are no messages or events for this application to process. The code forks at this point depending upon whether <b>PeekMessage</b> or <b>GetMessage</b> was called.<ul type=disc>
+<li>
+<b>PeekMessage</b>. If <b>PeekMessage</b> was called with the PM_NOYIELD flag, <b>PeekMessage</b> returns at this point with a NULL return value indicating that there are no messages to process. If the PM_NOYIELD flag was not specified, <b>PeekMessage</b> yields control at this point. It does not go to sleep, but simply gives other applications that are ready to run a chance to execute. (See "The Difference Between Yielding and Sleeping" below.) When the yield returns, <b>PeekMessage</b> immediately returns control to the application, returning a NULL value, which indicates there were no messages for this application waiting to be processed.<br><br></li>
+<li>
+<b>GetMessage</b>. <b>GetMessage</b>, at this point, puts the application to sleep, waiting until some event occurs that requires the application to wake up. Control does not return to the application that called <b>GetMessage</b> until a message that the application must process is present. Once the application wakes up from being put to sleep, <b>GetMessage</b> internally loops back to the top (step 1).</li>
+</ul>
+</li>
+</ol>
+<h3>The WH_GETMESSAGE Hook</h3>
+<p>
+Immediately before <b>GetMessage</b> and <b>PeekMessage</b> return a message to the calling application, a test is performed to check for the presence of a WH_GETMESSAGE hook. If one is installed, the hook is called. The hook is not called if <b>PeekMessage</b> finds no messages available and is about to return a NULL value. From the hook procedure, it is impossible to tell whether <b>GetMessage</b> or <b>PeekMessage</b> was called.</p>
+<h3>Scanning the System Queue</h3>
+<p>
+As described above, events in the system queue are simply records of hardware events. The primary job of the code scanning the system queue is to create messages from these events and determine which window should receive the message. </p>
+<p>
+The code first retrieves, but does not remove, the event at the head of the system queue. Because mouse and keyboard events are the only two types of events in the queue, the code branches and processes each type of event separately.</p>
+<h4>Processing mouse events in the system queue</h4>
+<p>
+The steps for processing mouse events follow.
+<ol>
+<li>
+First, the window corresponding to the screen coordinates of the event must be calculated. This calculation (called window-hit testing) starts with the desktop window and scans through every window in the system, including child windows, until it finds a window that contains the mouse coordinates but has no children that contain the same point.<p>
+<img src="getpeek_1.gif" border=0></P><p class=label>
+<b>Figure 2. Window-hit testing for mouse events</b>
+<p class=tl>
+If, for example, the arrow in Figure 2 represents the current mouse location, any mouse activity, such as a mouse-button click, will generate an event that will result in a message for Window B.</P></li>
+<li>
+If a window captures the mouse using <b>SetCapture</b>, the system-queue-scanning code will bypass the normal hit testing and return all mouse messages to the window with the capture. For example, if Window A in Figure 2 had called <b>SetCapture</b>, any mouse activity at the arrow would result in mouse messages for Window A, not Window B.<br><br></li>
+<li>
+If the event being processed is a mouse-button-down event (any mouse button), the code tests to see if the event should be converted into a double-click event. You can find a description of double-click translation in "Ask Dr. GUI #5" on the Microsoft Developer Network CD (Technical Articles, Ask Dr. GUI). In essence, if the time and distance deltas between this mouse-button-down event and the previous one are within certain limits, the event generates a double-click message. Otherwise, it will generate a standard button-down message. All other mouse events generate standard mouse messages. The double-click testing is performed only when the window the mouse event is destined for has the CS_DBLCLKS class style.<br><br></li>
+<li>
+A message is constructed from the mouse event.<br><br></li>
+<li>
+If the mouse-hit testing determines that the event occurred over a nonclient area of a window such as the frame or title bar, the constructed message is mapped into its corresponding nonclient message. For example, a WM_MOUSEMOVE message is mapped into a WM_NCMOUSEMOVE message.<br><br></li>
+<li>
+Check the message against any message filters specified. (See "Message-Range and Window-Handle Filtering" below.) If the message does not match the filter, restart the system-queue-scanning code from the top, looking at the next event in the queue.<br><br></li>
+<li>
+If the mouse message needs to go to a window that is associated with a task other than the currently executing task, the event is left in the system queue, and the task that needs to process the event is awakened if it was asleep. The newly awakened task is not run at this point, but is simply marked as ready to run. If the message is for another task, the system-queue-scanning code returns to the main <b>GetMessage</b>/<b>PeekMessage</b> code as if it had found no events in the system queue to process. For more information, see "The Difference Between Yielding and Sleeping" below.<br><br></li>
+<li>
+If a mouse hook is installed, it is called at this point. If the mouse hook returns a nonzero value, the mouse event is ignored by removing it from the queue and restarting the system-queue-scanning code from the top. If the hook returns zero, processing continues.<br><br></li>
+<li>
+If the message is a mouse-button-down message, the system-queue-scanning code attempts to activate the window before returning the message in the following way:<ul type=disc>
+<li>
+It determines the ultimate top-level parent of the window by following the parent chain upward until a top-level window is encountered.<br><br></li>
+<li>
+It sends the ultimate top-level parent of the window a WM_MOUSEACTIVATE message using SendMessage.<br><br></li>
+<li>
+The return value from WM_MOUSEACTIVATE is tested:<p class=tl>
+a) If the value returned is NULL, MA_ACTIVATE, or MA_ACTIVATEANDEAT, the ActivateWindow function is called to activate the ultimate top-level parent.</P><p class=tl>
+b) If the value returned is MA_NOACTIVATE or MA_NOACTIVATEANDEAT, the window is not activated.</P><p class=atl>
+<B><b>Note&nbsp;&nbsp;&nbsp;</b></B>MA_ACTIVATEANDEAT and MA_NOACTIVATEANDEAT cause the mouse-button-down event to be removed from the system queue without a mouse-down message being generated. </p><p class=tl>
+c) Finally, a WM_SETCURSOR message is sent to the window to allow the window to properly set the cursor shape.</P></li>
+</ul>
+</li>
+<li>
+If the mouse hook was called and the current mouse event is being removed from the system queue, check for the existence of a computer-based-training (CBT) hook. If a CBT hook is installed, call it with the HCBT_CLICKSKIPPED hook code.<br><br></li>
+<li>
+The key-state table contains three entries that are used to track the state of the mouse buttons. The buttons are assigned virtual key codes (VK_LBUTTON, VK_RBUTTON, and VK_MBUTTON) that can be used with <b>GetKeyState</b> to determine if the mouse button is up or down. Before returning the mouse message, the system-queue-scanning code sets the key-state table (for button-up or button-down messages) and removes the event from the system queue. If <b>PeekMessage</b> is called with PM_NOREMOVE, the key-state table is not modified.</li>
+</ol>
+<h4>Processing keyboard events in the system queue</h4>
+<ol>
+<li>
+Check to see whether the CTRL key is down and the current event is a key-down of the ESC key. If so, the user is directing Windows to display the task manager window. A WM_SYSCOMMAND message is posted to the active window with SC_TASKLIST in <i>wParam</i>. The key-down event is removed from the system queue, and the system-queue-scanning function is restarted from the top. The event is discarded if the active window is system modal or if a "hard" system modal message (such as an INT 24h system error message box or a <b>MessageBox</b> function using MB_ICONHAND and MB_SYSTEMMODAL) is being displayed.<br><br></li>
+<li>
+Next, test to see if the current event is a key-down of the PRINT SCREEN key. If it is, a bitmap snapshot of either the currently active window or the full desktop is placed in the Clipboard. If the ALT key is currently down, a snapshot of the entire desktop is copied to the Clipboard; otherwise, an image of the active window is copied. The PRINT SCREEN key-down event is removed from the system queue and the system-queue-scanning code is restarted from the top. This operation is ignored if a "hard" system modal message box is being displayed.<br><br></li>
+<li>
+Hot-key events are tested next. Using the Program Manager, a user can define a keystroke that, when typed, runs an associated application. These keystrokes are called <i>hot keys</i>. If the event is a key-down event, a test is made to see if the key matches a currently defined hot key. If a match is found, a WM_SYSCOMMAND message is posted to the active window with SC_HOTKEY in <i>wParam</i>. The event is then removed from the system queue, and the system-queue-scanning code is restarted from the top. This test is skipped if the active window is system modal or if a "hard" system modal message box is being displayed.<br><br></li>
+<li>
+Normally, all keyboard messages (WM_KEYDOWN, WM_CHAR, and so on) go to the window that has the input focus. If the window with the focus is associated with a task other than the currently executing task, the event is left in the system queue, and the task that owns the window with the focus is awakened (if it was asleep). The system-queue-scanning code then returns to the main <b>GetMessage</b>/<b>PeekMessage</b> code as if it had found no events to process. For more information, see "The Difference Between Yielding and Sleeping" and "How Applications Are Awakened" below.<br><br></li>
+<li>
+It is possible to have a situation where no window has the input focus. In this case, keyboard messages are directed to the currently active window but are translated into system-key messages (WM_SYSKEYDOWN, WM_SYSCHAR, and so on).<br><br></li>
+<li>
+Check the message against any message filters specified. See "Message-Range and Window-Handle Filtering" below. If the message does not match the filter, restart the system-queue-scanning code from the top, looking at the next event in the queue.<br><br></li>
+<li>
+If the event is to be returned to the current task, it is removed from the system queue unless <b>PeekMessage</b> with PM_NOREMOVE is specified. For more information on not removing events from the queue, see "PeekMessage with PM_NOREMOVE" below.<br><br></li>
+<li>
+If a keyboard hook is installed, it is called at this point. The hook is called with HC_ACTION if the event is being removed from the system queue or HC_NOREM if the event is not being removed from the system queue.<br><br></li>
+<li>
+If the keyboard hook was called and the current key event is being removed from the system queue, check for the existence of a CBT hook. If a CBT hook is installed, call it with the HCBT_KEYSKIPPED hook code.<br><br></li>
+<li>
+The message is then returned to the main <b>GetMessage</b>/<b>PeekMessage</b> code.</li>
+</ol>
+<h2>PeekMessage with PM_NOREMOVE</h2>
+<p>
+By default, both <b>PeekMessage</b> and <b>GetMessage</b> remove messages and events from the queues as each message is returned to the application. There are times, however, when an application needs to scan the queues for the existence of messages without removing the message from its queue. For example, an application may be doing some background processing that it would like to terminate as soon as there are messages available to process. The code checking for the existence of messages, however, may not be able to process the message. For this purpose, applications can call <b>PeekMessage</b> with PM_NOREMOVE in the <i>uRemove</i> parameter. If PM_NOREMOVE is used, <b>PeekMessage</b> will return messages as normal, but will not remove them from their queues.</p>
+<h2>Message-Range and Window-Handle Filtering</h2>
+<p>
+Message-range and window-handle filters allow an application to retrieve messages from the application or system queues that fall within a specified range of messages or that are intended for a particular window. Before a message or event is returned to an application, a test is made to ensure it matches the current message-range and window-handle filters. If a non-null window-handle filter is passed to <b>GetMessage</b> or <b>PeekMessage</b> in the <i>hwnd</i> parameter, only messages destined for that window will be returned to the application. If non-null minimum and maximum message numbers are passed in the <i>uMsgFilterMin</i> and <i>uMsgFilterMax</i> parameters, only messages that are within this range inclusively are returned. The window-handle and message-number filters may be used separately or together.</p>
+<p>
+Applications that do not desire window-handle filtering may pass a NULL value to <b>GetMessage</b> and <b>PeekMessage</b> in the <i>hwnd</i> parameter. Similarly, passing NULL values in both <i>uMsgFilterMin</i> and <i>uMsgFilterMax</i> parameters disables message-range filtering.</p>
+<p>
+It is important to realize that only mouse and keyboard hardware messages, posted messages, WM_PAINT messages, and timer messages can be filtered. Most messages a window procedure receives are sent directly to the window using <b>SendMessage</b>.</p>
+<p>
+If, while scanning the application queue and system queue for messages to return to the application, the code encounters a message or event that could be returned but does not match the message filter, the message or event is left in its respective queue and the scan continues with the next message or event in the queue. </p>
+<h3>Problems with Message Filtering</h3>
+<p>
+This process of skipping messages with filtering has the potential of causing serious problems if not done correctly. Windows relies heavily on the fact that input is serialized. That is, events occur in a regular and predictable manner. For example, Windows assumes that if a mouse-button-down event is encountered in the system queue, a corresponding mouse-button-up event will be encountered sometime later, further along in the system queue. If an application is filtering messages and removing them, it is possible to break the serialized nature of system-queue events. That is, it would be possible to filter out the mouse-up event, remove it, and have a mouse-down event in the system queue without a corresponding mouse-up event. The same holds true for keyboard events; the system assumes key-down events will have a corresponding key-up event later in the queue. To prevent problems with filtering, follow these general rules:
+<ul type=disc>
+<li>
+If you are filtering messages and removing them, do not filter on keyboard or mouse messages.<br><br></li>
+<li>
+If you are filtering on keyboard or mouse messages, do not remove the messages. (Use <b>PeekMessage</b> with PM_NOREMOVE.)</li>
+</ul>
+<h2>What Is WM_QUIT?</h2>
+<p>
+Normal message-processing loops in an application's <b>WinMain</b> routine usually exit when the <b>GetMessage</b> function returns a FALSE value. Internally, if <b>GetMessage</b> is about to return a WM_QUIT message, it returns FALSE instead of TRUE even though the message returned in the <b>MSG</b> structure (a WM_QUIT message) is valid. The only time <b>GetMessage</b> will ever return a FALSE value is when it is returning a WM_QUIT message. Conversely, <b>PeekMessage</b> returns WM_QUIT messages as it would any other message. Applications that use <b>PeekMessage</b> in their main message-processing loop must explicitly look for the WM_QUIT message.</p>
+<p>
+The <b>PostQuitMessage</b> function does not actually post a WM_QUIT message to the application's task queue. Instead, it sets a flag that is tested inside <b>GetMessage</b> and <b>PeekMessage</b>. WM_QUIT is returned when <b>GetMessage</b> or <b>PeekMessage</b> detects that this flag is set and no other messages or events are pending for the application.</p>
+<h2>The Difference Between Yielding and Sleeping</h2>
+<p>
+The scheduler inside the Windows kernel is quite simple. Each time a new application (task) is created, a task-descriptor block (TDB) is created and added to the end of the TDB list. (The TDB is sometimes incorrectly referred to as the "task database.") There is one TDB in the list for each task currently running. To the scheduler, every task exists in one of two states: ready to run or asleep. A flag in the TDB determines whether the task is asleep, waiting for some event to occur, or ready to run.</p>
+<p>
+The scheduler only runs tasks that are ready to run. It does this in a round-robin fashion. That is, when a task that has been running yields control, its TDB is moved to the end of the TDB list, and the next task in the list that is not asleep runs. The TDB list is implemented as a circular linked list, so all that really moves is a pointer to the currently running TDB.</p>
+<p>
+The <b>Yield</b> function simply stops running the task (but does not put it to sleep) and runs the next task that is ready to run. The task that called <b>Yield</b> is still ready to run. Although this appears to be the perfect solution for implementing background processing, using the <b>Yield</b> function presents a serious problem, which will be described in "Why You Can't Use Yield" below.</p>
+<p>
+When a task calls <b>GetMessage</b> and there are no messages for the task to process, the task is put to sleep. The task stays asleep until awakened due to activation changes, hardware events, sent messages, posted messages, and so on. For example, if there is nothing in the system queue, and if the task that has the focus window calls <b>GetMessage</b>, the task will most likely go to sleep. The scheduler does not run the task while it is asleep. When Windows receives a keyboard event, the task is awakened and made ready to run. The scheduler will see that the task is ready to run, and then run the task when it is its turn. The task will then check the system queue for events, see the keyboard event, and return the key message from the <b>GetMessage</b> call.</p>
+<h2>How Applications Are Awakened</h2>
+<p>
+When keyboard or mouse events happen, the system cannot determine which application the event is destined for. For example, suppose a dialog box is active and contains a push button and an edit control with the focus. If the user presses a mouse button and then immediately presses a key on the keyboard, it is possible for the system queue to contain (in this order) a mouse-down event, a mouse-up event, a key-down event, and a key-up event. When the mouse events are processed and the dialog button is clicked, it is possible for the dialog box code to change the focus to a window in a different application. Since keyboard messages can only be retrieved by the application that contains the window with the focus, there is no way for the system to determine which application will receive the key events until after the mouse events have been processed.</p>
+<p>
+In general, at the time of an event, it is impossible for Windows to know which application will be the destination of the message created by the event. But Windows must ensure that some application is awake to process the event. It makes its best guess and wakes the application it thinks might be able to process the event. When a key event happens, Windows ensures that the application that owns the focus window is ready to run (not sleeping). Similarly, for mouse events, Windows ensures that the application that owns the active window is ready to run. This process almost always awakens the proper application, but there are cases where the wrong application is awakened. This is the reason the system-queue-scanning code must check to see if the event about to be processed is destined for the currently running application. If not, it awakens the proper application and yields control to it.</p>
+<h2>Why You Can't Use Yield</h2>
+<p>
+The problem with using the <b>Yield</b> function is not with the function itself, but is a result of input serialization that <b>GetMessage</b> and <b>PeekMessage</b> enforce. Unless an application is filtering messages, events in the system queue are processed in a serial fashion. That is, the event at the head of the queue must be processed before subsequent events in the queue.</p>
+<p>
+The problem can best be illustrated by example. Suppose an application is performing a task that is taking quite a while. No other applications can run until this application yields control. It is very probable that events have been queued in the system queue, especially if the user has moved the mouse or typed on the keyboard. Assume, for this example, that the mouse has been moved in the client area of a window belonging to the application performing the long task. The event at the head of the system queue will then be a mouse-move event destined for this application.</p>
+<p>
+The application now wants to yield control to allow other applications a chance to run. It if tries to do this by calling the <b>Yield</b> function, the following will happen:
+<ol>
+<li>
+<b>Yield</b> is called, stopping execution of the current application (task). The next task in the task list that is not asleep is run.<br><br></li>
+<li>
+The new task, likely inside a <b>GetMessage</b> call, promptly wakes up and checks the queues for messages and events that it can process. Seeing nothing in its application queue, it checks the system queue for events. <br><br></li>
+<li>
+The system-queue-scanning code detects that the event at the head of the system queue is for the original task. As described above, the system-queue-scanning code ensures that the original task will run and then puts the current task back to sleep.<br><br></li>
+<li>
+The original application returns from the <b>Yield</b> call, having run another application but not allowing any other applications to process system-queue events. This will continue until the application processes and removes any events in the system queue that must be processed by it.</li>
+</ol>
+<p>
+The general problem with <b>Yield</b> is that it does not allow the currently executing application to process system-queue events. It should not be used by applications to yield control in situations where system-queue events may occur for the application.</p>
+<h2>WaitMessage</h2>
+<p>
+The <b>WaitMessage</b> function is one of the simplest Windows functions. It simply puts the current task to sleep. It is normally used by applications that perform background processing to control precisely when their application goes to sleep. Most applications that do background processing implement a <b>PeekMessage</b> loop in the following manner (this is pseudocode):</p>
+<pre><code>if (PeekMessage(...) != NULL)
+ &nbsp; // Translate &amp; dispatch the message
+else if (there is background processing to perform)
+ &nbsp; // Perform background processing
+else 
+ &nbsp; // No background processing, no messages - go to sleep
+ &nbsp; WaitMessage();
+</code></pre>
+<p>
+Used in this manner, the application puts itself to sleep using <b>WaitMessage</b> if there is no background processing to perform and there are no messages to process. It is important that applications do not sit and spin in a <b>PeekMessage</b> loop when in an idle state. An application spinning in a <b>PeekMessage</b> loop will not appear to Windows as idle. This will prevent Windows from performing idle processing like flushing disk cache buffers and performing power management optimization on battery-powered systems.</p>
+</BODY>
+</HTML>

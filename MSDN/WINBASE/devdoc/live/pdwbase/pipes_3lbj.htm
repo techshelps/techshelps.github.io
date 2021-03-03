@@ -1,0 +1,315 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Named Pipe Server Using Overlapped I/O</title>
+<link disabled rel=stylesheet href=../../backsdk3.css>
+<style type="text/css">
+@import url(../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h2><a name="_win32_named_pipe_server_using_overlapped_i_o"></a>Named Pipe Server Using Overlapped I/O</h2>
+<p>
+This topic includes an example of a single-threaded pipe server that uses overlapped operations to service simultaneous connections to multiple pipe clients. The pipe server creates a fixed number of pipe instances. Each pipe instance can be connected to a separate pipe client. When a pipe client has finished using its pipe instance, the server disconnects from the client and reuses the pipe instance to connect to a new client. </p>
+<p>
+The <a href="synchro_8tf6.htm"><b>OVERLAPPED</b></a> structure is specified as a parameter in each <a href="filesio_39id.htm"><b>ReadFile</b></a>, <a href="filesio_3kkl.htm"><b>WriteFile</b></a>, and <a href="pipes_3885.htm"><b>ConnectNamedPipe</b></a> operation on the pipe instance. Although the example shows simultaneous operations on different pipe instances, it avoids simultaneous operations on a single pipe instance by using the event object in the <b>OVERLAPPED</b> structure. Because the same event object is used for read, write, and connect operations for each instance, there is no way to know which operation's completion caused the event to be set to the signaled state for simultaneous operations using the same pipe instance. </p>
+<p>
+The event handles for each pipe instance are stored in an array that is passed to the <a href="synchro_9xbn.htm"><b>WaitForMultipleObjects</b></a> function. This function waits for one of the events to be signaled, and returns the array index of the event that caused the wait operation to complete. The example in this topic uses this array index to retrieve a structure containing information for the pipe instance. The server uses the <b>fPendingIO</b> member of the structure to keep track of whether the most recent I/O operation on the instance was pending, which requires a call to the <a href="synchro_75v8.htm"><b>GetOverlappedResult</b></a> function. The server uses the <b>dwState</b> member of the structure to determine the next operation that must be performed for the pipe instance. </p>
+<p>
+Overlapped <b>ReadFile</b>, <b>WriteFile</b>, and <b>ConnectNamedPipe</b> operations can finish by the time the function returns. Otherwise, if the operation is pending, the event object in the specified <b>OVERLAPPED</b> structure is set to the nonsignaled state before the function returns. When the pending operation finishes, the system sets the state of the event object to signaled. The state of the event object is not changed if the operation finishes before the function returns. </p>
+<p>
+Because the example uses manual-reset event objects, the state of an event object is not changed to nonsignaled by the <b>WaitForMultipleObjects</b> function. This is important, because the example relies on the event objects remaining in the signaled state, except when there is a pending operation. </p>
+<p>
+If the operation has already finished when <a href="filesio_39id.htm"><b>ReadFile</b></a>, <a href="filesio_3kkl.htm"><b>WriteFile</b></a>, or <a href="pipes_3885.htm"><b>ConnectNamedPipe</b></a> returns, the function's return value indicates the result. For read and write operations, the number of bytes transferred is also returned. If the operation is still pending, the <b>ReadFile</b>, <b>WriteFile</b>, or <b>ConnectNamedPipe</b> function returns zero and the <a href="errors_3uwi.htm"><b>GetLastError</b></a> function returns ERROR_IO_PENDING. In this case, use the <b>GetOverlappedResult</b> function to retrieve the results after the operation has finished. <b>GetOverlappedResult</b> returns only the results of pending operations. It does not report the results of operations that were completed before the overlapped <b>ReadFile</b>, <b>WriteFile</b>, or <b>ConnectNamedPipe</b> function returned. </p>
+<p>
+Before disconnecting from a client, the multithreaded server example in the previous topic used <a href="filesio_8wvn.htm"><b>FlushFileBuffers</b></a> to ensure that the client had read everything written to the pipe. This would defeat the purpose of overlapped I/O, because the flush operation would block the execution of the server thread while it waits for the client to empty the pipe. Consequently, before disconnecting, you must wait for a signal indicating the client has finished. In the following example, the signal is the error generated by trying to read from the pipe after the pipe client closes its handle. </p>
+<pre><code>#include &lt;windows.h&gt; 
+ 
+#define CONNECTING_STATE 0 
+#define READING_STATE 1 
+#define WRITING_STATE 2 
+#define INSTANCES 4 
+ 
+typedef struct 
+{ 
+   OVERLAPPED oOverlap; 
+   HANDLE hPipeInst; 
+   CHAR chBuf[BUFSIZE]; 
+   DWORD cbToWrite; 
+   DWORD dwState; 
+   BOOL fPendingIO; 
+} PIPEINST, *LPPIPEINST; 
+ 
+ 
+VOID DisconnectAndReconnect(DWORD); 
+BOOL ConnectToNewClient(HANDLE, LPOVERLAPPED); 
+VOID GetDataToWriteToClient(LPPIPEINST); 
+ 
+PIPEINST Pipe[INSTANCES]; 
+HANDLE hEvents[INSTANCES]; 
+ 
+DWORD main(VOID) 
+{ 
+   DWORD i, dwWait, cbBytes, dwErr; 
+   BOOL fSuccess; 
+   LPTSTR lpszPipename = "\\\\.\\pipe\\mynamedpipe"; 
+ 
+// The initial loop creates several instances of a named pipe 
+// along with an event object for each instance.  An 
+// overlapped ConnectNamedPipe operation is started for 
+// each instance. 
+ 
+   for (i = 0; i &lt; INSTANCES; i++) 
+   { 
+ 
+   // Create an event object for this instance. 
+ 
+      hEvents[i] = CreateEvent( 
+         NULL,    // no security attribute 
+         TRUE,    // manual-reset event 
+         TRUE,    // initial state = signaled 
+         NULL);   // unnamed event object 
+
+      if (hEvents[i] == NULL) 
+         MyErrExit("CreateEvent"); 
+ 
+      Pipe[i].oOverlap.hEvent = hEvents[i]; 
+ 
+      Pipe[i].hPipeInst = CreateNamedPipe( 
+         lpszPipename,            // pipe name 
+         PIPE_ACCESS_DUPLEX |     // read/write access 
+         FILE_FLAG_OVERLAPPED,    // overlapped mode 
+         PIPE_TYPE_MESSAGE |      // message-type pipe 
+         PIPE_READMODE_MESSAGE |  // message-read mode 
+         PIPE_WAIT,               // blocking mode 
+         INSTANCES,               // number of instances 
+         BUFSIZE,                 // output buffer size 
+         BUFSIZE,                 // input buffer size 
+         PIPE_TIMEOUT,            // client time-out 
+         NULL);                   // no security attributes 
+
+      if (Pipe[i].hPipeInst == INVALID_HANDLE_VALUE) 
+          MyErrExit("CreatePipe"); 
+ 
+   // Call the subroutine to connect to the new client
+ 
+      Pipe[i].fPendingIO = ConnectToNewClient( 
+         Pipe[i].hPipeInst, 
+         &amp;Pipe[i].oOverlap); 
+ 
+      Pipe[i].dwState = Pipe[i].fPendingIO ? 
+         CONNECTING_STATE : // still connecting 
+         READING_STATE;     // ready to read 
+   } 
+ 
+   while (1) 
+   { 
+   // Wait for the event object to be signaled, indicating 
+   // completion of an overlapped read, write, or 
+   // connect operation. 
+ 
+      dwWait = WaitForMultipleObjects( 
+         INSTANCES,    // number of event objects 
+         hEvents,      // array of event objects 
+         FALSE,        // does not wait for all 
+         INFINITE);    // waits indefinitely 
+ 
+   // dwWait shows which pipe completed the operation. 
+ 
+      i = dwWait - WAIT_OBJECT_0;  // determines which pipe 
+      if (i &lt; 0 || i &gt; (INSTANCES - 1)) 
+         MyErrExit("index out of range"); 
+ 
+   // Get the result if the operation was pending. 
+ 
+      if (Pipe[i].fPendingIO) 
+      { 
+         fSuccess = GetOverlappedResult( 
+            Pipe[i].hPipeInst, // handle to pipe 
+            &amp;Pipe[i].oOverlap, // OVERLAPPED structure 
+            &amp;cbBytes,          // bytes transferred 
+            FALSE);            // do not wait 
+ 
+         switch (Pipe[i].dwState) 
+         { 
+         // Pending connect operation 
+            case CONNECTING_STATE: 
+               if (! fSuccess) 
+                  MyErrExit("ConnectNamedPipe"); 
+               Pipe[i].dwState = READING_STATE; 
+               break; 
+ 
+         // Pending read operation 
+            case READING_STATE: 
+               if (! fSuccess || cbBytes == 0) 
+               { 
+                  DisconnectAndReconnect(i); 
+                  continue; 
+               } 
+               Pipe[i].dwState = WRITING_STATE; 
+               break; 
+ 
+         // Pending write operation 
+            case WRITING_STATE: 
+               if (! fSuccess || cbBytes != Pipe[i].cbToWrite) 
+               { 
+                  DisconnectAndReconnect(i); 
+                  continue; 
+               } 
+               Pipe[i].dwState = READING_STATE; 
+               break; 
+ 
+            default: 
+               MyErrExit("invalid pipe state"); 
+         }  
+      } 
+ 
+   // The pipe state determines which operation to do next. 
+ 
+      switch (Pipe[i].dwState) 
+      { 
+      // READING_STATE: 
+      // The pipe instance is connected to the client 
+      // and is ready to read a request from the client. 
+ 
+         case READING_STATE: 
+            fSuccess = ReadFile( 
+               Pipe[i].hPipeInst, 
+               Pipe[i].chBuf, 
+               BUFSIZE, 
+               &amp;cbBytes, 
+               &amp;Pipe[i].oOverlap); 
+ 
+         // The read operation completed successfully. 
+ 
+            if (fSuccess &amp;&amp; cbBytes != 0) 
+            { 
+               Pipe[i].fPendingIO = FALSE; 
+               Pipe[i].dwState = WRITING_STATE; 
+               continue; 
+            } 
+ 
+         // The read operation is still pending. 
+ 
+            dwErr = GetLastError(); 
+            if (! fSuccess &amp;&amp; (dwErr == ERROR_IO_PENDING)) 
+            { 
+               Pipe[i].fPendingIO = TRUE; 
+               continue; 
+            } 
+ 
+         // An error occurred; disconnect from the client. 
+ 
+            DisconnectAndReconnect(i); 
+            break; 
+ 
+      // WRITING_STATE: 
+      // The request was successfully read from the client. 
+      // Get the reply data and write it to the client. 
+ 
+         case WRITING_STATE: 
+            GetDataToWriteToClient(&amp;Pipe[i]); 
+ 
+            fSuccess = WriteFile( 
+               Pipe[i].hPipeInst, 
+               Pipe[i].chBuf, 
+               Pipe[i].cbToWrite, 
+               &amp;cbBytes, 
+               &amp;Pipe[i].oOverlap); 
+ 
+         // The write operation completed successfully. 
+ 
+            if (fSuccess &amp;&amp; cbBytes == Pipe[i].cbToWrite) 
+            { 
+               Pipe[i].fPendingIO = FALSE; 
+               Pipe[i].dwState = READING_STATE; 
+               continue; 
+            } 
+ 
+         // The write operation is still pending. 
+ 
+            dwErr = GetLastError(); 
+            if (! fSuccess &amp;&amp; (dwErr == ERROR_IO_PENDING)) 
+            { 
+               Pipe[i].fPendingIO = TRUE; 
+               continue; 
+            } 
+ 
+         // An error occurred; disconnect from the client. 
+ 
+            DisconnectAndReconnect(i); 
+            break; 
+ 
+         default: 
+            MyErrExit("invalid pipe state"); 
+      } 
+  } 
+ 
+  return 0; 
+} 
+ 
+ 
+// DisconnectAndReconnect(DWORD) 
+// This function is called when an error occurs or when the client 
+// closes its handle to the pipe. Disconnect from this client, then 
+// call ConnectNamedPipe to wait for another client to connect. 
+ 
+VOID DisconnectAndReconnect(DWORD i) 
+{ 
+// Disconnect the pipe instance. 
+ 
+   if (! DisconnectNamedPipe(Pipe[i].hPipeInst) ) 
+      MyErrExit("DisconnectNamedPipe"); 
+ 
+// Call a subroutine to connect to the new client. 
+ 
+   Pipe[i].fPendingIO = ConnectToNewClient( 
+      Pipe[i].hPipeInst, 
+      &amp;Pipe[i].oOverlap); 
+ 
+   Pipe[i].dwState = Pipe[i].fPendingIO ? 
+      CONNECTING_STATE : // still connecting 
+      READING_STATE;     // ready to read 
+} 
+ 
+// ConnectToNewClient(HANDLE, LPOVERLAPPED) 
+// This function is called to start an overlapped connect operation. 
+// It returns TRUE if an operation is pending or FALSE if the 
+// connection has been completed. 
+ 
+BOOL ConnectToNewClient(HANDLE hPipe, LPOVERLAPPED lpo) 
+{ 
+   BOOL fConnected, fPendingIO = FALSE; 
+ 
+// Start an overlapped connection for this pipe instance. 
+   fConnected = ConnectNamedPipe(hPipe, lpo); 
+ 
+// Overlapped ConnectNamedPipe should return zero. 
+   if (fConnected) 
+      MyErrExit("ConnectNamedPipe"); 
+ 
+   switch (GetLastError()) 
+   { 
+   // The overlapped connection in progress. 
+      case ERROR_IO_PENDING: 
+         fPendingIO = TRUE; 
+         break; 
+ 
+   // Client is already connected, so signal an event. 
+ 
+      case ERROR_PIPE_CONNECTED: 
+         if (SetEvent(lpo-&gt;hEvent)) 
+            break; 
+ 
+   // If an error occurs during the connect operation... 
+      default: 
+         MyErrExit("ConnectNamedPipe"); 
+   } 
+ 
+   return fPendingIO; 
+} 
+ </code></pre>
+<p>&nbsp;</p></body>
+</HTML>

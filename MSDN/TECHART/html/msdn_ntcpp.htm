@@ -1,0 +1,439 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Writing Windows NT Kernel-Mode Drivers in C++</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_ntcpp"></a></sup>Writing Windows NT Kernel-Mode Drivers in C++</h1>
+<p>
+Ruediger R. Asche<br>
+Microsoft Developer Network Technology Group</p>
+<p>
+February 1, 1995</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="3271">
+</OBJECT><a href="javascript:sample1.Click()">Click to open or copy the source files for the KBDCLASS and MOUCLASS drivers.</a></p>
+<h2>Abstract</h2>
+<p>
+This article describes the steps for writing a Windows NT™ kernel-mode device driver in C++ using the Microsoft® Visual C++™ version 2.0 development environment. With this article, I've provided a rudimentary C++ class library that encapsulates some of the system-provided support elements. The article also describes the porting process for two existing drivers (the mouse class and keyboard class drivers) and presents the C++ code for the driver.</p>
+<h2>Introduction</h2>
+<p>
+Object-oriented programming languages used with task-specific class libraries provide powerful tools that facilitate application design. Although system programming requires a fairly detailed knowledge of the underlying computer architecture, writing device drivers and operating-system extensions in object-oriented languages can significantly ease the development process.</p>
+<p>
+This article explores the potential for writing Windows NT™ kernel-mode device drivers in C++, today's language of choice for most PC-based applications. I will discuss the benefits and drawbacks of writing Windows NT kernel-mode device drivers in C++. I will also introduce a little device driver written in C++ and a small class library that encapsulates the system-specific data structures within C++ objects.</p>
+<p>
+Please see the first article in this series, <a href="msdn_msvcdrv.htm">"The Windows NT Kernel-Mode Driver Cookbook, Featuring Visual C++,"</a> for information on using the Microsoft® Visual C++™ integrated development environment (IDE) to build kernel-mode drivers.</p>
+<h2>Motivation</h2>
+<p>
+Here are some reasons why it makes sense to develop device drivers for the Windows NT operating system in C++:
+<ul type=disc>
+<li>
+Because the operating system is processor-independent, the device driver makes no assumptions about the contents of registers at system-service entry points; thus, register assignments made by the compiler do not affect the functionality of the driver. In this sense, device drivers written in C++ differ from other types of device drivers, for example virtual device drivers (VxDs), which at times make assumptions about register values.<br><br></li>
+<li>
+In a kernel-mode device driver written in plain C, the driver is responsible for explicitly allocating and deallocating memory and some of the system-provided data structures. Failure to do so may seriously affect the system as a whole. In C++, on the other hand, the device driver can encapsulate the data structures within C++ objects and put the allocation and deallocation routines in the constructors and destructors of those objects—thus, the driver has to track only the C++ objects, which keep track of the rest.<br><br></li>
+<li>
+For the same reason, debugging device drivers is much easier in C++ than it is in C, because all calls to system-provided services can be located in C++ modules that can be debugged separately. Furthermore, the C++ modules need to be developed only once and can be recycled to work with other drivers.<br><br></li>
+<li>
+If you choose fairly generic C++ classes, you may even be able to establish a certain degree of code compatibility between different operating systems.<br><br></li>
+<li>
+By design, the Windows NT system architecture builds upon an object-oriented model, which is fairly easy to extend to C++.<br><br></li>
+<li>
+You can establish code recycling by building a generic class library, and even reuse some of the library components for application code. For example, as we will see later, the heart of the mouse and keyboard class driver code is a circular queue, which is really a general-purpose data structure that can be used over and over, in applications as well as in system code. Debugging portions of a driver's code within an application also results in a shorter development cycle, because you do not have to reboot the target machine each time the code faults (which inevitably happens in device drivers).</li>
+</ul>
+<p>
+However, there is no such thing as a free lunch. In other words, we gain all of the above advantages only by accepting a number of drawbacks. Here are two of the drawbacks associated with writing device drivers in C++ instead of using plain C or assembly language:
+<ul type=disc>
+<li>
+Device drivers frequently need to be highly optimized for performance. Careful assembly-language programming may significantly enhance a driver's performance. Thus, by making the transition from assembly language to C, device driver writers may compromise performance. By the same token, C++ code tends to generate more overhead, for the following reasons:<ul type=disc>
+<li>
+Frequently not all of the member variables of a C++ class are used, so carrying them around may be unnecessary in some cases.<br><br></li>
+<li>
+A call to a C++ member function is generally more expensive than a C-type call to a system service.</li>
+</ul>
+<p class=tl>
+Although the performance hit incurred by the function call overhead in C++ tends to be rather small, the overall performance in a C++ environment may suffer when you add up all the member function calls.</P></li>
+<li>
+C++ provides an excellent framework for expressing class hierarchies through derived classes and virtual functions. However, device drivers rarely require class hierarchies, so you cannot exploit a number of the advantages provided by C++.</li>
+</ul>
+<p>
+In this article, I will address all of the preceding arguments (pros and cons) to show you that a certain subset of Windows NT kernel drivers may very well benefit from object-oriented programming, although it does not make sense to wrap all of the system services of the Windows NT kernel into C++ objects.</p>
+<p>
+In the next section, I will introduce a small, rudimentary class library for device drivers. In the section "A Practical Example: Porting a Driver to C++," I will describe how I ported an existing driver (the mouse and keyboard class drivers collapsed into one module) to C++.</p>
+<p>
+I assume that you have a fairly good knowledge of writing Windows NT kernel-mode device drivers. If you are new to the driver world and have a reasonable understanding of C++, I suspect that learning how to write Windows NT kernel-mode drivers will come much easier to you when you do it in C++.</p>
+<h2>A C++ Class Library for Device Drivers</h2>
+<p>
+Theoretically, it is possible to transform almost all system-provided data structures into C++ objects. For example, you can transform a kernel spin lock into a C++ object using something similar to the following prototype:</p>
+<pre><code>class CKeSpinlock
+{ 
+ public:
+ Acquire();
+ Release();
+};
+</code></pre>
+<p>
+where the <b>Acquire</b> and <b>Release</b> members encapsulate the <b>KeAcquireSpinlock</b> and <b>KeReleaseSpinlock</b> services, respectively. The advantage of such an approach is that all system services are called only from inside C++ member functions, and most system calls have wrappers. This approach can make it easier to design system-independent support libraries.</p>
+<p>
+However, encapsulating system services within C++ objects does not relieve you from doing the "grunt work" of driver design yourself. Thus, if the only advantage of encapsulation is to provide you with an object-based (instead of a function-based) interface, you will gain a small benefit; however, on the downside, you will buy a lot of unnecessary memory and run-time overhead.</p>
+<p>
+It makes most sense to use C++ objects in places where their respective constructors and destructors can save significant coding. For example, in driver initialization routines, a lot of work goes into allocating and deallocating memory for data structures such as Unicode™ strings, Registry query tables, device extensions, or auxiliary data structures. The code that deals with those things tends to be incredibly messy—you generally need several dozens of lines of code simply to request memory from the operating system, to check for the validity of the allocated memory, to set up data structures for the system calls, and to do all of these things for dynamically allocated auxiliary data structures.</p>
+<p>
+In addition, previously allocated data structures may need to be freed in several places, as shown in the following code snippet:</p>
+<pre><code>PVOID pMem1 = ExAllocatePool(...);
+if (pMem1)
+{
+ PVOID pMem2 = ExAllocatePool(...);
+ if (!pMem2)
+  { // diagnose an error
+ &nbsp;&nbsp; ExFreePool(pMem1);
+};
+};
+... do a lot of stuff here...
+if (pMem2) ExFreePool(pMem2);
+if (pMem1) ExFreePool(pMem2);
+</code></pre>
+<p>
+Having the same code in two or more places tends to generate errors, in particular, when the design of the affected structures needs to be changed at some point in the development cycle. In a C++ environment, the run-time support does a lot of object tracking for you (at least for statically allocated objects), so your code can focus on the issues that are relevant for drivers. </p>
+<p>
+The small class library I have provided for all Windows NT kernel-mode device drivers encapsulates only three system-provided elements—Unicode strings, Registry access, and error logs—but these classes radically ease the process of writing a driver. I also show how a device extension can benefit from being implemented as a C++ object. </p>
+<h3>Pragmatics of C++</h3>
+<p>
+One of the merits of C++ is that a module written in C++ needs no run-time support. If it did, we wouldn't be able to write a driver in C++ because the run-time libraries provided with the compiler are generally incompatible with kernel mode.</p>
+<p>
+The big bottleneck in writing a driver in C++ is memory allocation. All statically allocated C++ objects are allocated according to the rules followed by the driver loader, but what about dynamically allocated objects—that is, objects allocated with the <b>new</b> operator and deallocated with the <b>delete</b> operator? Unlike applications, drivers need to allocate their memory from one of several pools (the paged and non-paged pool, for example). If a C++ object contains a structure that must be non-pageable, then surely that object itself must be non-pageable as well. How do we address this problem?</p>
+<p>
+Very simply—by overriding the global <b>new</b> operator. The placement argument is a very useful C++ construct that helps us make the paged versus non-paged decision at run time. Let's look at the versions of <b>new</b> and <b>delete</b> that I provide in the library:</p>
+<pre><code>void * __cdecl operator new(unsigned int nSize, POOL_TYPE iType)
+{ 
+ return ExAllocatePool(iType,nSize);
+ 
+};
+
+
+void __cdecl operator delete (void * p)
+{ 
+ ExFreePool(p);
+};
+</code></pre>
+<p>
+If your code needs to allocate an object dynamically, it can conveniently choose the source allocation pool using the placement operator; for example:</p>
+<pre><code>cuSuffix = new (PagedPool) CUString(i,10);
+</code></pre>
+<p>
+The code above allocates the memory for <b>cuSuffix</b> from the paged pool, then calls one of the constructors for the <b>CUString</b> object, which can then allocate more memory for internal data structures using <b>ExAllocatePool</b> and the corresponding <b>ExFreePool</b> calls in the destructor, if applicable.</p>
+<p>
+A word of caution is necessary here: The <b>ExAllocatePool</b> call can fail, of course, like most other calls into the kernel. However, the <b>new</b> operator does not return a failure or success code in a form that the routine that calls <b>new</b> can catch, so how can we handle that situation gracefully?</p>
+<p>
+The obvious solution would be to use structured exception handling—the <b>new</b> operator could simply raise an exception if the memory allocation fails and let the routine that called <b>new</b> do the work. Unfortunately, there is no way to raise an exception in Windows NT kernel-mode driver. OK, I take that back, but only conditionally. You can use the <b>ExRaiseStatus</b> service to throw an exception, but the documentation states that this service can be called only from top-level drivers, and only on IRQ_PASSIVE_LEVEL and above. When I inquired about this restriction, I was told the following:
+<ul type=disc>
+<li>
+Exception handling in a driver is very expensive and should therefore be restricted to really malicious error conditions.<br><br></li>
+<li>
+By definition, kernel-mode exception handling requires all code, data, and stack memory accessed at exception-handling time to be non-pageable. Drivers cannot safely assume that this is true, especially lower-level drivers that do not know whether exceptions they don't handle can safely be handled by a higher-level driver.</li>
+</ul>
+<p>
+Thus, any code that calls <b>new</b> must check to see whether the memory was allocated correctly before accessing a member function. Fortunately, the C++ compiler automatically generates code that checks the return value from <b>new</b> before calling a constructor. This way, the code that manipulates the objects can avoid all possible exceptions that might be generated by accessing members of objects that have not been allocated successfully.</p>
+<h3>Registry Access Services</h3>
+<p>
+In most drivers, a significant part of the work in the <b>DriverEntry</b> routine consists of the interaction with the Registry. For example, parameters must be read out of the Registry, and entries must be written into the Registry's device map upon successful initialization of the hardware. Because of the amount of work involved, it makes sense to delegate this interaction to a C++ object. Here's the prototype for the <b>CRegistry</b> class (from the DRVCLASS.H file in the sample code):</p>
+<pre><code>class CRegistry 
+{ 
+  private: PRTL_QUERY_REGISTRY_TABLE m_pTable;
+  public: NTSTATUS m_status;
+  public: CRegistry(int iSize);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ~CRegistry();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BOOL QueryDirect(CUString *location,CUString *key, void 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **pReceiveBuffer, ULONG uType);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BOOL QueryWithCallback(PRTL_QUERY_REGISTRY_ROUTINE callback,ULONG 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RelativeTo,PWSTR Path,PVOID Context, PVOID 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Environment);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BOOL WriteString(ULONG relativeTo, CUString *pBuffer, CUString *pPath, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CUString *pKey);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BOOL WriteDWord(ULONG relativeTo, void *pBuffer,CUString 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *pPath,CUString *pKey);
+
+};
+</code></pre>
+<p>
+You will notice that the <b>CRegistry</b> class does not support all of the functionality that the Registry services provide. In particular, the <b>RtlQueryRegistryValues</b> function allows an array of several Registry entries to be queried at the same time. The <b>CRegistry</b> class member <b>QueryDirect</b> does not support this feature, because an interface for multiple queries is somewhat difficult to design. I also found that submitting the queries individually may produce more accurate results than querying several values at the same time, unless you're querying a large number of Registry values. The non-C++ version of the mouse class driver, for example, reads a set of four values out of the Registry, and assigns defaults to these four values if any one of the queries fails. If you split the query into four separate queries, you can handle query failures individually. Note that any potential performance degradation caused by splitting up the query is not very relevant, because the Registry is generally read only at driver initialization time and does not affect the behavior of the driver.</p>
+<p>
+Furthermore, the Windows NT kernel allows you to query Registry keys relative to a given key, but the <b>CRegistry</b> class does not currently support this functionality.</p>
+<h3>Unicode String Manipulation Services</h3>
+<p>
+The problem with strings in Windows NT drivers is that they come in several flavors, each of which requires special treatment. Additionally, some of the routines that work on Unicode strings expect a pointer to the actual string, whereas others expect the address of a variable of type UNICODE_STRING, which is defined as follows in NTDDK.H:</p>
+<pre><code>typedef struct _UNICODE_STRING {
+ &nbsp;&nbsp; USHORT Length;
+ &nbsp;&nbsp; USHORT MaximumLength;
+#ifdef MIDL_PASS
+ &nbsp;&nbsp; [size_is(MaximumLength / 2), length_is((Length) / 2) ] USHORT * Buffer;
+#else // MIDL_PASS
+ &nbsp;&nbsp; PWSTR&nbsp; Buffer;
+#endif // MIDL_PASS
+} UNICODE_STRING;
+typedef UNICODE_STRING *PUNICODE_STRING;
+</code></pre>
+<p>
+Let's look at some of the ways in which you can allocate Unicode strings:
+<ul type=disc>
+<li>
+You can create a variable of type UNICODE_STRING from a literal PWCHAR using <b>RtlInitUnicodeString</b> with a non-null string. <br><br></li>
+<li>
+You can call <b>RtlInitUnicodeString</b> with a NULL parameter to simply initialize a variable of type UNICODE_STRING with a length of zero. It is the driver's responsibility to allocate the memory for the string part, set the length values, and deallocate the memory when the memory is no longer needed. Also, you need to fill the string itself; for example, by using <b>RtlAppendStringToUnicodeString</b>.<br><br></li>
+<li>
+You can use <b>RtlIntegerToUnicodeString</b> to convert an integer to a Unicode string.<br><br></li>
+<li>
+You can use <b>RtlConvertAnsiToUnicodeString</b> to generate a Unicode string from an ANSI string.</li>
+</ul>
+<p>
+In some of these cases, the driver must explicitly deallocate the memory that holds the string; in other cases, the system allocates the memory for the string.</p>
+<p>
+You can use a single C++ object that encapsulates the different ways to generate a Unicode string. Here is the prototype for the <b>CUString</b> object that I provide in DRVCLASS.H:</p>
+<pre><code>class CUString 
+{ 
+  private : unsigned char m_bType;
+  public: UNICODE_STRING m_String;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NTSTATUS m_status;
+  public:
+ &nbsp;&nbsp; CUString(int);
+ &nbsp;&nbsp; CUString(PWCHAR);
+ &nbsp;&nbsp; CUString(int,int);
+ &nbsp;&nbsp; ~CUString();
+ &nbsp;&nbsp; void Append(UNICODE_STRING *);
+ &nbsp;&nbsp; void CUString::CopyTo(CUString *pTarget);
+ &nbsp; BOOL operator==(CUString cuArg);
+ &nbsp; int inline GetLength() { return m_String.Length; };
+ &nbsp; PWCHAR inline GetString() { return m_String.Buffer; };
+ &nbsp; void inline SetLength(int i) { m_String.Length = i; };
+};
+</code></pre>
+<p>
+In the code above, each overloaded constructor provides a different way to generate a Unicode string. The <b>m_bType</b> member variable specifies whether the memory for the buffer was allocated by the system or by the driver, so the destructor knows whether to call <b>ExFreePool</b> on the allocated memory.</p>
+<p>
+Note that the <b>m_String</b> member is public so that routines that expect PWCHAR or UNICODE_STRING variables can access the buffer directly. The <b>m_status</b> member determines whether the internal data structures were allocated successfully at construction time.</p>
+<p>
+It would be nice to implement a full set of operations, such as <b>Copy</b> instead of <b>CopyTo</b> and &gt;&gt; instead of <b>Append</b>. However, allocating new objects inside of objects (which is required, for example, for a <b>Copy</b> operator) is problematic because the driver cannot determine which pool to use to derive the memory for a new object. Given an existing object, it must still be the driver's responsibility to explicitly allocate all the memory that it uses. For this reason, we use <b>CopyTo</b>, which takes the Unicode string member <b>m_String</b> in the <b>CUString</b> object instance and copies it to the buffer in the target instance object. The driver allocates the memory for the object before the copy operation.</p>
+<p>
+I have not implemented all of the routines that the run-time library provides for string manipulation in the <b>CUString</b> class. I suggest that you add the necessary class members as you go along, always remembering that each member you add to a class will yield more memory space in any object created from that class.</p>
+<p>
+I have defined one more class, <b>CErrorLogEntry</b>, in DRVCLASS.H. I will discuss that class in the "Error Handling" section, later in this article.</p>
+<h3>Debugging a Driver Written in C++</h3>
+<p>
+When you use WinDbg as your kernel debugger (the preferred way to debug a driver!), debugging the driver is fairly straightforward if you have already managed to debug your driver in plain C. In fact, WinDbg automatically understands C++, so there is nothing you need to do differently when you switch from C to C++. Please refer to the article <a href="msdn_msvcdrv.htm">"The Windows NT Kernel-Mode Driver Cookbook, Featuring Visual C++"</a> in the Development Library for details on how to set up the debugger and prepare the driver for debugging.</p>
+<h2>A Practical Example: Porting a Driver to C++</h2>
+<p>
+Initially, I used the C++ classes that I introduced in the last section to rewrite a little dummy driver I had written earlier in C++. When that worked, I decided to try a "real" driver to see whether my approach was too academic. The mouse class driver seemed appropriate because it consists of a single source file and demonstrates almost all of the "standard" functionality of a Windows NT kernel-mode driver. (There is one exception: The mouse class driver does not support interrupt handlers or port access because it is not a physical driver.)</p>
+<p>
+Later on, I discovered that the mouse and keyboard drivers are almost 100 percent compatible, so I collapsed both driver sources into a common source with all driver-specific parts located in the MOUCLASS.H and KBDCLASS.H header files. The only difference in building the two drivers is that one of the preprocessor options for the mouse class driver is the MOUSECLASSTYPE symbol, which forces the compiler to include MOUCLASS.H instead of KBDCLASS.H, and MOULOG.H instead of KBDLOG.H.</p>
+<p>
+You may wish to compare my version of the sample driver with the version that comes with the Windows NT version 3.5 Device Driver Kit (DDK). I will go over the differences as we go along.</p>
+<h3>The New Files</h3>
+<p>
+Instead of one source file, there are now three:
+<ul type=disc>
+<li>
+DRVCLASS.CPP, which contains implementations of the <b>CUString</b>, <b>CRegistry</b>, and <b>CErrorLogEntry</b> classes. Note that you can use this file with any driver.<br><br></li>
+<li>
+MCLASSES.CPP, which contains the driver-specific C++ class <b>CInputClassDeviceExt</b>. This is a fairly general-purpose class that you can use for other drivers as well, as we will see later on.<br><br></li>
+<li>
+INPCLASS.CPP, which contains the main code for the driver.</li>
+</ul>
+<h3>Recompiling the Driver for C++</h3>
+<p>
+This step is fairly easy and does not involve a single line of C++ code. At this point, I assume that you have already ported your project from the DDK environment to Visual C++, as I described in the article <a href="msdn_msvcdrv.htm">"The Windows NT Kernel-Mode Driver Cookbook, Featuring Visual C++."</a> Simply change your driver source file extensions from .C to .CPP, change the project to reference the .CPP files (from the Visual C++&nbsp; File menu, choose Project, and fill in the dialog box), and rebuild the driver.</p>
+<p>
+You are probably in for a surprise—the compiler may spit out warnings and errors like crazy—but relax. Remember that the extern "C" declaration allows you to compile C++ code as if it were C code. This declaration is useful, among other things, for preventing function names from being decorated (by wrapping the function prototypes in the declaration), and for compiling header files correctly (by wrapping the <b>#include</b> statements in extern "C"). Any remaining errors are probably caused by sloppy code (for example, implicit casts). Remember that C++ depends on correct data types, so you may encounter cases in which, say, your driver calls <b>ExAllocatePool</b> and assigns the result to a variable of type <b>MYSTRUCTURE *</b>. In C++, casts are program-definable operations, so the compiler cannot determine how to do the cast. The resolution is to use an explicit cast:</p>
+<pre><code>myStructVariable = (MYSTRUCTURE *) ExAllocatePool(...);
+</code></pre>
+<p>
+This will take care of the error messages. Note that in a pure C++ environment, using casts is not a good idea because they turn off error checking and can hide vicious errors. The code could provide a cast operator that implicitly converts a variable of type <b>void *</b> (which is the return value of <b>ExAllocatePool</b>) to <b>MYSTRUCTURE *</b>. However, because <b>ExAllocatePool</b> is a fairly frequently used function, and the cast from <b>void *</b> to any data structure is nothing but a reinterpretation of the returned value (in other words, a cast would never have to do anything in this case), I decided to stick with the good old C cast operator.</p>
+<p>
+Once the driver compiles and executes successfully, it is time to think about using C++ classes in your driver code—after all, that is the reason why you put up with C++ in the first place, right?</p>
+<p>
+For the mouse class driver, I took the two classes I discussed earlier—<b>CRegistry</b> and <b>CUString</b>—and replaced the original code with the C++ classes piece by piece. I was able to reduce the code for the driver initialization significantly; believe me, it is <i>much</i> easier to initialize a driver if you can leave the memory management up to the C++ classes.</p>
+<p>
+I found it very helpful to rewrite the code piece by piece because I could easily detect where the problems that I encountered in test runs originated.</p>
+<p>
+After rewriting the code, I did some sleuth work to figure out what else I could make into C++ objects. I discovered that the device extension that the mouse class driver uses is actually an implementation of a circular queue. The operations that work on a circular queue are well known. If we can use a hypothetical C++ class, <b>CCircularQueue</b>, with the well-known <b>Flush</b>, <b>Insert</b>, and <b>Remove</b> operations instead of using a data type that is embedded in the driver, we can separate the debugging of the driver from the debugging of the circular queue. This will also provide us with a generic circular queue class that can be recycled for other drivers. In fact, I debugged the circular queue data object in a test application that I linked with the class implementation, not bothering to test the driver before I knew that the class worked for sure. If a better algorithm to implement a circular queue comes your way, you can also replace our hypothetical C++ class easily, regardless of the driver logic.</p>
+<p>
+The flow of control through the mouse class device driver is fairly standard for I/O devices. An incoming read request from an application checks to see whether there is data in the circular queue. If so, it picks up the data and returns. If not, the request is marked as pending. When a hardware interrupt is processed (in the service callback routine called from the port driver), the driver checks to see whether there is a pending application request for data. If yes, the request is serviced with the data from the interrupt, and the request is completed. Either way, all remaining data is buffered in the device extension's circular queue.</p>
+<p>
+The difficult part of driver design is synchronization—that is, acquiring and releasing spin locks at the right time, and making sure that the asynchronous service callback invocations do not corrupt data when overlapping with synchronous I/O requests. By encapsulating the circular queue within a C++ data structure, we can focus on the difficult part and leave the queue manipulation to a separately debugged routine with well-defined entry points.</p>
+<h3>Device Extensions as C++ Classes</h3>
+<p>
+As I mentioned earlier, a number of system-provided objects, such as device objects and driver objects, cannot easily be rewritten in C++ because they are maintained by the operating system kernel. We cannot simply replace those system-provided objects with C++ objects because the Windows NT kernel makes assumptions about the internal representations of those objects, and their members must internally be represented exactly as the kernel expects. If you do not mind relying on the fact that most C++ compilers (including the Microsoft Visual C++ compiler) normally store C++ objects exactly as they store structures, you could simply cast a variable of, say, type <b>PDEVICE_OBJECT</b> to a variable of type <b>(CDeviceObject *)</b> (if such a type existed) and get away with it. This method works because the representation of class elements generally corresponds to the order of the member variables in the class declaration, with no class header preceding an instance of that class.</p>
+<p>
+However, I don't like such assumptions. All it takes to invalidate the assumption is a <b>new</b> operator overridden in a different way, a class that multiply inherits from several base classes, a derived object, or an exotic compiler—if it encounters any of these cases, the driver will fail with all kinds of disgusting errors. Thus, I stayed away from the objects whose internal structure must be known to the system.</p>
+<p>
+In contrast, the device extension can be implemented as a C++ class very conveniently. The advantage of using C++ is that the device extension is generally the carrier of the most heavily used data structures in your driver; thus, by encapsulating the device extension within an object, you delegate a lot of the work to classes that enjoy all the abstraction, modularity, and error-isolation mechanisms that C++ provides.</p>
+<p>
+A device extension is normally part of the device object that Window NT allocates when the driver calls <b>IoCreateDeviceObject</b>. Your driver code passes the size of the extension to the <b>IoCreateDeviceObject</b> call. The operating-system kernel allocates the memory for the extension from the non-paged pool and embeds the extension into the driver object.</p>
+<p>
+For the input class driver, I simply had Windows NT allocate enough space in its device extension to hold a variable of type <b>CInputClassDeviceExt</b> *, to which I assigned a custom object:</p>
+<pre><code>IoCreateDevice(DriverObject, sizeof(CInputClassDeviceExt 
+*),FullDeviceName,FILE_DEVICE_MOUSE,0,FALSE,ClassDeviceObject);
+.
+.
+.
+(*ClassDeviceObject)-&gt;DeviceExtension = new (NONPAGED_MEMORY) CInputClassDeviceExt(..);
+</code></pre>
+<p>
+What is <b>CInputClassDeviceExt</b>? Remember that a device extension is defined completely by the driver—all the operating-system kernel does is give the driver access to the device extension whenever an I/O request is passed on to the driver. The driver can then dereference the device extension and party on it as much as it needs to. Dereferencing the device extension is easy for C++ objects. Let's look at <b>InputClassStartIo</b> for an example:</p>
+<pre><code>VOID
+InputClassStartIo(
+ &nbsp;&nbsp; IN PDEVICE_OBJECT DeviceObject,
+ &nbsp;&nbsp; IN PIRP Irp
+ &nbsp;&nbsp; )
+{
+.
+.
+.
+CInputClassDeviceExt *cExtension;
+.
+.
+.
+cExtension = (CInputClassDeviceExt *)DeviceObject-&gt;DeviceExtension;
+.
+.
+.
+}
+</code></pre>
+<p>
+At this point, the routine can access all members of the extension.</p>
+<p>
+<b>CInputClassDeviceExtension</b>, as I mentioned earlier, is basically a C++ implementation of a circular queue. The pointers into the queue and the queue's buffer are private data members; this arrangement helps hide the internal representation of the queue from the code that accesses the queue. Here is the prototype for the device extension:</p>
+<pre><code>class CInputClassDeviceExt
+{ private:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // These are the internal data structures
+ &nbsp;&nbsp; int m_iStructureSize;&nbsp; // for the circular queue.
+ &nbsp;&nbsp; PCHAR m_InputData;
+ &nbsp;&nbsp; PCHAR m_DataIn;
+ &nbsp;&nbsp; PCHAR m_DataOut;
+  public:
+ &nbsp;&nbsp; NTSTATUS m_status;
+  public:
+ &nbsp;&nbsp; BOOLEAN RequestIsPending;&nbsp;&nbsp;&nbsp;&nbsp; // These data members are from the
+ &nbsp;&nbsp; BOOLEAN CleanupWasInitiated;&nbsp; // non-C++ version of the driver.
+ &nbsp;&nbsp; ULONG InputCount;
+ &nbsp;&nbsp; KSPIN_LOCK SpinLock;
+ &nbsp;&nbsp; ULONG SequenceNumber;
+ &nbsp;&nbsp; BOOLEAN OkayToLogOverflow;
+ &nbsp;&nbsp; CGlobalInputClassData *cData;
+  public:
+ &nbsp;&nbsp; CInputClassDeviceExt(CGlobalInputClassData *);&nbsp; 
+ &nbsp;&nbsp; ~CInputClassDeviceExt();
+ &nbsp;&nbsp; void FlushDataQueue();&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Access functions for the
+ &nbsp;&nbsp; int Insert(PCHAR source, int iSize); // circular queue
+ &nbsp;&nbsp; int Remove(PCHAR dest, iSize);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // data structure.
+};
+</code></pre>
+<p>
+When you compare the data members of the <b>CInputClassDeviceExt</b> class to the members of the <b>DEVICE_EXTENSION </b>structure in the DDK version of the driver, you will find that the version that is shipped with the DDK has a few additional members, namely, <b>InputAttributes</b>, <b>MaximumPortsServiced</b>, <b>ConnectOneClassToOnePort</b>, and <b>PortDeviceObjectList</b>. I took these members out of the class because they have no instanced values (in other words, all instances of the <b>CInputClassDeviceExt</b> class share the same values for those variables). Instead of making these members global variables, I introduced a new object, <b>CGlobalInputClassData</b>, that contains all of the variables. Only one instance of that class exists, and it is initialized at driver startup time. Each instance of the <b>CInputClassDeviceExt</b> class is assigned a pointer to that one global data object in its <b>cGlobalData</b> member. This way, the variables need to be initialized only once and can be used by all devices in the system without copying data back and forth. Also, the memory that was allocated for the device port array can be deallocated in the destructor of the global object.</p>
+<p>
+Note that <b>cGlobalData</b> never gets deallocated. Because that structure must be present during the life of the driver, and because the input class driver contains no driver unload routine, the <b>CGlobalInputData</b> element is never freed. If a driver unload routine existed, the <b>delete</b> call to free <b>cGlobalData</b> would have to be placed in this hypothetical unload routine.</p>
+<h3>Error Handling</h3>
+<p>
+Device drivers execute trusted code that the Windows NT kernel relies on. For this reason, it is absolutely crucial to ensure that no error condition can bring the system to an unstable state. In the plain C version of the MOUCLASS driver, approximately 40 percent of the code performs tasks associated with error processing, including:
+<ul type=disc>
+<li>
+Checking return values from system calls.<br><br></li>
+<li>
+Setting up error log data structures, filling them in, and writing an error log for the free version of the driver.<br><br></li>
+<li>
+Formatting and displaying diagnostic strings to output to a debugger in the checked version.<br><br></li>
+<li>
+Keeping track of fatal error returns and deallocating previously allocated data structures before terminating from a function prematurely.</li>
+</ul>
+<p>
+You can encapsulate these tasks in C++ member functions in several ways. For example:
+<ul type=disc>
+<li>
+For failed system calls that occur in C++ member functions, the code for dumping the error condition to a debugger or logging the failure in the system event log can be placed within the member functions themselves.<br><br></li>
+<li>
+Because C++ constructors do not have return values, the driver cannot easily determine at run time whether a C++ object was created successfully. Here are two methods you can use to enable a driver function to terminate gracefully from an error condition that occurred while constructing a C++ object:<ul type=disc>
+<li>
+Locate the "real" code that initiates the object in a <b>Create</b> member function, which can return an error code. Place only the fail-proof code in the constructor, and have the driver call the <b>Create</b> member right after the object is created. This is the approach that the Microsoft Foundation Class Library (MFC) takes for most of its classes.<br><br></li>
+<li>
+Let the constructor keep track of the failure or success of embedded system calls through a member variable that can be checked upon the constructor's return.</li>
+</ul>
+</li>
+</ul>
+<p>
+In the C++ version of the mouse class driver, I chose the latter approach. For example, in some places in the driver initialization sequence, a number of <b>CUString</b> objects are created implicitly, as shown in the following code from the <b>InputConfiguration</b> routine:</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;CUString parameterString(L"\\Parameters");
+ &nbsp;&nbsp; CUString cuDataQueueSize(QSIZESTRING);
+ &nbsp;&nbsp; CUString cuMaximumPortsServiced(SERVICEDNOSTRING);
+ &nbsp;&nbsp; CUString cuPointerDeviceBaseName(BASENAMESTRING);
+ &nbsp;&nbsp; CUString cuMultiple(CONNECTMULTIPLESTRING);
+ &nbsp;&nbsp; CUString defaultUnicodeName(DD_POINTER_CLASS_BASE_NAME_U);
+ &nbsp;&nbsp; CRegistry crQueryTable(1);
+</code></pre>
+<p>
+The constructor for the <b>CUString</b> object will assign status codes (indicating failure or success of embedded system calls) to the member variable <b>m_status</b>, which is checked by the driver code:</p>
+<pre><code>if (&nbsp;&nbsp;&nbsp;&nbsp; (!OK_ALLOCATED(&amp;parameterString))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ||(!OK_ALLOCATED(&amp;cuDataQueueSize))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ||(!OK_ALLOCATED(&amp;cuMaximumPortsServiced))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ||(!OK_ALLOCATED(&amp;cuPointerDeviceBaseName))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ||(!OK_ALLOCATED(&amp;cuMultiple))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ||(!OK_ALLOCATED(&amp;defaultUnicodeName))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ||(!OK_ALLOCATED(&amp;crQueryTable)))
+ &nbsp;&nbsp;&nbsp;&nbsp; return STATUS_INSUFFICIENT_RESOURCES; 
+</code></pre>
+<p>
+Where is the <b>m_status</b> value checked? Simple—look at the definition of the <b>OK_ALLOCATED</b> macro:</p>
+<pre><code>#define OK_ALLOCATED(obj) \
+ &nbsp; ((obj!=(void *)0) &amp;&amp; NT_SUCCESS((obj)-&gt;m_status))
+</code></pre>
+<p>
+This macro first checks to see whether the object is present (to ensure that an attempt to access the <b>m_status</b> member does not fail when object allocation fails), and then looks at the <b>m_status</b> member, which always indicates whether all of the allocations in the object's constructor have succeeded.</p>
+<p>
+Now because all objects are allocated on the stack, the call to <b>return</b> will implicitly call the objects' destructors and thereby free the data structures. Very convenient. Of course, all the objects that were dynamically allocated using the <b>new</b> operator will need to be deleted explicitly.</p>
+<p>
+The error logging has been delegated to a new C++ class called <b>CErrorLogEntry</b>, which encapsulates the calls that log errors. The class is defined as follows:</p>
+<pre><code>class CErrorLogEntry
+{
+  private: PIO_ERROR_LOG_PACKET pPacket;
+  public: CErrorLogEntry(PVOID,ULONG,USHORT,ULONG,NTSTATUS,ULONG *,UCHAR);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ~CErrorLogEntry();
+};
+</code></pre>
+<p>
+The constructor for this object does all of the work; therefore, to log an entry, you simply create the object and delete it right away:</p>
+<pre><code>delete (new CErrorLogEntry(...));
+</code></pre>
+<p>
+In this case, the error-logging mechanism does not need to support different functionalities, so you could make the error logging a global function instead of a C++ class. However, an error log entry, by definition, indicates an error, which represents an abnormal condition, so working with a C++ object instead of a function does not affect the normal functionality of the driver—using a C++ object for this purpose was merely a playful gesture on my part. </p>
+<h2>Performance Considerations</h2>
+<p>
+So far, we have seen that incorporating C++ objects into Windows NT kernel-mode drivers can make the task of writing a driver significantly easier. What about the drawbacks, though? In particular, do we lose any efficiency using C++ instead of C?</p>
+<p>
+For the <b>CUString</b> and <b>CRegistry</b> objects, the answer is no. Those objects are generally used only during driver initialization, which is not a time-critical operation. The <b>CErrorLogEntry</b> object, as I mentioned before, should not affect the driver under non-error conditions.</p>
+<p>
+If the driver serves a very fast hardware device or is otherwise under stringent response-time constraints, allocating and deallocating C++ objects during the regular control flow of the driver is probably not a good idea, because creating an object involves a number of function calls. At the minimum, it involves calling the global <b>new</b> operator (which calls <b>ExAllocatePool</b> to request the memory for the object from the system) and calling one of the object's constructors (which may call the kernel again to allocate memory).</p>
+<p>
+Note also that the creation of C++ objects generally involves several memory allocations, which, if used carelessly, can result in serious fragmentations of the system's memory pools. When you design your C++ classes, you should ensure that memory used by an object is always allocated in the constructor and deallocated in the destructor, instead of being allocated or deallocated in member functions called unpredictably. The constructor is always invoked right after the call to <b>new</b> that allocates the object itself, and the destructor always precedes the <b>delete</b> call that deallocates the object. Thus, the memory for an object is always adjacent to the memory used by that object, which cuts down on the fragmentation.</p>
+<p>
+I also refrain from passing C++ objects to functions on the stack, or as return values from nested functions—both of these operations invoke the copy constructor. Copy constructors are fairly tricky to deal with and obstruct the control flow; furthermore, invoking them incurs a costly overhead at run time. Thus, you'll see that in the driver code, all functions to which C++ objects are passed actually expect pointers to the objects rather than the objects themselves. </p>
+<p>
+So how do you reference C++ objects? For example, in the modified input class driver, each device object is associated with one <b>CInputClassDeviceExt</b> object, which may be accessed whenever an I/O function is dispatched. Dereferencing the object typically requires a single instruction. Invoking a member function of the object (as opposed to executing code in the routine itself) carries the overhead of, well, executing a function call. A C++ member function call is slightly more expensive than a non-member function call, because the <b>this</b> pointer must be passed to the member function as well.</p>
+<h3>Where Should You Go from Here?</h3>
+<p>
+If you think that the C++ approach is valuable, you will probably want to extend my class library to support additional object types, for example, spin locks, device objects, driver objects, and possibly I/O request packets (IRPs) and interrupt objects. (Note that most of these objects would require making an assumption about how C++ objects are stored in memory; see the "Device Extensions as C++ Classes" section earlier in this article for more information.) You may also want to enhance the existing class library (for example, by encapsulating all routines that provide support for Unicode strings in the <b>CUString</b> class) or provide a class hierarchy with a base class that supports the <b>m_status</b> member.</p>
+<p>
+Please let me know if you would be interested in extended driver classes. If there is enough interest, I'll be happy to work on implementing and documenting more elaborate classes.</p>
+<h2>Summary</h2>
+<p>
+Writing Windows NT kernel-mode device drivers in C++ is possible and can greatly facilitate driver development. Although C++ cannot solve some of the difficult problems that occur in device driver programming (for example, synchronizing and serializing events, defining the control flow of an I/O request through the system), using C++ objects will allow you to abstract away the uninteresting aspects of device driver writing and focus on the challenges instead.</p>
+<p>
+C++ objects provide good abstraction mechanisms that simplify the design of the driver. However, the driver code is trusted by the operating system, so the driver must react to failures in the allocation and initialization of C++ objects in a predictable way. A device driver cannot reliably employ structured exception handling, so it must check the validity of each object explicitly. This is the biggest problem associated with using C++ in device drivers.</p>
+<p>
+As long as you use C++ objects carefully and deliberately in your driver code, you will be able to bear the overhead their use incurs and take advantage of the performance improvements these objects provide.</p>
+</BODY>
+</HTML>

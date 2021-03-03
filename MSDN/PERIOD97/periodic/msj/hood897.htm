@@ -1,0 +1,1209 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Under the Hood</title>
+
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF>
+
+<font face="verdana,arial,helvetica" size="2">
+<h1>Under the Hood</h1>
+<p>Matt Pietrek</p>
+<p>Matt Pietrek is the author of Windows 95 System Programming Secrets (IDG Books, 1995). He works at NuMega Technologies Inc., and can be reached at mpietrek@tiac.com or at <BR>http://www.tiac.com/users/mpietrek.</p>
+<p>In my May 1997 column, I used some APIs from <BR>&#09;IMAGEHLP.DLL as part of a framework for reporting <BR>&#09;on unhandled exceptions. Since then I’ve received quite a bit of email about the use of those APIs, indicating that IMAGEHLP.DLL is an area of widespread interest. Unfortunately, in many ways the IMAGEHLP documentation assumes that you’re comfortable working with executable files and symbol tables. It’s also weak in explaining which APIs need to be used, and in what particular order to perform a given task. The result is that many developers who would benefit from using IMAGEHLP.DLL get lost in the documentation. </p>
+<p>This month, I’ll go over a different subset of the IMAGEHLP APIs to show how their powerful features can be implemented with a few simple lines of code. To demonstrate how easy it is to use IMAGEHLP APIs, I wrote the EZPE program, a PE file-display program that also displays debug symbols belonging to an executable (that is, EXEs, DLLs, OCXs, and so on). It displays information similar to programs like DUMPBIN from Visual C++&reg; or PEDUMP from my book, <i>Windows 95 System Programming Secrets</i> (IDG Books, 1995). The key difference is that EZPE never touches the executable file directly, and it doesn’t grovel through data structures like other PE file- display programs. Instead, EZPE lets the IMAGEHLP APIs do all the hard work and effectively demonstrates the proper use of the APIs as a by-product.</p>
+<p>Another nice feature that falls out from EZPE’s use of the IMAGEHLP APIs is that you can see the symbol names and addresses contained within debug information, such as the DBG files that are provided for Windows NT components. You can also use EZPE to see the symbols contained with PDB files, something that even DUMPBIN can’t do. All you have to do is make sure that the symbol table file (for example, PDB or DBG) is in the same directory as the executable it belongs to. Running EZPE on the executable file causes it to automatically find the symbols in the PDB or DBG file, as appropriate. The beauty is that EZPE kicks back and lets IMAGEHLP.DLL do the hard work of finding and loading the symbol tables. More on this later.</p>
+<p>Before jumping into a description of the IMAGEHLP APIs, a quick review of IMAGEHLP’s availability is worthwhile. IMAGEHLP is a standard component of Windows NT&reg; 4.0. However, it’s a redistributable DLL, so you can ship it with your app if it needs to run on Windows&reg; 95. Be aware, though, that certain functions in IMAGEHLP don’t work under Windows 95 (at least not in the IMAGEHLP.DLL that was available when I wrote this). The import library and header file for IMAGEHLP.DLL can be found in any Win32&reg; SDK that shipped on or after the release date of Windows NT 4.0 (July 31, 1996). IMAGEHLP isn’t specific to any one CPU platform. I built my EZPE program on a DEC Alpha, and it worked perfectly the first time.</p>
+<h2>IMAGEHLP APIs</h2>
+<p>The first IMAGEHLP API to look at is MapAndLoad. You’d use this if you were interested only in the contents of an executable and didn’t care about any debug information that might be available. Although the IMAGEHLP documentation is vague about exactly what MapAndLoad does, it’s really quite simple. First, the function goes through <BR>the necessary gyrations to make a memory mapped file corresponding to the specified executable. Internally, Map&shy;AndLoad&nbsp;goes&nbsp;through&nbsp;the&nbsp;standard&nbsp;OpenFile,&nbsp;&nbsp;Create&shy;&shy;&shy;File&shy;Mapping, MapViewOfFile sequence. Because these underlying APIs open up handles, it’s important that you call the matching UnMapAndLoad API when you’re done to close all the handles.</p>
+<p>After memory mapping the executable file, MapAndLoad fills in the LOADED_IMAGE structure that was passed in. There are a number of key fields in this structure that are likely to be valuable to you. The Mapped&shy;Address field is where the executable is mapped into memory (that is, it’s what the internal call to MapViewOfFile returned). The FileHeader field contains a pointer to an IMAGE_NT_<BR>HEADERS structure, which is defined in WINNT.H. The IMAGE_NT_HEADERS structure is better known as the PE header, and contains all the vital values for the executable. This structure has been described in numerous articles (many of which are in the Microsoft KnowledgeBase), so I won’t dwell on it here. However, EZPE does a rudimentary printout of the PE header contents without putting too much effort into interpreting the fields.</p>
+<p>The Sections field in the LOADED_IMAGE structure is a pointer to the PE section table, which is an array of IMAGE_SECTION_HEADERS that is also defined in WINNT.H. The number of sections in the array is given by the (you guessed it) NumberOfSections field. An IMAGE_<BR>SECTION_HEADER structure contains the name of a section, its size, its attributes, and its location within the executable file. The EZPE program prints out the im&shy;portant contents of each IMAGE_SECTION_HEADER in sequence, again without too much effort doing things <BR>such as breaking down the attributes into meaningful <BR>flags like PAGE_READONLY. </p>
+<p>The final field in the LOADED_IMAGE structure worth mentioning here is the Characteristics field. Using this is just a shortcut to grabbing the Characteristics field out of the PE header. The characteristics flags are defined in WINNT.H and include values such as IMAGE_FILE_DLL, which means the executable is a DLL rather than a program (EXE) file.</p>
+<p>As the main function in EZPE.CPP shows (see Figure 1), the MapAndLoad and UnMapAndLoad APIs can be used without any advanced preparation, unlike the symbol table APIs that I’ll get to shortly. MapAndLoad is relatively lightweight and executes quickly. Using just MapAndLoad, and knowing the contents of various PE file data structures, you can quickly access nearly everything of importance in an executable file.</p>
+<p>Figure 1  EZPE.CPP</p>
+<p>
+//==========================================</p>
+<p>
+// Matt Pietrek</p>
+<p>
+// Microsoft Systems Journal, August 1997</p>
+<p>
+// FILE: EZPE.CPP</p>
+<p>
+//==========================================</p>
+<p>
+#include &lt;windows.h&gt;</p>
+<p>
+#include &lt;stdio.h&gt;</p>
+<p>
+#include &lt;imagehlp.h&gt;</p>
+<p>
+//=============================================================================</p>
+<p>
+// Macros to make formatted output of numerous data structure fields easier</p>
+<p>
+//=============================================================================</p>
+<p>
+#define DISPLAY_COLUMNS &quot;35&quot;</p>
+<p>
+#define DisplayPtrField( ptr, field, fmt ) \</p>
+<p>
+    printf( &quot;%-&quot; DISPLAY_COLUMNS fmt, #field, ptr-&gt;field );</p>
+<p>
+#define DisplayPtrFieldD( ptr, field )  DisplayPtrField( ptr, field, &quot;s%08X\n&quot; )</p>
+<p>
+#define DisplayPtrFieldW( ptr, field )  DisplayPtrField( ptr, field, &quot;s%04X\n&quot; )</p>
+<p>
+#define DisplayPtrFieldStr(ptr,field )  DisplayPtrField( ptr, field, &quot;s%s\n&quot; )</p>
+<p>
+#define DisplayPtrVersionFields( name, ptr, field1, field2 ) \</p>
+<p>
+        printf(&quot;%-&quot; DISPLAY_COLUMNS &quot;s%u.%02u\n&quot;, name,ptr-&gt;field1,ptr-&gt;field2);</p>
+<p>
+#define DisplayField( struct, field, fmt ) \</p>
+<p>
+    printf( &quot;%-&quot; DISPLAY_COLUMNS fmt, #field, struct.field );</p>
+<p>
+    </p>
+<p>
+#define DisplayFieldD( struct, field )  DisplayField( struct, field, &quot;s%08X\n&quot;)</p>
+<p>
+#define DisplayFieldW( struct, field )  DisplayField( struct, field, &quot;s%04X\n&quot;)</p>
+<p>
+#define DisplayFieldStr(struct,field )  DisplayField( struct, field, &quot;s%s\n&quot;)</p>
+<p>
+#define DisplayDataDir( ptr, x ) \</p>
+<p>
+    printf( &quot;%-&quot; DISPLAY_COLUMNS &quot;sAddress: %08X Size: %08X\n&quot;, \</p>
+<p>
+        #x, ptr-&gt;DataDirectory[x].VirtualAddress, ptr-&gt;DataDirectory[x].Size );</p>
+<p>
+//=============================================================================</p>
+<p>
+// Prototypes for helper functions</p>
+<p>
+//=============================================================================</p>
+<p>
+BOOL CALLBACK EnumSymbolsCallback( LPSTR, ULONG, ULONG, PVOID );</p>
+<p>
+void ShowImageFileHeaders( PIMAGE_NT_HEADERS pNTHdrs );</p>
+<p>
+void ShowSectionHeaders( PIMAGE_SECTION_HEADER pSectionHdr, DWORD cSections );</p>
+<p>
+void StartNewDisplaySection( PSTR pszSectionName );</p>
+<p>
+BOOL ParseCommandLine(int argc, char * argv[], PSTR pszFilename, PSTR pszPath);</p>
+<p>
+void ShowSymbols( PSTR pszFilename, PSTR pszPath );</p>
+<p>
+//=============================================================================</p>
+<p>
+// Global variables</p>
+<p>
+//=============================================================================</p>
+<p>
+BOOL g_fDecoratedNames = FALSE;</p>
+<p>
+BOOL g_fShowSymbols = TRUE;</p>
+<p>
+char g_szHelp[] =</p>
+<p>
+    &quot;EZPE - August 1997 Microsoft Systems Journal, by Matt Pietrek\n&quot;</p>
+<p>
+    &quot;Syntax: EZPE [options] &lt;filename&gt;\n&quot;</p>
+<p>
+    &quot;  -d  Decorated C++ names\n&quot;</p>
+<p>
+    &quot;  -n  No symbol display\n&quot;;</p>
+<p>
+//=============================================================================</p>
+<p>
+// Main program - First display info about the executable, then shows symbols</p>
+<p>
+//=============================================================================</p>
+<p>
+int main( int argc, char * argv[] )</p>
+<p>
+{</p>
+<p>
+    char szFilename[MAX_PATH];</p>
+<p>
+    char szPath[MAX_PATH];</p>
+<p>
+    if ( !ParseCommandLine(argc, argv, szFilename, szPath) )</p>
+<p>
+    {</p>
+<p>
+        printf( g_szHelp );</p>
+<p>
+        return 1;</p>
+<p>
+    }</p>
+<p>
+    printf( &quot;Display of file %s\n&quot;, szFilename );</p>
+<p>
+        </p>
+<p>
+    LOADED_IMAGE li;</p>
+<p>
+    if ( MapAndLoad( szFilename, 0, &amp;li, FALSE, TRUE) )</p>
+<p>
+    {</p>
+<p>
+        StartNewDisplaySection( &quot; LOADED_IMAGE&quot; );</p>
+<p>
+        DisplayFieldStr( li, ModuleName )</p>
+<p>
+        DisplayFieldD( li, hFile )</p>
+<p>
+        DisplayFieldD( li, MappedAddress )</p>
+<p>
+        DisplayFieldD( li, FileHeader )</p>
+<p>
+        DisplayFieldD( li, LastRvaSection )</p>
+<p>
+        DisplayFieldD( li, NumberOfSections )</p>
+<p>
+        DisplayFieldD( li, Sections )</p>
+<p>
+        DisplayFieldD( li, Characteristics )</p>
+<p>
+        DisplayFieldD( li, fSystemImage )</p>
+<p>
+        DisplayFieldD( li, fDOSImage )</p>
+<p>
+        DisplayFieldD( li, Links )</p>
+<p>
+        DisplayFieldD( li, SizeOfImage )</p>
+<p>
+        StartNewDisplaySection( &quot;PE File Headers (LOADED_IMAGE.FileHeader)&quot; );</p>
+<p>
+                </p>
+<p>
+        ShowImageFileHeaders( li.FileHeader );</p>
+<p>
+        StartNewDisplaySection( &quot;Section Headers (LOADED_IMAGE.Sections)&quot; );</p>
+<p>
+                </p>
+<p>
+        ShowSectionHeaders( li.Sections, li.NumberOfSections );</p>
+<p>
+    }</p>
+<p>
+    else</p>
+<p>
+    {</p>
+<p>
+        printf( &quot;MapAndLoad failed - exiting\n&quot; );</p>
+<p>
+        return 1;</p>
+<p>
+    }</p>
+<p>
+    UnMapAndLoad( &amp;li );        </p>
+<p>
+    if ( g_fShowSymbols )</p>
+<p>
+        ShowSymbols( szFilename, szPath );</p>
+<p>
+    </p>
+<p>
+    return 0;</p>
+<p>
+}</p>
+<p>
+#define MY_PROCESS_HANDLE 0</p>
+<p>
+//=============================================================================</p>
+<p>
+// Loads a symbol table and enumerates the symbols in it</p>
+<p>
+//=============================================================================</p>
+<p>
+void ShowSymbols( PSTR pszFilename, PSTR pszPath )</p>
+<p>
+{</p>
+<p>
+    PIMAGE_DEBUG_INFORMATION pidi;</p>
+<p>
+    //</p>
+<p>
+    // First, see if there's any debug information worth displaying.  If</p>
+<p>
+    // this functions succeeds, the PE file, and its debug information</p>
+<p>
+    // is memory mapped in.</p>
+<p>
+    //</p>
+<p>
+    pidi = MapDebugInformation( 0, pszFilename, &quot;&quot;, 0 );</p>
+<p>
+    if ( pidi )</p>
+<p>
+    {</p>
+<p>
+        StartNewDisplaySection( &quot;IMAGE_DEBUG_INFORMATION&quot; );</p>
+<p>
+        DisplayPtrFieldD( pidi, Size )</p>
+<p>
+        DisplayPtrFieldD( pidi, MappedBase )</p>
+<p>
+        DisplayPtrFieldW( pidi, Machine )</p>
+<p>
+        DisplayPtrFieldW( pidi, Characteristics )</p>
+<p>
+        DisplayPtrFieldD( pidi, CheckSum )</p>
+<p>
+        DisplayPtrFieldD( pidi, ImageBase )</p>
+<p>
+        DisplayPtrFieldD( pidi, SizeOfImage )</p>
+<p>
+        DisplayPtrFieldD( pidi, NumberOfSections )</p>
+<p>
+        DisplayPtrFieldD( pidi, Sections )</p>
+<p>
+        DisplayPtrFieldD( pidi, ExportedNamesSize )</p>
+<p>
+        DisplayPtrFieldD( pidi, ExportedNames )</p>
+<p>
+        DisplayPtrFieldD( pidi, NumberOfFunctionTableEntries )</p>
+<p>
+        DisplayPtrFieldD( pidi, FunctionTableEntries )</p>
+<p>
+        DisplayPtrFieldD( pidi, LowestFunctionStartingAddress )</p>
+<p>
+        DisplayPtrFieldD( pidi, HighestFunctionEndingAddress )</p>
+<p>
+        DisplayPtrFieldD( pidi, NumberOfFpoTableEntries )</p>
+<p>
+        DisplayPtrFieldD( pidi, FpoTableEntries )</p>
+<p>
+        DisplayPtrFieldD( pidi, SizeOfCoffSymbols )</p>
+<p>
+        DisplayPtrFieldD( pidi, CoffSymbols )</p>
+<p>
+        DisplayPtrFieldD( pidi, SizeOfCodeViewSymbols )</p>
+<p>
+        DisplayPtrFieldD( pidi, CodeViewSymbols )</p>
+<p>
+        DisplayPtrFieldStr( pidi, ImageFilePath )</p>
+<p>
+        DisplayPtrFieldStr( pidi, ImageFileName )</p>
+<p>
+        DisplayPtrFieldStr( pidi, DebugFilePath )</p>
+<p>
+        DisplayPtrFieldD( pidi, TimeDateStamp )</p>
+<p>
+        DisplayPtrFieldD( pidi, RomImage )</p>
+<p>
+        DisplayPtrFieldD( pidi, DebugDirectory )</p>
+<p>
+        DisplayPtrFieldD( pidi, NumberOfDebugDirectories )      </p>
+<p>
+    }</p>
+<p>
+    else</p>
+<p>
+    {</p>
+<p>
+        printf( &quot;MapDebugInformation failed - exiting\n&quot; );</p>
+<p>
+        return;</p>
+<p>
+    }</p>
+<p>
+    //</p>
+<p>
+    // Init symbol handler for &quot;process&quot; (in our case, &quot;0&quot; is the process)</p>
+<p>
+    //          </p>
+<p>
+    if ( !SymInitialize( MY_PROCESS_HANDLE, pszPath, FALSE ) )</p>
+<p>
+    {</p>
+<p>
+        printf( &quot;MapDebugInformation failed - exiting\n&quot; );</p>
+<p>
+        return;</p>
+<p>
+    }</p>
+<p>
+    //</p>
+<p>
+    // If the command line specified &quot;decorated&quot; names (-d), set the symbol</p>
+<p>
+    // options before loading the symbol table below.</p>
+<p>
+    //  </p>
+<p>
+    if ( g_fDecoratedNames )</p>
+<p>
+    {</p>
+<p>
+        DWORD symOptions = SymGetOptions();</p>
+<p>
+        symOptions &amp;= ~SYMOPT_UNDNAME;      // Turn off the SYMOPT_UNDNAME flag</p>
+<p>
+        SymSetOptions( symOptions );</p>
+<p>
+    }</p>
+<p>
+    //</p>
+<p>
+    // Load the symbol table for the specified file.  A &quot;MappedAddress&quot; from</p>
+<p>
+    // MapAndLoad, or a &quot;MappedBase&quot; from MapDebugInformation is needed as</p>
+<p>
+    // parameter 5.</p>
+<p>
+    //</p>
+<p>
+    if ( !SymLoadModule( MY_PROCESS_HANDLE, 0, pszFilename, 0,</p>
+<p>
+                         (DWORD)pidi-&gt;MappedBase, 0 ) )</p>
+<p>
+    {</p>
+<p>
+        printf( &quot;SymLoadModuleFailed\n&quot; );</p>
+<p>
+        return;</p>
+<p>
+    }</p>
+<p>
+    IMAGEHLP_MODULE im = { sizeof(im) };</p>
+<p>
+    if ( SymGetModuleInfo( MY_PROCESS_HANDLE, (DWORD)pidi-&gt;MappedBase, &amp;im ) )</p>
+<p>
+    {</p>
+<p>
+        StartNewDisplaySection( &quot;IMAGEHLP_MODULE&quot; );</p>
+<p>
+        // DisplayFieldD( im, SizeOfStruct );   // Not worth showing</p>
+<p>
+        // DisplayFieldD( im, BaseOfImage );</p>
+<p>
+        // DisplayFieldD( im, ImageSize );</p>
+<p>
+        // DisplayFieldD( im, TimeDateStamp );</p>
+<p>
+        </p>
+<p>
+        DisplayFieldD( im, CheckSum );</p>
+<p>
+        DisplayFieldD( im, NumSyms );</p>
+<p>
+        DisplayFieldD( im, SymType );</p>
+<p>
+        PSTR pszSymType;</p>
+<p>
+        switch( im.SymType )</p>
+<p>
+        {</p>
+<p>
+            case SymNone:       pszSymType = &quot;SymNone&quot;;     break;</p>
+<p>
+            case SymCoff:       pszSymType = &quot;SymCoff&quot;;     break;</p>
+<p>
+            case SymCv:         pszSymType = &quot;SymCv&quot;;       break;</p>
+<p>
+            case SymPdb:        pszSymType = &quot;SymPdb&quot;;      break;</p>
+<p>
+            case SymExport:     pszSymType = &quot;SymExport&quot;;   break;</p>
+<p>
+            case SymDeferred:   pszSymType = &quot;SymDeferred&quot;; break;</p>
+<p>
+            default:            pszSymType = &quot;?&quot;;</p>
+<p>
+        }</p>
+<p>
+        printf( &quot;%-&quot; DISPLAY_COLUMNS &quot;s%s\n&quot;, &quot; &quot;, pszSymType );</p>
+<p>
+        </p>
+<p>
+        DisplayFieldStr( im, ModuleName );</p>
+<p>
+        DisplayFieldStr( im, ImageName );</p>
+<p>
+        DisplayFieldStr( im, LoadedImageName );</p>
+<p>
+    }</p>
+<p>
+        </p>
+<p>
+    StartNewDisplaySection( &quot;Symbols&quot; );</p>
+<p>
+    printf( &quot;     RVA  Name\n&quot; );</p>
+<p>
+    printf( &quot;--------  ----\n&quot; );</p>
+<p>
+    //</p>
+<p>
+    // Kick off the symbol enumeration.  The EnumSymbolsCallback function</p>
+<p>
+    // is called once for each symbol.</p>
+<p>
+    //          </p>
+<p>
+    SymEnumerateSymbols( 0, (DWORD)pidi-&gt;MappedBase, EnumSymbolsCallback,</p>
+<p>
+                        pidi-&gt;MappedBase );</p>
+<p>
+    SymUnloadModule( 0, (DWORD)pidi-&gt;MappedBase );  // Undo SymLoadModule</p>
+<p>
+    SymCleanup( 0 );                // Undo the SymInitialize</p>
+<p>
+    UnmapDebugInformation( pidi );  // Close the PE file and debug info mapping</p>
+<p>
+}</p>
+<p>
+//=============================================================================</p>
+<p>
+// Callback function for use by the SymEnumerateSymbols API</p>
+<p>
+//=============================================================================</p>
+<p>
+BOOL CALLBACK EnumSymbolsCallback(</p>
+<p>
+    LPSTR SymbolName,   </p>
+<p>
+    ULONG SymbolAddress,    </p>
+<p>
+    ULONG SymbolSize,   </p>
+<p>
+    PVOID UserContext )</p>
+<p>
+{</p>
+<p>
+    // User Context is whatever was passed to SymEnumerateSymbols.  Here,</p>
+<p>
+    // we passed the mapped address of the executable.  This allows us</p>
+<p>
+    // to convert the symbol addresses we get into RVAs, below.</p>
+<p>
+    DWORD mappedBase = (DWORD)UserContext;</p>
+<p>
+    // print out the RVA, and the symbol name passed to us. </p>
+<p>
+    printf( &quot;%08X  %s\n&quot;, SymbolAddress - mappedBase, SymbolName );</p>
+<p>
+    //</p>
+<p>
+    // If &quot;decorated&quot; names were specified, and if the name is &quot;decorated,&quot;</p>
+<p>
+    // undecorate it so that a human readable version can be displayed.</p>
+<p>
+    //</p>
+<p>
+    if ( g_fDecoratedNames &amp;&amp; ('?' == *SymbolName) )</p>
+<p>
+    {</p>
+<p>
+        char szUndecoratedName[0x400];  // Make symbol name buffers for the</p>
+<p>
+        char szDecoratedName[0x400];    // decorated &amp; undecorated versions</p>
+<p>
+    </p>
+<p>
+        // Make a copy of the original SymbolName, so that we can modify it </p>
+<p>
+        lstrcpy( szDecoratedName, SymbolName );</p>
+<p>
+        PSTR pEnd = szDecoratedName + lstrlen( szDecoratedName );</p>
+<p>
+        // Strip everything off the end until we reach a 'Z'        </p>
+<p>
+        while ( (pEnd &gt; szDecoratedName) &amp;&amp; (*pEnd != 'Z') )</p>
+<p>
+            *pEnd-- = 0;</p>
+<p>
+        // Call the IMAGEHLP function to undecorate the name            </p>
+<p>
+        if ( 0 != UnDecorateSymbolName( szDecoratedName, szUndecoratedName,</p>
+<p>
+                                        sizeof(szUndecoratedName),</p>
+<p>
+                                        UNDNAME_COMPLETE |</p>
+<p>
+                                        UNDNAME_32_BIT_DECODE ) )</p>
+<p>
+        {</p>
+<p>
+            // End the output line with the undecorated name</p>
+<p>
+            printf( &quot;          %s\n&quot;, szUndecoratedName );</p>
+<p>
+        }</p>
+<p>
+    }</p>
+<p>
+        </p>
+<p>
+    return TRUE;</p>
+<p>
+}</p>
+<p>
+//=============================================================================</p>
+<p>
+// Shows the contents of a PE header.  Called by main()</p>
+<p>
+//=============================================================================</p>
+<p>
+void ShowImageFileHeaders( PIMAGE_NT_HEADERS pNTHdrs )</p>
+<p>
+{</p>
+<p>
+    PIMAGE_FILE_HEADER pImageFileHeader = &amp;pNTHdrs-&gt;FileHeader;</p>
+<p>
+    DisplayPtrFieldW( pImageFileHeader, Machine )</p>
+<p>
+    DisplayPtrFieldW( pImageFileHeader, NumberOfSections )</p>
+<p>
+    DisplayPtrFieldD( pImageFileHeader, TimeDateStamp )</p>
+<p>
+    DisplayPtrFieldD( pImageFileHeader, PointerToSymbolTable )</p>
+<p>
+    DisplayPtrFieldD( pImageFileHeader, NumberOfSymbols )</p>
+<p>
+    DisplayPtrFieldW( pImageFileHeader, SizeOfOptionalHeader )</p>
+<p>
+    DisplayPtrFieldW( pImageFileHeader, Characteristics )</p>
+<p>
+    PIMAGE_OPTIONAL_HEADER pImageOptHeader = &amp;pNTHdrs-&gt;OptionalHeader;</p>
+<p>
+    DisplayPtrFieldW( pImageOptHeader, Magic )</p>
+<p>
+    DisplayPtrVersionFields(&quot;LinkerVersion&quot;, pImageOptHeader,</p>
+<p>
+                            MajorLinkerVersion, MinorLinkerVersion ); </p>
+<p>
+                </p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, SizeOfCode )</p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, SizeOfInitializedData )</p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, SizeOfUninitializedData )</p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, AddressOfEntryPoint )</p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, BaseOfCode )</p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, BaseOfData )</p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, ImageBase )</p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, SectionAlignment )</p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, FileAlignment )</p>
+<p>
+    </p>
+<p>
+    DisplayPtrVersionFields(&quot;OperatingSystemVersion&quot;, pImageOptHeader,</p>
+<p>
+                            MajorOperatingSystemVersion,</p>
+<p>
+                            MinorOperatingSystemVersion )</p>
+<p>
+    DisplayPtrVersionFields(&quot;ImageVersion&quot;, pImageOptHeader, MajorImageVersion,</p>
+<p>
+                            MinorImageVersion )</p>
+<p>
+    DisplayPtrVersionFields(&quot;SubsystemVersion&quot;, pImageOptHeader,</p>
+<p>
+                            MajorSubsystemVersion,</p>
+<p>
+                            MinorSubsystemVersion )</p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, Win32VersionValue )</p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, SizeOfImage )</p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, SizeOfHeaders )</p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, CheckSum )</p>
+<p>
+    DisplayPtrFieldW( pImageOptHeader, Subsystem )</p>
+<p>
+    DisplayPtrFieldW( pImageOptHeader, DllCharacteristics )</p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, SizeOfStackReserve )</p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, SizeOfStackCommit )</p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, SizeOfHeapReserve )</p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, SizeOfHeapCommit )</p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, LoaderFlags )</p>
+<p>
+    DisplayPtrFieldD( pImageOptHeader, NumberOfRvaAndSizes )</p>
+<p>
+    DisplayDataDir( pImageOptHeader, IMAGE_DIRECTORY_ENTRY_EXPORT )</p>
+<p>
+    DisplayDataDir( pImageOptHeader, IMAGE_DIRECTORY_ENTRY_IMPORT )</p>
+<p>
+    DisplayDataDir( pImageOptHeader, IMAGE_DIRECTORY_ENTRY_RESOURCE )</p>
+<p>
+    DisplayDataDir( pImageOptHeader, IMAGE_DIRECTORY_ENTRY_EXCEPTION )</p>
+<p>
+    DisplayDataDir( pImageOptHeader, IMAGE_DIRECTORY_ENTRY_SECURITY )</p>
+<p>
+    DisplayDataDir( pImageOptHeader, IMAGE_DIRECTORY_ENTRY_BASERELOC )</p>
+<p>
+    DisplayDataDir( pImageOptHeader, IMAGE_DIRECTORY_ENTRY_DEBUG )</p>
+<p>
+    DisplayDataDir( pImageOptHeader, IMAGE_DIRECTORY_ENTRY_COPYRIGHT )</p>
+<p>
+    DisplayDataDir( pImageOptHeader, IMAGE_DIRECTORY_ENTRY_GLOBALPTR )</p>
+<p>
+    DisplayDataDir( pImageOptHeader, IMAGE_DIRECTORY_ENTRY_TLS )</p>
+<p>
+    DisplayDataDir( pImageOptHeader, IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG )</p>
+<p>
+    DisplayDataDir( pImageOptHeader, IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT )</p>
+<p>
+    DisplayDataDir( pImageOptHeader, IMAGE_DIRECTORY_ENTRY_IAT )</p>
+<p>
+}</p>
+<p>
+//=============================================================================</p>
+<p>
+// Enumerates through a section table and displays basic info for each section</p>
+<p>
+//=============================================================================</p>
+<p>
+void ShowSectionHeaders( PIMAGE_SECTION_HEADER pSectionHdr, DWORD cSections )</p>
+<p>
+{</p>
+<p>
+    printf( &quot; #      Name   Address  VirtSize   RawSize\n&quot; );</p>
+<p>
+    printf( &quot;--  --------  --------  --------  --------\n&quot; );</p>
+<p>
+    </p>
+<p>
+    for ( unsigned i=1; i &lt;= cSections; i++, pSectionHdr++ )</p>
+<p>
+    {</p>
+<p>
+        printf( &quot;%2u  %8.8s  %08X  %08X  %08x\n&quot;, i, pSectionHdr-&gt;Name,</p>
+<p>
+                pSectionHdr-&gt;VirtualAddress, pSectionHdr-&gt;Misc.VirtualSize,</p>
+<p>
+                pSectionHdr-&gt;SizeOfRawData );</p>
+<p>
+    }</p>
+<p>
+}</p>
+<p>
+//=============================================================================</p>
+<p>
+// Helper function used to provide consistent delimitation of output sections</p>
+<p>
+//=============================================================================</p>
+<p>
+void StartNewDisplaySection( PSTR pszSectionName )</p>
+<p>
+{</p>
+<p>
+    printf( &quot;\n==== %s ====\n&quot;, pszSectionName );</p>
+<p>
+}</p>
+<p>
+//=============================================================================</p>
+<p>
+// Called by main() to extract any command-line arguments, as well as the</p>
+<p>
+// filename to be used.  Also attempts to come up with a complete path to</p>
+<p>
+// the directory containing the named executable.  Returns this value in the</p>
+<p>
+// pszPath param buffer. </p>
+<p>
+//=============================================================================</p>
+<p>
+BOOL ParseCommandLine( int argc, char * argv[], PSTR pszFilename, PSTR pszPath )</p>
+<p>
+{</p>
+<p>
+    if ( argc &lt; 2 )</p>
+<p>
+        return FALSE;</p>
+<p>
+    BOOL fSawFilename = FALSE;</p>
+<p>
+    </p>
+<p>
+    for ( int i = 1; i &lt; argc; i++ )</p>
+<p>
+    {</p>
+<p>
+        PSTR pszArg = argv[i];</p>
+<p>
+        </p>
+<p>
+        if ( *pszArg == '-' )   // Is the first character a '-' ?</p>
+<p>
+        {</p>
+<p>
+            *pszArg++;</p>
+<p>
+            </p>
+<p>
+            if ( (*pszArg=='d') || (*pszArg=='D') ) // allow &quot;d&quot; or &quot;D&quot;</p>
+<p>
+                g_fDecoratedNames = TRUE;           // set global flag</p>
+<p>
+                </p>
+<p>
+            else if ( (*pszArg=='n') || (*pszArg=='N') )    // allow &quot;n&quot; or &quot;N&quot;</p>
+<p>
+                g_fShowSymbols = FALSE;                     // set global flag</p>
+<p>
+        }</p>
+<p>
+        else</p>
+<p>
+        {</p>
+<p>
+            if ( fSawFilename )     // We should only get here once</p>
+<p>
+                return FALSE;</p>
+<p>
+            PSTR pszFilenamePart;</p>
+<p>
+            if (GetFullPathName( argv[i], MAX_PATH, pszPath, &amp;pszFilenamePart))</p>
+<p>
+            {</p>
+<p>
+                // Truncate the filename portion off the path</p>
+<p>
+                if ( pszFilenamePart )</p>
+<p>
+                    *pszFilenamePart = 0;</p>
+<p>
+                    </p>
+<p>
+                // Copy the input argument to the passed in filename buffer             </p>
+<p>
+                lstrcpy( pszFilename, argv[i] );</p>
+<p>
+                </p>
+<p>
+                fSawFilename = TRUE;</p>
+<p>
+            }</p>
+<p>
+            else                // GetFullPathName failed.  Ooops!</p>
+<p>
+                return FALSE;</p>
+<p>
+        }</p>
+<p>
+    }</p>
+<p>
+    </p>
+<p>
+    return fSawFilename;    </p>
+<p>
+}</p>
+<p>As a final note on MapAndLoad, it’s important to remember that it creates a linear mapping of the entire file in one contiguous chunk. This is different from the Win32 loader bringing an executable module into memory, creating distinct mappings for each section so that it starts on a page boundary in memory. The result of this linear mapping is that any Relative Virtual Addresses (RVA) that you might see in the PE header aren’t directly usable with the image as loaded by MapAndLoad. To use an RVA in this situation, you’d have to adjust it to account for the difference between the section’s file offset and its in-memory address. Luckily, IMAGEHLP.DLL provides an API, ImageRVAToVa, that will do this for you.</p>
+<p>If it’s symbol table information you’re after, the equivalent to MapAndLoad is the MapDebugInformation API. You can think of MapDebugInformation as a superset of the MapAndLoad API. Besides mapping the executable file into memory, this API also figures out what the best type of symbol information is as well as some basic information about that symbol table. What exactly do I mean by “best”? It turns out that an executable can be built with more than one type of debug information. For example, you can create an executable with both CodeView (PDB) information and a COFF symbol table. IMAGEHLP knows how to read both formats, as well as a few others, and knows which one is optimal for your executable. More on this later. Just as the MapAndLoad API eventually needs to be followed by a call to UnMapAndLoad, MapDebugInformation also needs to be cleaned up by calling UnmapDebugInformation.</p>
+<p>Because the symbols for an executable may be in a file other than the executable itself, the MapDebugInformation API takes a parameter not needed for the MapAndLoad API—the symbol search path. By default, IMAGEHLP searches for symbol files in a series of paths that I’ll describe later. However, the MapDebugInformation API lets you override these paths. This is what I’ve done in the EZPE source where it calls MapDebugInformation.</p>
+<p>Besides mapping and loading the executable and its symbols (if present), the MapDebugInformation API returns a pointer to an IMAGE_DEBUG_INFORMATION structure. This structure contains many more fields than a LOADED_IMAGE structure, although nearly every field in the LOADED_IMAGE structure can be found in the IMAGE_DEBUG_INFORMATION structure. For example, the MappedBase field contains the address where the executable was mapped, and is the same as the Mapped&shy;Address field in a LOADED_IMAGE structure. Similarly, the Sections field is a pointer to the executable’s section table, and so forth.</p>
+<p>More useful information found in the IMAGE_DEBUG_<BR>INFORMATION structure includes the preferred load address (the ImageBase field), and the size of the executable in memory (the SizeOfImage field). There are also pointers to the table of names for the exported functions, as well as the executable’s time/date stamp DWORD. You can pass this DWORD to the C++ ctime function to get the time and date when the executable was built. For more information on the time/date stamp, see my February 1997 column.</p>
+<p>The meaning of some fields in the IMAGE_DEBUG_<BR>INFORMATION structure isn’t so obvious—like the pointers to Function and FPO tables. The Function table is data used by the structured exception handling code on the Alpha and MIPS platforms (it’s not encountered with Intel-based executables). FPO information is seen only on the Intel platform; it helps debuggers walk the call stack in the absence of standard EBP register stack frames.</p>
+<p>Finally, the IMAGE_DEBUG_INFORMATION has a variety of fields that indicate if CodeView and COFF information are present, and if so, where. There’s even a pointer to the debug directory. This is the data structure in the PE file that tells you what types of debug information are present and where. The MapDebugInformation API does a good job of extracting this information and presenting it in the IMAGE_DEBUG_INFORMATION structure. Still, if you’re so inclined, you can go straight to the same raw data that IMAGEHLP uses to generate the IMAGE_<BR>DEBUG_INFORMATION structure. Remember though, the whole advantage of using IMAGEHLP is to avoid such low-level grunginess.</p>
+<p>So far, the two APIs I’ve examined (MapAndLoad and MapDebugInformation) simply map an executable into memory and extract some useful information from it. Neither API loads a symbol table, although calling one of them is effectively a prerequisite to using the symbol table APIs. The key piece of data needed is the mapped address of the executable. The symbol table APIs work from the mapped executable to find and load the appropriate symbol table into memory.</p>
+<p>The first IMAGEHLP symbol table API you should be aware of is SymInitialize, which sets up internal variables in IMAGEHLP so that the DLL is prepared to load symbol tables for the executable and possibly multiple DLLs within a process. As you might expect, there’s a corresponding shutdown API, SymCleanup, that should be called when you’re finished working with symbols.</p>
+<p>The first parameter to SymInitialize is an identifier for a process that you want to use when working with symbols. If you were using IMAGEHLP as part of a real debugger, you’d want to pass a valid process handle. This allows IMAGEHLP to enumerate through all the loaded modules in a process address space and load the associated symbol tables. You can turn off this automatic module enumeration by passing FALSE as the third parameter to Sym&shy;Initialize. If you’re not a debugger process (EZPE isn’t), you can pass whatever value you’d like as the process handle. Just remember to pass the same value to subsequent symbol APIs that expect a process handle. In the case of EZPE, I used the value zero through a #define called MY_<BR>PROCESS_HANDLE.</p>
+<p>(As a side note to the automatic module enumeration I referred to, the Windows NT 4.0-supplied IMAGEHLP won’t do this under Windows 95. The module enumeration APIs under Windows NT are different than those in Windows 95. However, these differences are slated to be resolved in a subsequent release.)</p>
+<p>The second parameter to SymInitialize is the symbol search path. If you pass a valid string pointer in the form of a path (that is, directories separated by semicolons), IMAGEHLP searches those directories when looking for a symbol table that’s in a different file than the executable. Passing zero causes IMAGEHLP to use three environment variables as the path: _NT_SYMBOL_PATH, _NT_ALTER&shy;NATE_SYMBOL_PATH, and SYSTEMROOT.</p>
+<p>After you’ve called SymInitialize, the next step is to load the symbol tables you’re interested in—that is, assuming you didn’t pass a valid process handle to SymInitialize so that it enumerated and loaded all the symbol tables automatically. EZPE doesn’t do this, so it’s necessary to manually load the symbol table for the executable file that it’s working with. The API that manually loads a symbol table is SymLoadModule. Not surprisingly, there’s a SymUnload&shy;Module to use when you’re done with a given symbol table.</p>
+<p>Although the SymLoadModule API takes six parameters, only three are required for a simple program like EZPE. The first parameter is the process handle value that was passed to SymInitialize earlier in the program. Parameter three is the name of the executable file whose symbols are to be loaded. Parameter five is the address where the executable is mapped into memory. As I alluded to earlier, this value can be obtained easily by calling MapAndLoad or MapDebugInformation. Assuming all goes well, SymLoad&shy;Module returns TRUE.</p>
+<p>After loading a symbol table, there are a variety of actions available. For example, in my April 1997 column I used the SymGetSymFromAddr function to take an address and find the name of the nearest symbol. The end result was a stack trace containing symbolic function names. If I were writing a debugger, I could use the SymGetSymFromName API to look up the address of a function or variable name that the user requested.</p>
+<p>With EZPE, the first action after loading a symbol table is to find out more about what was just loaded. This can be done with the SymGetModuleInfo API. The first parameter is the process handle value used with the other symbol APIs. The second parameter needs to be an address somewhere within the module that the symbol table belongs to. In the EZPE code, the easiest thing to use is the base address to which the executable was memory mapped. The third parameter to SymGetModuleInfo is a pointer to an IMAGEHLP_MODULE structure that the API fills with information about the module and its symbol table.</p>
+<p>The first group of fields in an IMAGEHLP_MODULE structure is standard stuff that you can get in ways that I described earlier. More interesting is the SymType and NumSyms fields. The SymType field contains an enum that indicates what type of symbol table was loaded (for example, SymCoff, SymCv, SymPdb, or SymExport). </p>
+<p>The SymExport type is worth a mention. Exports aren’t formally considered to be debug information. However, the information stored for an exported function (its name and address) is the bare minimum required for inclusion in a symbol table. Therefore, IMAGEHLP can synthesize a symbol table out of an executable’s exports. The upshot is that any executable that exports symbols can be considered to have at least a minimal symbol table available. (By the way, if you’re a SoftIce user, the Load EXPORTS capability works along the same lines.)</p>
+<p>Another, more useful action you can take with a loaded symbol table is to enumerate through all the symbols. For this purpose, IMAGEHLP has the SymEnumerateSymbols API. The first parameter is the process handle value used with the other symbol APIs. Parameter two is the base address of the executable whose symbols you’re interested in. The third parameter is the address of a callback function that will be called once for each symbol in the symbol table. The fourth parameter can be whatever you’d like. It’s passed on to the callback function, unmodified. If I didn’t want to use the SymEnumerateSymbols API, I could use the GymGetSymNext API in a loop instead. Both APIs have their strengths and weaknesses, so I just picked one arbitrarily for EZPE to use.</p>
+<h2>The EZPE Code</h2>
+<p>Now let’s look at the EZPE program and its code. EZPE is a command-line program that accepts arguments. The source file EZPE.CPP is shown in Figure 1. You can see its usage by running EZPE with no arguments:</p>
+<p>
+Syntax: EZPE [options] &lt;filename&gt;</p>
+<p>
+  -d  Decorated C++ names</p>
+<p>
+  -n  No symbol display</p>
+<p>In the simplest case, you’d give EZPE the name of an executable file to display. EZPE outputs to the stdout, so its output can be redirected to a file. For example:</p>
+<p>
+EZPE C:\WINNT\SYSTEM32\KERNEL32.DLL &gt; results</p>
+<p>Figure 2 shows the results of running EZPE on its own EXE. The –n option tells EZPE to not bother loading and displaying the symbols. If you were to use the –n option, everything after the “==== IMAGE_DEBUG_ INFORMATION ====” line in Figure 2 would be omitted from the program output.</p>
+<p>Figure 2  EZPE Output</p>
+<h4>ezpe.mak</h4>
+<h4>Ezpe.out</h4>
+<p>
+Display of file EZPE.EXE</p>
+<p>
+====  LOADED_IMAGE ====</p>
+<p>
+ModuleName                         EZPE.EXE</p>
+<p>
+hFile                              FFFFFFFF</p>
+<p>
+MappedAddress                      008B0000</p>
+<p>
+FileHeader                         008B0080</p>
+<p>
+LastRvaSection                     008B0178</p>
+<p>
+NumberOfSections                   00000004</p>
+<p>
+Sections                           008B0178</p>
+<p>
+Characteristics                    0000010B</p>
+<p>
+fSystemImage                       00000000</p>
+<p>
+fDOSImage                          00000000</p>
+<p>
+Links                              0012FFA4</p>
+<p>
+SizeOfImage                        00003E00</p>
+<p>
+==== PE File Headers (LOADED_IMAGE.FileHeader) ====</p>
+<p>
+Machine                            014C</p>
+<p>
+NumberOfSections                   0004</p>
+<p>
+TimeDateStamp                      336CF53B</p>
+<p>
+PointerToSymbolTable               00000000</p>
+<p>
+NumberOfSymbols                    00000000</p>
+<p>
+SizeOfOptionalHeader               00E0</p>
+<p>
+Characteristics                    010B</p>
+<p>
+Magic                              010B</p>
+<p>
+LinkerVersion                      5.00</p>
+<p>
+SizeOfCode                         00002200</p>
+<p>
+SizeOfInitializedData              00001800</p>
+<p>
+SizeOfUninitializedData            00000000</p>
+<p>
+AddressOfEntryPoint                00001E59</p>
+<p>
+BaseOfCode                         00001000</p>
+<p>
+BaseOfData                         00004000</p>
+<p>
+ImageBase                          00400000</p>
+<p>
+SectionAlignment                   00001000</p>
+<p>
+FileAlignment                      00000200</p>
+<p>
+OperatingSystemVersion             4.00</p>
+<p>
+ImageVersion                       0.00</p>
+<p>
+SubsystemVersion                   4.00</p>
+<p>
+Win32VersionValue                  00000000</p>
+<p>
+SizeOfImage                        00007000</p>
+<p>
+SizeOfHeaders                      00000400</p>
+<p>
+CheckSum                           00000000</p>
+<p>
+Subsystem                          0003</p>
+<p>
+DllCharacteristics                 0000</p>
+<p>
+SizeOfStackReserve                 00100000</p>
+<p>
+SizeOfStackCommit                  00001000</p>
+<p>
+SizeOfHeapReserve                  00100000</p>
+<p>
+SizeOfHeapCommit                   00001000</p>
+<p>
+LoaderFlags                        00000000</p>
+<p>
+NumberOfRvaAndSizes                00000010</p>
+<p>
+IMAGE_DIRECTORY_ENTRY_EXPORT       Address: 00000000 Size: 00000000</p>
+<p>
+IMAGE_DIRECTORY_ENTRY_IMPORT       Address: 00006000 Size: 00000050</p>
+<p>
+IMAGE_DIRECTORY_ENTRY_RESOURCE     Address: 00000000 Size: 00000000</p>
+<p>
+IMAGE_DIRECTORY_ENTRY_EXCEPTION    Address: 00000000 Size: 00000000</p>
+<p>
+IMAGE_DIRECTORY_ENTRY_SECURITY     Address: 00000000 Size: 00000000</p>
+<p>
+IMAGE_DIRECTORY_ENTRY_BASERELOC    Address: 00000000 Size: 00000000</p>
+<p>
+IMAGE_DIRECTORY_ENTRY_DEBUG        Address: 00004000 Size: 00000054</p>
+<p>
+IMAGE_DIRECTORY_ENTRY_COPYRIGHT    Address: 00000000 Size: 00000000</p>
+<p>
+IMAGE_DIRECTORY_ENTRY_GLOBALPTR    Address: 00000000 Size: 00000000</p>
+<p>
+IMAGE_DIRECTORY_ENTRY_TLS          Address: 00000000 Size: 00000000</p>
+<p>
+IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG  Address: 00000000 Size: 00000000</p>
+<p>
+IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT Address: 00000000 Size: 00000000</p>
+<p>
+IMAGE_DIRECTORY_ENTRY_IAT          Address: 0000613C Size: 000000EC</p>
+<p>
+==== Section Headers (LOADED_IMAGE.Sections) ====</p>
+<p>
+ #      Name   Address  VirtSize   RawSize</p>
+<p>
+--  --------  --------  --------  --------</p>
+<p>
+ 1     .text  00001000  0000206F  00002200</p>
+<p>
+ 2    .rdata  00004000  00000164  00000200</p>
+<p>
+ 3     .data  00005000  00000E53  00000c00</p>
+<p>
+ 4    .idata  00006000  000004FC  00000600</p>
+<p>
+==== IMAGE_DEBUG_INFORMATION ====</p>
+<p>
+Size                               0000012C</p>
+<p>
+MappedBase                         008B0000</p>
+<p>
+Machine                            014C</p>
+<p>
+Characteristics                    010B</p>
+<p>
+CheckSum                           00000000</p>
+<p>
+ImageBase                          00400000</p>
+<p>
+SizeOfImage                        00007000</p>
+<p>
+NumberOfSections                   00000004</p>
+<p>
+Sections                           008B0178</p>
+<p>
+ExportedNamesSize                  00000000</p>
+<p>
+ExportedNames                      00000000</p>
+<p>
+NumberOfFunctionTableEntries       00000000</p>
+<p>
+FunctionTableEntries               00000000</p>
+<p>
+LowestFunctionStartingAddress      00000000</p>
+<p>
+HighestFunctionEndingAddress       00000000</p>
+<p>
+NumberOfFpoTableEntries            00000005</p>
+<p>
+FpoTableEntries                    008AE72C</p>
+<p>
+SizeOfCoffSymbols                  00000000</p>
+<p>
+CoffSymbols                        00000000</p>
+<p>
+SizeOfCodeViewSymbols              00000029</p>
+<p>
+CodeViewSymbols                    008AE780</p>
+<p>
+ImageFilePath                      E:\column\col47\EZPE.EXE</p>
+<p>
+ImageFileName                      EZPE.EXE</p>
+<p>
+DebugFilePath                      E:\column\col47\EZPE.EXE</p>
+<p>
+TimeDateStamp                      336CF53B</p>
+<p>
+RomImage                           00000000</p>
+<p>
+DebugDirectory                     008B2600</p>
+<p>
+NumberOfDebugDirectories           00000003</p>
+<p>
+==== IMAGEHLP_MODULE ====</p>
+<p>
+CheckSum                           00000000</p>
+<p>
+NumSyms                            00000000</p>
+<p>
+SymType                            00000003</p>
+<p>
+                                   SymPdb</p>
+<p>
+ModuleName                         EZPE</p>
+<p>
+ImageName                          EZPE.EXE</p>
+<p>
+LoadedImageName                    E:\column\col47\EZPE.EXE</p>
+<p>
+==== Symbols ====</p>
+<p>
+     RVA  Name</p>
+<p>
+--------  ----</p>
+<p>
+000061BC  _imp__ExitProcess</p>
+<p>
+00001834  ShowImageFileHeaders</p>
+<p>
+0000616C  _imp__UnDecorateSymbolName</p>
+<p>
+00001F92  UnmapDebugInformation</p>
+<p>
+00001FEC  GetStdHandle</p>
+<p>
+00001F8C  MapAndLoad</p>
+<p>
+00006014  _IMPORT_DESCRIPTOR_IMAGEHLP</p>
+<p>
+00001E14  printf</p>
+<p>
+000061A8  _imp__lstrlenA</p>
+<p>
+00001F80  wvsprintfA</p>
+<p>
+00001D5F  ParseCommandLine</p>
+<p>
+00001E76  _ConvertCommandLineToArgcArgv</p>
+<p>
+00005A78  g_szHelp</p>
+<p>
+000061F8  _imp__wvsprintfA</p>
+<p>
+0000614C  _imp__UnmapDebugInformation</p>
+<p>
+00001FE0  GetFullPathNameA</p>
+<p>
+00006154  _imp__SymUnloadModule</p>
+<p>
+000061C8  KERNEL32_NULL_THUNK_DATA</p>
+<p>
+00006148  _imp__MapAndLoad</p>
+<p>
+00001FDA  lstrcpyA</p>
+<p>
+000061B0  _imp__GetCommandLineA</p>
+<p>
+00001F86  UnMapAndLoad</p>
+<p>
+00001FA4  SymEnumerateSymbols</p>
+<p>
+00005BE0  _ppszArgv</p>
+<p>
+00005A70  g_fShowSymbols</p>
+<p>
+00001FAA  SymGetModuleInfo</p>
+<p>
+00001292  ShowSymbols</p>
+<p>
+0000613C  _imp__MapDebugInformation</p>
+<p>
+000061FC  USER32_NULL_THUNK_DATA</p>
+<p>
+00001D4A  StartNewDisplaySection</p>
+<p>
+00001046  main</p>
+<p>
+00001FBC  SymGetOptions</p>
+<p>
+0000615C  _imp__SymGetModuleInfo</p>
+<p>
+00006140  _imp__SymInitialize</p>
+<p>
+00006144  _imp__UnMapAndLoad</p>
+<p>
+00002004  GetCommandLineA</p>
+<p>
+000061C4  _imp__GetProcessHeap</p>
+<p>
+000061A4  _imp__GetFullPathNameA</p>
+<p>
+00006170  IMAGEHLP_NULL_THUNK_DATA</p>
+<p>
+00006164  _imp__SymSetOptions</p>
+<p>
+00005BC0  g_fDecoratedNames</p>
+<p>
+00006160  _imp__SymLoadModule</p>
+<p>
+00001FC8  MapDebugInformation</p>
+<p>
+00001F9E  SymUnloadModule</p>
+<p>
+00006000  _IMPORT_DESCRIPTOR_USER32</p>
+<p>
+00001FF8  HeapAlloc</p>
+<p>
+00006158  _imp__SymEnumerateSymbols</p>
+<p>
+00001F98  SymCleanup</p>
+<p>
+00001FE6  WriteFile</p>
+<p>
+000061AC  _imp__lstrcpyA</p>
+<p>
+00001767  EnumSymbolsCallback</p>
+<p>
+00006150  _imp__SymCleanup</p>
+<p>
+000061B8  _imp__GetStdHandle</p>
+<p>
+00001FD4  lstrlenA</p>
+<p>
+00001FB6  SymSetOptions</p>
+<p>
+00006168  _imp__SymGetOptions</p>
+<p>
+00001FFE  GetProcessHeap</p>
+<p>
+000061B4  _imp__WriteFile</p>
+<p>
+00006028  _IMPORT_DESCRIPTOR_KERNEL32</p>
+<p>
+00001E59  mainCRTStartup</p>
+<p>
+00001FF2  ExitProcess</p>
+<p>
+000061C0  _imp__HeapAlloc</p>
+<p>
+00001FCE  UnDecorateSymbolName</p>
+<p>
+00001CEE  ShowSectionHeaders</p>
+<p>
+00001FC2  SymInitialize</p>
+<p>
+00001FB0  SymLoadModule</p>
+<p>
+0000603C  _NULL_IMPORT_DESCRIPTOR</p>
+<p>The –d option tells EZPE to display the decorated (mangled) names of any C++ symbols in the symbol table. By default, when SymLoadModule creates the symbol table, it undecorates any C++ symbols into human readable form. The undecorated name consists solely of the class name and member function name, such as foo::bar. This is the default output mode that EZPE uses. The –d option tells EZPE to emit the raw, decorated names instead: ?ParseCommand&shy;Line@@YAHHQAPADPAD1@Z.</p>
+<p>While I was writing EZPE, it occurred to me that the default undecoration strips out lots of potentially useful information such as the parameters, calling convention, return type, and so forth. Therefore, when using the –d option, EZPE displays the decorated name as well as an undecorated version that contains much more information about the symbol.</p>
+<p>Coming up with a better undecorated version of a symbol name turned out to be a bit of a challenge.&nbsp;The first require&shy;ment was to force SymLoadModule to leave the symbol names alone when loading the symbol table. Luckily, there’s another IMAGEHLP API that makes this easy—the SymSetOptions API takes a flag called SYMOPT_UND&shy;NAME, which isn’t a default setting. Because I wanted to change only that option and leave the others alone, the code calls SymGetOptions to get the current options. It then ORs in the SYMOPT_UNDNAME flag and calls SymSetOptions with the result.</p>
+<p>The remaining work of displaying a better undecorated symbol name is to call yet another IMAGEHLP API, UndecorateSymbolName, for any name that appears to be decorated (decorated names begin with a “?”). Undecorate&shy;SymbolName takes a whole slew of parameters that tell it what parts of an undecorated name to include or not include. The EZPE code uses the set of options that should produce the most information in the undecorated name. </p>
+<p>When I tested EZPE, the UndecorateSymbolName failed on certain symbol names. A little investigation proved that some symbols had garbage characters at the end of their names, whether the name was normal or decorated. Apparently, IMAGEHLP leaves garbage at the end of certain symbol names when operating with the SYMOPT_<BR>UNDNAME option enabled. For normal names, I didn’t go to the trouble of trying to strip off the garbage characters. However, I did notice that most C++ symbol names end with a capital Z. In the EnumSymbolsCallback function from EZPE.CPP, you’ll find that the code works backwards from the end of C++ symbol names, stripping off characters until it encounters a Z. Not pretty, but it seems to work OK.</p>
+<p>Another interesting thing about the EZPE Enum&shy;SymbolsCallback function concerns the fourth parameter. It turns out that when IMAGEHLP calls the function, the symbol address it passes is a linear address and is connected to where the executable was mapped into memory. For a debugger operating on a live process, this is just fine. However, in a symbol display program, it’s worthless. The executable could be mapped nearly anywhere.</p>
+<p>To resolve this situation, I made EZPE emit the RVA of the symbol rather than the value IMAGEHLP passes to the callback function. (An RVA is independent of the executable’s mapped address, and just makes more sense since PE files themselves store all addresses as RVAs.) To calculate the RVA of each symbol, the EnumSymbols&shy;Callback has to know where the executable is mapped into memory. Luckily, SymEnumerate&shy;Symbols has a parameter that it passes on, unmodified, to the enumeration callback function. EZPE uses this parameter to convey the executable’s mapped address to the enumeration callback function. In the callback, the code subtracts this value from the symbol address to obtain the symbol’s RVA. You’ll see this in the portion of Figure 2 that begins with the header “==== Symbols ====”. In particular, note that the addresses for the symbols are relatively small and fall within the RVAs listed for the various PE file sections.</p>
+<p>As a final wrap-up, let me first apologize for the macro madness at the beginning (for example, the DisplayPtr&shy;FieldD macro). When I was writing EZPE, I knew that it would display many fields from numerous structures. I wanted these fields to be formatted in a nice, consistent manner. If I had used printf directly, I would need to modify each printf individually if I wanted to change any output formatting. Making EZPE into a GUI app would have been even more of a pain. By using nested macros and the pre&shy;&shy;processor stringize feature, I was able to isolate all the details of how the structure fields should be displayed into one location.</p>
+<p>If you’re ambitious and want to extend or customize EZPE, there are a number of things you can do. For example, you could remove the display of the various IMAGEHLP-specific data structures. I included them to show what sort of information IMAGEHLP gives you. The resulting output would be smaller and would include only information from the executable and symbol tables. Another nice feature would be to decode the various fields containing flags, such as the Characteristics field in the PE header, or the PE section attributes. Even with this extra code, you’d have a very compact program, which is a testament to the power that IMAGEHLP.DLL provides.</p>
+<h5>To obtain complete source code listings, see page 5.</h5>
+<p>Have a question about programming in Windows? Send it to Matt at mpietrek@tiac.com</p>
+</font></font></body>
+</HTML>

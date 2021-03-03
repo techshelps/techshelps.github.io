@@ -1,0 +1,206 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML>
+<HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>4.2  Device Drivers’ Staged IRP Processing</TITLE>
+<style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD>
+<BODY BGPROPERTIES="FIXED" TEXT="#000000" BGCOLOR="#FFFFFF">
+
+<FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<H2><A NAME="DDK_Device_Drivers_Staged_IRP_Processing_KG"></A>4.2  Device Drivers’ Staged IRP Processing</H2>
+<P>
+As shown in <A HREF="04drvovr_1.htm">Figure 4.1</A>,
+lowest-level NT drivers have certain standard routines that higher-level NT
+drivers need not have. The set of standard routines for NT device drivers also
+varies according to the following criteria:
+<UL>
+<LI>
+The nature of the device each controls
+<P>
+<LI>
+Whether a particular driver sets up its device objects for direct or buffered
+I/O, as described in Chapter 3
+<P>
+<LI>
+The design of any particular device driver 
+</UL>
+<P>
+Figure 4.2 illustrates the path an IRP takes through the standard routines of
+an NT mass-storage device driver with the following characteristics: 
+<UL>
+<LI>
+The device generates interrupts at the end of each I/O operation, so this
+driver has ISR and DpcForIsr routines. 
+<P>
+<LI>
+The driver has a StartIo routine, rather than setting up internal queues for
+IRPs and managing its own queueing. 
+<P>
+<LI>
+The driver uses system DMA, so it sets its device objects’ <B>Flags</B>&nbsp;for
+direct I/O, as described in Chapter 3, and has an AdapterControl routine. 
+</UL>
+<P>
+<B><IMG SRC="../art/4loddirp.gif" BORDER=0></B>
+<P>
+<B>Figure 4.2    IRP Path through NT Device Driver Routines (DMA)</B>
+<P>
+As Figure 4.2 shows, an IRP is sent first to the driver’s Dispatch routine for
+the given major function code (IRP_MJ_<I>XXX</I>), in this case
+DDDispatchReadWrite. An NT driver is never sent an IRP with an unknown
+function code, because each driver sets its Dispatch routine(s) in the driver
+object on an IRP_MJ_<I>XXX</I>-specific basis when the driver initializes. 
+<H4>Calling IoGetCurrentIrpStackLocation</H4>
+<P>
+A Dispatch routine that handles more than one IRP_MJ_<I>XXX</I>, handles an
+IRP_MJ_<I>XXX</I>&nbsp;with minor subfunctions (IRP_MN_<I>XXX</I>), or handles
+device I/O control requests (IRP_MJ_DEVICE_CONTROL and/or
+IRP_MJ_INTERNAL_DEVICE_CONTROL), and every other driver routine that processes
+each IRP must call <B>IoGetCurrentIrpStackLocation</B>&nbsp;in order to determine
+what to do and what parameters to use. 
+<P>
+The IRP shown in Figure 4.2 requests a data transfer operation (IRP_MJ_READ or
+IRP_MJ_WRITE), and this driver’s I/O stack location is the lowest in the IRP,
+with an indefinite number of higher-level drivers’ I/O stack locations shown
+shaded. For simplicity, calls to <B>IoGetCurrentIrpStackLocation</B>&nbsp;from the
+DispatchReadWrite, StartIo, AdapterControl, and DpcForIsr routines are not
+shown in Figure 4.2. 
+<H4>Calling IoMarkIrpPending and IoStartPacket</H4>
+<P>
+Assuming the parameters for the read/write request are valid, the Dispatch
+routine would call <B>IoMarkIrpPending</B>&nbsp;to indicate that the IRP is not yet
+completed, and <B>IoStartPacket</B>&nbsp;to queue or pass the IRP on to the
+driver’s StartIo routine for further processing. The Dispatch routine would
+also return the NTSTATUS value STATUS_PENDING. 
+<P>
+Figure 4.3 illustrates such a call to <B>IoStartPacket</B>.
+<P>
+<B><IMG SRC="../art/4strtpak.gif" BORDER=0></B>
+<P>
+<B>Figure 4.3    Calling IoStartPacket</B>
+<P>
+If the driver is currently busy processing another IRP on the device, <B>IoStartPacket</B>
+will insert the IRP into the device queue associated with the device object.
+If the driver is not busy and the device queue is empty, its StartIo routine
+will be called immediately with the input IRP.
+<P>
+Note that the driver of a mass-storage device would not supply a Cancel
+routine when it calls <B>IoStartPacket</B>&nbsp;both because a file system layered
+over such a driver handles the cancelation of file I/O requests and because
+mass-storage device drivers process IRPs so quickly. Usually, the
+highest-level driver in a chain of layered NT drivers handles the cancelation
+of IRPs. 
+<P>
+The device driver shown in Figure 4.2 might supply a <I>Key</I>&nbsp;value to
+impose a driver-determined order on IRPs in the device queue when it calls <B>IoStartPacket</B>.
+<H4>Calling IoAllocateAdapterChannel and IoMapTransfer</H4>
+<P>
+Assuming the StartIo routine shown in Figure 4.2 finds that the transfer
+request can be done by a single DMA operation, the StartIo routine calls <B>IoAllocateAdapterChannel</B>
+with the entry point of the driver’s AdapterControl routine and the IRP. 
+<P>
+When the system DMA controller is available, the AdapterControl routine is
+called to set up the transfer operation, as shown in Figure 4.2. The
+AdapterControl routine calls <B>IoMapTransfer</B>&nbsp;with a pointer to the
+buffer, described in the MDL at <B>Irp-&gt;MdlAddress</B>, to set up the
+system DMA controller. Then, the driver programs its device for the DMA
+operation and returns. (For more detailed information about using DMA and
+adapter objects, see Chapter 3.) 
+<H4>Calling IoRequestDpc from the Driver’s ISR</H4>
+<P>
+When the device interrupts to indicate its transfer operation is complete, the
+driver’s ISR stops the device from generating interrupts and calls <B>IoRequestDpc</B>,
+as shown in Figure 4.2. 
+<P>
+This call queues the driver’s DpcForIsr routine to complete as much of the
+transfer operation as possible at a lower hardware priority (IRQL). 
+<H4>Calling IoStartNextPacket and IoCompleteRequest</H4>
+<P>
+When the DpcForIsr routine has done its processing for the transfer, it calls <B>IoStartNextPacket</B>
+promptly so the driver’s StartIo routine will be called with the next IRP in
+the device queue, if any are queued. The DpcForIsr also sets the just
+completed IRP’s I/O status block and then calls <B>IoCompleteRequest</B>&nbsp;with
+the IRP. 
+<P>
+Figure 4.4 illustrates this driver’s calls to <B>IoStartNextPacket</B>&nbsp;and <B>IoCompleteRequest</B>.
+<P>
+<B><IMG SRC="../art/4snxtpak.gif" BORDER=0></B>
+<P>
+<B>Figure 4.4    Calling IoStartNextPacket and IoCompleteRequest</B>
+<P>
+Contrary to what Figure 4.4 implies, most NT device drivers call <B>IoStartNextPacket</B>
+before they call <B>IoCompleteRequest</B>. 
+<P>
+NT drivers should call <B>IoStartNextPacket</B>&nbsp;or <B>IoStartNextPacketByKey</B>
+to begin the next requested I/O operation as soon as possible, preferably
+before they call <B>IoCompleteRequest</B>&nbsp;and certainly before they return
+control. If no IRPs are currently in the device queue, <B>IoStartNextPacket</B>
+merely returns to the caller. 
+<H4>Setting the I/O Status Block in an IRP</H4>
+<P>
+Every NT device driver must set the I/O status block in the IRP before calling
+<B>IoCompleteRequest</B>, in order to supply information to any interested
+higher-level drivers and, ultimately, to the original requestor of the I/O
+operation. Any higher-level driver layered above the device driver in Figure
+4.4 might have set up an IoCompletion routine that reads the I/O status block
+set by the device driver. However, higher-level NT drivers usually do not
+modify the I/O status block in an IRP that has been completed by a device
+driver, unless such a higher-level driver is retrying the IRP and, therefore,
+reinitializes the I/O status block. 
+<P>
+Every higher-level NT driver that completes an IRP without sending it on to
+the next lower driver also must set the I/O status block in that IRP before it
+calls <B>IoCompleteRequest</B>. For good overall I/O throughput, a
+higher-level driver should check the parameters in its own I/O stack location
+of a given IRP and, if it determines that they are invalid, should set the I/O
+status block and complete the request itself, rather than passing an invalid
+request on to lower drivers in the chain. 
+<DL>
+<DT>
+The I/O status block is defined as follows: 
+<DD>
+<PRE><FONT FACE="Courier" SIZE="2">typedef struct _IO_STATUS_BLOCK { 
+&nbsp; &nbsp; NTSTATUS Status; 
+&nbsp; &nbsp; ULONG Information; 
+} IO_STATUS_BLOCK, *PIO_STATUS_BLOCK; 
+&nbsp;</FONT></PRE>
+</DL>
+<P>
+Assuming the transfer operation in Figure 4.4 was successful, the DpcForIsr
+shown in Figure 4.2 would set STATUS_SUCCESS in <B>Status</B>&nbsp;and the number
+of bytes transferred in <B>Information</B>&nbsp;for the IRP’s I/O status block. 
+<P>
+Note that certain standard NT driver routines also return NTSTATUS-type
+values, as shown by the declarations in <A HREF="04drvovr_1.htm">Section
+4.1</A>. For more information about NTSTATUS constants like STATUS_SUCCESS, see
+Chapter 16. 
+<H4>Supplying a PriorityBoost in Calls to IoCompleteRequest</H4>
+<P>
+If an NT device driver can complete an IRP in its Dispatch routine, it calls <B>IoCompleteRequest</B>
+with a <I>PriorityBoost</I>&nbsp;of IO_NO_INCREMENT because that driver can assume
+that the original requestor did not wait on its I/O operation. 
+<P>
+Otherwise, such a device driver supplies a system-defined and
+device-type-specific value that boosts the requestor’s runtime priority to
+compensate for the time the requestor waited on its device I/O request. (See <I>ntddk.h</I>
+for specifics.) 
+<P>
+Higher-level NT drivers apply the same <I>PriorityBoost</I>&nbsp;as their
+respective underlying device drivers when they call <B>IoCompleteRequest</B>
+with an IRP. 
+<H4>Effect of Calling IoCompleteRequest</H4>
+<P>
+When a driver calls <B>IoCompleteRequest</B>&nbsp;with a given IRP, the I/O Manager
+fills that driver’s I/O stack location with zeros before calling the next
+higher-level driver, if any, that has set up its IoCompletion routine to be
+called for the IRP. 
+<P>
+A higher-level driver’s IoCompletion routine can check only the IRP’s I/O
+status block to determine how all lower drivers handled a given request.
+<P>
+The caller of <B>IoCompleteRequest</B>&nbsp;must not attempt to access the just
+completed IRP. Such an attempt is a programming error that causes a system
+crash. 
+<P></FONT>
+</BODY>
+</HTML>

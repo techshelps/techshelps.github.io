@@ -1,0 +1,143 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Creating a Complex Control</title>
+<link disabled rel=stylesheet href=msdn_ie3.css>
+<style type="text/css">
+@import url(msdn_ie4.css);
+</style>
+</HEAD>
+<BODY>
+<FONT FACE="Verdana, Arial, Helvetica" SIZE="2">
+
+	<!--TOOLBAR_START-->
+	<!--TOOLBAR_EXEMPT-->
+	<!--TOOLBAR_END-->
+
+
+<h1><a name="creatingcomplexcontrol"></a>Creating a Complex Control</h1>
+<p>
+A complex control creates two properties: one of type <b>DataSource</b> and one of type <b>DataMember</b> in the control’s .odl (or .idl) file, which is compiled into its type library. Containers that support data binding recognize these properties and provide the necessary user interface for setting <b>DataSource</b> and <b>DataMember</b>. You can also set these properties in code. Containers that support data binding are Visual Basic, Visual C++ (MFC), and Internet Explorer 4.0. Microsoft Access will support data binding in a subsequent release.</p>
+<p>
+Once <b>DataSource</b> is set, the control calls <b>IDataSource::getDataMember</b>, passing in the value of its <b>DataMember</b> property and retrieving an <b>IRowPosition</b> interface on return. To retrieve the rowset interface, the control calls <b>IRowPosition::GetRowset</b>, after which the process of data consumption can begin.</p>
+<p>
+Complex controls also implement <b>IDataSourceListener </b>to be notified when data becomes available, becomes unavailable, or has been completely refreshed for a particular <b>DataMember</b>. A control calls <b>IDataSource::addDataSourceListener</b> when it wants to be notified, and <b>IDataSource::removeDataSourceListener</b> to remove a previously added listener. For more granular changes to the rowset, <b>IRowsetNotify</b> should be implemented and added to a rowset’s notification list using its <b>IConnectionPointContainer</b> interface. However, rowsets are not required to implement the latter two interfaces. Therefore, their usage may not be supported in some cases.</p>
+<h1>Creating Properties of Type DataSource and DataMember</h1>
+<p>
+The first step in creating a complex bound control is to create the <b>DataSource</b> and <b>DataMember</b> properties by modifying the control's .odl file. Respectively, <b>DataSource</b> and <b>DataMember</b> are properties of type <b>DataSource</b> and <b>DataMember</b>. These types are defined in Msdatsrc.tlb, which should be imported into the control’s library definition using the <b>importlib</b> ODL directive. Controls exposing these properties are recognized by containers as complex data-bound controls. </p>
+<p>
+At design time, the container supplies a list of data sources for the <b>DataSource</b> property. Once a data source is selected for a control, the container supplies a list of data members for the <b>DataMember</b> property. This list is based on the selected data source.</p>
+<p class=indent>
+<B><b>Note&nbsp;&nbsp;&nbsp;</b></B>Visual Basic 5.0 does not recognize <b>DataSource</b> type properties, and therefore does not supply a list of data sources. Users must set the <b>DataSource</b> and <b>DataMember</b> properties in code.</p>
+<h1>Modifying the .odl File</h1>
+<p>
+To get definitions for <b>DataSource</b> and <b>DataMember</b> types, add the following code within the declaration of your control class library (you must do this before defining any other types):</p>
+<pre><code>importlib("STDOLE32.TLB");      // These two lines should
+importlib(STDTYPE_TLB);      // already be in the ODL file.
+importlib("msdatsrc.tlb");   // This line should be added.
+</code></pre>
+<p>
+Create your property definition as follows:</p>
+<pre><code>[id(DISPID_DATASOURCE), propget] 
+HRESULT DataSource([out, retval] DataSource** ppdp);
+[id(DISPID_DATASOURCE), propputref] 
+HRESULT DataSource([in] DataSource* pdp);
+
+// The DataMember property
+[id(DISPID_DATAMEMBER), propget, bindable] 
+HRESULT DataMember([out, retval] DataMember* pbstrDataMember);
+[id(DISPID_DATAMEMBER), propput, bindable] 
+HRESULT DataMember([in] DataMember bstrDataMember);
+</code></pre>
+<p>
+<b>DataSource</b> is defined as type <b>IDataSource</b>, and <b>DataMember</b> is defined as type <b>BSTR</b> in Msdatsrc.h. DISPID_DATASOURCE and DISPID_DATAMEMBER must be explicitly defined for the control and can be any unreserved value.</p>
+<p class=indent>
+<B><b>Note&nbsp;&nbsp;&nbsp;</b></B>The container can only supply a list of data members at design time if the <b>DataMember</b> property has the <b>bindable</b> attribute flag.</p>
+<h1>Retrieving the Rowset</h1>
+<p>
+Once a control's <b>DataSource</b> property is set, it should cache the <b>IDataSource</b> interface pointer, and perform only the necessary amount of work on the new data source. At design time, this may just involve releasing interfaces and deallocating memory pertaining to the previous data source. At run time, the process becomes more complex because a control may want to repaint its content using the new data. This may require a series of expensive operations. Control writers must decide beforehand what operations their controls must perform with a data source for design time and run time to best optimize the controls' response time. This distinction is illustrated later with the sample complex bound list control.</p>
+<p>
+Ultimately, the control must retrieve the rowset presented by the data source in order to do what it was written for—to consume data. This is done by calling <b>IDataSource::getDataMember</b>, which takes as its first argument the data member name from the <b>DataMember</b> property. This can be Null or an empty string to designate the default data member. The second argument is the interface ID that the control can consume. For most cases, this is <b>IID_IRowPosition</b>. Finally, the third argument is a pointer to a buffer in which the provider returns a pointer to the interface requested. </p>
+<p>
+The following code sample demonstrates the use of <b>IDataSource::getDataMember</b> to request a pointer to an <b>IRowPosition</b> interface:</p>
+<pre><code>// This method is called to initialize the member
+// variable m_pRowPosition.
+HRESULT CMyControl::InitRowPosition(void)
+{
+   // Initialize if you need to.
+   if (m_pRowPosition) 
+      return S_OK;
+   
+   // m_pDataSource is a member variable that caches
+   // an IDataSource pointer.
+   // m_dataMember is a member variable that stores
+   // the current data member name. The default can be 
+   // NULL or an empty string (""). 
+   //
+   // If getDataMember succeeds and the requested
+   // interface pointer returned is NULL, then
+   // the consumer must assume that no
+   // data is available.
+   //
+   return m_pDataSource-&gt;getDataMember(m_state.dmDataMember, IID_IRowPosition, (IUKNOWN**)&amp;m_pRowPosition);
+}
+</code></pre>
+<p>
+The next step is to retrieve an <b>IRowset</b> interface by using <b>IRowPosition::GetRowset</b>. This method takes as its first argument the interface ID of any rowset interface that may be supported by the provider, and its second argument a buffer in which to return the requested pointer. The following code illustrates this:</p>
+<pre><code>// This method is called to initialize 
+// the class member variable m_pRowset.
+//
+HRESULT CMyControl::InitRowset(void)
+{
+   // Initialize if you need to.
+   if (m_pRowset)
+      return S_OK;
+
+   // Ensures that you have m_pRowPosition.
+   HRESULT hr = InitRowPosition();
+   RETURN_ON_FAILURE(hr);
+
+   // m_pRowPosition may be NULL if data
+   // is not yet avaiable.
+   if (NULL == m_pRowPosition)
+      return S_FALSE;
+
+   // This line retrieves the rowset and 
+   // stores it in a class member variable.
+   hr = m_pRowPosition-&gt;GetRowset(IID_IRowset, (IUnknown **)&amp;m_pRowset);
+   return hr;
+}
+</code></pre>
+<h1>Interfaces for Data Binding</h1>
+<p>
+The following is a description of the interfaces that an OLE DB provider must implement to be consumed by OLE DB consumers. For more detailed information about implementing these interfaces, see the <i>OLE DB Programmer’s Reference.</i></p>
+<h1>IDataSource</h1>
+<p>
+A consumer gains access to a data access interface by calling <b>IDataSource::getDataMember</b>. A consumer can request a number of data access interfaces. Here, the data access interface of interest is <b>IID_IRowPosition</b>.</p>
+<h1>IRowPosition</h1>
+<p>
+Consumers use <b>IRowPosition</b> to track and manage row currency. A consumer can gain access to the rowset object using <b>IRowPosition::GetRowset</b>.</p>
+<h1>Notifications</h1>
+<p>
+Notifications are an important aspect of data binding. They allow a control to track changes in the data source and respond appropriately to them. Refer to the section “Handling Notifications” in Chapter 1 for a review of this subject. Following is a discussion of how a control uses notifications as part of the data-consumption process.</p>
+<h1>IDataSourceListener</h1>
+<p>
+Once a control's <b>DataSource</b> property is set, the control should add its implementation of <b>IDataSourceListener</b> to the data source's notification list before it attempts to call <b>IDataSource</b> methods. This is crucial in the case of <b>IDataSource::getDataMember</b>, because this method may return Null with success when there is no data. When this occurs, a control must be able to handle this case and wait patiently until its <b>IDataSourceListener::dataMemberChanged</b> is called. This event signifies that data is available for the given data member. A control checks the passed-in data member parameter against its own. If the two match, then the control may again call <b>IDataSource::getDataMember</b>.</p>
+<p>
+<b>IDataSourceListener::dataMemberAdded</b> allows consumers to update information that depends on concurrency with the data source's data member list.</p>
+<p>
+<b>IDataSourceListener::dataMemberRemoved</b> must be handled by consumers to prevent them from continuing to access a rowset that is associated with a deleted data member. A consumer should check the data member passed in by the event against the one that the consumer is using and perform any necessary cleanup.</p>
+<h1>IRowPositionChange</h1>
+<p>
+This interface is implemented by consumers to track the current row in the data source. Controls that track the current row must process <b>IRowPositionChange::OnRowPositionChange</b> to stay current.</p>
+<h1>IRowsetNotify</h1>
+<p>
+<b>IRowsetNotify</b> notifications allow multiple consumers attached to the same rowset object to synchronize changes made to the rowset. This is the most comprehensive of the three notification interfaces, but is optional and may not be supported by all providers. For a detailed discussion of <b>IRowsetNotify</b> and notifications, refer to the <i>OLE DB Programmer's Reference</i>.</p>
+<h1>IConnectionPointContainer and IConnectionPoint</h1>
+<p>
+A consumer adds itself to the notification chain of <b>IRowPositionChange</b> and <b>IRowsetNotify</b> by using the <b>IConnectionPointContainer</b> interface. Because providers are not required to support <b>IRowsetNotify</b>, neither are they required to support <b>IConnectionPoint</b> interfaces. When these interfaces are supported, consumers use them to add and remove themselves from a provider’s notification chain.</p>
+<p>
+For more information about the <b>IConnectionPoint</b> and <b>IConnectionPointContainer</b> interfaces, see the <i>COM Programmer’s Reference </i>and<i> Automation Programmer’s Reference</i>.</p>
+</font></BODY>
+</HTML>

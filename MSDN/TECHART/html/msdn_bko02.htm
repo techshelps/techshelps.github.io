@@ -1,0 +1,1509 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Integrating SQL Server with Visual FoxPro</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_bko02"></a></sup>Integrating SQL Server with Visual FoxPro</h1>
+<p>
+Robert Green<br>
+Microsoft Corporation</p>
+<p>
+January 1997</p>
+<h2>Introduction</h2>
+<p>
+Your good friends on the Visual FoxPro™ team at Microsoft® spent a great deal of time to make Visual FoxPro a robust and powerful front-end for client-server applications. Remote views and SQL pass-through provide powerful tools to take advantage of SQL back-ends such as Oracle and Microsoft SQL Server via ODBC (Open Database Connectivity).</p>
+<p>
+One of the great truisms of application development is that there are many ways to do everything. One of the hardest things to do when building an application is to decide on an approach and to know if it is better than the other approaches. In client-server development this is compounded by the fact that you are dealing with two database engines, Visual FoxPro on the front-end and a very powerful SQL database engine on the back-end. </p>
+<p>
+This article explores two approaches to building client-server applications: remote views and SQL pass-through. You will see some of the pros and cons of each approach. Of course, the best solution will vary from application to application but after you see the examples here you will have a better feel for the strengths of these two methods and how you would use them to build client-server applications.</p>
+<h2>The Sample Data</h2>
+<p>
+The data used in this article’s examples is from a SQL Server 6.5 based library application. The library wants to keep track of its members, its books and its loans. The library database schema is shown in Figure 1.</p>
+<p>
+<img src="bko02_1.gif" border=0></p>
+<p class=label>
+<b>Figure 1. Library database schema</b></p>
+<h3>Table Structures</h3>
+<p>
+One of the central tables in the Library application is the Member table, which contains one row for every member of the library. An interesting twist here is that juveniles can only be members of the library if they have a sponsoring adult. Since a juvenile lives, presumably, in the same place as the adult there are separate tables for Adult and Juvenile. This saves disk space because all of a juvenile's address information is redundant once you know who the adult is. Also, the juvenile's expiration date is the same as the adult's. Further, you don't care about the adult's birth date although you do care about a juvenile's birth date, but only because on their eighteenth birthday he or she becomes an adult (at least as far as the tables are concerned!). </p>
+<p>
+The following code shows the SQL Server statements used to create the Member, Adult, and Juvenile tables:</p>
+<pre><code>CREATE TABLE member
+
+  ( member_no&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; member_no&nbsp;&nbsp;&nbsp; NOT NULL IDENTITY(1,1),
+
+ &nbsp;&nbsp; lastname&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; shortstring&nbsp; NOT NULL ,
+
+ &nbsp;&nbsp; firstname&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; shortstring&nbsp; NOT NULL ,
+
+ &nbsp;&nbsp; middleinitial&nbsp;&nbsp;&nbsp; letter&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL ,
+
+ &nbsp;&nbsp; photograph&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; image&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL )
+
+
+CREATE TABLE adult
+
+  ( member_no&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; member_no&nbsp;&nbsp;&nbsp; NOT NULL ,
+
+ &nbsp;&nbsp; street&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; shortstring&nbsp; NOT NULL ,
+
+ &nbsp;&nbsp; city&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; shortstring&nbsp; NOT NULL ,
+
+ &nbsp;&nbsp; state&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; statecode&nbsp;&nbsp;&nbsp; NOT NULL ,
+
+ &nbsp;&nbsp; zip&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; zipcode&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NOT NULL ,
+
+ &nbsp;&nbsp; phone_no&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; phonenumber&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL ,
+
+ &nbsp;&nbsp; expr_date&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; datetime&nbsp;&nbsp;&nbsp;&nbsp; NOT NULL )
+
+
+CREATE TABLE juvenile
+
+  ( member_no&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; member_no&nbsp;&nbsp;&nbsp; NOT NULL ,
+
+ &nbsp;&nbsp; adult_member_no&nbsp; member_no&nbsp;&nbsp;&nbsp; NOT NULL ,
+
+ &nbsp;&nbsp; birth_date&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; datetime&nbsp;&nbsp;&nbsp;&nbsp; NOT NULL )
+</code></pre>
+<p>
+The member_no field in the Member table is automatically generated by SQL Server when a new row is added. This field is an Identity column. The seed value of 1 and the increment value of 1 specify that the first row entered into the table should have a member_no of 1. For every row inserted after that the member_no is incremented by 1. When adding a row the client does not specify the member_no. SQL Server takes care of it automatically and the client can ask what number was used.</p>
+<p>
+The member_no field in the Adult and Juvenile tables is not an Identity column. The value in that column has to match the member_no of the corresponding row in the Member table. When a new member is added to the library, a row is first added to the Member table. The SQL Server global variable <i>@@Identity</i> contains the automatically generated member_no. A row is then added to the Adult or Juvenile table and the value for the member_no will be whatever is in <i>@@Identity</i>.</p>
+<h3>Declarative Referential Integrity</h3>
+<p>
+In prior versions of SQL Server referential integrity was enforced through the use of triggers, which is the same way Visual FoxPro enforces referential integrity. SQL Server 6.0 added declarative referential integrity, which allows you to define your RI rules as part of the data structure. The first step is to create a Primary Key constraint in each table, as shown in the following code:</p>
+<pre><code>ALTER TABLE member
+
+  ADD CONSTRAINT member_ident PRIMARY KEY CLUSTERED 
+
+ &nbsp;&nbsp; (member_no) 
+
+ALTER TABLE adult
+
+  ADD CONSTRAINT adult_ident PRIMARY KEY CLUSTERED
+
+ &nbsp;&nbsp; (member_no) 
+
+ALTER TABLE juvenile
+
+  ADD CONSTRAINT juvenile_ident PRIMARY KEY CLUSTERED 
+
+ &nbsp;&nbsp;&nbsp;&nbsp; (member_no) 
+</code></pre>
+<p>
+The Primary Key constraint creates a Unique index, which enforces the uniqueness of the member_no. In the examples here a clustered index, which physically sorts the data, is created. </p>
+<p>
+The second step in defining declarative referential integrity is to create Foreign Key constraints between related tables, as shown in the following code:</p>
+<pre><code>ALTER TABLE adult
+
+  ADD CONSTRAINT adult_member_link FOREIGN KEY (member_no) 
+
+ &nbsp;&nbsp;&nbsp;&nbsp; REFERENCES member (member_no)
+
+ALTER TABLE juvenile
+
+  ADD CONSTRAINT juvenile_member_link FOREIGN KEY
+
+ &nbsp;&nbsp;&nbsp; (member_no) REFERENCES member (member_no)
+
+ALTER TABLE juvenile
+
+  ADD CONSTRAINT juvenile_adult_link FOREIGN KEY 
+
+ &nbsp;&nbsp; (adult_member_no) REFERENCES adult (member_no)
+</code></pre>
+<p>
+The first Alter Table defines a relationship between the Member and Adult tables. This is a one-to-one relationship, although there is nothing in the code to indicate or enforce that aspect of the relationship. The second Alter Table defines a relationship between the Member and Juvenile tables. The final Alter Table defines a relationship between the Adult and Juvenile tables. This is a one-to-many relationship.</p>
+<p>
+Be aware that SQL Server currently does not support cascading updates or deletes. If you wanted those you would use triggers instead of constraints.</p>
+<h2>Using Views—Attempt 1</h2>
+<p>
+The first pass at building the Library application uses remote views. Views are easy to set up, can be parameterized so they only return one or a few records at a time, support row and table buffering, and support transaction processing. With all that power built in you would be remiss not to consider building client-server applications based on remote views. </p>
+<h3>The Views</h3>
+<p>
+In the Library database (the Visual FoxPro version) you will find the remote views vAdultMember and vJuvenileMember. The following shows the SQL statements that define the two views:</p>
+<pre><code>SELECT Member.member_no, Member.lastname, Member.firstname, ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Member.middleinitial, Adult.street, Adult.city, ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Adult.state, Adult.zip, Adult.phone_no, Adult.expr_date ;
+
+FROM dbo.adult Adult, dbo.member Member ;
+
+WHERE Adult.member_no = Member.member_no ;
+
+  AND Member.member_no = ?nMemberID
+
+
+SELECT Member.member_no, Member.lastname, Member.firstname, ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Member.middleinitial, Juvenile.adult_member_no, ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Juvenile.birth_date, Adult.street, Adult.city, Adult.state, ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Adult.zip, Adult.phone_no, Adult.expr_date ;
+
+FROM dbo.adult Adult, dbo.juvenile Juvenile, ;
+
+ &nbsp;&nbsp;&nbsp; dbo.member Member ;
+
+WHERE Adult.member_no = Juvenile.adult_member_no ;
+
+  AND Juvenile.member_no = Member.member_no ;
+
+  AND Member.member_no = ?nMemberID
+</code></pre>
+<p>
+The two views are very straightforward. The member's name is in the Member table and the address is in Adult. A juvenile's birth date and sponsoring adult can be found in the Juvenile table. Both views are based on the same connection and are made modifiable by identifying the primary key in each table and by marking the other fields as updatable. This occurs in the Update Criteria tab in the View Designer.</p>
+<h3>Loading the Form</h3>
+<p>
+The form MEMBVIEW.SCX uses these two views. The following code is the form's Load method. The form comes up with no data loaded because the two views are opened with the NoData option. Optimistic row buffering is then set for the view cursors. </p>
+<pre><code>Open Database library
+
+Use vAdultMember In 0 NoData
+
+= CursorSetProp("Buffering", DB_BUFOPTRECORD, ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "vAdultMember")
+
+Use vJuvenileMember In 0 NoData
+
+= CursorSetProp("Buffering", DB_BUFOPTRECORD, ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "vJuvenileMember")
+</code></pre>
+<h3>Locating a Member</h3>
+<p>
+The user can enter a member's ID and press the Locate button. This supplies a value for the <i>nMemberID</i> parameter and the view is requeried. The following code is in the Click event of the Locate button:</p>
+<pre><code>nMemberID = Val(ThisForm.txtMemberID.Value)
+
+
+Select vAdultMember
+
+= ReQuery()
+
+If RecCount("vAdultMember") = 0
+
+  Select vJuvenileMember
+
+  = ReQuery()
+
+  If RecCount("vJuvenileMember") = 0
+
+ &nbsp;&nbsp; lcMessage = "There is no member with this ID."
+
+ &nbsp;&nbsp; = MessageBox(lcMessage , MB_ICONINFORMATION)
+
+&lt;code intentionally left out&gt;
+</code></pre>
+<p>
+The code first checks to see if the user had made changes. It then stores the entered ID to the <i>nMemberID</i> variable. The Adult view is requeried first. If no record is found with that ID the Juvenile view is requeried. If no record is found with that ID then the ID is not valid. If the member is found the information is displayed on the form.</p>
+<h3>Adding a Member</h3>
+<p>
+When the user presses the Add button he or she is presented with an empty form. The record is not actually saved until the Save button is pressed. The Click event code of the Add button first checks to see if the user has made changes to the current member record. <b>TableRevert()</b> is issued on the view that is not in use to make sure Visual FoxPro does not think changes are pending in that view. A blank record is then added to the view in use and the form is refreshed. The user enters the new member's information in the blank record. When the user presses Save, Visual FoxPro will send the new record to SQL Server. </p>
+<h3>Saving Changes</h3>
+<p>
+One of the nice features of views is that dealing with the back-end is handled for you. The <b>TableUpdate() </b>function is used to save changes to the view's underlying table(s). Visual FoxPro handles this automatically. The following code is in the Click event of the Save button:</p>
+<pre><code>If <b>TableUpdate()</b>
+
+  = MessageBox(lcMessage, MB_ICONINFORMATION)
+
+Else
+
+  ThisForm.ShowError
+
+Endif
+
+</code></pre>
+<p>
+The vAdultMember or vJuvenileMember view is selected, depending on whether the current member is an adult or a juvenile. A <b>TableUpdate()</b> is then issued. If it worked, the data was saved. If it didn't, the user is shown what the problem is.</p>
+<p>
+Notice that because this code uses <b>TableUpdate()</b>, it handles both adding new members and making changes to existing members. </p>
+<h3>Deleting a Member</h3>
+<p>
+To delete a row on the back-end it merely needs to be deleted in the view. The following code is in the Click event of the Delete button:</p>
+<pre><code>Select (ThisForm.cViewInUse)
+
+Delete
+
+If <b>TableUpdate()</b>
+
+  = MessageBox("This member has been deleted.", ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; MB_ICONINFORMATION)
+
+  Append Blank
+
+&lt;code intentionally left out&gt;
+
+Else
+
+  ThisForm.ShowError
+
+  =TableRevert()
+
+Endif
+</code></pre>
+<p>
+After the user is asked to confirm the deletion the appropriate view is selected, the record is deleted from the view and <b>TableUpdate()</b> is issued. If it works, the record is gone on the back-end. If it doesn't, the user is shown what went wrong.</p>
+<h3>Issues</h3>
+<p>
+Isn't Visual FoxPro wonderful? How easy can client-server be, you ask? This form is elegantly simple and easy to use. There are only three problems with it.</p>
+<h4>You can't add new members</h4>
+<p>
+To test this, press the Add button, add a new member and press Save. After a small pause you will see the message shown in Figure 2.</p>
+<p>
+<img src="bko02_2.gif" border=0></p>
+<p class=label>
+<b>Figure 2. Error message after adding a member </b></p>
+<p>
+When the Add button was pressed, a blank record was appended to the vAdultMember view cursor. This view is made up of two tables, Adult and Member. When the Save button is pressed, Visual FoxPro sends the name information to the Member table. SQL Server automatically supplies the member ID. So far so good. Visual FoxPro also sends the address information to the Adult table. But it doesn't send anything for the member's ID. That column is left empty, which is invalid and causes the <b>TableUpdate()</b> to fail.</p>
+<p>
+For this to work, the new row needs to be added to the Member table first and the resulting ID needs to be put into the Adult table along with the address information. There is no reason to think that Visual FoxPro view knows this. How could it? Visual FoxPro doesn't know what the ID is and wouldn't know to send it in the Adult table anyway.</p>
+<h4>You can't delete members</h4>
+<p>
+In the Library database (the SQL Server version) there is referential integrity defined between the Adult and Juvenile tables and between the Member and Loan tables. You can not delete a member if he or she is an adult responsible for juvenile members or if he or she has outstanding loans. You would expect SQL Server to reject the deletion and send back an error.</p>
+<p>
+However, you should be able to delete a member if he or she has no associated juveniles and no outstanding loans. Try this and you will see the error message shown in Figure 3.</p>
+<p>
+<img src="bko02_3.gif" border=0></p>
+<p class=label>
+<b>Figure 3. Error message after deleting a member </b></p>
+<p>
+This error, once you decipher the SQL Server language, tells you that you have violated referential integrity between the Adult and Member tables. This will happen if you try to delete the Member row before you delete the Adult row. This obviously is what the view is doing. For the delete to work the row has to be deleted from Adult first and then from Member. But again, how is Visual FoxPro supposed to know that?</p>
+<h4>The error messages are incomprehensible</h4>
+<p>
+If you try to delete a member with juveniles you will be stopped. If you try to delete a member with loans you will be stopped. However, SQL Server will send back to Visual FoxPro an error message with language similar to the one in Figure 3. This is totally incomprehensible to the user. </p>
+<p>
+Consider another example. The Adult table has the following Check constraint defined:</p>
+<pre><code>ALTER TABLE adult
+
+  WITH NOCHECK
+
+  ADD CONSTRAINT phone_no_rule CHECK (phone_no LIKE 
+
+ &nbsp;&nbsp; '(206)[0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]')
+</code></pre>
+<p>
+This constraint forces phone numbers to begin with the 206 area code. If a row is inserted or updated and the phone number violates this rule the data will be rejected. However, the user will be presented with the monstrosity shown in Figure 4.</p>
+<p>
+<img src="bko02_4.gif" border=0></p>
+<p class=label>
+<b>Figure 4. Check constraint violated error message</b></p>
+<h2>Using Views—Attempt 2</h2>
+<p>
+So are views useless in this situation? Should you give up on them? Not without at least one more attempt. The problem above is that the views are made up of two tables and you have no control over how Visual FoxPro tries to insert or update rows. There are specific rules you have to follow based on the Library database schema but you can't make the views behave.</p>
+<p>
+As an alternative approach, the form MEMBVEW2.SCX uses three views instead of two. The views vMemberTable, vAdultTable and vJuvenileTable are all based on a single SQL Server table. </p>
+<h3>Loading the Form</h3>
+<p>
+The form still comes up with no data loaded. All three views are opened with the NoData option and optimistic row buffering is then set for them. </p>
+<p>
+The three views are all based on the same shared connection. The ConnectHandle property of any of the views stores the connection handle used by the views. This handle will be used shortly.</p>
+<pre><code>* What is the connection handle used by the views?
+
+ThisForm.nHandle = CursorGetProp("ConnectHandle", ;
+
+  "vMemberTable")
+</code></pre>
+<h3>Locating a Member</h3>
+<p>
+When the user wants to see a new member's information he or she will still provide a member ID and press Locate. The code in this form differs slightly from the previous version in that the Member view is requeried first. If no record is found then you immediately know the ID is not valid. The Adult view is requeried next. If no record is found then the member must be a juvenile.</p>
+<h3>Saving Changes</h3>
+<p>
+In the previous version of the form a simple <b>TableUpdate()</b> was issued when the user pressed Save. As you saw, that is insufficient given the table structures. This version of the form takes a more complicated but ultimately much more successful approach. If the user is currently adding a record the first half of Save button's Click event code will be run.</p>
+<pre><code>If ThisForm.lAddMode = .T.
+
+  Wait Window "Saving new member information..." NoWait
+</code></pre>
+<p>
+The code adds the new member to the Member table first. A row will then be added to the Adult table. Both rows should be added or neither should be added. Therefore a transaction has to be started. The Transactions property of a connection is used to control transaction processing. In the form's Load method the view's connection handle was stored to the form property nHandle. <b>SQLSetProp()</b> is then used to start a transaction.</p>
+<pre><code>&nbsp;&nbsp;* Begin a transaction
+
+  = SQLSetProp(ThisForm.nHandle, "Transactions", 2)
+</code></pre>
+<p>
+The vMemberTable view is then selected and a <b>TableUpdate()</b> is issued. If it works the new member's name information will have been added to the Member table. In addition the member will have a member ID. If the <b>TableUpdate()</b> failed the user should see what happened and the transaction is rolled back using the SQLRollback() function.</p>
+<pre><code>* Add the new member to the member table
+
+  Select vMemberTable
+
+  If Not <b>TableUpdate()</b>
+
+ &nbsp;&nbsp; ThisForm.ShowError
+
+ &nbsp;&nbsp; * Rollback the transaction
+
+ &nbsp;&nbsp; = SQLRollback(ThisForm.nHandle)
+
+ &nbsp;&nbsp; Return
+
+  Endif
+</code></pre>
+<p>
+If the <b>TableUpdate()</b> worked then the new row made it into the Member table. The next step is to find out what member ID was assigned. <b>SQLExec()</b> is used to send a Select statement to SQL Server. This Select retrieves the value of <i>@@Identity</i>, which stores the last Identity value inserted into a table. In this case that will be the member ID. <b>SQLExec()</b> uses the same connection handle the views use. This is efficient because it doesn't require another connection to SQL Server.</p>
+<pre><code>&nbsp;&nbsp;* Find out the member_no of the new member
+
+  If SQLExec(ThisForm.nHandle, "Select <i>@@Identity</i>")&lt; 0
+
+&lt;code intentionally left out&gt;
+
+</code></pre>
+<p>
+The member_no in the vAdultTable view is replaced with the value of <i>@@Identity</i>. This enforces the relationship between Member and Adult. Note that this involves changing the primary key of the Adult table. There is no other choice. The expiration date for this member is set to one year from today and <b>TableUpdate()</b> is issued to save this information to the Adult table. If it doesn't work the transaction is rolled back. This would remove the row from the Member table.</p>
+<pre><code>&nbsp;&nbsp;* Add the new member to the adult table
+
+  Select vAdultTable
+
+  * The member_no is the primary key but it is
+
+  * updatable in the view for just this very reason.
+
+  * The expiration date is one year from today.
+
+  Replace member_no With sqlresult.exp, ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; expr_date With DToT(GoMonth(Date(),12))
+
+  If Not <b>TableUpdate()</b>
+
+&lt;code intentionally left out&gt;
+</code></pre>
+<p>
+If everything worked to this point the transaction is committed with the <b>SQLCommit()</b> function. If that fails then everything is rolled back.</p>
+<pre><code>&nbsp;&nbsp;* Everything worked so commit the transaction.
+
+  If SQLCommit(ThisForm.nHandle) &lt; 0
+
+ &nbsp;&nbsp; ThisForm.ShowError
+
+ &nbsp;&nbsp; * Rollback the transaction
+
+ &nbsp;&nbsp; = SQLRollback(ThisForm.nHandle)
+
+  Else
+
+&lt;code intentionally left out&gt;
+</code></pre>
+<p>
+If the user is not adding a new member the code is somewhat simpler. A transaction is still started. The information in the Member table is saved first and then the information in the Adult and Juvenile tables is saved. If everything worked the transaction is committed. If not it is all rolled back.</p>
+<pre><code>Else
+
+  Wait Window "Saving member information..." NoWait
+
+
+  * Begin a transaction
+
+  = SQLSetProp(ThisForm.nHandle, "Transactions", 2)
+
+
+  * Save the information to the member table
+
+  Select vMemberTable
+
+  If Not <b>TableUpdate()</b>
+
+&lt;code intentionally left out&gt;
+
+
+  * Save the information to the adult table
+
+  Select vAdultTable
+
+  If Not <b>TableUpdate()</b>
+
+&lt;code intentionally left out&gt;
+
+
+* Everything worked so commit the transaction.
+
+  If SQLCommit(ThisForm.nHandle) &lt; 0
+
+ &nbsp;&nbsp; ThisForm.ShowError
+
+ &nbsp;&nbsp; * Rollback the transaction
+
+ &nbsp;&nbsp; = SQLRollback(ThisForm.nHandle)
+
+  Else
+
+ &nbsp;&nbsp; = MessageBox("This member's information has been " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "saved.", MB_ICONINFORMATION)
+
+  Endif
+
+Endif
+</code></pre>
+<h3>Deleting a Member</h3>
+<p>
+Using one view per table not only allows you to solve the problem of adding a new member, it also allows you to solve the problem of not being able to delete members. When the user presses the Delete button a transaction is started. The member's row from the Adult or Juvenile table is deleted first. The Delete is applied to the view and the <b>TableUpdate()</b> sends it to SQL Server. If the <b>TableUpdate()</b> doesn't work the transaction is rolled back.</p>
+<pre><code>* Start a transaction on the view connection
+
+= SQLSetProp(ThisForm.nHandle, "Transactions", 2)
+
+
+If RecCount("vJuvenileTable") = 0
+
+  Select vAdultTable
+
+  Delete
+
+Else
+
+  Select vJuvenileTable
+
+  Delete
+
+Endif&nbsp; 
+
+If Not <b>TableUpdate()</b>
+
+  ThisForm.ShowError
+
+  * Rollback the transaction
+
+  = SQLRollBack(ThisForm.nHandle)
+
+&lt;code intentionally left out&gt;
+</code></pre>
+<p>
+If the corresponding Adult or Juvenile record has already been removed you can remove the Member table record. The Delete may still fail, for instance if this member has outstanding loans. In that case the transaction is rolled back and the Adult or Juvenile record is put back into the relevant table.</p>
+<pre><code>Select vMemberTable
+
+Delete
+
+If Not <b>TableUpdate()</b>
+
+  ThisForm.ShowError
+
+  * Rollback the transaction
+
+  = SQLRollBack(ThisForm.nHandle)
+
+&lt;code intentionally left out&gt;
+</code></pre>
+<p>
+If both of the <b>TableUpdate()</b> functions worked then the transaction is committed with the <b>SQLCommit()</b> function. If that doesn't work the transaction is rolled back. </p>
+<h3>Issues</h3>
+<p>
+Two of the three problems with the first version of the form are solved here. New members can be added and members can be deleted. If referential integrity is violated the deletion will fail. For example, suppose you try to delete a member who has no associated juveniles but does have outstanding loans. You will see the error shown in Figure 5.</p>
+<p>
+<img src="bko02_5.gif" border=0></p>
+<p class=label>
+<b>Figure 5. Error message when member with loans is deleted </b></p>
+<p>
+So the problem of the incoherent error messages still remains. You could write code to parse the error messages and look for certain phrases. You could then translate the SQL Server messages into something a user would want to see. This is a lot of work and requires a thorough familiarity with SQL Server error messages. It also makes it quite difficult to port your application to other back-end databases, for example Oracle.</p>
+<h2>Using SQL Pass-Through</h2>
+<p>
+The alternative to using views is to rely solely on SQL pass-through. This means that you send SQL statements to the back-end and explicitly tell it what to do. If you want to add a record you send an Insert. To save a record you send an Update. This obviously involves more work than using views. It does however allow you to be in complete control over what happens and when it happens.</p>
+<h3>Loading the Form</h3>
+<p>
+The form MEMBEXEC.SCX is the same form used above, only it uses SQL pass-through instead of views. The following code is in the form's Load method.</p>
+<pre><code>Open Database library
+
+ThisForm.nHandle = SQLConnect('cnLibrary')
+
+If ThisForm.nHandle &lt; 0
+
+  ThisForm.ShowError
+
+  ThisForm.lConnected = .F.
+
+  Else
+
+  lcSQL = "Select member.member_no, lastname, firstname, " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "&nbsp; middleinitial, street, city, state, zip, " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "&nbsp; phone_no, expr_date, birth_date = null, " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "&nbsp; adult_member_no = null " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "From member, adult " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "Where member.member_no = -99 "
+
+  If SQLExec(ThisForm.nHandle, lcSQL, "c_member") &lt; 0
+
+ &nbsp;&nbsp; ThisForm.ShowError
+
+ &nbsp;&nbsp; ThisForm.lConnected = .F.
+
+  Endif
+
+ &nbsp;&nbsp; = CursorSetProp("Buffering", DB_BUFOPTRECORD, 'c_member')
+
+Endif
+</code></pre>
+<p>
+When the form is loaded <b>SQLConnect()</b> is used to establish a connection to SQL Server using the cnLibrary connection, which is stored in the Visual FoxPro Library database. If the <b>SQLConnect()</b> fails there is not much to do except quit and go home.</p>
+<p>
+If the connection works, an empty cursor is created by sending to SQL Server a Select statement looking for member number -99. Visual FoxPro creates the cursor even though no rows are returned. Optimistic buffering is then set on this cursor. The reason for doing this is to be able to use a buffered cursor on this form. This gives back some of the ease of use of views.</p>
+<h3>Locating a Member</h3>
+<p>
+When views are used on the form, locating a member is as simple as plugging in a value for the view's parameter and requerying. When SQL pass-through is used it is a bit more complex. To retrieve member information a Select statement is constructed and sent to the server. You can see in the code below that this Select is a Union. The member, if he or she exists, is in the Member table and in either the Adult or Juvenile table. </p>
+<pre><code>lcSQL = "Select member.member_no, lastname, firstname, " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "&nbsp; middleinitial, street, city, state, zip, " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "&nbsp; phone_no, expr_date, birth_date = null, " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "&nbsp; adult_member_no = null " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "From member, adult " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "Where member.member_no = adult.member_no " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "&nbsp; And member.member_no = " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtMemberID.Value) + " " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "Union " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "Select member.member_no, lastname, firstname, " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "&nbsp; middleinitial, street, city, state, zip, " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "&nbsp; phone_no, expr_date, birth_date, " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "&nbsp; adult_member_no " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "From member, adult, juvenile " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "Where member.member_no = juvenile.member_no " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "&nbsp; And adult.member_no = " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "&nbsp;&nbsp;&nbsp; juvenile.adult_member_no " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "&nbsp; And member.member_no = " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtMemberID.Value)
+
+  
+
+If SQLExec(ThisForm.nHandle, lcSQL, "c_member") &lt; 0
+
+&lt;code intentionally left out&gt;
+</code></pre>
+<p>
+If the c_member cursor is empty there is no member with the entered ID. Otherwise all the member information is in the cursor. Row buffering is set for the cursor and the form controls are then populated with the member information in the cursor.</p>
+<p>
+The Union allows you to send one Select to the server and get all the information for the member. In the previous examples either two or three views were requeried whereas here one <b>SQLExec()</b> is all that is required. Note that you cannot create a remote view with a Union if you use the View Designer. You could however create the view by hand using the Create SQL View command.</p>
+<h3>Adding an Adult</h3>
+<p>
+When the user presses the Add button a blank record is added to the c_member cursor. This is no different than in the previous view examples.</p>
+<pre><code>Select c_member
+
+= TableRevert()
+
+Append Blank
+</code></pre>
+<p>
+Solely for reasons of readability, the code to add a new member is located in the Form method <b>AddMember.</b> Because adding a member involves adding rows to two tables a transaction is started. Just as in the forms with views, the <b>SQLSetProp()</b> function is used to start the transaction. </p>
+<pre><code>= SQLSetProp(ThisForm.nHandle, "Transactions", 2)
+</code></pre>
+<p>
+When using views to access remote data you can rely on Visual FoxPro to do most of the behind the scenes work for you. For example, in the previous forms you saw that to send an Insert or Update to the server all you had to do was issue a <b>TableUpdate().</b> The syntax of the Insert or Update was created for you by Visual FoxPro. </p>
+<p>
+The form here uses the <b>SQLExec()</b> function to send SQL statements to the server. That means that you have to construct the SQL statements yourself. After the transaction is started an Insert statement is constructed to add the new row to the Member table.</p>
+<pre><code>* Add the new member to the member table
+
+lcSQL = "Insert member (lastname, firstname, " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "middleinitial, photograph) " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "Values ('" + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtFirstName.Value) + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "', '" + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtLastName.Value) + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "', '" + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtMiddleInitial.Value) + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "', " + "NULL)"
+
+If SQLExec(ThisForm.nHandle, lcSQL) &lt; 0
+
+  ThisForm.ShowError
+
+  * Rollback the transaction
+
+  = SQLRollback(ThisForm.nHandle)
+
+  Return
+
+Endif
+</code></pre>
+<p>
+You now need to know the member_no SQL Server assigned the new member. The code to do this is the same as in the previous form. </p>
+<pre><code>* Find out the member_no of the new member
+
+If SQLExec(ThisForm.nHandle, "Select <i>@@Identity</i>") &lt; 0
+
+  &lt;code intentionally left out&gt;
+
+
+nNewMemberID = sqlresult.exp
+
+</code></pre>
+<p>
+An Insert is then constructed to add the new row to the Adult table. The <i>@@Identity</i> value from the server is used in this Insert to correctly link the Adult row to the Member row.</p>
+<pre><code>* Add the new member to the adult table
+
+lcSQL = "Insert adult (member_no, street, city, state, " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "zip, phone_no, expr_date) " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "Values (" + AllTrim(Str(nNewMemberID)) + ", '" +;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtStreet.Value) + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "', '" + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtCity.Value) + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "', '" + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtState.Value) + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "', '" + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtZip.Value) + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "', '" + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtPhoneNumber.Value) + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "', "'" + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; TToC(DToT(GoMonth(Date(),12))) + "' )"
+
+If SQLExec(ThisForm.nHandle, lcSQL) &lt; 0
+
+&lt;code intentionally left out&gt;
+</code></pre>
+<p>
+As before, if everything worked the transaction is committed. If not it is all rolled back. </p>
+<h3>Saving Changes</h3>
+<p>
+The code to save an existing member's information is in the Form method <b>UpdateMember.</b> To save information an Update statement is sent to the server. The form of the Update statement is as follows:</p>
+<pre><code>Update &lt;table&gt; Set &lt;column1&gt; = &lt;value1&gt;,
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;column2&gt; = &lt;value2&gt;,
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; etc
+</code></pre>
+<p>
+It is pretty straightforward, although a bit bulky, to construct an Update statement to send to the server. You know the names of the table's columns and the values are sitting in controls on the form. You can just build the Set part of the Update one column after another. However, you want to be a bit more clever than that. You don't want to waste SQL Server's time updating a column that has not changed. The code here uses the <b>OldVal()</b> function, made possible by the use of the buffered cursor, to check the value of each field in the cursor to its original value. Only if it has changed does it become part of the Update statement. By the way, remote views do this automatically. </p>
+<pre><code>lcSQL = ""
+
+* Update this member in the member table
+
+If c_member.firstname &lt;&gt; OldVal("c_member.firstname")
+
+  lcSQL = lcSQL + "firstname = '" + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtFirstName.Value) + "', "
+
+Endif
+
+If c_member.lastname &lt;&gt; OldVal("c_member.lastname")
+
+  lcSQL = lcSQL + "lastname = '" +;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtLastName.Value) + "', "
+
+Endif
+
+&lt;code intentionally left out&gt;
+</code></pre>
+<p>
+If none of the columns in the Member table have changed, the lcSQL variable will be empty and there is nothing to save for that table. If there is data to save, the rest of the Update statement is constructed and is then sent to the server.</p>
+<pre><code>If Len(lcSQL) &gt; 0
+
+  * Add the Update, strip off the last comma, 
+
+  * add a Where clause
+
+  lcSQL = "Update member Set " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Left(lcSQL, Len(lcSQL) - 2) + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "Where member_no = " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtMemberID.Value)
+
+  If SQLExec(ThisForm.nHandle, lcSQL) &lt; 0
+
+&lt;code intentionally left out&gt;
+</code></pre>
+<p>
+The same process as above then occurs for the Adult table. The next part should by now be very familiar. Commit if it all worked and rollback if it didn't. </p>
+<h3>Deleting a Member</h3>
+<p>
+One of the benefits of using SQL pass-through rather than remote views is that you gain control over what happens and when it happens. The code run when the user clicks the Delete button is a good example of this. </p>
+<p>
+There are various reasons you might not be able to delete a member. If the member has associated juveniles or if the member has outstanding loans any Delete will fail. You can easily determine if either of these is true by sending a Select statement to the server. The code here uses <b>SQLExec()</b> to check for both of these conditions. If either is true a user-friendly message is displayed and nothing further happens.</p>
+<pre><code>* First check to see if this is an adult with 
+
+* active juveniles
+
+lcSQL = "Select member_no From juvenile " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "Where adult_member_no = " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ThisForm.txtMemberID.Value
+
+If SQLExec(ThisForm.nHandle, lcSQL) &lt; 0
+
+  ThisForm.ShowError
+
+  Return
+
+Else
+
+  If RecCount("sqlresult") &lt;&gt; 0&nbsp; 
+
+ &nbsp;&nbsp; lcMessage = "This member can not be deleted. " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "He/she is an adult with active juveniles."
+
+ &nbsp;&nbsp; = MessageBox(lcMessage, MB_ICONINFORMATION)
+
+ &nbsp;&nbsp; Return
+
+  Endif&nbsp; 
+
+Endif
+
+
+* Now check to see if this member has active loans
+
+lcSQL = "Select member_no From loan " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "Where member_no = " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ThisForm.txtMemberID.Value
+
+If SQLExec(ThisForm.nHandle, lcSQL) &lt; 0
+
+  ThisForm.ShowError
+
+  Return
+
+Else
+
+  If RecCount("sqlresult") &lt;&gt; 0&nbsp; 
+
+ &nbsp;&nbsp; lcMessage = "This member can not be deleted. " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "He/she has active loans."
+
+ &nbsp;&nbsp; = MessageBox(lcMessage, MB_ICONINFORMATION)
+
+ &nbsp;&nbsp; Return
+
+  Endif&nbsp; 
+
+Endif
+</code></pre>
+<p>
+If there are additional checks that need to be performed that code can be placed after the code above. You have complete control over what you check and what order the checks are run. If all the checks succeed and the member can be deleted a transaction is started. </p>
+<p>
+There are relationships defined between the Member table and the Loanhist and Reservation tables. Loanhist contains a row for every book borrowed and returned by the member. The Reservation table contains a row for every book the member has on reserve. If the member is deleted the associated information in those two tables needs to be removed. It needs to deleted first or else there will be a referential integrity violation.</p>
+<pre><code>* Delete the loan history records for this member
+
+lcSQL = "Delete loanhist Where member_no = " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtMemberID.Value)
+
+If SQLExec(ThisForm.nHandle, lcSQL) &lt; 0
+
+&lt;code intentionally left out&gt;
+
+
+* Delete the loan reservation records for this member
+
+lcSQL = "Delete reservation Where member_no = " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtMemberID.Value)
+
+If SQLExec(ThisForm.nHandle, lcSQL) &lt; 0
+
+&lt;code intentionally left out&gt;
+</code></pre>
+<p>
+To delete an adult member you have to delete the row in the Adult table first and then you can delete the row in the Member table. This is still part of the transaction so if anything goes wrong everything is rolled back.</p>
+<pre><code>* Delete the member
+
+lcSQL = "Delete adult Where member_no = " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtMemberID.Value)
+
+If SQLExec(ThisForm.nHandle, lcSQL) &lt; 0
+
+&lt;code intentionally left out&gt;
+
+
+lcSQL = "Delete member Where member_no = " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtMemberID.Value)
+
+If SQLExec(ThisForm.nHandle, lcSQL) &lt; 0
+
+&lt;code intentionally left out&gt;
+
+</code></pre>
+<p>
+If all of the Deletes worked then the entire transaction is committed and the member is removed. The user should then be looking at an empty screen so a blank record is added to c_member and the form is refreshed. </p>
+<h3>Issues</h3>
+<p>
+What are the tradeoffs between using remote views and using SQL pass-through? </p>
+<p>
+<b>More work</b></p>
+<p>
+Clearly, using SQL pass-through is more work than using remote views. Views do a lot of the work for you, taking care of communicating with the server and passing Inserts, Updates, and Deletes. Views are easy to set up and easy to use.</p>
+<p>
+<b>More control</b></p>
+<p>
+You saw in the two view examples that one of the problems with using remote views is that you have little control over the communication between Visual FoxPro and the back-end. With many database schemas this might not be a problem. However, with the schema used here an issue arose. The problem was mitigated by using one view per table but the point remains. There may be times when views do not give you the power you need for data entry.</p>
+<p>
+When you use SQL pass-through you have complete control over how Visual FoxPro talks to the back-end. You construct the SQL statements and then use <b>SQLExec()</b> to send them to the server. If validations need to be performed or business rules need to checked you decide when and how they occur.</p>
+<p>
+<b>Error messages can be made user-friendly</b></p>
+<p>
+Because you are in control of what happens and you are validating by hand you have control over the error messages. You will essentially intercept the SQL Server errors and give the users an understandable message when something predictable happens. You still have the issue of a <b>SQLExec()</b> failing due to unpredictable occurrences, such as a network failure. For those you can decide if you want to parse the messages or display them in their raw form.</p>
+<p>
+<b>On the one hand this provides less interoperability</b></p>
+<p>
+A downside to this approach is that it sacrifices interoperability to a certain degree. The SQL statements sent to the back-end via the <b>SQLExec()</b> are written in the back-end's language. The examples here were designed to work with SQL Server. How much of a rewrite would be involved to port this application to Oracle? </p>
+<p>
+It is true that the basic form of a Select, Insert, Update, or Delete doesn't vary much from back-end to back-end. So the example here might be easily ported. However, the point is an important one and depending on the complexity of the SQL statements you use you might limit your ability to swap back-ends. Of course, if the application is written for one and only one back-end this will not be a big issue. </p>
+<p>
+<b>On the other hand this provides more interoperability</b></p>
+<p>
+Consider what happens if you are using remote views and you try to delete a member who has outstanding loans. Referential integrity defined on the server will prevent the deletion. However, the error message sent back by Oracle will differ from the message sent back by SQL Server. You could parse the messages and translate them into a user-friendly form but you will have to parse differently for each back-end. This limits your interoperability because you will have to create parsing routines for each server.</p>
+<p>
+With the SQL pass-through approach you would send a Select statement to the back-end looking for this member in the Loan table. If the Select finds a row the member can't be deleted. The message shown to the user is the same regardless of what was sent in the <b>SQLExec()</b>. This serves to increase your interoperability, assuming that the form of the Selects, Inserts, Updates and Deletes doesn't vary greatly among the various back-ends, which is a reasonable assumption.</p>
+<h2>Using Stored Procedures</h2>
+<p>
+In the approach just reviewed, the work is split between the client and the server. The server does the actual data manipulation, which involves searching for records and adding, updating and deleting records. However, the client controls the logic, telling the server what to do and what order to do it in. </p>
+<p>
+An alternative approach is to let the server not only do the work but also control the logic. This is accomplished by relying on stored procedures. A stored procedure is a precompiled set of SQL statements. Because they are precompiled there is a performance gain to using them. In addition, they are essentially black box routines.</p>
+<p>
+The <b>SQLExec()</b> function can be used to send not only SQL statements such as Insert and Update, but also can be used to tell SQL Server to run a stored procedure. Visual FoxPro tells the server what stored procedure to run but it doesn't know what is in the various procedures. Visual FoxPro only knows, and in fact only needs to know, whether or not the stored procedures worked.</p>
+<h3>Loading the Form</h3>
+<p>
+The form MEMBPROC.SCX uses stored procedures to talk to SQL Server. <b>SQLExec()</b> is still used so a connection to the server needs to be established in the Load method of the form. This also occurred in the previous example and in fact the Load method of both forms is exactly the same.</p>
+<h3>Locating a Member</h3>
+<p>
+A SQL Server stored procedure called <b>GetMember</b> is used to retrieve information on a member. This stored procedure takes as a parameter the ID of the member whose information you want. This stored procedure is called when the user presses the Locate button.</p>
+<pre><code>If SQLExec(ThisForm.nHandle, "Execute GetMember " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ThisForm.txtMemberID.Value, "c_member") &lt; 0
+
+  ThisForm.ShowError
+
+  Return
+
+Endif
+
+</code></pre>
+<p>
+The stored procedure runs a Select and therefore returns a result set to the cursor c_member. If the cursor is empty then no member with that ID was found. Otherwise the member's information is in the fields of the cursor and can then be displayed on the form.</p>
+<p>
+The SQL Server code that created the <b>GetMember</b> stored procedure is as follows. You can see that it takes one parameter and then runs a Union Select to find the member's information.</p>
+<pre><code>CREATE PROCEDURE getmember 
+
+  @member_no member_no
+
+AS
+
+  SELECT member.member_no, firstname, lastname,
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; middleinitial, street, city, state, zip,
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; phone_no, expr_date, birth_date = NULL,
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; adult_member_no = NULL
+
+  FROM member, adult
+
+  WHERE member.member_no = adult.member_no
+
+ &nbsp;&nbsp; AND member.member_no = @member_no
+
+  UNION
+
+  SELECT member.member_no, firstname, lastname,
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; middleinitial, street, city, state, zip,
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; phone_no, expr_date, birth_date, adult_member_no
+
+  FROM member, adult, juvenile
+
+  WHERE member.member_no = juvenile.member_no
+
+ &nbsp;&nbsp; AND juvenile.adult_member_no = adult.member_no
+
+ &nbsp;&nbsp; AND member.member_no = @member_no
+
+  RETURN (@@ROWCOUNT)
+</code></pre>
+<h3>Adding an Adult</h3>
+<p>
+The code to add an adult member is in the form method <b>AddMember.</b> The code calls the stored procedure AddAdult, which takes as parameters the name, address, and phone information for the new member.</p>
+<pre><code>lcSQL = "Execute addadult " '" + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtLastName.Value) + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "', '" + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtFirstName.Value) + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "', '" + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtMiddleInitial.Value) + "', " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "'" + AllTrim(ThisForm.txtStreet.Value) + "', " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "'" + AllTrim(ThisForm.txtCity.Value) + "', " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "'" + AllTrim(ThisForm.txtState.Value) + "', " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "'" + AllTrim(ThisForm.txtZip.Value) + "', " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "'" + AllTrim(ThisForm.txtPhoneNumber.Value) + "'"
+
+If SQLExec(ThisForm.nHandle, lcSQL) &lt; 0
+
+  ThisForm.ShowError
+
+Else
+
+  = MessageBox("This member has been added.", ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; MB_ICONINFORMATION)
+
+  * Find out the member_no of the new member
+
+  ThisForm.txtMemberID.Value = AllTrim(Str(sqlresult.exp1))
+
+&lt;code intentionally left out&gt;
+</code></pre>
+<p>
+The SQL Server code used to create the <b>AddAdult</b> stored procedure is as follows:</p>
+<pre><code>CREATE PROCEDURE addadult
+
+  @lastname&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; shortstring,
+
+  @firstname&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; shortstring,
+
+  @middleinitial&nbsp;&nbsp;&nbsp; letter = NULL,
+
+  @street&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; shortstring = NULL,
+
+  @city&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; shortstring = NULL,
+
+  @state&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; statecode = NULL,
+
+  @zip&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; zipcode = NULL,
+
+  @phone_no&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; phonenumber = NULL
+
+AS 
+
+  DECLARE&nbsp; @member_no&nbsp; member_no
+
+
+  IF&nbsp; @lastname = NULL OR @firstname = NULL OR
+
+ &nbsp;&nbsp;&nbsp;&nbsp; @street = NULL OR @zip = NULL 
+
+ &nbsp;&nbsp; BEGIN
+
+ &nbsp;&nbsp;&nbsp;&nbsp; PRINT "&nbsp;&nbsp; You must provide Last name, First name,"
+
+ &nbsp;&nbsp;&nbsp;&nbsp; PRINT "&nbsp;&nbsp; Street, City, State, and Zip."
+
+ &nbsp;&nbsp;&nbsp;&nbsp; RETURN
+
+ &nbsp;&nbsp; END
+
+
+  BEGIN TRANSACTION
+
+
+  INSERT member (lastname,&nbsp; firstname,&nbsp; middleinitial,
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; photograph)
+
+  VALUES (@lastname, @firstname, @middleinitial, NULL )
+
+  IF @@error != 0
+
+ &nbsp;&nbsp; BEGIN
+
+ &nbsp;&nbsp;&nbsp;&nbsp; ROLLBACK TRAN
+
+ &nbsp;&nbsp;&nbsp;&nbsp; RAISERROR('The new member was not added. Feel free 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; to try again.',16,1)
+
+ &nbsp;&nbsp;&nbsp;&nbsp; RETURN
+
+ &nbsp;&nbsp; END
+
+
+  SELECT @member_no = <i>@@Identity</i>
+
+  INSERT adult ( member_no,&nbsp; street,&nbsp; city,&nbsp; state,&nbsp; zip,&nbsp; 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; phone_no, expr_date)
+
+  VALUES (@member_no, @street, @city, @state, @zip, 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @phone_no, dateadd(year,1,getdate()) )
+
+  IF @@error != 0
+
+ &nbsp;&nbsp; BEGIN
+
+ &nbsp;&nbsp;&nbsp;&nbsp; ROLLBACK TRAN
+
+ &nbsp;&nbsp;&nbsp;&nbsp; RAISERROR('The new member was not added. Feel free 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; to try again.',16,1)
+
+ &nbsp;&nbsp;&nbsp;&nbsp; RETURN
+
+ &nbsp;&nbsp; END
+
+
+  PRINT "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *** Adult Member added ***"
+
+  SELECT "This member is number ", @member_no
+
+
+  COMMIT TRANSACTION
+</code></pre>
+<p>
+This stored procedure takes the name, address, and phone number information as parameters. If the name or address fields are not supplied then the stored procedure won't continue. They are defined in the Member and Adult tables as Not Null. The stored procedure begins a transaction and adds a new row to the Member table. It then issues a Select to store the value in <i>@@Identity</i> to the @member_no variable. That value is then used when the new row is added to the Adult table. </p>
+<p>
+If anything goes wrong the transaction is rolled back and an error number and message is sent back. This is needed so that Visual FoxPro knows the stored procedure failed. This causes the <b>SQLExec()</b> function to return a -1, which is how you know it didn't work.</p>
+<p>
+It turns out that the Select used to get the value of <i>@@Identity</i> creates a result set and that this is sent back to Visual FoxPro. This is a happy coincidence as this causes the <b>SQLExec()</b> to create a result set cursor called sqlresult. The value in the exp field in that cursor is the value of <i>@@Identity</i> and is easily retrieved.</p>
+<p>
+This is good for another reason. If you waited until the stored procedure had run and then used <b>SQLExec()</b> to ask SQL Server for the value of <i>@@Identity</i> it would come back empty. This is because the second thing the stored procedure does is insert a row into the Adult table, which doesn't have an Identity column. This causes the value of <i>@@Identity</i> to be set to Null. So if the stored procedure didn't send back the <i>@@Identity</i> after the Insert into Member then the information would have been lost.</p>
+<h3>Saving Changes</h3>
+<p>
+The code to save a member's information is in the form method <b>UpdateMember.</b> The code calls the stored procedure <b>UpdateAdult,</b> which takes as parameters the member ID and the name and new value of any fields that need to be updated.</p>
+<pre><code>lcSQL = ""
+
+If c_member.firstname &lt;&gt; OldVal("c_member.firstname")
+
+  lcSQL = lcSQL + " @firstname = '" + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtFirstName.Value) + "', "
+
+Endif
+
+If c_member.lastname &lt;&gt; OldVal("c_member.lastname")
+
+  lcSQL = lcSQL + " @lastname = '" + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtLastName.Value) + "', "
+
+Endif
+
+&lt;code intentionally left out&gt;
+
+
+If Len(lcSQL) &gt; 0
+
+  * Strip off the last comma
+
+  lcSQL = Left(lcSQL, Len(lcSQL) - 2)
+
+  lcSQL = "Execute updateadult @member_no = " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AllTrim(ThisForm.txtMemberID.Value) + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ", " + lcSQL
+
+Else
+
+  = MessageBox("There is nothing to save.", ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; MB_ICONINFORMATION)
+
+  Return
+
+Endif&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+
+
+If SQLExec(ThisForm.nHandle, lcSQL) &lt; 0
+
+  ThisForm.ShowError
+
+&lt;code intentionally left out&gt;
+</code></pre>
+<p>
+The SQL Server code used to create the <b>UpdateAdult</b> stored procedure is as follows:</p>
+<pre><code>CREATE PROCEDURE updateadult
+
+  @member_no&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; member_no,
+
+  @lastname&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; shortstring = NULL,
+
+  @firstname&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; shortstring = NULL,
+
+  @middleinitial&nbsp;&nbsp;&nbsp; letter = NULL,
+
+  @street&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; shortstring = NULL,
+
+  @city&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; shortstring = NULL,
+
+  @state&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; statecode = NULL,
+
+  @zip&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; zipcode = NULL,
+
+  @phone_no&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; phonenumber = NULL
+
+AS
+
+  DECLARE @sqlstring1&nbsp;&nbsp;&nbsp; varchar(255)
+
+  DECLARE @sqlstring2&nbsp;&nbsp;&nbsp; varchar(255)
+
+
+  IF&nbsp; @lastname&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = NULL AND @firstname&nbsp;&nbsp;&nbsp;&nbsp; = NULL AND
+
+ &nbsp;&nbsp;&nbsp;&nbsp; @middleinitial = NULL AND @street&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = NULL AND
+
+ &nbsp;&nbsp;&nbsp;&nbsp; @city&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = NULL AND @state&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = NULL AND
+
+ &nbsp;&nbsp;&nbsp;&nbsp; @zip&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = NULL AND @phone_no&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = NULL 
+
+  BEGIN
+
+ &nbsp;&nbsp; PRINT "Nothing to do."
+
+ &nbsp;&nbsp; RETURN
+
+  END
+
+
+  SELECT @sqlstring1 = NULL
+
+  SELECT @sqlstring2 = NULL
+
+
+  IF&nbsp; @lastname != NULL 
+
+ &nbsp;&nbsp;&nbsp;&nbsp; SELECT @sqlstring1 = @sqlstring1&nbsp; + "lastname = '" + 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @lastname + "',"
+
+  IF&nbsp; @firstname != NULL
+
+ &nbsp;&nbsp;&nbsp;&nbsp; SELECT @sqlstring1 = @sqlstring1&nbsp; + "firstname = '" + 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @firstname + "',"
+
+  &lt;code intentionally left out&gt;
+
+
+  BEGIN TRANSACTION
+
+
+  IF @sqlstring1 != NULL
+
+ &nbsp;&nbsp; BEGIN
+
+ &nbsp;&nbsp;&nbsp;&nbsp; SELECT @sqlstring1 = "UPDATE member SET " + 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SUBSTRING(@sqlstring1, 1, 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DATALENGTH(@sqlstring1) - 1) + 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; " WHERE member_no = " + 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CONVERT(char(6), @member_no)
+
+ &nbsp;&nbsp;&nbsp;&nbsp; EXECUTE (@sqlstring1)
+
+ &nbsp;&nbsp;&nbsp;&nbsp; IF @@error != 0
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BEGIN
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ROLLBACK TRAN
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RAISERROR('The member information was not saved. 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Feel free to try again.',16,1)
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RETURN
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; END
+
+ &nbsp;&nbsp; END
+
+ &nbsp;&nbsp; 
+
+  IF @sqlstring2 != NULL
+
+ &nbsp;&nbsp; BEGIN
+
+ &nbsp;&nbsp;&nbsp;&nbsp; SELECT @sqlstring2 = "UPDATE adult SET " + 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SUBSTRING(@sqlstring2, 1, 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DATALENGTH(@sqlstring2) - 1) + 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; " WHERE member_no = " + 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CONVERT(char(6), @member_no)
+
+ &nbsp;&nbsp;&nbsp;&nbsp; EXECUTE (@sqlstring2)
+
+ &nbsp;&nbsp;&nbsp;&nbsp; IF @@error != 0
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BEGIN
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ROLLBACK TRAN
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RAISERROR('The member information was not saved. 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Feel free to try again.',16,1)
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RETURN
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; END
+
+ &nbsp;&nbsp; END
+
+ &nbsp;&nbsp; 
+
+  COMMIT TRANSACTION
+</code></pre>
+<p>
+The member ID is a required parameter for this stored procedure. It couldn't construct an Update statement without some way of identifying the member's record. The other parameters are optional and will default to Null if they are not passed. If they are all Null then there is nothing to do. Note that the Visual FoxPro code will not call the stored procedure if nothing has changed.</p>
+<p>
+The stored procedure then constructs two Update statements, one for the Member table and one for the Adult table. For efficiency, only the columns that have changed are included. The Update statements are stored to the variables <i>@sqlstring1</i> and <i>@sqlstring2.</i> The Execute statement parses the strings and then executes that code. This capability of the Execute statement is a very popular feature that first appeared in SQL Server 6.0.</p>
+<h2>Deleting a Member</h2>
+<p>
+When the user presses the Delete button <b>SQLExec()</b> is used to tell SQL Server to run the stored procedure RemoveMember, which takes the member's ID as a parameter. </p>
+<pre><code>If SQLExec(ThisForm.nHandle, "Execute RemoveMember " + ;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ThisForm.txtMemberID.Value) &lt; 0
+
+  ThisForm.ShowError
+
+Else
+
+&lt;code intentionally left out&gt;
+</code></pre>
+<p>
+The SQL Server code to create the RemoveMember stored procedure is as follows:</p>
+<pre><code>CREATE PROCEDURE removemember
+
+  @member_no&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; member_no
+
+AS 
+
+  IF NOT EXISTS
+
+ &nbsp;&nbsp;&nbsp; (SELECT * FROM member WHERE member_no = @member_no) 
+
+  BEGIN
+
+ &nbsp;&nbsp;&nbsp;&nbsp; PRINT " Member number not found in Member table."
+
+ &nbsp;&nbsp;&nbsp;&nbsp; RETURN
+
+  END
+
+
+  IF EXISTS (SELECT member_no FROM juvenile
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WHERE @member_no = adult_member_no)
+
+  BEGIN
+
+ &nbsp;&nbsp;&nbsp;&nbsp; RAISERROR('This member can not be deleted. He/she is
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; an adult with active juveniles.',16,1)
+
+ &nbsp;&nbsp;&nbsp;&nbsp; RETURN
+
+  END
+
+
+  IF EXISTS (SELECT member_no FROM loan
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WHERE member_no = @member_no)
+
+  BEGIN
+
+ &nbsp;&nbsp;&nbsp;&nbsp; RAISERROR("This member can not be deleted. He/she has
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; active loans.",16,1)
+
+ &nbsp;&nbsp;&nbsp;&nbsp; RETURN
+
+  END
+
+
+  BEGIN TRANSACTION
+
+
+  IF EXISTS (SELECT member_no FROM loanhist
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WHERE member_no = @member_no)
+
+  BEGIN
+
+ &nbsp;&nbsp;&nbsp;&nbsp; PRINT 'Deleting Loan History information'
+
+ &nbsp;&nbsp;&nbsp;&nbsp; DELETE loanhist WHERE member_no = @member_no 
+
+ &nbsp;&nbsp;&nbsp;&nbsp; IF @@error != 0
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BEGIN 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ROLLBACK TRAN
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RETURN
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; END
+
+  END
+
+
+  IF EXISTS (SELECT member_no FROM reservation
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WHERE member_no = @member_no)
+
+  BEGIN
+
+ &nbsp;&nbsp;&nbsp;&nbsp; PRINT 'Deleting Loan Reservation information'
+
+ &nbsp;&nbsp;&nbsp;&nbsp; DELETE reservation WHERE member_no = @member_no 
+
+ &nbsp;&nbsp;&nbsp;&nbsp; IF @@error != 0
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BEGIN 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ROLLBACK TRAN
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RETURN
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; END
+
+  END
+
+
+  IF EXISTS (SELECT member_no FROM juvenile
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WHERE member_no = @member_no)
+
+  BEGIN
+
+ &nbsp;&nbsp;&nbsp;&nbsp; DELETE juvenile WHERE member_no = @member_no
+
+ &nbsp;&nbsp;&nbsp;&nbsp; IF @@error != 0
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BEGIN 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ROLLBACK TRAN
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RETURN
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; END
+
+  END
+
+  ELSE IF EXISTS (SELECT member_no FROM adult
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WHERE member_no = @member_no)
+
+  BEGIN
+
+ &nbsp;&nbsp;&nbsp;&nbsp; DELETE adult WHERE member_no = @member_no
+
+ &nbsp;&nbsp;&nbsp;&nbsp; IF @@error != 0
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BEGIN 
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ROLLBACK TRAN
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RETURN
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; END
+
+  END
+
+
+  DELETE member WHERE member_no = @member_no
+
+  IF @@error != 0
+
+ &nbsp;&nbsp; BEGIN 
+
+ &nbsp;&nbsp;&nbsp;&nbsp; ROLLBACK TRAN
+
+ &nbsp;&nbsp;&nbsp;&nbsp; RETURN
+
+ &nbsp;&nbsp; END
+
+
+  COMMIT TRANSACTION
+</code></pre>
+<p>
+This stored procedure first checks to see if the member exists. It then checks to see if this is an adult with active juveniles or a member with outstanding loans. If so the member can not be deleted and the stored procedure sends back an error and user friendly message. If the deletion can occur a transaction is begun and the member's information is removed from the Loanhist, Reservation, Juvenile, Adult and Member tables. As always, if anything goes wrong the whole thing is rolled back.</p>
+<h3>Issues</h3>
+<p>
+How does SQL pass-through with hand crafted SQL statements compare to SQL pass-through with stored procedures?</p>
+<p>
+<b>This is less work</b></p>
+<p>
+Assuming the stored procedures already exist there is much less work for the Visual FoxPro programmer to do in this scenario. All you need is to know is which stored procedure to call, what parameters it takes and what it returns. You do not need to know how the stored procedure works or in what order it does things. </p>
+<p>
+<b>You have less control in Visual FoxPro</b></p>
+<p>
+Because all of your access to SQL Server occurs through stored procedures you have very little control from Visual FoxPro over what happens on the server. Of course, assuming that the stored procedures do what they are supposed to do, you probably won't mind this.</p>
+<p>
+<b>You have more control in SQL Server</b></p>
+<p>
+If you are responsible not only for the Visual FoxPro front-end but also the SQL Server back-end then you have control either way. However, what if you are just writing a Visual FoxPro front-end to SQL Server data and that data is controlled by someone else? Providing access to the data solely through stored procedures is a great way for the owners of the SQL Server data to exercise control over that data. They can rest assured that the front-end developers don't mess up the data. This would come in extremely handy if there is a Visual FoxPro, a Visual Basic and an Access front-end to the same data. </p>
+<p>
+<b>This provides more interoperability</b></p>
+<p>
+Because all the work is done in the stored procedures it should be very easy to switch back-ends. At the worst you would have to change each line of code containing a <b>SQLExec()</b> to reflect a different syntax for calling stored procedures.</p>
+<h2>Conclusion</h2>
+<p>
+In this session you have seen examples of using both views and SQL pass-through for building client-server applications using Visual FoxPro. The obvious question is when should you use one or the other?</p>
+<p>
+Using remote views has the benefit of being relatively simple because Visual FoxPro does a lot of the work for you. You can use standard Visual FoxPro functions such as <b>TableUpdate()</b> for data entry. FoxPro handles the communications with the back-end server. A downside to using views is that you give up a large degree of control. </p>
+<p>
+A particularly good use of views is for reporting. The View Designer is a very easy way to construct many Select statements. It is also a great way to construct heterogenous queries, where some of the data is coming from the back-end server and some is coming from local Visual FoxPro tables, for instance lookup tables.</p>
+<p>
+Using SQL pass-through and sending SQL statements directly to the back-end gives you total control. You create the SQL statements that get run. You can still use buffered cursors and get much of the convenience of views. The cost however is the work involved in constructing the SQL statements. Calling stored procedures on the back-end via SQL pass-through greatly reduces the burden of writing SQL statements but also takes away your control of what happens and when.</p>
+<p>
+The purpose of this session is not to convince you to use either views <i>or</i> SQL pass-through. Rather, you should consider both of them to be powerful tools you can use to build applications. If your data structures and validation requirements are not complex then you should consider using views. If you need more control or views can't handle something you want to do you should consider SQL pass-through. You can also use both whenever that makes sense.</p>
+</BODY>
+</HTML>

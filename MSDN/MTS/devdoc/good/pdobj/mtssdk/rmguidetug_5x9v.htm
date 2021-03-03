@@ -1,0 +1,186 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Using an Application Program to Update Two SQL Server Databases</title>
+<link disabled rel=stylesheet href=../../../backsdk3.css>
+<style type="text/css">
+@import url(../../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000>
+
+<h1><a name="asusinganapplicationprogramtoupdatetwosqlserverdatabases"></a>Using an Application Program to Update Two SQL Server Databases</h1>
+<p>
+The following example introduces the OLE Transactions calls for initiating and committing MS DTC transactions, and the ODBC call for propagating an MS DTC transaction from an application program to a relational database:
+<ol>
+<li>
+The client application connects to MS DTC by calling <b>DtcGetTransactionManager</b>, which returns an interface pointer to a <i>transaction dispenser object</i>. The transaction dispenser object is used to initiate subsequent transactions.<pre><code>ITransactionDispenser *pTransactionDispenser;
+ITransaction *pTransaction;
+HRESULT hr = S_OK ;
+
+// Obtain an interface pointer from MS DTC proxy.
+hr = DtcGetTransactionManager(0, 0, IID_ITransactionDispenser, 0, 0, 0,(void **)&amp;pTransactionDispenser);
+if (FAILED (hr))
+{
+printf("DtcGetTransactionManager failed: %x\n", hr);
+exit (1);
+}</code></pre>
+</li>
+</ol>
+<p>
+Application programs do not need to call either <b>CoInitialize</b> or <b>OleInitialize</b>. The <b>DtcGetTransactionManager</b> doesn’t depend on these calls. The transaction dispenser object can be used to create multiple transactions.
+<ol>
+<li>
+The application program connects to the two databases using ODBC. These standard ODBC calls are not affected by using MS DTC.<pre><code>// Establish connection to database on server#1
+LogonToDB(&amp;gSrv1);
+
+// Establish connection to database on server#2
+LogonToDB(&amp;gSrv2);
+
+void LogonToDB(DBCONN *ptr)
+{
+RETCODE rc = 0;
+
+rc = SQLAllocConnect(gHenv, &amp;(ptr-&gt;hdbc) );
+
+if (ProcessRC("SQLAllocConnect",ptr,rc))
+{
+rc = SQLConnect(ptr-&gt;hdbc,
+(unsigned char *)(ptr-&gt;pszDSN),
+SQL_NTS,
+(unsigned char *)(ptr-&gt;pszUser),
+SQL_NTS,
+(unsigned char *)(ptr-&gt;pszPasswd),
+SQL_NTS
+);
+
+ProcessRC("SQLConnect",ptr,rc);
+}
+}</code></pre>
+</li>
+</ol>
+<p>
+The application program begins an MS DTC transaction by invoking the <b>ITransactionDispenser::BeginTransaction</b> method on the transaction dispenser object obtained in step one. The <b>BeginTransaction</b> method returns a translation object that represents the transaction.</p>
+<pre><code>// Initiate an MS DTC transaction
+
+hr = pTransactionDispenser-&gt;BeginTransaction(
+      NULL,                                  // [in] IUnknown __RPC_FAR *punkOuter,
+      ISOLATIONLEVEL_ISOLATED,         // [in] ISOLEVEL isoLevel,
+      ISOFLAG_RETAIN_DONTCARE,     // [in] ULONG isoFlags,
+      NULL,                                  // [in] ITransactionOptions  *pOptions,
+      &amp;pTransaction                          // [out] ITransaction__RPC_FAR
+                                      //        *__RPC_FAR *ppTransaction
+) ;
+
+if (FAILED (hr))
+{</code>    
+<code>printf("BeginTransaction failed: %x\n",hr);</code>
+<code>exit(1);</code>
+<code>}</code></pre>
+<ol>
+<li>
+The application program associates the transaction object with the ODBC database connections, using the new ODBC enlistment interface that directs further work on the ODBC connections to be performed under the auspices of the MS DTC transaction.<pre><code>// Enlist each of the data sources in the transaction
+Enlist(&amp;gSrv1,pTransaction);
+Enlist(&amp;gSrv2,pTransaction);
+<b><i> </i></b>
+//-------------------------------------------------------------------</code>    
+<code>void Enlist(DBCONN *ptr, ITransaction *pTransaction)</code>
+<code>{</code>
+<code>RETCODE rc = 0;</code>
+<b><i><code> </code></i></b>
+<code>// Enlist database in the transaction</code>
+<code>    rc = SQLSetConnectOption (ptr-&gt;hdbc, SQL_COPT_SS_ENLIST_IN_DTC,</code>
+<code>(UDWORD)pTransaction);</code>
+<b><i><code> </code></i></b>
+<code>ProcessRC("SQLSetConnectOption",ptr,rc);</code>
+<b><i><code> </code></i></b>
+<code>}</code></pre>
+</li>
+<li>
+The application program associates a <i>statement handle</i> with each ODBC database connection. These standard ODBC calls are not affected by using MS DTC. The application program uses the ODBC database connections to do work on behalf of the transaction.<pre><code>// Generate the SQL statement to execute on each of the
+// databases.
+sprintf(SqlStatement,
+    "update authors set address = '%s' where au_id = '%s'",
+     gNewAddress,gAuthorID
+    );
+
+// Perform updates on both of the DBs participating in
+// the transaction
+ExecuteStatement(&amp;gSrv1,SqlStatement);
+ExecuteStatement(&amp;gSrv2,SqlStatement);
+<b><i> </i></b>
+// --------------------------------------------------
+void ExecuteStatement(DBCONN *ptr, char *pszBuf)
+{
+RETCODE rc = 0;
+<b><i> </i></b>
+// Allocate an ODBC statement handle
+<b><i> </i></b>
+rc = SQLAllocStmt(ptr-&gt;hdbc,&amp;(ptr-&gt;hstmt));
+ProcessRC("SQLAllocStmt",ptr,rc);
+
+// Execute the passed string as a SQL statement
+    rc = SQLExecDirect(ptr-&gt;hstmt,
+(unsigned char *)pszBuf,SQL_NTS);
+
+ProcessRC("SQLExecDirect",ptr,rc);
+<b><i> </i></b>
+// Free the statement handle
+rc = SQLFreeStmt(ptr-&gt;hstmt, SQL_DROP);
+ptr-&gt;hstmt = SQL_NULL_HSTMT;
+<b><i> </i></b>
+ProcessRC("SQLFreeStmt",ptr,rc);
+
+}</code></pre>
+</li>
+<li>
+The application program calls the <b>Commit</b> method on the transaction<i> </i>object. MS DTC performs the two-phase commit protocol to commit the transaction. If any SQL Server database is unable to commit the transaction, the transaction is aborted and the transaction's effects are undone from all databases that were modified.</li>
+</ol>
+<p>
+The ODBC database connections can’t be used until the commit completes and another <b>SQLSetConnectOption</b> call is made to enlist the ODBC connection in either a new MS DTC transaction or in the null transaction.</p>
+<p>
+<b>Note</b>  Do not reuse the ODBC connection before the commit completes or another <b>SQLSetConnectOption</b> call is made.</p>
+<p>
+When the application completes the transaction, it releases the transaction object.</p>
+<pre><code>// Commit the transaction
+hr = pTransaction-&gt;Commit(0,0,0);
+if (FAILED(hr))
+{
+printf("pTransaction-&gt;Commit() failed: %x\n",hr);
+exit(1);
+}
+<b><i> </i></b>
+// Release Transaction
+pTransaction-&gt;Release();
+if (FAILED(hr))
+{
+printf("pTransaction-&gt;Commit() failed: %x\n",hr);
+exit(1);
+}</code></pre>
+<ol>
+<li>
+When no more transactions are needed, the program releases the transaction dispenser object and closes the ODBC connections.<pre><code>// release transaction dispenser
+pTransactionDispenser-&gt;Release();
+ 
+ 
+// Free ODBC handles
+FreeODBCHandles(&amp;gSrv1);
+FreeODBCHandles(&amp;gSrv2);
+ 
+// Free the global ODBC environment handle.
+SQLFreeEnv(gHenv);
+ 
+// -------------------------------------------------------
+void FreeODBCHandles(DBCONN *ptr)
+{
+SQLDisconnect(ptr-&gt;hdbc);
+SQLFreeConnect(ptr-&gt;hdbc);
+
+ptr-&gt;hdbc   = SQL_NULL_HDBC;
+ptr-&gt;hstmt  = SQL_NULL_HSTMT;
+}</code></pre>
+</li>
+</ol>
+<p>&nbsp; </p></body>
+</HTML>

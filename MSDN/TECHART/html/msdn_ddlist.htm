@@ -1,0 +1,395 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Simple Drag and Drop for List Boxes in 32-Bit Visual C++ Applications</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_ddlist"></a></sup>Simple Drag and Drop for List Boxes in 32-Bit Visual C++ Applications</h1>
+<p>
+Nigel Thompson<br>
+Microsoft Developer Network Technology Group</p>
+<p>
+Created: October 17, 1994</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="3185">
+</OBJECT><a href="javascript:sample1.Click()">Click to open or copy the files in the DDLIST sample application for this technical article.</a></p>
+<h2>Abstract</h2>
+<p>
+This article shows a simple way to add drag-and-drop support to list boxes in 32-bit applications based on the Microsoft® Foundation Class Library (MFC). The sample code included in the DDLIST application supports both Clipboard and drag-and-drop support in a multiple-selection list box. Drag and drop is also supported between different instances of the application. For details on how the Clipboard implementation works, see <a href="msdn_mfcclip.htm">"MFC Tips for Copying, Pasting, Blting, and Creating Owner-Drawn List Boxes."</a></p>
+<h2>Introduction</h2>
+<p>
+I have a bit of a thing about list boxes. It seems that every application I want to write for myself involves list boxes. I create all my applications using Visual C++™ on a Microsoft® Windows NT™ machine, and it was because of this need for lists that I found out how to implement Clipboard support in a Microsoft Foundation Class Library (MFC) application. I soon tired of the "Select, CTRL+C, Select, CTRL+V" sequence and decided to implement drag and drop to improve the interface a bit.</p>
+<p>
+Now, I've done some drag-and-drop stuff before. Some of you may have read the "OLE for Idiots" series of articles written by my good friend Herman Rodent. In that series, we used OLE to implement drag and drop. Or, more correctly, in investigating OLE, we played with drag and drop. So my first idea was to implement list box drag-and-drop support using OLE. Then I went and had a brief lie down and decided that I could do the entire thing myself without using OLE and with a lot less pain. The result is a small set of functions and a new list box class, which show how you, too, can implement drag and drop without the need to OLE-enable your application. Having said that, I'm not suggesting this is better than using OLE—just different. So you can choose how you want to implement it.</p>
+<p>
+The DDLIST sample application that accompanies this article is a multiple document interface (MDI) application based on MFC's document/view architecture. Each view is simply a multiple-selection list box. You can move items between views in one application or from a view in one application to a view in another application using either the Clipboard or drag and drop. I've improved the Clipboard support from the code I developed in <a href="msdn_mfcclip.htm">"MFC Tips for Copying, Pasting, Blting, and Creating Owner-Drawn List Boxes"</a> by creating a few simple helper functions. I've derived a new class from <b>CListBox</b> to implement the drag-and-drop support and again, packaged the grunt work into a few simple helper functions. I won't claim this is the definitive implementation, but it certainly provided the support I needed, which is more than I can say for my office chair.</p>
+<h2>How to Get There from Here</h2>
+<p>
+Inasmuch as a simple map is often infinitely better than pages of complex driving directions, I thought we'd start with a list of the steps I took to add drag-and-drop support to the list boxes in my application.
+<ol>
+<li>
+Build the basic application without Clipboard or drag-and-drop support.<br><br></li>
+<li>
+Add Clipboard support for the list boxes and test it.<br><br></li>
+<li>
+Derive a new class from <b>CListBox</b> to which the drag-and-drop support code will be added. The new class has no member functions yet. Build the application and test to see that the Clipboard support still works.<br><br></li>
+<li>
+Add handlers to the new list box class for left-mouse-button up and down events and for mouse-movement events.<br><br></li>
+<li>
+Reimplement the list box selection logic, and build in a test for the start of a drag operation.<br><br></li>
+<li>
+Register some private messages to be used for initiating a drag-and-drop operation, testing a potential drop site, and executing a drop on a drop site.<br><br></li>
+<li>
+Implement the QueryDrop functionality to see if a potential drop site will accept a drop. (You don't need any data for this yet.)<br><br></li>
+<li>
+Implement the DoDrop functionality, and test, test, test.</li>
+</ol>
+<p>
+I'm going to assume you can manage to get through steps 1 and 2 on your own, so I'll pick up the story with steps 3 and 4.</p>
+<h2>A New List Box Class: CDDListBox</h2>
+<p>
+<b>CDDListBox</b> is derived publicly from <b>CListBox</b>, and its purpose in life is to handle mouse events that would normally be handled directly by <b>CListBox</b>. We need to handle mouse events ourselves in order to know when a drag operation needs to be started. There are many different models we could use for this, and inasmuch as I had no particular desire to reinvent any wheels, I chose to mimic the model that the Microsoft Windows® File Manager uses. I spent a good deal of time playing with the File Manager in order to understand how drag operations are started and, in particular, how they are started when multiple selections are involved. If your list boxes are single-selection, most of the complexity goes away, but because multiple-selection list boxes are what I wanted, I had to go the whole nine yards and implement a reasonable selection model.</p>
+<p>
+<b>CDDListBox</b> begins life with just three main functions to handle mouse events. The following code is taken from DDLSTBOX.H and shows part of the class definition:</p>
+<pre><code>class CDDListBox : public CListBox
+{
+public:
+ &nbsp;&nbsp; CDDListBox();
+ &nbsp;&nbsp; virtual ~CDDListBox();
+ &nbsp; ...
+ &nbsp; ...
+ &nbsp;&nbsp; // Generated message map functions
+protected:
+ &nbsp;&nbsp; //{{AFX_MSG(CDDListBox)
+ &nbsp;&nbsp; afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
+ &nbsp;&nbsp; afx_msg void OnLButtonUp(UINT nFlags, CPoint point);
+ &nbsp;&nbsp; afx_msg void OnMouseMove(UINT nFlags, CPoint point);
+//}}AFX_MSG
+ &nbsp;&nbsp; DECLARE_MESSAGE_MAP()
+};
+</code></pre>
+<p>
+The mouse-event message entries were added with ClassWizard. </p>
+<h2>Implementing the Selection Logic</h2>
+<p>
+The essentials of implementing the selection logic are to detect key down plus movement as the start of a drag operation and to use the key-up event to do some selection steps rather than the key-down event. We can't always change selection state on key-down events because the user might be trying to drag an existing selection set. So here are the handlers for the three relevant events:</p>
+<pre><code>void CDDListBox::OnLButtonDown(UINT nFlags, CPoint point)
+{
+ &nbsp;&nbsp; // Get the index value of the item under the mouse.
+ &nbsp;&nbsp; int iSel = IndexFromPoint(point);
+ &nbsp;&nbsp; // If no item was hit, there is nothing to do.
+ &nbsp;&nbsp; if (iSel == LB_ERR) return;
+ &nbsp;&nbsp; SetCapture();
+ &nbsp;&nbsp; m_bCaptured = TRUE;
+ &nbsp;&nbsp; // Save the position of the mouse.
+ &nbsp;&nbsp; m_ptMouseDown = point;
+ &nbsp;&nbsp; // If the item is already selected, defer the operation until the 
+ &nbsp;&nbsp; // mouse button goes up because this might be the start of a drag operation.
+ &nbsp;&nbsp; if (GetSel(iSel)) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_bMouseOpPending = TRUE;
+ &nbsp;&nbsp; } else {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_bMouseOpPending = FALSE;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; UpdateSelection(iSel, nFlags, point);
+ &nbsp;&nbsp; }
+}
+
+void CDDListBox::OnLButtonUp(UINT nFlags, CPoint point)
+{
+ &nbsp;&nbsp; if (m_bCaptured) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // See if a mouse operation is pending.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (m_bMouseOpPending == TRUE) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; int iSel = IndexFromPoint(point);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (iSel != LB_ERR) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; UpdateSelection(iSel, nFlags, point);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_bMouseOpPending = FALSE;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ReleaseCapture();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_bCaptured = FALSE;
+ &nbsp;&nbsp; }
+}
+
+void CDDListBox::OnMouseMove(UINT nFlags, CPoint point)
+{
+ &nbsp;&nbsp; if (m_bCaptured) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // See if the mouse has moved far enough to start
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // a drag operation.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if ((abs(point.x - m_ptMouseDown.x) &gt; 3)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; || (abs(point.y - m_ptMouseDown.y) &gt; 3)) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Release the mouse capture.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ReleaseCapture();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_bCaptured = FALSE;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Tell the parent window to begin a drag-and-drop operation.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GetParent()-&gt;PostMessage(ddcMsgBeginDragDrop, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (WPARAM) GetDlgCtrlID(),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (LPARAM) this);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; }
+}
+</code></pre>
+<p>
+The important thing to look at is how a drag operation is started. I chose to send a message to the list box's parent to inform it that it should begin a drag operation. This makes more sense than having the list box itself control the operation because the list box is a rather generic object and drag and drop is very specific to the application.</p>
+<p>
+The <b>ddcMsgBeginDragDrop</b> message is a Windows message that is registered along with some other messages as the application starts up. The code for this is in DDCLIP.CPP:</p>
+<pre><code>// Messages 
+UINT ddcMsgQueryDrop = ::RegisterWindowMessage("DDCQUERYDROP");
+UINT ddcMsgDoDrop = ::RegisterWindowMessage("DDCDODROP");
+UINT ddcMsgBeginDragDrop = ::RegisterWindowMessage("DDCBEGINDRAGDROP");
+</code></pre>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;This code is not part of any function, but simply a set of initialization instructions to be performed before the application starts running.</p>
+<p>
+We'll see shortly what the view window that owns the list box does when it receives the <b>ddcMsgBeginDragDrop </b>message. Just before we do that, it's worth looking at how you add a handler for a registered Windows message because ClassWizard can't do this for you. Here's a section of the definition of the view class in DDLISTVW.H that defines the message handlers:</p>
+<pre><code>class CDdlistView : public CView
+{
+ &nbsp; ...
+// Generated message map functions
+protected:
+ &nbsp;&nbsp; //{{AFX_MSG(CDdlistView)
+ &nbsp;&nbsp; ...
+ &nbsp;&nbsp; afx_msg LRESULT OnQueryDrop(WPARAM wParam,LPARAM lParam);
+ &nbsp;&nbsp; afx_msg LRESULT OnDoDrop(WPARAM wParam,LPARAM lParam);
+ &nbsp;&nbsp; afx_msg LRESULT OnBeginDragDrop(WPARAM wParam,LPARAM lParam);
+ &nbsp;&nbsp; //}}AFX_MSG
+ &nbsp;&nbsp; DECLARE_MESSAGE_MAP()
+};
+</code></pre>
+<p>
+The message handlers are registered as being very generic—they each have a <i>wParam</i> and <i>lParam</i> argument and return an LRESULT.</p>
+<p>
+The implementation of the view class is in DDLISTVW.CPP. Here's the part of the message map that deals with the registered messages:</p>
+<pre><code>BEGIN_MESSAGE_MAP(CDdlistView, CView)
+ &nbsp;&nbsp; //{{AFX_MSG_MAP(CDdlistView)
+ &nbsp;&nbsp; ...
+ &nbsp;&nbsp; ON_REGISTERED_MESSAGE(ddcMsgQueryDrop, OnQueryDrop)
+ &nbsp;&nbsp; ON_REGISTERED_MESSAGE(ddcMsgDoDrop, OnDoDrop)
+ &nbsp;&nbsp; ON_REGISTERED_MESSAGE(ddcMsgBeginDragDrop, OnBeginDragDrop)
+ &nbsp;&nbsp; //}}AFX_MSG_MAP
+END_MESSAGE_MAP()
+</code></pre>
+<p>
+So now we can look at the implementation of the <b>OnBeginDragDrop</b> function:</p>
+<pre><code>LRESULT CDdlistView::OnBeginDragDrop(WPARAM wParam,LPARAM lParam)
+{
+ &nbsp;&nbsp; // wParam is child window ID.
+ &nbsp;&nbsp; // lParam is pointer to the window object.
+
+ &nbsp;&nbsp; // Construct a drag-and-drop object from our data.
+ &nbsp;&nbsp; // Get the number of selected items.
+ &nbsp;&nbsp; int iCount = m_wndList.GetSelCount();
+ &nbsp;&nbsp; if (iCount &lt;= 0) return 0; // nothing to drag
+ &nbsp;&nbsp; // Get the list of selection IDs.
+ &nbsp;&nbsp; int* pItems = new int [iCount];
+ &nbsp;&nbsp; m_wndList.GetSelItems(iCount, pItems);
+ &nbsp;&nbsp; // Create a string list.
+ &nbsp;&nbsp; CStrList StrList;
+ &nbsp;&nbsp; // Add all the selected items to the list.
+ &nbsp;&nbsp; int i;
+ &nbsp;&nbsp; for (i=0; i&lt;iCount; i++) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CString* pStr = new CString;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_wndList.GetText(pItems[i], *pStr);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; StrList.AddTail(pStr);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; // Done with item list.
+ &nbsp;&nbsp; delete pItems;
+ &nbsp;&nbsp; ::BeginDragDrop((CWnd*)lParam, // Source window
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; theApp.m_uiStrListClipFormat, // Format
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;StrList); // object
+ &nbsp;&nbsp; // Nuke the list.
+ &nbsp;&nbsp; StrList.DeleteAll();
+ &nbsp;&nbsp; return 0;
+}
+</code></pre>
+<p>
+Most of the code in this function is concerned with creating a list of the selected item IDs and then creating a list object that contains all of the selected objects. Once we have a list object, we can call the <b>BeginDragDrop</b> helper function to start the drag-and-drop operation.</p>
+<h2>The Drag-and-Drop Operation</h2>
+<p>
+I packaged all the actual drag-and-drop code into a single code module, DDCLIP.CPP. The module contains a number of global helper functions and a window class that is used to receive mouse messages during a drag-and-drop operation. Let's go through the drag-and-drop sequence, looking at each function as it's used. We'll begin with the <b>BeginDragDrop</b> function:</p>
+<pre><code>void BeginDragDrop(CWnd* pSourceWnd, UINT uiFmt, CObject* pObject)
+{
+ &nbsp;&nbsp; // Serialize the object to a file.
+ &nbsp;&nbsp; // Get the directory for temp files.
+ &nbsp;&nbsp; char szPath[_MAX_PATH];
+ &nbsp;&nbsp; ::GetTempPath(sizeof(szPath), szPath);
+ &nbsp;&nbsp; // Create the full filename.
+ &nbsp;&nbsp; strcat(szPath, MAPFILENAME);
+ &nbsp;&nbsp; // Create a new file.
+ &nbsp;&nbsp; CFile DataFile(szPath, CFile::modeCreate|CFile::modeReadWrite);
+ &nbsp;&nbsp; CArchive ar(&amp;DataFile, CArchive::store);&nbsp; 
+ &nbsp;&nbsp; pObject-&gt;Serialize(ar);
+ &nbsp;&nbsp; ar.Close(); // Flush and close.
+ &nbsp;&nbsp; DataFile.Close();
+ &nbsp;&nbsp; // Capture the mouse so we can control what happens next.
+ &nbsp;&nbsp; CDdcWnd* pWnd = new CDdcWnd(pSourceWnd, uiFmt);
+ &nbsp;&nbsp; ASSERT(pWnd);
+}
+</code></pre>
+<p>
+We create a file in the machine's temporary files directory and archive the object to the file. This is necessary in order to be able to drag the object into another process address space. We can't simply keep the object in the source process's local address space and send a pointer in the drop message because the pointer would not be valid in any other process.</p>
+<p>
+Once the object has been serialized to the file, the file is closed, and a special window is created to handle mouse events while the drag-and-drop operation is performed. Let's look next at the window's constructor:</p>
+<pre><code>CDdcWnd::CDdcWnd(CWnd* pSourceWnd, UINT uiFmt)
+{
+ &nbsp;&nbsp; // Save the parameters.
+ &nbsp;&nbsp; ASSERT(pSourceWnd);
+ &nbsp;&nbsp; m_hwndSource = pSourceWnd-&gt;m_hWnd; 
+ &nbsp;&nbsp; m_uiFmt = uiFmt;
+ &nbsp;&nbsp; // Create the window.
+ &nbsp;&nbsp; if (!szWndClass) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; szWndClass = AfxRegisterWndClass(WS_POPUP);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; CreateEx(0, szWndClass, "", WS_POPUP, 0, 0, 0, 0, NULL, NULL);
+ &nbsp;&nbsp; m_hwndUnder = NULL;
+ &nbsp;&nbsp; // Load the cursors.
+ &nbsp;&nbsp; m_hcurNoDrop = ::LoadCursor(AfxGetResourceHandle(),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; MAKEINTRESOURCE(IDC_DDCNODROP));
+ &nbsp;&nbsp; m_hcurDropOK = ::LoadCursor(AfxGetResourceHandle(),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; MAKEINTRESOURCE(IDC_DDCDROPOK));
+
+ &nbsp;&nbsp; // Save the existing cursor.
+ &nbsp;&nbsp; m_hcurOld = ::SetCursor(NULL);
+ &nbsp;&nbsp; ::SetCursor(m_hcurOld);
+ &nbsp;&nbsp; // Capture the mouse.
+ &nbsp;&nbsp; m_hwndOldCapture = ::GetCapture();
+ &nbsp;&nbsp; SetCapture();
+}
+</code></pre>
+<p>
+The source window (the place the drag operation was started) is saved, and the mouse handler window is created. The existing cursor is saved, and the mouse is captured so that all further mouse events come to the mouse handler window. Let's see what happens as the mouse is moved:</p>
+<pre><code>void CDdcWnd::OnMouseMove(UINT nFlags, CPoint point)
+{
+ &nbsp;&nbsp; // Convert the mouse coordinates to screen coordinates.
+ &nbsp;&nbsp; ClientToScreen(&amp;point);
+ &nbsp;&nbsp; // Find the window it's over.
+ &nbsp;&nbsp; CWnd* pWnd = WindowFromPoint(point);
+ &nbsp;&nbsp; // Note: pWnd is temporary so don't store it!
+ &nbsp;&nbsp; if (!pWnd) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ::SetCursor(m_hcurNoDrop);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_hwndUnder = NULL;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; HWND hWnd = pWnd-&gt;m_hWnd;
+ &nbsp;&nbsp; // See if this is a new window.
+ &nbsp;&nbsp; if (hWnd == m_hwndUnder) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // No, it isn't, so don't do anything.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; // If this is the source window, show the OK to drop cursor.
+ &nbsp;&nbsp; // See if this window will accept a drop.
+ &nbsp;&nbsp; // The window will set the cursor if it wants drop, etc.
+ &nbsp;&nbsp; if ((hWnd == m_hwndSource)
+ &nbsp;&nbsp; || (pWnd-&gt;SendMessage(ddcMsgQueryDrop, m_uiFmt, 0))) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ::SetCursor(m_hcurDropOK);
+ &nbsp;&nbsp; } else {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ::SetCursor(m_hcurNoDrop);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; m_hwndUnder = hWnd;
+}
+</code></pre>
+<p>
+The window under the mouse position is found, and a test is made to see if this is a new window or one we were over already. This avoids redundantly testing a given window multiple times. If it's a new window, the window is sent a message to see if it would accept a drop operation. If the window responds with TRUE, the cursor is changed to show that a drop can occur here. If the Window responds FALSE (or doesn't process the message), the cursor is changed to show that no drop operation is valid here.</p>
+<p>
+Obviously, there are all sort of variations you can do here, but this is simple.</p>
+<p>
+The DDLIST sample application simply tests the data type to see if it will accept the drop (DDLISTVW.CPP):</p>
+<pre><code>LRESULT CDdlistView::OnQueryDrop(WPARAM wParam,LPARAM lParam)
+{
+ &nbsp;&nbsp; // wParam has the format.
+ &nbsp;&nbsp; if (wParam == theApp.m_uiStrListClipFormat) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return TRUE;
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; return FALSE;
+}
+</code></pre>
+<p>
+Finally, the user releases the mouse button to end the drag operation:</p>
+<pre><code>void CDdcWnd::OnLButtonUp(UINT nFlags, CPoint point)
+{
+ &nbsp;&nbsp; // Don't drop on the source window.
+ &nbsp;&nbsp; if ((m_hwndUnder) 
+ &nbsp;&nbsp; &amp;&amp; (m_hwndUnder != m_hwndSource)) {
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // See if we can drop here.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (::SendMessage(m_hwndUnder, ddcMsgQueryDrop, m_uiFmt, 0)) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Yes
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ::SendMessage(m_hwndUnder,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ddcMsgDoDrop,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_uiFmt,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (LPARAM)0);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; m_hwndUnder = NULL;
+ &nbsp;&nbsp; // Restore the cursor, etc.
+ &nbsp;&nbsp; ::SetCursor(m_hcurOld);
+ &nbsp;&nbsp; ReleaseCapture();
+ &nbsp;&nbsp; if (m_hwndOldCapture) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ::SetCapture(m_hwndOldCapture); 
+ &nbsp;&nbsp; }&nbsp;&nbsp; 
+ &nbsp;&nbsp; DestroyWindow();
+ &nbsp;&nbsp; delete this;
+}
+</code></pre>
+<p>
+The window is again tested to see if a drop is valid, and if so, the target window is sent a <b>ddcMsgDoDrop</b> message. Notice that there is no data pointer in the message. Here's how DDLIST handles the message in DDLSTVW.CPP:</p>
+<pre><code>LRESULT CDdlistView::OnDoDrop(WPARAM wParam, LPARAM lParam)
+{
+ &nbsp;&nbsp; // wParam has the format.
+ &nbsp;&nbsp; // We only accept one format, so check that's what we have.
+ &nbsp;&nbsp; ASSERT(wParam == theApp.m_uiStrListClipFormat);
+ &nbsp;&nbsp; // Create an object to receive the data.
+ &nbsp;&nbsp; CStrList PasteList;
+ &nbsp;&nbsp; ::GetDropData(&amp;PasteList);
+
+ &nbsp;&nbsp; // Add all the strings to the doc.
+ &nbsp;&nbsp; CDdlistDoc* pDoc = GetDocument();
+ &nbsp;&nbsp; ASSERT(pDoc);
+ &nbsp;&nbsp; CStrList* pStrList = &amp;pDoc-&gt;m_StrList;
+ &nbsp;&nbsp; ASSERT(pStrList);
+ &nbsp;&nbsp; POSITION pos = NULL;
+ &nbsp;&nbsp; // Use the data in the list to update the current info.
+ &nbsp;&nbsp; while (! PasteList.IsEmpty()) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CString* pStr = PasteList.RemoveHead();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ASSERT(pStr);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pStrList-&gt;AddTail(pStr);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; GetParentFrame()-&gt;SetActiveView(this); // Make this the active child.
+ &nbsp;&nbsp; pDoc-&gt;SetModifiedFlag();
+ &nbsp;&nbsp; pDoc-&gt;UpdateAllViews(NULL);
+ &nbsp;&nbsp; return 0;
+}
+</code></pre>
+<p>
+This is almost a complete mirror of the steps used to start the drag operation: The <b>GetDropData</b> helper function is used to retrieve the object ,and the object's contents are then added to the document. Finally, the view is repainted to show the new information. Let's see how <b>GetDropData</b> works:</p>
+<pre><code>BOOL GetDropData(CObject* pObject)
+{
+ &nbsp;&nbsp; ASSERT(pObject);
+ &nbsp;&nbsp; // Open the temp file.
+ &nbsp;&nbsp; char szPath[_MAX_PATH];
+ &nbsp;&nbsp; ::GetTempPath(sizeof(szPath), szPath);
+ &nbsp;&nbsp; // Create the full filename.
+ &nbsp;&nbsp; strcat(szPath, MAPFILENAME);
+ &nbsp;&nbsp; CFile DataFile(szPath, CFile::modeRead);
+ &nbsp;&nbsp; // Create the archive and get the data.
+ &nbsp;&nbsp; CArchive ar(&amp;DataFile, CArchive::load);&nbsp; 
+ &nbsp;&nbsp; pObject-&gt;Serialize(ar);
+ &nbsp;&nbsp; ar.Close();
+ &nbsp;&nbsp; DataFile.Close();
+ &nbsp;&nbsp; return TRUE;
+}
+</code></pre>
+<p>
+The temporary file is opened, and the object is serialized from the file. The temporary file is then closed. I didn't bother to delete the file because it gets reused a lot in my own application, and it's always truncated to zero length when it's opened anyway.</p>
+<h2>Summary</h2>
+<p>
+If you want some simple drag-and-drop functionality without having to resort to adding OLE support to your application, you should be able to use this example as a good starting point.</p>
+</BODY>
+</HTML>

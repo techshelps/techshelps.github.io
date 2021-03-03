@@ -1,0 +1,684 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Rebasing Win32 DLLs: The Whole Story</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_pagetest"></a></sup>Rebasing Win32 DLLs: The Whole Story</h1>
+<p>
+Ruediger R. Asche<br>
+Microsoft Developer Network Technology Group</p>
+<p>
+September 18, 1995</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="4424">
+</OBJECT><a href="javascript:sample1.Click()">Click to open or copy the files in the PAGETEST sample application for this technical article.</a></p>
+<h2>Abstract</h2>
+<p>
+This article discusses the ramifications of dynamic-link library (DLL) rebasing under both Microsoft® Windows NT™ and Windows® 95. ("Rebasing" in this context refers to the process of changing the base address of a DLL in memory space.) A sample application accompanies this article, as well as a suite of DLLs to provide comparison figures.</p>
+<h2>Introduction</h2>
+<p>
+One of the questions I have heard a lot recently from developers at Microsoft is, "Gee, what happens if the operating system has to rebase my DLLs? What is the penalty for that, and is there any way that I can prevent the penalty? Is there any way I can change the code to generate fewer fixups?" </p>
+<p>
+I thought that was a really good question, so I decided to temporarily relocate to Empiric-land, investigate the costs of DLL loading, and pour a bucket of numbers at your feet so that you can decide for yourself what to do about the DLLs.</p>
+<p>
+The results presented in this paper are probably not revolutionary, nor are they surprising: Prefer one large DLL over several small ones; make sure that the operating system does not need to search for the DLLs very long; and avoid many fixups if there is a chance that the DLL may be rebased by the operating system (or, alternatively, try to select your base addresses such that rebasing is unlikely). However, as the old saying goes, "The journey is the goal." In other words, on the way to writing this paper, I found a number of little things about DLLs and memory management that I think are worth sharing. A more appropriate title for the paper might actually have been "Bits and Pieces about DLLs."</p>
+<p>
+In this paper I describe a sample test application that I wrote to measure DLL loading times, as well as providing a set of DLLs to measure. </p>
+<h2>The Application</h2>
+<p>
+The architecture of the test set to measure dynamic-link library (DLL) load times is very simple: The PAGETEST application, written using the Microsoft® Foundation Class libraries (MFC), consists of two threads. The first (main application) thread creates and owns a mutex object. This first thread samples the current time and then calls <b>LoadLibrary</b> to explicitly load one of a number of libraries I provide (I discuss the libraries in the next section). Meanwhile, the second thread waits for the mutex object to become signaled.</p>
+<p>
+All of the libraries consist of the DLL entry procedure only. In the PROCESS_ATTACH dispatch point of the DLL entry procedure, the mutex object is signaled. At that point, the secondary application thread wakes up and computes the difference between the current time and the time sampled before <b>LoadLibrary</b> was called. This difference is roughly the elapsed time that was used to load the DLL into memory. The MFC application has an option to load and unload the DLL repeatedly (50 times) so that a meaningful average loading time can be computed.</p>
+<p>
+I will not discuss the specifics of the application here—it's a fairly straightforward MFC application, with all the relevant code located in the view class. The view is derived from <b>CEasyOutputView</b> to provide for easy display of results. (Please see <a href="msdn_seccpp.htm">"Windows NT Security in Theory and Practice"</a> for details.)</p>
+<p>
+Note that this empirical test has a number of drawbacks that may distort the actual results:
+<ul type=disc>
+<li>
+We are assuming that the time-sampling mechanism is efficient, reliable, and has a granularity that is fine enough. (I use the system performance counters.) <br><br></li>
+<li>
+We are assuming that the thread-switching mechanism is consistently efficient and does not have too bad an effect on the time it takes to wake up the secondary thread. <br><br></li>
+<li>
+The results from the tests naturally depend to a high degree on the underlying hardware (that is, the processor speed of the machine on which the test is run, the number of processors, the speed of the hard disk controller, and so forth). <br><br></li>
+<li>
+The results were sampled using specific versions of the software involved (operating system versions, C run-time library versions, and so forth). <br><br></li>
+<li>
+Normally most DLLs are loaded implicitly, not explicitly, and it is assumed that the implicit and explicit loading of DLLs takes the same amount of time, all other things being equal. </li>
+</ul>
+<p>
+To make things worse, the numbers I did obtain vary widely at times.</p>
+<p>
+Thus, you should take the results of the tests with a grain of salt. The most important deduction to make from the results is not the absolute load times, but the relative times—in other words, how changing one property changes the loading behavior, and how different strategies compare to each other. </p>
+<p>
+If you wish to recreate the test results on your machine, follow the DLL positioning instructions in the next section, run PTAPP.EXE, and choose Run All Tests from the Multiple Test menu.</p>
+<h2>The DLLs</h2>
+<p>
+I considered a number of properties of DLLs relevant to their load time:
+<ul type=disc>
+<li>
+The size of the library<br><br></li>
+<li>
+The number of items to be relocated<br><br></li>
+<li>
+Whether the DLL initializes C startup code or not<br><br></li>
+<li>
+Whether the DLL exports symbols or not<br><br></li>
+<li>
+Whether the DLL implicitly links to other libraries or not<br><br></li>
+<li>
+How long it takes the operating system to locate the DLL executable</li>
+</ul>
+<p>
+Aside from these issues, there are also a few factors independent of the DLL that determine how slowly or quickly a DLL can be loaded—for example, the underlying operating system, the overall current work load on the machine, the application's working set, whether the DLL needs to be rebased, and so forth. </p>
+<p>
+To make a long story short, I wrote 18 little (or not-so-little) DLLs that represent almost all permutations of the following properties:
+<ul type=disc>
+<li>
+DLL size (can be small or large)<ul type=disc>
+<li>
+If it's a large DLL, has load-time fixups or not</li>
+</ul>
+</li>
+<li>
+C run-time support (none, implicitly linked, or explicitly linked)<br><br></li>
+<li>
+Symbols exported from the DLL (yes or no)</li>
+</ul>
+<p>
+I loaded each of the 18 DLLs, under both Windows NT™ version 3.51 and Windows® 95 on the same machine, at its preferred base address and with the preferred virtual memory range taken. Each test was also run first with the DLL located in the current directory and then deep down in the path to measure how long it takes the operating system to locate the DLL in the search path. As I mentioned earlier, each test was run 50 times to obtain a meaningful average value. </p>
+<p>
+The first observation I made was that under Windows NT, the initial load time for any given DLL was about three times the time it would subsequently take to load the same DLL on the average. This is a side effect of Windows NT's memory management design: Once the DLL is initially loaded and subsequently unloaded, the pages that belong to the DLL image remain in memory; they are inserted into what is called the standby list (a system-maintained list of discarded pages that can be made available to the application if it should need the pages again or if another application requesting new memory should need them). For a more thorough description of the standby list, please consult Helen Custer's <i>Inside Windows NT</i>, pages 194–196. </p>
+<p>
+Reloading the DLL's pages from the standby pages is much more efficient than reloading from the disk. Over time, the pages will migrate from the standby list to the free list such that, if there is a lot of memory allocation and access activity goes on between the initial and subsequent DLL loading tests, the time difference will even out. To simulate this behavior (and make sure that I could obtain meaningful average DLL loading times from several tests), I added a little option that allows the test application to hog as much memory as it possibly can so that the standby list will be exhausted quickly. There is also a little utility that comes with the Windows NT Resource Kit that can be used to force pages off the standby list (CLEARMEM.EXE).</p>
+<p>
+That worked, but unfortunately, right after I freed the hogged memory, the load time was about 20 times the average load time—or 7 times the initial load time!</p>
+<p>
+This phenomenon put me into some kind of Catch-22 situation: On the one hand, I wanted to obtain a reliable average figure for DLL loading times under normal working conditions; on the other hand, the only reliable and consistent figures I could obtain were not the ones under normal working conditions! My way out of that dilemma is a little daring but, I hope, valid: I base my results on the comparisons between the average DLL load times and assume that the relationships between the initial and subsequent average load times are constant so that the comparison values are still meaningful under normal working conditions.</p>
+<p>
+If you wish to rebuild the DLLs or add your own DLL variations, or if you are just curious to see what I did to build 18 DLLs, read on; otherwise, skip this subsection and continue under the heading titled "The Theory."</p>
+<h3>Building the DLLs</h3>
+<p>
+The DLLs were built using Visual C++™ version 2.2 using a makefile generated by Visual C++. You will find the project in the attached sample code in the PAGETEST subdirectory. Each of the 18 DLLs is built from the same project; you should build each DLL as the retail (no debug) version and then copy the generated executable to a new location using the naming convention that follows.</p>
+<p>
+The PTAPP sample application expects the name of the DLL to encode the information about what the DLL contains. Each letter in the DLL's name represents one property, according to the following scheme:
+<ul type=disc>
+<li>
+The first letter expresses whether the DLL is small (that is, does not contain any data) or large (that is, has 100,000 static data elements). An <i>S</i> in this position indicates small, an <i>L</i> indicates large, and <i>F</i> indicates that all of the 100,000 data elements are initialized to a relocatable string, the address of which must be fixed up at load time when the DLL is rebased.<p class=tl>
+Note that 100,000 relocatable strings does not necessarily mean 100,000 relocations. There is a problem with the linker in Visual C++ version 2.<i>x</i> that will limit to 64K the number of relocatable items in a portable executable (PE) file. Thus, if you run an .EXE header utility such as YAHU on one of the DLLs whose name begins with an <i>F</i>, you will find that there are only about 34K of relocations. This problem will be fixed in upcoming versions of Visual C++.</P></li>
+<li>
+The second letter indicates whether the DLL supports C run-time code or not. This letter can either be <i>N</i> (meaning that the DLL has a custom entry point that does not call the C run-time initialization code), <i>C</i> (meaning that the DLL's entry point is <b>DllMain</b>, which implicitly initializes the C run-time support) or <i>D</i> (meaning that the DLL has a custom entry point that calls _CRT_INIT to initialize the C run-time library dynamically).<br><br></li>
+<li>
+Finally, the third letter is <i>N</i> if the DLL does not export any symbols or <i>E</i> if a function is exported. The remaining letters are currently unassigned.<p class=tl>
+For example, SCNNNNNN.DLL is a small DLL that implicitly calls the C run-time initialization code, but does not export a symbol. FNENNNNN.DLL is a large DLL with many relocations that does not call the C run-time initialization code but exports a symbol. </P></li>
+</ul>
+<p>
+In order not to introduce any unwanted side effects into the comparisons, I made the DLLs as small as I possibly could. The smallest DLL I provide has nothing but a custom DLL entry point that does not initialize the C run-time support code. </p>
+<p>
+There is no MFC support in any of the DLLs because MFC DLLs implicitly link to other DLLs and perform custom initializations that I did not want introduced into the measurements. All of the other variations of DLLs are built with small modifications to the project, as follows:
+<ul type=disc>
+<li>
+In order to make a small DLL into a large DLL, add the symbol MANYPAGES to the preprocessor directives. Generate a large DLL with many fixups by adding both MANYPAGES and FIXUPS to the preprocessor definitions. To build a DLL with a custom entry point that calls the C run-time initialization code, add the symbol DYNACRT; to build a DLL with implicit C run-time initialization code, add the symbol STANDARDENTRY and rename the DLL entry point in the Settings/Link/Entry text box to DllMain. Finally, to have the DLL export a symbol, add the preprocessor directive HASSYMBOLS. <br><br></li>
+<li>
+For the ambitious, I also define a symbol, HUGEBINARY, that will generate a really big DLL (a DLL with about 15,000 data pages which, if combined with the FIXUPS symbol, will yield about 15,000 relocations). The DLL is 40 to 61 MB in size, depending on whether you define FIXUPS or not; therefore, I do not include the binary in the DLL test set. </li>
+</ul>
+<p>
+Whatever options you use to build the DLL, the resulting executable will be called PAGETEST.DLL in the WINREL subdirectory of the PAGETEST project. After building the DLL, you should copy the DLL to a different location, renaming the DLL according to the above naming conventions.</p>
+<p>
+To see how searching for the DLL binary affects the load time, I kept two copies of each DLL on my machine—one in the same directory as PTAPP.EXE (the test application) and one in the subdirectory that is listed at the very end in the search path (in my case, C:\DOS). After having run the test with the DLL found in the same directory as the executable, I renamed all of the DLLs to force the operating system to look for the DLLs in another directory.</p>
+<p>
+When I built the DLLs, I ran into a few scenarios where I changed one option for test purposes and was unable to recreate the original configuration afterwards. Thus, just to make sure that you can rebuild the DLLs exactly as I built them, here are the project options I used.
+<ul type=disc>
+<li>
+Compiler<pre><code>/nologo /MT /W3 /GX /YX /O2 /D &lt;see above&gt; /FAcs /Fa "WinRel/" FR "WinRel/" /Fp 
+"WinRel/pagetest.pch" /Fo "WinRel" /c
+</code></pre>
+</li>
+<li>
+Preprocessor<p class=tl>
+The exact preprocessor options depend on the type of library built, as explained before.</P></li>
+<li>
+Linker<pre><code>kernel32 advapi msvcrt /nologo /subsystem:windows /DLL /incremental:no /PDB: 
+"WinRel/pagetest.pdb" /MACHINE:I386
+</code></pre>
+</li>
+</ul>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;The PE file format contains time stamps. That means that if you build the same DLL two times, the resulting binary images will not be identical. A byte-byte-byte file-comparison utility should report six differing bytes in two groups of three consecutive bytes, one for every pair of independently built, but otherwise identical, DLLs.</p>
+<h2>The Theory</h2>
+<p>
+The operating system has to go through these steps to load a DLL: 
+<ol>
+<li>
+Locate the DLL executable file on disk.<br><br></li>
+<li>
+Traverse the list of DLLs loaded into the application's address space to determine if the DLL is already loaded.<br><br></li>
+<li>
+Allocate the memory for the DLL to reside in and map the DLL binary into that memory. (In Windows NT, this happens through section objects.)<br><br></li>
+<li>
+Perform various manipulations in order for the DLL to work (that is, resolve fixups in the DLL, and so forth).</li>
+</ol>
+<p>
+Various factors determine how fast a DLL will be loaded. Here is a (possibly incomplete) list of the ones that need to be taken into consideration:
+<ul type=disc>
+<li>
+The underlying hardware and software: How fast the computer is and what operating system it runs.<br><br></li>
+<li>
+The current state of the system and the application: How tight the system is on virtual memory, and if the DLL can be loaded at the preferred base address.<br><br></li>
+<li>
+The DLL itself: How big it is, how many locations in the DLL need to be fixed up (in conjunction with two above), and whether the DLL implicitly links to other DLLs that also need to be loaded.</li>
+</ul>
+<p>
+This list tells us that rebasing a DLL is by no means the only factor that determines a DLL's loading time. In this article I present a lot of numbers that should give you an idea of how widely the loading time for a DLL can vary and how much an application can influence the loading time.</p>
+<p>
+Note that rebasing a DLL may result not only in a greater load time, but also in a penalty in pagefile usage. One of the first steps in loading a DLL consists of creating a section object—that is, a contiguous region of memory that is backed by the DLL executable file. Whenever a page of the DLL is removed from an application's working set, the operating system will reload that page from the DLL executable file the next time the page is accessed.</p>
+<p>
+Of course, when a DLL is rebased, this scheme no longer works because the pages that contain relocated addresses differ from the corresponding pages in the DLL executable image. Thus, as soon as the operating system attempts to fix up an address when loading an executable file, the corresponding page is copied (because the section was opened with the COPY_ON_WRITE flag), all the changes are made to the copy, and the operating system makes a note that from now on the page is to be swapped from and to the system pagefile instead of the executable image.</p>
+<p>
+There are two potential performance hits in this setup: First, each page that contains an address to be relocated takes up a page on the system pagefile (which will, in effect, reduce the amount of virtual memory available to all applications); and second, as the operating system performs the first fixup in a DLL's page, a new page must be allocated from the pagefile, and the entire page is copied.</p>
+<p>
+The act of performing fixups also increases a DLL's load time, although the algorithm that scans the relocation section of the DLL and applies the fixups is fairly efficient. (The complexity of the traversal is simply a linear function of the number of fixups to be performed.) </p>
+<h3>Fixups</h3>
+<p>
+A couple of frequently asked questions about DLL rebasing are, "What exactly is a fixup, and is there any way that I can code so that I avoid a lot of fixups in my executable?" The answer to both questions depends to a high degree on the platform for which a particular executable has been built. In this article, I will limit the discussion to executables built for Intel 386, 486, and Pentium processors. (Note that executables built for other platforms have different notions of what a fixup is.)</p>
+<p>
+On 386, 486, or Pentium processors, there are basically two things that can cause an address to be marked as relocatable: static objects and absolute jumps.</p>
+<p>
+First, if a static object is referenced by DLL code, the absolute address of the object is used (assuming that the DLL is loaded into its preferred address). For example, in the code fragment</p>
+<pre><code>LPSTR lpName="Name";
+</code></pre>
+<p>
+the DLL loader will allocate the string "Name" in the DLL's data segment and fill the beginning address of that string into the location that corresponds to the variable <i>lpName</i>. If the string "Name" must be relocated because the DLL could not be loaded at its base address, <i>lpName</i> must be updated accordingly. Note that in this case, every reference to <i>lpName</i> from within the code must also be fixed up.</p>
+<p>
+Objects that can be subject to relocation are literal strings (for example, the string "Name" in the example above), as well as global and static data of every type, including statically allocated C++ objects. Note that especially in C++ there may be many hidden cross-references from one static object to another. Uninitialized data will (trivially) not be fixed up during the relocation process, but references to uninitialized static data will.</p>
+<p>
+The second category of items that can be relocated in an i386 executable is absolute jumps and function calls, including calls to system functions. Note that there is not much you can do in your code to avoid relocations, except for cutting down on statically allocated data. One way to accomplish that would be to avoid resource references by name in favor of referencing resources by ordinal (inasmuch as each name that you explicitly use in your code automatically becomes a potentially relocatable item). </p>
+<p>
+I would not recommend, however, that you design your DLL code with the specific goal of minimizing load time unless (1) the number of statically allocated objects can be significantly reduced, and (2) such a coding practice does not sacrifice other goals in your software design.</p>
+<p>
+One optimization you can perform rather easily, however, is to sort your relocatable data out into only a few pages. It is obvious that two pages with one relocatable item each will both need to be backed by the pagefile if the DLL needs to be rebased. If both relocatable items will occur in the same page, there is only one page that is affected. You might want to check with the pragma (data_seg) directive to ensure that as many relocatable items as possible go into as few pages as absolutely necessary.</p>
+<h2>The Tools</h2>
+<p>
+The fun part about gathering the DLL load times was that I got to understand the internal workings of the operating systems, as well as the executable format, a little bit better. Here are a few tools I considered very useful for dissecting the DLLs as images and at run time:
+<ul type=disc>
+<li>
+An executable header utility (such as YAHU, written about in the technical article <a href="msdn_exeform.htm">"YAHU, or Yet Another Header Utility"</a>) can tell you almost everything about the DLL after it has been built but before it is loaded—for example, how many sections there are, how big each section is, how many relocations there are, and so forth.<br><br></li>
+<li>
+A process walker (for example, PWALK from the Win32 SDK) can tell you where in a process's address space a DLL has been loaded, and where the individual sections of the DLL go.<br><br></li>
+<li>
+A process viewer (for example PVIEW from the Windows NT Resource Kit) tells you how many pages the DLL uses in memory at any given time.<br><br></li>
+<li>
+The performance monitor that is shipped with Windows NT (by default installed in the Administrative Tools group) is an excellent tool to monitor the impact of DLL loading on the system, for example, in terms of pagefile usage.</li>
+</ul>
+<p>
+Let us look at how we can use these tools to get a better understanding of the internal workings of a DLL. Running YAHU on the DLL SNNNNNNN.DLL, we obtain the following information on the five sections in the DLL:
+<ul type=disc>
+<li>
+Section .TEXT, size 0x28 bytes, located 0x400 bytes behind the beginning of the file. This section contains the complete DLL code. This section will be loaded one page (0x1000) behind the start address of the DLL image.<br><br></li>
+<li>
+Section .DATA, size 9, located 0x600 bytes behind the beginning of the file. This section contains all the initialized data and will be loaded two pages (0x2000) behind the start address of the DLL image.<br><br></li>
+<li>
+Section .IDATA, size 0x6c, located 0x800 bytes behind the beginning of the file. In this section you will find the import data; that is, the names of the DLLs that the executable links to and the names of the functions called in those DLLs. This section will be loaded three pages (0x3000) behind the start address of the DLL image.<br><br></li>
+<li>
+Section .EDATA, size 0x35, located 0xA00 bytes behind the beginning of the file. This section contains the DLL's export information and will be loaded four pages (0x4000) behind the start address of the DLL image.<br><br></li>
+<li>
+Section .RELOC, size 0x32, located 0xC00 bytes into the file. This section contains the complete relocation information for the entire DLL and will be loaded five pages (0x5000) behind the start of the DLL image in memory.</li>
+</ul>
+<p>
+In other DLLs, you may find more sections—for example, the .BSS section, which contains uninitialized data.</p>
+<p>
+Note that the offsets of the respective sections in the file help you to look at the binary data. For example, open the DLL in binary mode in Visual C++, and scroll down to offset 0xc00. You will see eight bytes of heading followed by six data bytes. The exact format of the relocation records is described in the <i>Microsoft Systems Journal</i> article "Peering Inside the PE: A Tour of the Win32 Executable File Format" (Pietrek 1994) in the MSDN Library. Note that the information in the .RELOC section gives you all you need to determine where in memory the relocations will be performed.</p>
+<p>
+Thus, the DLL image of SNNNNNNN.DLL consists of six pages: The PE header and the five sections listed above, each of which happens to consist of one page. Now run PTAPP.EXE under control of PWALK, and select a small DLL with no exports and no CRT support from the Select DLL menu. You should see a message saying that SNNNNNNN.DLL was located somewhere on your hard drive. Choose Load DLL from the Run Single Tests menu. You should now see a message saying that the DLL was loaded at some address. Then go back to PWALK, rewalk the process, and scroll down to the address that PTAPP reported as the loading address (if the DLL was loaded at the preferred base address, this would be 0x10000000). You will then see the six pages of the DLL exactly in the order they were specified in the executable header. Note that the page that belongs to the .RELOC section is listed as a second page in the .EDATA section.</p>
+<p>
+Then run PVIEW.EXE and select the process PTAPP.EXE from the process list combo box. In the User Address Space group box, select SNNNNNNN.DLL from the combo box. You should now see all of the DLL's pages sorted by access type: The DLL is listed as occupying a total of 24K (six pages). 12K (or three pages) are listed as <i>read-only</i>—the DLL header page beginning at 0x10000000 and the two pages in the .EDATA section beginning at 0x10004000. One page in the .IDATA section is marked as <i>read/write</i>. (This must be <i>read/write</i> because an import designation may refer to a DLL that must be rebased, so entries in this section may actually have to be updated.) The one page in the .TEXT section is marked as <i>execute</i>, and the .DATA section page has <i>copy-on-write</i> protection.</p>
+<p>
+If you run the same procedure on one of the large DLLs, you will see that the .DATA section will grow as expected, and all of the relocatable data in that section will be marked as <i>copy-on-write</i>. As mentioned before, the <i>copy-on-write</i> scheme ensures that relocations will be performed not on the physical page of the DLL image, but on a copy on the pagefile.</p>
+<h2>The Numbers</h2>
+<p>
+One of the caveats I mentioned earlier about measuring DLL load times is that your mileage may vary greatly. I ran the test set several times and found that, although some patterns and general relationships can be detected, the influence of the overall machine work load may skew the results widely—differences of up to 20 percent from one test run to the other are not atypical.</p>
+<p>
+Let me first describe how I obtained the numbers and then interpret the results. Please refer to Appendix A for the test runs on which I based the evaluations in this paper.</p>
+<p>
+In order to obtain a set of numbers, run the test application PTAPP and choose Run All Tests from the Run Multiple Tests menu. This will invoke a script that loads all of the 18 DLLs 50 times each. (An individual scenario can be tested by choosing a particular DLL from the Select DLL menu, choosing Finish to locate the DLL and initialize the test, and then choosing Run Without Hogging from the Run Multiple Tests menu. A DLL can be loaded in a one-shot fashion using the Load DLL menu item from the Run Single Tests menu.) Caution: The test takes several minutes to complete. </p>
+<p>
+The result of each test will be displayed in the application's main window. The first line displays the resolution of the system performance counter (this can be used to compute absolute times), and after the last test, you will find a table of 36 figures. These numbers are the average load times (in performance-counter ticks) for each of the 18 DLLs loaded both at the preferred address and rebased. As I mentioned earlier, the number of ticks, in conjunction with the performance counter resolution, can be used to compute the absolute loading times through this formula:</p>
+<p>
+<b>loading times in seconds = number of ticks/ performance counter resolution.</b></p>
+<p>
+The test application also computes the relative load time in parentheses behind each result; this is based on the smallest result encountered while running the test.</p>
+<p>
+In order to obtain the four sets of 36 numbers each (as listed in Appendix A), you should run the test application four times: twice under Windows NT (once with the DLLs located in the same directory as PTAPP.EXE, and once with the DLLs located deep down in the search path), and twice under Windows 95 (same conditions).</p>
+<p>
+As I mentioned before, none of the results I present are groundbreakingly new nor surprising. Here are the important conclusions:
+<ul type=disc>
+<li>
+The figures for Windows NT and Windows 95 do not differ wildly, except that Windows 95 does seem to load small DLLs slower and large DLLs faster than Windows NT.<br><br></li>
+<li>
+All other things being equal, the size of the DLL does not matter; that is, the costs for loading a small DLL and a large DLL are pretty much equal. Thus, if possible, you should avoid writing a lot of small DLLs and instead write fewer large DLLs if load time is an issue for you. Note that this observation holds true over a very wide range of DLL sizes—when I ran the test on the huge binary DLL I mentioned earlier (the one with 15,000 pages), the load time did not differ very much from the load time for the small DLL that contains six pages total.<br><br></li>
+<li>
+Rebasing the DLL incurs an overhead of about 600 percent on Windows NT and around 400 percent on Windows 95. Note, however, that this implies a great number of fixups (34,000 in the sample suite). For a typical DLL, the number is much smaller on the average; for example, in the debug version of MFC30D.DLL, which ships with Visual C++ version 2.<i>x</i>, there are about 1700 fixups, which is about 5 percent of the 34,000 fixups in the sample suite.<br><br></li>
+<li>
+The single biggest factor that slows down the loading of DLLs is the <i>location</i> of the DLL. The documentation for <b>LoadLibrary</b> describes the algorithm that the operating system uses for locating the DLL image; a DLL located at the first search position (the current directory) loads in typically 20 percent or less of the time as the same DLL located deep down in the path loads. It is fairly obvious that the exact load time difference depends a lot on the length of the path, the efficiency of the underlying file system, and the number of files and directories that need to be searched.</li>
+</ul>
+<p>
+Here are the numbers in neat, digestible format. Please refer to Appendix A for information on how the numbers were pulled together.</p>
+<p>
+<img src="pagetest_1.gif" border=0></p>
+<p class=label>
+<b>Figure 1. Windows NT 3.51 DLL load times</b></p>
+<p>
+<img src="pagetest_2.gif" border=0></p>
+<p class=label>
+<b>Figure 2. Windows 95 DLL load times</b></p>
+<h2>The Recommendations</h2>
+<p>
+The single, major thing you can do to speed up DLL loading is to ensure that the operating system does not spend a lot of time locating the DLL—either put the DLL in the same directory from which the executable is started, or start the executable with your environment variable set up so that the DLL in question can be located quickly. This is something you can do without even touching the DLL. If you load the DLL repeatedly and explicitly, you can use the <b>SearchPath</b> application programming interface (API) to first obtain the full path name of the DLL location so that you can provide the operating system with an exact location before loading the DLL.</p>
+<p>
+The other main optimization that can help you speed up DLL loading—if there are a significant number of relocation items in the DLL—is to try to ensure that the DLL will not have to be rebased by the operating system. You will also notice that for very small DLLs, the presence of the C run-time initialization code may slow down the DLL loading a little bit.</p>
+<p>
+As you can see from the numbers above, there is a fixed cost in loading a DLL, regardless of its size; thus, you are much better off writing one bigger DLL instead of a number of small DLLs.</p>
+<p>
+Finally, I need to reiterate that due to the way both Windows NT and Windows 95 handle the management of pages that are to be discarded (the pages are, in fact, kept in memory and will be reused over time), the loading of an executable is much faster if the same executable has already been loaded into any application's address space or has recently been loaded and is still on the standby list.</p>
+<h2>What Else Is There?</h2>
+<p>
+I wouldn't like to end this article without mentioning another issue that is related to DLL loading: binding import addresses to external DLLs. Fortunately for me, there is no need to explicitly discuss this issue here because pretty much everything that is to be said has already been said in Matt Pietrek's article series on DLL binding in the "Windows Q&amp;A" column in <i>Microsoft Systems Journal</i>, which describes the internals of DLL import binding as well as the usage of the BIND utility. (See the reference in the "Bibliography" section.)</p>
+<h2>Bibliography</h2>
+<p>
+Custer, Helen. <i>Inside Windows NT</i>. Redmond, WA: Microsoft Press, 1993.</p>
+<p>
+Pietrek, Matt. "Peering Inside the PE: A Tour of the Win32 Executable File Format. "<i>Microsoft Systems Journal</i> 9 (March 1994). (MSDN Library, Books and Periodicals)</p>
+<p>
+Pietrek, Matt. "Windows Q&amp;A." <i>Microsoft Systems Journal</i> 10 (July 1995). (MSDN Library, Books and Periodicals)</p>
+<p>
+Pietrek, Matt. "Windows Q&amp;A." <i>Microsoft Systems Journal</i> 10 (August 1995). (MSDN Library, Books and Periodicals)</p>
+<h2>Appendix A. Results from a Test Run</h2>
+<p>
+All tests were executed on an i486 machine running at 33 MHz with 24 MB of RAM. Note that the references (1.0 base value) differ from test set to test set. In the charts, the values from the respective second test sets (DLLs located in the search path) have been adjusted relative to the reference value of the first test set.</p>
+<p>
+<b>Table 1. Windows NT 3.51, DLLs Located in Current Directory (Reference: 1.0 == 17.5 ms)</b></p>
+<p class=label>
+<b>1a. DLLs Loaded at Preferred Address</b></p>
+<table border=1 cellpadding=5 cols=4 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=32%><b>DLL Type</b></td>
+<td class=label width=18%><b>Small DLL</b></td>
+<td class=label width=18%><b>Large DLL</b></td>
+<td class=label width=32%><b>Large DLL with Fixups</b></td>
+</tr>
+<tr valign=top>
+<td width=32%>No CRT, no exports</td>
+<td width=18%>1.0</td>
+<td width=18%>1.0</td>
+<td width=32%>1.0</td>
+</tr>
+<tr valign=top>
+<td width=32%>No CRT, exports</td>
+<td width=18%>1.1</td>
+<td width=18%>1.0</td>
+<td width=32%>1.1</td>
+</tr>
+<tr valign=top>
+<td width=32%>DllMain, no exports</td>
+<td width=18%>1.25</td>
+<td width=18%>1.22</td>
+<td width=32%>1.24</td>
+</tr>
+<tr valign=top>
+<td width=32%>DllMain, exports</td>
+<td width=18%>1.23</td>
+<td width=18%>1.18</td>
+<td width=32%>1.21</td>
+</tr>
+<tr valign=top>
+<td width=32%>CRT_INIT, no exports</td>
+<td width=18%>1.18</td>
+<td width=18%>1.2</td>
+<td width=32%>1.15</td>
+</tr>
+<tr valign=top>
+<td width=32%>CRT_INIT, exports</td>
+<td width=18%>1.2</td>
+<td width=18%>1.19</td>
+<td width=32%>1.21</td>
+</tr>
+</table><br>
+<p class=label>
+<b>1b. DLLs Rebased</b></p>
+<table border=1 cellpadding=5 cols=4 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=32%><b>DLL Type</b></td>
+<td class=label width=18%><b>Small DLL</b></td>
+<td class=label width=19%><b>Large DLL</b></td>
+<td class=label width=31%><b>Large DLL with Fixups</b></td>
+</tr>
+<tr valign=top>
+<td width=32%>No CRT, no exports</td>
+<td width=18%>1.25</td>
+<td width=19%>1.23</td>
+<td width=31%>6.4</td>
+</tr>
+<tr valign=top>
+<td width=32%>No CRT, exports</td>
+<td width=18%>1.26</td>
+<td width=19%>1.3</td>
+<td width=31%>6.38</td>
+</tr>
+<tr valign=top>
+<td width=32%>DllMain, no exports</td>
+<td width=18%>1.4</td>
+<td width=19%>1.4</td>
+<td width=31%>6.5</td>
+</tr>
+<tr valign=top>
+<td width=32%>DllMain, exports</td>
+<td width=18%>1.29</td>
+<td width=19%>1.42</td>
+<td width=31%>6.52</td>
+</tr>
+<tr valign=top>
+<td width=32%>CRT_INIT, no exports</td>
+<td width=18%>1.4</td>
+<td width=19%>1.4</td>
+<td width=31%>6.45</td>
+</tr>
+<tr valign=top>
+<td width=32%>CRT_INIT, exports</td>
+<td width=18%>1.3</td>
+<td width=19%>1.3</td>
+<td width=31%>6.4</td>
+</tr>
+</table><br>
+<p>
+<b>Table 2. Windows NT 3.51, DLLs Located in Search Path (Reference: 1.0 == 85.4 ms)</b></p>
+<p class=label>
+<b>2a. DLLs Loaded at Preferred Address</b></p>
+<table border=1 cellpadding=5 cols=4 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=33%><b>DLL Type</b></td>
+<td class=label width=18%><b>Small DLL</b></td>
+<td class=label width=18%><b>Large DLL</b></td>
+<td class=label width=31%><b>Large DLL with Fixups</b></td>
+</tr>
+<tr valign=top>
+<td width=33%>No CRT, no exports</td>
+<td width=18%>1.0</td>
+<td width=18%>1.0</td>
+<td width=31%>1.0</td>
+</tr>
+<tr valign=top>
+<td width=33%>No CRT, exports</td>
+<td width=18%>1.0</td>
+<td width=18%>1.0</td>
+<td width=31%>1.0</td>
+</tr>
+<tr valign=top>
+<td width=33%>DllMain, no exports</td>
+<td width=18%>1.0</td>
+<td width=18%>1.0</td>
+<td width=31%>1.0</td>
+</tr>
+<tr valign=top>
+<td width=33%>DllMain, exports</td>
+<td width=18%>1.0</td>
+<td width=18%>1.0</td>
+<td width=31%>1.0</td>
+</tr>
+<tr valign=top>
+<td width=33%>CRT_INIT, no exports</td>
+<td width=18%>1.0</td>
+<td width=18%>1.0</td>
+<td width=31%>1.1</td>
+</tr>
+<tr valign=top>
+<td width=33%>CRT_INIT, exports</td>
+<td width=18%>1.0</td>
+<td width=18%>1.0</td>
+<td width=31%>1.0</td>
+</tr>
+</table><br>
+<p class=label>
+<b>2b. DLLs Rebased</b></p>
+<table border=1 cellpadding=5 cols=4 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=32%><b>DLL Type</b></td>
+<td class=label width=19%><b>Small DLL</b></td>
+<td class=label width=18%><b>Large DLL</b></td>
+<td class=label width=31%><b>Large DLL with Fixups</b></td>
+</tr>
+<tr valign=top>
+<td width=32%>No CRT, no exports</td>
+<td width=19%>1.1</td>
+<td width=18%>1.0</td>
+<td width=31%>2.1</td>
+</tr>
+<tr valign=top>
+<td width=32%>No CRT, exports</td>
+<td width=19%>1.1</td>
+<td width=18%>1.0</td>
+<td width=31%>2.1</td>
+</tr>
+<tr valign=top>
+<td width=32%>DllMain, no exports</td>
+<td width=19%>1.1</td>
+<td width=18%>1.1</td>
+<td width=31%>2.1</td>
+</tr>
+<tr valign=top>
+<td width=32%>DllMain, exports</td>
+<td width=19%>1.0</td>
+<td width=18%>1.0</td>
+<td width=31%>2.1</td>
+</tr>
+<tr valign=top>
+<td width=32%>CRT_INIT, no exports</td>
+<td width=19%>1.1</td>
+<td width=18%>1.1</td>
+<td width=31%>2.1</td>
+</tr>
+<tr valign=top>
+<td width=32%>CRT_INIT, exports</td>
+<td width=19%>1.1</td>
+<td width=18%>1.0</td>
+<td width=31%>2.1</td>
+</tr>
+</table><br>
+<p>
+<b>Table 3. Windows 95, DLLs Located in Current Directory (Reference: 1.0 == 21.0 ms)</b></p>
+<p class=label>
+<b>3a. DLLs Loaded at Preferred Address</b></p>
+<table border=1 cellpadding=5 cols=4 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=32%><b>DLL Type</b></td>
+<td class=label width=19%><b>Small DLL</b></td>
+<td class=label width=18%><b>Large DLL</b></td>
+<td class=label width=31%><b>Large DLL with Fixups</b></td>
+</tr>
+<tr valign=top>
+<td width=32%>No CRT, no exports</td>
+<td width=19%>1.0</td>
+<td width=18%>1.2</td>
+<td width=31%>1.2</td>
+</tr>
+<tr valign=top>
+<td width=32%>No CRT, exports</td>
+<td width=19%>1.0</td>
+<td width=18%>1.2</td>
+<td width=31%>1.1</td>
+</tr>
+<tr valign=top>
+<td width=32%>DllMain, no exports</td>
+<td width=19%>1.0</td>
+<td width=18%>1.2</td>
+<td width=31%>1.2</td>
+</tr>
+<tr valign=top>
+<td width=32%>DllMain, exports</td>
+<td width=19%>1.1</td>
+<td width=18%>1.2</td>
+<td width=31%>1.2</td>
+</tr>
+<tr valign=top>
+<td width=32%>CRT_INIT, no exports</td>
+<td width=19%>1.0</td>
+<td width=18%>1.2</td>
+<td width=31%>1.1</td>
+</tr>
+<tr valign=top>
+<td width=32%>CRT_INIT, exports</td>
+<td width=19%>1.0</td>
+<td width=18%>1.2</td>
+<td width=31%>1.2</td>
+</tr>
+</table><br>
+<p class=label>
+<b>3b. DLLs Rebased</b></p>
+<table border=1 cellpadding=5 cols=4 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=33%><b>DLL Type</b></td>
+<td class=label width=18%><b>Small DLL</b></td>
+<td class=label width=19%><b>Large DLL</b></td>
+<td class=label width=30%><b>Large DLL with Fixups</b></td>
+</tr>
+<tr valign=top>
+<td width=33%>No CRT, no exports</td>
+<td width=18%>1.1</td>
+<td width=19%>1.2</td>
+<td width=30%>4.0</td>
+</tr>
+<tr valign=top>
+<td width=33%>No CRT, exports</td>
+<td width=18%>1.1</td>
+<td width=19%>1.2</td>
+<td width=30%>3.8</td>
+</tr>
+<tr valign=top>
+<td width=33%>DllMain, no exports</td>
+<td width=18%>1.1</td>
+<td width=19%>1.2</td>
+<td width=30%>4.0</td>
+</tr>
+<tr valign=top>
+<td width=33%>DllMain, exports</td>
+<td width=18%>1.1</td>
+<td width=19%>1.2</td>
+<td width=30%>4.0</td>
+</tr>
+<tr valign=top>
+<td width=33%>CRT_INIT, no exports</td>
+<td width=18%>1.1</td>
+<td width=19%>1.2</td>
+<td width=30%>4.0</td>
+</tr>
+<tr valign=top>
+<td width=33%>CRT_INIT, exports</td>
+<td width=18%>1.1</td>
+<td width=19%>1.2</td>
+<td width=30%>4.1</td>
+</tr>
+</table><br>
+<p>
+<b>Table 4. Windows 95, DLLs Located in Search Path (Reference: 1.0 == 94.7 ms)</b></p>
+<p class=label>
+<b>4a. DLLs Loaded at Preferred Address</b></p>
+<table border=1 cellpadding=5 cols=4 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=33%><b>DLL Type</b></td>
+<td class=label width=18%><b>Small DLL</b></td>
+<td class=label width=19%><b>Large DLL</b></td>
+<td class=label width=30%><b>Large DLL w/ Fixups</b></td>
+</tr>
+<tr valign=top>
+<td width=33%>No CRT, no exports</td>
+<td width=18%>1.0</td>
+<td width=19%>1.0</td>
+<td width=30%>1.1</td>
+</tr>
+<tr valign=top>
+<td width=33%>No CRT, exports</td>
+<td width=18%>1.0</td>
+<td width=19%>1.0</td>
+<td width=30%>1.0</td>
+</tr>
+<tr valign=top>
+<td width=33%>DllMain, no exports</td>
+<td width=18%>1.0</td>
+<td width=19%>1.0</td>
+<td width=30%>1.1</td>
+</tr>
+<tr valign=top>
+<td width=33%>DllMain, exports</td>
+<td width=18%>1.0</td>
+<td width=19%>1.0</td>
+<td width=30%>1.0</td>
+</tr>
+<tr valign=top>
+<td width=33%>CRT_INIT, no exports</td>
+<td width=18%>1.0</td>
+<td width=19%>1.0</td>
+<td width=30%>1.0</td>
+</tr>
+<tr valign=top>
+<td width=33%>CRT_INIT, exports</td>
+<td width=18%>1.0</td>
+<td width=19%>1.0</td>
+<td width=30%>1.1</td>
+</tr>
+</table><br>
+<p class=label>
+<b>4b. DLLs Rebased</b></p>
+<table border=1 cellpadding=5 cols=4 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=33%><b>DLL Type</b></td>
+<td class=label width=18%><b>Small DLL</b></td>
+<td class=label width=19%><b>Large DLL</b></td>
+<td class=label width=30%><b>Large DLL with Fixups</b></td>
+</tr>
+<tr valign=top>
+<td width=33%>No CRT, no exports</td>
+<td width=18%>1.0</td>
+<td width=19%>1.0</td>
+<td width=30%>1.7</td>
+</tr>
+<tr valign=top>
+<td width=33%>No CRT, exports</td>
+<td width=18%>1.0</td>
+<td width=19%>1.1</td>
+<td width=30%>1.7</td>
+</tr>
+<tr valign=top>
+<td width=33%>DllMain, no exports</td>
+<td width=18%>1.0</td>
+<td width=19%>1.1</td>
+<td width=30%>1.7</td>
+</tr>
+<tr valign=top>
+<td width=33%>DllMain, exports</td>
+<td width=18%>1.0</td>
+<td width=19%>1.0</td>
+<td width=30%>1.7</td>
+</tr>
+<tr valign=top>
+<td width=33%>CRT_INIT, no exports</td>
+<td width=18%>1.0</td>
+<td width=19%>1.1</td>
+<td width=30%>1.7</td>
+</tr>
+<tr valign=top>
+<td width=33%>CRT_INIT, exports</td>
+<td width=18%>1.0</td>
+<td width=19%>1.0</td>
+<td width=30%>1.7</td>
+</tr>
+</table><br>
+</BODY>
+</HTML>

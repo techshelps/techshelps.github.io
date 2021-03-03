@@ -1,0 +1,270 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML>
+<HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Memory Hooks</TITLE>
+<style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD>
+<BODY BGPROPERTIES="FIXED" TEXT="#000000" BGCOLOR="#FFFFFF">
+
+<FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<H4><A NAME="DDK_Memory_Hooks"></A>Memory Hooks</H4>
+<P>
+A VDD can install a memory hook function called by the system when an MS-DOS
+application tries to access a specified range of memory on the device. The VDD
+installs a memory hook function by calling <B>VDDInstallMemoryHook</B>&nbsp;in the
+VDD initialization routine, specifying a pointer to the callback function and
+a range of memory it supports. The VDD should install a memory hook for all
+ranges of board memory the application will attempt to access.
+<P>
+The VDM sizes the memory ranges you specify for your memory hooks to page
+boundaries. Two VDDs in the same VDM cannot hook overlapping ranges of memory.
+<P>
+<B>Note</B>&nbsp; During VDM initialization, valid areas of ROM on plug-in boards
+are automatically mapped into the VDM address space. Thus, a VDD does not have
+to install a memory hook for the ROM on its board.
+<P>
+A VDD memory hook is called if the application accesses an invalid memory
+range on which a VDD has placed a memory hook. The chain of events looks like
+this:
+<OL>
+<LI>
+The application tries to access memory in the board’s address range.
+<P>
+<LI>
+Because the Windows NT memory manager has marked that range as not present,
+the page fault handler is called and finds that the memory has not been
+swapped out, but it is invalid.
+<P>
+<LI>
+The page fault handler then asks the VDM to verify if the memory is hooked by
+one of its registered VDD memory handlers.
+<P>
+<LI>
+The VDM calls the memory hook the VDD installed for that range of memory. The
+memory hook can either:
+<P>
+<UL>
+<LI>
+Validate the range of memory by calling <B>VDDAllocMem</B>. When the memory
+hook returns, the system retries the instruction that caused the original page
+fault.
+<P>
+<LI>
+Modify the CS:IP so the offending access instruction is not retried.
+</UL>
+</OL>
+<P>
+<B>Note</B>&nbsp; Windows NT assumes you have solved the page-fault problem when
+your memory hook returns. The VDD callback function must either allocate some
+memory to validate the invalid range or modify the CS:IP so that the offending
+instruction is not retried. Failure to do either can cause an infinite loop in
+the page fault handler.
+<P>
+After the VDD has allocated a buffer for the range covered by its memory hook,
+the hook is not called again unless you deallocate some or all of that range,
+causing another page fault in that range. Use <B>VDDFreeMem</B>&nbsp;to deallocate
+memory allocated with <B>VDDAllocMem</B>. These two functions ensure the
+memory operations are performed in a platform-independent manner.
+<P>
+In a typical scenario, the VDD memory hook is called the first time the
+application tries to access the VDD’s memory-mapped range. The memory hook
+calls <B>VDDAllocMem</B>&nbsp;to map that range onto the virtual address space.
+Subsequent accesses to that range proceed normally. The VDD eventually
+transfers the data in its buffer to the actual device hardware by calling the
+device driver. How often that transfer takes place depends on the operating
+characteristics of the application and the hardware. The need to transfer data
+is often signaled by a command sequence coming in through the I/O ports, as
+described in <A HREF="vdd_8.htm">I/O Ports</A>. Alternatively, a VDD can
+create its own worker thread responsible for flushing the data to the Windows
+NT driver. This worker thread can then use <B>Sleep </B>or <B>WaitForSingleObject
+</B>with a timeout to get timer functionality.
+<P>
+Likewise, the VDD can periodically request services from the kernel-mode
+device driver to offload data from the board memory to the VDD buffer so it
+can be consumed by the application. If the memory hook encounters an
+unrecoverable error, such as a failure to allocate memory, it should put up a
+message to the user by calling <B>MessageBox</B>&nbsp;and then call <B>VDDTerminateVDM</B>.
+<P>
+The memory hook function is called by using the address on which the page
+fault occurred and an argument that tells whether it was a read or a write
+operation that caused the fault. There is no information given to identify the
+operand value. If the VDD needs to know this information, it can use <B>GetCS</B>
+and <B>GetIP</B>&nbsp;to get the segmented address of the offending instruction,
+use <B>GetVDMPointer</B>&nbsp;to convert it to a 32-bit address, and then use that
+address to decode the instruction causing the page fault.
+<P>
+The installation process for memory hooks is very similar to that described
+for I/O hooks <A HREF="vdd_8.htm">I/O Ports</A>. Specify a pointer to the VDD
+memory hook callback function and a range of memory the device supports, and
+then call <B>VDDInstallMemoryHook</B>&nbsp;in the initialization routine of the
+VDD.
+<P>
+The VDD must call <B>VDDDeinstallMemoryHook</B>&nbsp;to remove the memory hook when
+the VDD is terminated. Before removing its memory hook, a VDD should call <B>VDDFreeMem</B>
+to free any memory it allocated with <B>VDDAllocMem</B>. When the VDD
+deinstalls a memory hook, the range of memory supported by that hook is marked
+as invalid by the Windows NT memory manager. The following code shows a
+template of a memory hook and its installation.
+<PRE><FONT FACE="Courier" SIZE="2">/** Global variables **/
+
+HANDLE  hVDD;&#09;&#09;&#09;/* VDD module handle */
+HANDLE  hVddHeap;&#09;&#09;/* VDD local heap */
+PBYTE   IOBuffer;&#09;&#09;/* buffer to simulate I/O Read and Write */
+ULONG   MIOAddress; &#09;&#09;/* memory mapped I/O linear address */
+PVOID   BaseAddress;&#09;&#09;/* memory mapped I/O virtual address */
+
+BOOL VDDInitialize(HANDLE hVdd, DWORD dwReason, LPVOID lpReserved)
+
+/*++
+
+Routine Description:
+
+&nbsp; &nbsp; The DllEntryPoint for the VDD that handles initialization and termination.
+
+Arguments:
+&nbsp; &nbsp; hVdd   - The handle to the VDD
+&nbsp; &nbsp; Reason - flag word that indicates why the Dll Entry Point was called
+&nbsp; &nbsp; lpReserved - Unused
+
+Return Value:
+&nbsp; &nbsp; BOOL bRet - if (dwReason == DLL_PROCESS_ATTACH)
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;TRUE    - Dll Initialization successful
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;FALSE   - Dll Initialization failed
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; else
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;always returns TRUE
+--*/
+
+{
+&nbsp; &nbsp; int     i;
+&nbsp; &nbsp; static BOOLEAN IOHook;             /* True, if we installed an I/O &#09;<BR>&#09;&#09;&#09;&#09;&#09;&#09;&#09;&#09;&#09;&#09;  hooked. */
+&nbsp; &nbsp; static BOOLEAN MIOHook;            /* True, if we installed a memory <BR>&#09;&#09;&#09;&#09;&#09;&#09;&#09;&#09;&#09;&#09;  hook. */
+&nbsp; &nbsp; static VDD_IO_PORTRANGE PortRange;
+&nbsp; &nbsp; VDD_IO_HANDLERS  IOHandlers;
+
+
+/**
+&nbsp; &nbsp; Keep a copy of VDD handle in a global variable so the other
+&nbsp; &nbsp; functions can see it.
+**/
+&nbsp; &nbsp; hVDD = hVdd;
+
+&nbsp; &nbsp; switch (dwReason) {
+
+&nbsp; &nbsp; case DLL_PROCESS_ATTACH:
+
+&nbsp; &nbsp; &nbsp; &nbsp; // Allocate the VDD&#39;s local heap.
+&nbsp; &nbsp; &nbsp; &nbsp; hVddHeap = HeapCreate(0, 0x1000, 0x10000);
+
+&nbsp; &nbsp; if (!hVddHeap) {
+&nbsp; &nbsp; &nbsp; &nbsp; OutputDebugString(&quot;VDD: Can&#39;t create local heap&quot;);
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; return FALSE;
+&nbsp; &nbsp; }
+
+&nbsp; &nbsp; &nbsp; &nbsp; IOBuffer = (PBYTE)HeapAlloc(hVddHeap,0,IO_PORT_RANGE);
+
+&nbsp; &nbsp; if (!IOBuffer)&#09;{
+&nbsp; &nbsp; &nbsp; &nbsp; OutputDebugString(&quot;VDD: Can&#39;t allocate IO buffer from heap&quot;);
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; HeapDestroy(hVddHeap);
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; return FALSE;
+&nbsp; &nbsp; }
+
+&nbsp; &nbsp; &nbsp; &nbsp; // Communicate your departure to the appropriate driver.
+
+&nbsp; &nbsp; // Set emulated I/O to floating.
+&nbsp; &nbsp; &nbsp; &nbsp; for (i = 0 ; i &lt; IO_PORT_RANGE; i++)
+&nbsp; &nbsp; &nbsp; &nbsp; IOBuffer[i] = FLOATING_IO;
+
+&nbsp; &nbsp; IOHandlers.inb_handler = MyInB;
+&nbsp; &nbsp; IOHandlers.inw_handler = NULL;
+&nbsp; &nbsp; IOHandlers.insb_handler = NULL;
+&nbsp; &nbsp; IOHandlers.insw_handler = NULL;
+&nbsp; &nbsp; IOHandlers.outb_handler = MyOutB;
+&nbsp; &nbsp; IOHandlers.outw_handler = NULL;
+&nbsp; &nbsp; IOHandlers.outsb_handler = NULL;
+&nbsp; &nbsp; IOHandlers.outsw_handler = NULL;
+&nbsp; &nbsp; PortRange.First = IO_PORT_FIRST;
+&nbsp; &nbsp; PortRange.Last = IO_PORT_LAST;
+
+&nbsp; &nbsp; // Hook I/O mapped I/O.
+&nbsp; &nbsp; IOHook = VDDInstallIOHook(hVDD, (WORD) 1, &amp;PortRange, &amp;IOHandlers);
+&nbsp; &nbsp; // Get 32 bits linear address of memory-mapped I/O.
+&nbsp; &nbsp; MIOAddress = (ULONG) GetVDMPointer(MIO_ADDRESS, MIO_PORT_RANGE, 0);
+&nbsp; &nbsp; // Hook memory-mapped I/O.
+&nbsp; &nbsp; MIOHook = VDDInstallMemoryHook(hVDD, (PVOID) MIOAddress, <BR>&#09;&#09;&#09;&#09;&#09;&#09;MIO_PORT_RANGE, <BR>&#09;&#09;&#09;&#09;&#09;&#09;(PVDD_MEMORY_HANDLER)MyMIOHandler);
+&nbsp; &nbsp; break;
+
+&nbsp; &nbsp; case DLL_PROCESS_DETACH:
+
+&nbsp; &nbsp; &nbsp; &nbsp; // Communicate your departure to the appropriate driver.
+&nbsp; &nbsp; if (IOHook)
+&nbsp; &nbsp; &nbsp; &nbsp; VDDDeInstallIOHook(hVDD, 1, &amp;PortRange);
+&nbsp; &nbsp; if (MIOHook) {
+&nbsp; &nbsp; &nbsp; &nbsp; VDDDeInstallMemoryHook(hVDD, (PVOID) MIOAddress, MIO_PORT_RANGE);
+&nbsp; &nbsp; &nbsp; &nbsp; if (BaseAddress) {
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; VDDFreeMem(BaseAddress, PAGE_SIZE, MEM_DECOMMIT);
+&nbsp; &nbsp; &nbsp; &nbsp; }
+&nbsp; &nbsp; }
+
+&nbsp; &nbsp; &nbsp; &nbsp; // Deallocate VDD&#39;s local heap, if needed.
+&nbsp; &nbsp; &nbsp; &nbsp; HeapDestroy(hVddHeap);
+&nbsp; &nbsp; &nbsp; &nbsp; break;
+
+&nbsp; &nbsp; default:
+&nbsp; &nbsp; &nbsp; &nbsp; break;
+&nbsp; &nbsp; }
+
+&nbsp; &nbsp; return TRUE;
+}
+
+
+VOID MyInB(WORD&#09;Port, PBYTE Buffer)
+{
+// Provide the data from our buffer.
+&nbsp; &nbsp; *Buffer = IOBuffer[Port - IO_PORT_FIRST];
+}
+
+VOID MyOutB(WORD Port, BYTE Data)
+{
+&nbsp; &nbsp; // Update our local buffer.
+&nbsp; &nbsp; // In a real application, the VDD might want to call its associated
+&nbsp; &nbsp; // device driver to update the change.
+
+&nbsp; &nbsp; IOBuffer[Port - IO_PORT_FIRST] = (BYTE)Data;
+&nbsp; &nbsp; // If the I/O port is the one to trigger DMA operation, do it.
+&nbsp; &nbsp; // To demonstrate the two options in handling a DMA operation, we
+&nbsp; &nbsp; // use two ports here to trigger different DMA operation schemes.
+
+&nbsp; &nbsp; if (Port == IO_PORT_FIRE_DMA_FAST) {
+&nbsp; &nbsp; FastDMA( );
+&nbsp; &nbsp; }
+&nbsp; &nbsp; else {
+&nbsp; &nbsp; if(Port == IO_PORT_FIRE_DMA_SLOW) {
+&nbsp; &nbsp; &nbsp; &nbsp; SlowDMA( );
+&nbsp; &nbsp; &nbsp;}
+&nbsp; &nbsp; }
+}
+
+
+VOID MyMIOHandler(
+ULONG&#09;Address,&#09;&#09;&#09;// faulting linear address
+ULONG&#09;RWFlags &#09;&#09;&#09;// 1 if write operation, 0 if read
+)
+{
+
+&nbsp; &nbsp; // Map the memory for the memory-mapped I/O so we won&#39;t
+&nbsp; &nbsp; // get a page fault on our memory-mapped I/O after this.
+&nbsp; &nbsp; // We may reserve the memory during  DLL_PROCESS_ATTACH by using
+&nbsp; &nbsp; // MEM_RESERVE rather than MEM_COMMIT, as we did here.
+&nbsp; &nbsp; // The solution applied here is not the best, although it
+&nbsp; &nbsp; // is the simplest. A better way to handle memory-mapped
+&nbsp; &nbsp; // I/O is to hook the page fault as we did here and decode the<BR>&#09;// faulting instruction, simulate its operation, and advance 16 bits <BR>&#09;// application program counter(getIP and setIP).
+
+&nbsp; &nbsp; BaseAddress = VDDAllocMem ((LPVOID) MIOAddress, PAGE_SIZE, MEM_COMMIT, PAGE_READWRITE);
+&nbsp; &nbsp; if (!BaseAddress) {
+&nbsp; &nbsp; OutputDebugString(&quot;VDD: Can&#39;t allocate virtual memory&quot;);
+&nbsp; &nbsp; }
+}
+</FONT></PRE>
+<P></FONT>
+</BODY>
+</HTML>

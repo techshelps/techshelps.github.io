@@ -1,0 +1,123 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Technical Details</title>
+<style>@import url(stylesheets/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="stylesheets/msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000>
+<FONT FACE="Verdana,Arial,Helvetica" SIZE="2">
+<h1><a name="technicaldetails"></a>Technical Details</h1>
+<p>
+Let’s look at some of the technical aspects of the Internet Software Update application (IntSoft.VBP).</p>
+<p>
+The connection information is stored in an Access database. This makes it easy to administer the details of the various sites from which you want to retrieve software. Using the Visual Basic data-bound grid also makes it easy to maintain this information. The application loops through the individual site entries in the database and processes them one at a time.</p>
+<p>
+The user name and password details stored in the database are supplied to the Internet Transfer Control. The Internet Transfer Control manages default values for the properties, so it doesn’t matter whether or not there are values for these fields. You simply assign values to the Internet Transfer Control and continue. (In the following examples, the Internet Transfer Control is named <i>icMain </i>and the recordset containing site information is <i>m_rstSites</i>.)</p>
+<p>
+<img src="f04rf03.gif" border=0></p>
+<p class=blue>
+<b>Figure 4-3  Sample application using the <i>Execute </i>method</b></p>
+<pre><code>' Supply UserName/Password to Internet Transfer Control.
+' The control will provide default properties if UserName
+' or Password is NULL.
+If Not IsNull(m_rstSites("UserName")) Then
+    icMain.UserName = m_rstSites("UserName")
+Else
+    icMain.UserName = ""
+End If
+
+If Not IsNull(m_rstSites("Password")) Then
+    icMain.Password = m_rstSites("Password")
+Else
+    icMain.Password = ""
+End If</code></pre>
+<p>
+The next step is to connect to the remote computer using the user name and password you have supplied. This is achieved using the FTP USER command.</p>
+<pre><code>' Log onto the FTP site using the FTP 'USER' command.
+icMain.Execute sURL, "USER " &amp; icMain.UserName &amp; " " &amp; icMain.Password
+zsWaitForResponse</code></pre>
+<p>
+Remember that any errors raised in the logon process will be reported by the <i>icError </i>state in the <i>StateChanged </i>event. Once you have logged on, you can then change to the appropriate directory by using the FTP CD command. The CD command performs exactly the same function as it does in MS-DOS. Note that when specifying the directories on the FTP server, you use forward slashes (/), but backward slashes (\) are still used for the local filename.</p>
+<pre><code>icMain.Execute sURL, "CD " &amp; m_rstSites("Directory")
+zsWaitForResponse</code></pre>
+<p>
+After you have successfully changed to this directory, you can retrieve the filenames it contains. Executing the command to retrieve the filenames is easy. Actually parsing the returned results is a bit more difficult. To retrieve the contents of the directory, send an FTP DIR command.</p>
+<pre><code>icMain.Execute sURL, "DIR"
+zsWaitForResponse</code></pre>
+<p>
+After the DIR command is executed, any existing data is returned to you by the remote computer. You are notified of this by means of the <i>icResponseCompleted </i>state in the <i>StateChanged </i>event. In this event, you make a call to retrieve the data by means of the <i>GetChunk </i>method. One of the nice things about the directory structure returned by an FTP DIR command is that it has none of the extra formatting that accompanies a directory listing retrieved by the <i>OpenURL </i>method. This makes it a lot easier to retrieve the individual filenames.</p>
+<pre><code>Function zsGetText() As String
+' Retrieve any text data that the remote sever has returned to us.
+    Dim vChunk As Variant
+    Dim sData  As String
+    Dim bDone  As Boolean
+
+    bDone = False
+    vChunk = icMain.GetChunk(256)
+    Do Until bDone
+        sData = sData &amp; vChunk
+        vChunk = icMain.GetChunk(256)
+        If Len(vChunk) = 0 Then
+            bDone = True
+        End If
+    Loop
+    zsGetText = sData
+End Function</code></pre>
+<p>
+After executing the DIR command, you have retrieved the directory listing as a string. The problem is that the string contains all the filename entries, separated by carriage return and line feed characters. This string needs to be passed to a function that will retrieve the individual directory entries and build an array containing each file in the directory. A function that performs this task is as follows:</p>
+<pre><code>Sub zsGetFileList(asFiles, sDirectory)
+
+' This function will fill the array 'asFiles' with the directory
+' entries that have been returned as part of the sDirectory string.
+
+    Dim i          As Integer
+    Dim iLastIndex As Integer
+
+    iLastIndex = 0
+
+    Do Until Len(sDirectory) = 0
+        For i = 1 To Len(sDirectory)
+            If Mid$(sDirectory, i, 1) = Chr$(13) Then
+                If Len(sDirectory) &lt;= 2 Then
+                    sDirectory = ""
+                    Exit For
+                End If
+                ReDim Preserve asFiles(iLastIndex)
+                asFiles(iLastIndex) = Left$(sDirectory, i - 1)
+                iLastIndex = iLastIndex + 1
+                sDirectory = Mid$(sDirectory, i + 2)
+                Exit For
+            End If
+        Next
+    Loop
+
+End Sub</code></pre>
+<p>
+So now you have an array with each of the directory entries as an element of the array. All you have to do now is loop through this array and perform an FTP GET command to retrieve the files. An interesting fact about using the GET command with the Internet Transfer Control is that the actual control takes care of retrieving the files to your local machine. Normally you retrieve any data that has been sent to you by using the <i>GetChunk </i>method. But when a GET command is issued, the Internet Transfer Control will automatically save the files to the location you have specified in the command parameters.</p>
+<pre><code>' Loop through each file in the directory.
+For i = 0 To UBound(asFiles)
+    ' Retrieve current file.
+    icMain.Execute sURL, "GET " &amp; asFiles(i) &amp; " " &amp; sFileName
+    zsWaitForResponse
+Next</code></pre>
+<p>
+Now that you have retrieved all the files in the directory, you loop around to the next site from the database and continue.</p>
+<p>
+What is <i>zsWaitForResponse</i>? The trick to using the <i>Execute </i>method is knowing how to handle the asynchronous mode of operation. The Visual Basic code needs to know when to sit and wait for the remote server to return a response. This process involves issuing a command and then waiting for the Internet Transfer Control to indicate (via the <i>StillExecuting </i>property) that it has finished processing the command.</p>
+<p>
+The <i>zsWaitForResponse </i>line is a call to a piece of code that will wait until the remote computer has finished processing the last command issued before continuing. The <i>DoEvents </i>command is used to yield execution while the remote computer is processing the results.</p>
+<pre><code>Sub zsWaitForResponse()
+
+' After executing an FTP command, we have to wait for it to complete
+' before we undertake any further processing.
+
+Do Until Not icMain.StillExecuting
+    DoEvents
+    ' We can do other things here.
+Loop
+
+End Sub</code></pre>
+<h1></h1>
+</BODY>
+</HTML>

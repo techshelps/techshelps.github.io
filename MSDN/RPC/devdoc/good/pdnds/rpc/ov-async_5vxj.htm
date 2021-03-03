@@ -1,0 +1,163 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Client-side Asynchronous Pipe Handling</title>
+<link disabled rel=stylesheet href=../../../backsdk3.css>
+<style type="text/css">
+@import url(../../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h2><a name="_rpc_client_side_asynchronous_pipe_handling"></a>Client-side Asynchronous Pipe Handling</h2>
+<p>
+Before making an asynchronous remote call, the client must first initialize the asynchronous handle. As with non-pipe procedures, the client calls an asynchronous function with the asynchronous handle as the first parameter and uses the asynchronous handle to send and receive pipe data, query the status of the call, and receive the reply. </p>
+
+<h4><a name="_rpc_making_asynchronous_remote_procedure_calls"></a>Making Asynchronous Remote Procedure Calls</h4>
+<p>
+The client makes the asynchronous remote procedure call with the asynchronous handle as the first parameter. The client can use this handle to query the status of the call and to receive the reply. The asynchronous pipe model is symmetric. Both client and server applications send and receive pipe data actively (as opposed to synchronous RPC, where the pipe data is sent and received passively). </p>
+
+<h4><a name="_rpc_c_sending_asynchronous_pipe_data"></a>Sending Asynchronous Pipe Data</h4>
+<p>
+The client sends asynchronous pipe data by calling the <i>push</i> function on the appropriate asynchronous pipe, with the pipe's state variable as the first parameter. When the <i>push</i> function returns, the client can modify or free the send buffer.</p>
+<p>
+If the RPC_ASYNC_NOTIFY_ON_SEND_COMPLETE flag is set in the asynchronous handle, and if APCs are used as the notification mechanism, an APC is queued when the pipe send is actually complete. You can take advantage of this mechanism to implement flow control. Note, however, that if the client pushes another buffer before the previous push is complete, the client may, depending on the speed of the transfer operation, receive only one send-complete notification, rather than one notification for each buffer or each <i>push</i> operation. When the client has sent all of the pipe data, it makes one final <i>push</i> call with the number of elements set to 0. </p>
+
+<h4><a name="_rpc_c_receiving_asynchronous_pipe_data"></a>Receiving Asynchronous Pipe Data</h4>
+<p>
+The client receives asynchronous pipe data by calling the <i>pull</i> function on the appropriate asynchronous pipe, with the pipe's state variable as the first parameter. If no pipe data is available, the <i>pull</i> function returns RPC_S_ASYNC_CALL_PENDING. </p>
+<p>
+If the notification mechanism is APC, and the server returned RPC_S_ASYNC_CALL_PENDING, the client must wait until it receives the <b>RpcReceiveComplete</b> APC from the runtime before calling <i>pull</i> again. </p>
+
+<h4><a name="_rpc_waiting_for_reply"></a>Waiting for reply</h4>
+<p>
+Same as the nonpipe case. </p>
+<h4>Example</h4>
+<pre><code>// User defined data structure to keep track of the asynchronous call. 
+typedef struct {
+  RPC_ASYNC_STATE Async;
+  ASYNC_INTPIPE inpipe ;
+  ASYNC_INTPIPE outpipe ;
+  int i;
+  BOOL PipeDataSent;
+  int PipeBuffer[ASYNC_CHUNK_SIZE] ;
+} PIPE_CALL_COOKIE;
+ 
+//call the asynchronous function
+ 
+void AsyncPipesUsingAPC (RPC_BINDING_HANDLE Binding)
+{
+RPC_STATUS Status;
+PIPE_CALL_COOKIE *Cookie;
+int retval ;
+int a = 10;
+int b;
+BOOL fDone;
+Cookie = new PIPE_CALL_COOKIE;
+ 
+RpcAsyncInitializeHandle (&amp;(Cookie-&gt;Async));
+Cookie-&gt;PipeDataSent = 0;
+Cookie-&gt;i = 0;
+Cookie-&gt;Async.Flags = RPC_C_NOTIFY_ON_SEND_COMPLETE;
+Cookie-&gt;Async.NotificationType =RpcNotificationTypeApc;
+Cookie-&gt;Async.u.APC.NotificationRoutine = MyAsyncPipeAPCRoutine;
+Cookie-&gt;Async.u.APC.hThread = 0;
+ 
+// The function calls itself, causing the nonpipe 
+//params to be sent.
+//The application can send pipe data immediately after returning 
+//from this call or it can wait to receive the send complete
+//notification before proceeding.
+ 
+MyAsyncPipeFunc(&amp;(Cookie-&gt;Async),Binding,a,
+                &amp;(Cookie-&gt;inpipe),&amp;(Cookie-&gt;outpipe),&amp;b);
+ 
+//at this point the application can either send more pipe 
+//data or do other work.
+ 
+while (Cookie-&gt;PipeDataSent == 0)
+{
+if (SleepEx(INFINITE, TRUE) != WAIT_IO_COMPLETION)
+  {
+  RpcRaiseException(APP_ERROR) ;
+  }
+}
+//
+// Receiving pipe data:
+//
+while (!fDone)
+  {
+  Status = Cookie-&gt;outpipe.pull(Cookie-&gt;outpipe.state, 
+                       (int *) Cookie-&gt;PipeBuffer, 
+                        ASYNC_CHUNK_SIZE,
+                        &amp;num_elements);
+switch (Status)
+  {
+  case RPC_S_ASYNC_CALL_PENDING:
+     if (SleepEx(INFINITE, TRUE) != WAIT_IO_COMPLETION)
+       {
+       RpcRaiseException(APP_ERROR) ;
+       }
+     break;
+  case RPC_S_OK:
+     if (num_elements == 0)
+       {
+       fDone = 1;
+       }
+     else
+       {
+// Process the data here.
+       }
+     break;
+  default:
+     fDone = 1;
+     break;
+  }//end switch
+//now call the runtime to complete the call:
+RpcAsyncCompleteCall (&amp;Cookie-&gt;Async, &amp;retval) ;
+}  //end while
+}//end AsyncPipesUsingAPC
+ 
+//
+//sending pipe data
+//
+void MyAsyncPipeAPCRoutine (IN PRPC_ASYNC_STATE pAsync,
+                            IN void *Context,
+                            IN unsigned int Flags
+                            )
+{
+PIPE_CALL_COOKIE *Cookie = (PIPE_CALL_COOKIE *) pAsync-&gt;UserInfo;
+if (Flags &amp; RPC_ASYNC_PIPE_SEND_COMPLETE)
+  {
+  if (Cookie-&gt;i &lt;ASYNC_NUM_CHUNKS)
+    {
+    Cookie-&gt;i++ ;
+    Cookie-&gt;inpipe.push(cookie-&gt;inpipe.state,
+                        0,
+                        (int *) Cookie-&gt;PipeBuffer,
+                        ASYNC_CHUNK_SIZE);
+    }
+  else
+    {
+    pAsync-&gt;Flags = 0;
+    Cookie-&gt;inpipe.push(cookie-&gt;inpipe.state, 0, 0, 0);
+    }
+  }
+if (Flags &amp; RPC_ASYNC_CALL_COMPLETE)
+  {
+  Cookie-&gt;PipeDataSent = 1;
+  }
+}//end MyAsyncPipeAPCRoutine
+ </code></pre>
+<h4>See Also</h4>
+<p>
+<object id=alink_1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="../../../notopic_0pk4.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="_rpc_pipes">
+</object><a href=JavaScript:alink_1.Click()>Pipes</a>, <a href="ov-async_9sgz.htm">Client-side Asynchronous RPC</a> </p>
+<p>&nbsp;</p></body>
+</HTML>

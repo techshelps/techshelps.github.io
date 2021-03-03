@@ -1,0 +1,1424 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>More First Aid for the Thread Impaired:  Cool Ways to Take Advantage of Multithreading</title>
+
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF>
+
+<font face="verdana,arial,helvetica" size="2">
+<h1>More First Aid for the Thread Impaired:  Cool Ways to Take Advantage of Multithreading</h1>
+<p>Russell Weisz</p>
+<p>Russell Weisz is a software developer at The Windward Group, a Los Gatos, California-based company that provides software research and development, quality assurance, and documentation services. He can be reached at rbw@wwg.com.</p>
+<p>
+Multithreading is a powerful technique that can improve the performance, responsiveness, and structure of your application. At the same time, multithreading introduces synchronization, debugging, and other complexities into your code and development cycle. In a previous article entitled “First Aid for the Thread-Impaired: Using Multiple Threads with MFC” (<i>MSJ,</i> December 1996), I discussed some of the reasons why you would consider using multi&shy;threading and reviewed some <BR>of the related MFC classes and Win32&reg; mechanisms. In this article, I’d like to continue with this thread (sorry, no more bad jokes from now on). I’ll clarify a few points from the last article, and discuss my seven favorite ways to use multithreading.</p>
+<p>
+In my last article, I discussed three ways to create multi&shy;threaded objects. Two of them are provided directly by the MFC class CWinThread. You can pass CWinThread a pointer to a function that the new thread will execute. This is called a worker thread. Alternatively, you can derive a class from CWinThread and override a virtual method, such as OnIdle, to do your specific work. This is called a UI thread. I also presented a third approach, using a class called CMultiThread. Derived from CWinThread, CMultiThread uses CEvent objects to block when there is no work for the second, internal thread to do. When it is time to do some work, the CEvent object is used to notify the second thread to wake up and get busy.</p>
+<h2>Multithreaded Workflow Application</h2>
+<p>
+Recently, I had an opportunity to use several instances of CMultiThread in a rather demanding application. You may know my customer for this application, CTB/McGraw-Hill. They supply and score the placement and proficiency tests that a child may take in school. The application I developed for them is called Scoring Production Control Software (SPCS). It’s a flow-control system for the huge amounts of student and test data that makes its way through their scoring process. And no, it’s not my fault if you had to repeat third grade!</p>
+<p>
+Instances of a class called CJobMgr, derived from CMulti&shy;Thread, guide the processing of large data clusters called OpUnits. The data is transformed in a sequence of operations which occur on different high-end servers. The servers have multiple CPUs, and a separate thread runs on each CPU to maximize the throughput of data. The servers are permanently assigned to do one of three different <BR>types of data processing. An OpUnit must flow across all three designated server types to complete its processing, as shown in Figure 1.</p>
+<p>
+<img src="impair1.gif" border=0></p>
+<p>
+Figure 1  Servers with Data Flow</p>
+<p>
+One valuable lesson that I learned in developing this application is how to better handle the removal of embedded thread objects. CJobMgr instances are terminated only when a server must be brought down, but some limitations in shutting down the secondary threads became apparent. The problem results from a subtle race condition. The original CMultiThread class terminates its secondary <BR>thread when the destructor is called. (The destructor code is traversed on the caller’s, or primary, thread.) Of course, <BR>the base class destructor code is executed after the derived destructor, and that’s the root of the problem. CJobMgr’s secondary thread can still access the derived object data after the derived object has been destroyed, but before <BR>the base class can kill the secondary thread. I added a <BR>new protected method to CMultiThread, called KillThread2, which must be called in the derived class’s destructor. Unfortunately, this goes against my desire to encapsulate threading knowledge completely within the base class. The Run method also had to be modified. If you look at Figure 2, which includes the code for KillThread2, Run, and the derived class destructor, you will notice the call to AfxEndThread at the end of Run. This call is essential for cleanly removing the secondary thread. I adopted it from a discussion in <i>MFC Internals</i> (Addison-Wesley, 1996) by George Shepherd and Scot Wingo.</p>
+<dl>
+<dt>
+Figure 2  CMultiThread--Modified but Bulky</dt>
+<dd>
+// MultiThread.h : header file<p>
+// Copyright (C) 1997 by The Windward Group, All Rights Reserved</p>
+<p>
+#ifndef MULTITHREAD_H</p>
+<p>
+#define MULTITHREAD_H</p>
+<p>
+#ifndef __AFXWIN_H__</p>
+<p>
+    #error include 'stdafx.h' before including this file for PCH</p>
+<p>
+#endif</p>
+<p>
+#include &lt;afxmt.h&gt;</p>
+<p>
+/////////////////////////////////////////////////////////////////////////////</p>
+<p>
+class CMultiThread : public CWinThread</p>
+<p>
+{</p>
+<p>
+DECLARE_DYNCREATE(CMultiThread)</p>
+<p>
+public:</p>
+<p>
+    CMultiThread();</p>
+<p>
+    virtual ~CMultiThread();</p>
+<p>
+    BOOL CreateThread(DWORD dwCreateFlags = 0,      // masks</p>
+<p>
+                                                    // CWinThread::CreateThread</p>
+<p>
+                      UINT nStackSize = 0,</p>
+<p>
+                      LPSECURITY_ATTRIBUTES lpSecurityAttrs = NULL,</p>
+<p>
+                      UINT nMilliSecs = INFINITE);  // upper time limit to wait</p>
+<p>
+    BOOL InitInstance() {return TRUE;}</p>
+<p>
+    void KillThread2();</p>
+<p>
+    int Run();</p>
+<p>
+protected:</p>
+<p>
+    CEvent*        m_pWorkEvent;              // do work event</p>
+<p>
+    CEvent*        m_pExitEvent;              // used to synchronize destruction</p>
+<p>
+    int            m_nCycleTime;              // do work cycle time</p>
+<p>
+    BOOL           m_bEndThread;              // end the thread ?</p>
+<p>
+    virtual void StartWork() {}               // override to do startup</p>
+<p>
+    virtual void DoWork() {}                  // override to do work</p>
+<p>
+    virtual void EndWork() {}                 // override to do shutdown</p>
+<p>
+    CEvent* GetEvent() const {return m_pWorkEvent;}    // cycle control event</p>
+<p>
+    int GetCycleTime() const {return m_nCycleTime;}</p>
+<p>
+    void SetCycleTime(int nMilliSecs) {m_nCycleTime = nMilliSecs;}</p>
+<p>
+};</p>
+<p>
+#endif</p>
+<p>
+// MultiThread.cpp : implementation file</p>
+<p>
+// Copyright (C) 1997 by The Windward Group, All Rights Reserved</p>
+<p>
+#include &quot;stdafx.h&quot;</p>
+<p>
+#include &quot;MultiThread.h&quot;</p>
+<p>
+IMPLEMENT_DYNCREATE(CMultiThread, CWinThread)</p>
+<p>
+/////////////////////////////////////////////////////////////////////////////</p>
+<p>
+// CMultiThread</p>
+<p>
+CMultiThread::CMultiThread()</p>
+<p>
+{</p>
+<p>
+    // Create a non-signaled, manual-reset event to synchronize destruction</p>
+<p>
+    m_pExitEvent = new CEvent(FALSE, TRUE);</p>
+<p>
+    ASSERT(m_pExitEvent);</p>
+<p>
+    // Create a non-signaled, auto-reset event to wait on for work cycle</p>
+<p>
+    m_pWorkEvent = new CEvent();</p>
+<p>
+    ASSERT(m_pWorkEvent);</p>
+<p>
+}</p>
+<p>
+CMultiThread::~CMultiThread()</p>
+<p>
+{</p>
+<p>
+    delete m_pWorkEvent;</p>
+<p>
+    delete m_pExitEvent;</p>
+<p>
+}</p>
+<p>
+BOOL CMultiThread::CreateThread(DWORD dwCreateFlags, UINT nStackSize, </p>
+<p>
+                                LPSECURITY_ATTRIBUTES lpSecurityAttrs, </p>
+<p>
+                                UINT nMilliSecs)</p>
+<p>
+{</p>
+<p>
+    m_nCycleTime = nMilliSecs;</p>
+<p>
+    m_bEndThread = FALSE;</p>
+<p>
+    // Start second thread</p>
+<p>
+    return CWinThread::CreateThread(dwCreateFlags, nStackSize, lpSecurityAttrs);</p>
+<p>
+}</p>
+<p>
+void CMultiThread::KillThread2()</p>
+<p>
+{</p>
+<p>
+    // Start up the other thread so it can complete.</p>
+<p>
+    // When it does, it will set the exit event and the object can be destructed.</p>
+<p>
+    m_bEndThread = TRUE;</p>
+<p>
+    m_pWorkEvent-&gt;SetEvent();</p>
+<p>
+    CSingleLock csl(m_pExitEvent);</p>
+<p>
+    csl.Lock();                        // wait for 2nd thread to finish</p>
+<p>
+    csl.Unlock();                        </p>
+<p>
+}</p>
+<p>
+int CMultiThread::Run()</p>
+<p>
+{</p>
+<p>
+    CSingleLock csl(m_pWorkEvent);     // synch on the work event</p>
+<p>
+    StartWork();                       // do derived startup</p>
+<p>
+    while (!m_bEndThread)              // loop until we're done</p>
+<p>
+    {</p>
+<p>
+        csl.Lock(m_nCycleTime);        // wait for event or timeout</p>
+<p>
+        csl.Unlock();            </p>
+<p>
+        if (!m_bEndThread) DoWork();   // and then do some work</p>
+<p>
+    }</p>
+<p>
+    EndWork();                         // do derived shutdown</p>
+<p>
+    m_pExitEvent-&gt;SetEvent();          // set not waiting signal</p>
+<p>
+    AfxEndThread(0, FALSE);            // end the thread, but do not delete it</p>
+<p>
+    return 0;</p>
+<p>
+}</p>
+</dd>
+</dl>
+<p>
+Even with this fix, CMultiThread has one undesirable quality: it’s big and bulky. That’s because it is derived from CWinThread. CWinThread is a large, extremely complex class. It has a tremendous amount of functionality, most of which you will not use except to support message handling in UI threads. Since CMultiThread was not primarily designed to support UI threading, my thread class has acquired some unnecessary bulk.</p>
+<h2>Leaner Multithreading</h2>
+<p>
+Having said this, the solution to developing a leaner embedded thread class is now obvious: let’s get rid of CWinThread. Figure 3 shows the definition and code for this new class, which I call CThinThread because it has lost the CWinThread baggage. CThinThread spins off its secondary thread via a call to the runtime library function, beginthread&shy;ex. I considered using beginthread or the Win32 function CreateThread instead of beginthreadex, but they both have important limitations. beginthreadex offers more flexibility than beginthread, allowing me to specify Windows NT&reg; security attributes (under Windows NT). It also corrects some internal race conditions that exist in beginthread. Finally, beginthreadex does some thread local storage initialization so you can use the multithreaded C runtime library functions. CreateThread doesn’t and is, therefore, incompatible with C runtime calls. For a more complete discussion of CreateThread, I recommend that you take a look at Jim Beveridge and Robert Wiener’s <i>Multithreading Applications in Win32</i> (Addison-Wesley, 1996). </p>
+<dl>
+<dt>
+Figure 3  CThinThread</dt>
+<dd>
+// ThinThread.h : header file<p>
+// Copyright (C) 1997 by The Windward Group, All Rights Reserved</p>
+<p>
+#ifndef THINTHREAD_H</p>
+<p>
+#define THINTHREAD_H</p>
+<p>
+#ifndef __AFXWIN_H__</p>
+<p>
+    #error include 'stdafx.h' before including this file for PCH</p>
+<p>
+#endif</p>
+<p>
+#include &lt;afxmt.h&gt;</p>
+<p>
+/////////////////////////////////////////////////////////////////////////////</p>
+<p>
+class CThinThread</p>
+<p>
+{</p>
+<p>
+public:</p>
+<p>
+    CThinThread();</p>
+<p>
+    virtual ~CThinThread();</p>
+<p>
+    BOOL CreateThread(DWORD dwCreateFlags = 0,</p>
+<p>
+                      UINT nStackSize = 0,</p>
+<p>
+                      LPSECURITY_ATTRIBUTES lpSecurityAttrs = NULL,</p>
+<p>
+                      UINT nMilliSecs = INFINITE);    // upper time&nbsp;limit&nbsp;to wait</p>
+<p>
+    HANDLE GetHandle() {return m_hThread2;}</p>
+<p>
+    BOOL IsBusy()      {return m_b2ndThread;}</p>
+<p>
+    void Stop()        {m_bEndThread = TRUE;}</p>
+<p>
+protected:</p>
+<p>
+    CEvent*        m_pWorkEvent;          // do work event</p>
+<p>
+    CEvent*        m_pExitEvent;          // used to synchronize destruction</p>
+<p>
+    int            m_nCycleTime;          // do work cycle time</p>
+<p>
+    BOOL           m_bEndThread;          // end the thread ?</p>
+<p>
+    BOOL           m_b2ndThread;          // 2nd thread active?</p>
+<p>
+    HANDLE         m_hThread2;            // 2nd thread handle</p>
+<p>
+    virtual void StartWork() {}           // override to do startup</p>
+<p>
+    virtual void DoWork() = 0;            // override to do work</p>
+<p>
+    virtual void EndWork() {}             // override to do shutdown</p>
+<p>
+    CEvent* GetEvent() const {return m_pWorkEvent;}    // cycle control event</p>
+<p>
+    int GetCycleTime() const {return m_nCycleTime;}</p>
+<p>
+    void KillThread2();</p>
+<p>
+    int Run();</p>
+<p>
+    void SetCycleTime(int nMilliSecs) {m_nCycleTime = nMilliSecs;}</p>
+<p>
+    static unsigned int __stdcall Start(void* pv);</p>
+<p>
+};</p>
+<p>
+#endif</p>
+<p>
+// ThinThread.cpp : implementation file</p>
+<p>
+// Copyright (C) 1997 by The Windward Group, All Rights Reserved</p>
+<p>
+#include &quot;stdafx.h&quot;</p>
+<p>
+#include &quot;ThinThread.h&quot;</p>
+<p>
+#include &lt;process.h&gt;    /* _beginthread, _endthread */</p>
+<p>
+/////////////////////////////////////////////////////////////////////////////</p>
+<p>
+// ThinThread</p>
+<p>
+CThinThread::CThinThread()</p>
+<p>
+: m_b2ndThread(FALSE)</p>
+<p>
+{</p>
+<p>
+    // Create a signaled, manual-reset event to synchronize destruction</p>
+<p>
+    m_pExitEvent = new CEvent(TRUE, TRUE);</p>
+<p>
+    ASSERT(m_pExitEvent);</p>
+<p>
+    // Create a non-signaled, auto-reset event to wait on for work cycle</p>
+<p>
+    m_pWorkEvent = new CEvent();</p>
+<p>
+    ASSERT(m_pWorkEvent);</p>
+<p>
+}</p>
+<p>
+BOOL CThinThread::CreateThread(DWORD dwCreateFlags, UINT nStackSize, </p>
+<p>
+                               LPSECURITY_ATTRIBUTES lpSecurityAttrs, </p>
+<p>
+                               UINT nMilliSecs)</p>
+<p>
+{</p>
+<p>
+    m_b2ndThread = TRUE;</p>
+<p>
+    m_bEndThread = FALSE;</p>
+<p>
+    m_nCycleTime = nMilliSecs;</p>
+<p>
+    m_pExitEvent-&gt;ResetEvent();    // exit event is reset until we're done</p>
+<p>
+    // Start second thread</p>
+<p>
+    unsigned usThreadAddr;</p>
+<p>
+    m_hThread2 = reinterpret_cast&lt;HANDLE&gt;</p>
+<p>
+       (_beginthreadex(lpSecurityAttrs, nStackSize, Start,</p>
+<p>
+       this, 1, &amp;usThreadAddr));</p>
+<p>
+    return reinterpret_cast&lt;unsigned long&gt; (m_hThread2);</p>
+<p>
+}</p>
+<p>
+CThinThread::~CThinThread()</p>
+<p>
+{</p>
+<p>
+    delete m_pWorkEvent;</p>
+<p>
+    delete m_pExitEvent;</p>
+<p>
+}</p>
+<p>
+void CThinThread::KillThread2()</p>
+<p>
+{</p>
+<p>
+       // Start up the other thread so it can complete.</p>
+<p>
+       // When it does, it will set the exit event and the object can</p>
+<p>
+       // be destructed.</p>
+<p>
+    m_bEndThread = TRUE;</p>
+<p>
+    m_pWorkEvent-&gt;SetEvent();</p>
+<p>
+    CSingleLock csl(m_pExitEvent);</p>
+<p>
+    csl.Lock();                         // wait for 2nd thread to finish</p>
+<p>
+    csl.Unlock();                        </p>
+<p>
+}</p>
+<p>
+int CThinThread::Run()</p>
+<p>
+{</p>
+<p>
+    CSingleLock csl(m_pWorkEvent);      // synch on the work event</p>
+<p>
+    StartWork();                        // do derived startup</p>
+<p>
+    while (!m_bEndThread)               // loop until we're done</p>
+<p>
+    {</p>
+<p>
+        csl.Lock(m_nCycleTime);         // wait for event or timeout</p>
+<p>
+        csl.Unlock();            </p>
+<p>
+        if (!m_bEndThread) DoWork();    // then do derived work</p>
+<p>
+    }</p>
+<p>
+    EndWork();                          // do derived shutdown</p>
+<p>
+    m_pExitEvent-&gt;SetEvent();           // set not waiting signal</p>
+<p>
+    m_b2ndThread = FALSE;</p>
+<p>
+    CloseHandle(m_hThread2);</p>
+<p>
+    _endthreadex(0);</p>
+<p>
+    return 0;</p>
+<p>
+}</p>
+<p>
+unsigned int __stdcall CThinThread::Start(void* pv)</p>
+<p>
+{</p>
+<p>
+    CThinThread* pMT = static_cast&lt;CThinThread*&gt; (pv);</p>
+<p>
+    return pMT-&gt;Run();</p>
+<p>
+}</p>
+</dd>
+</dl>
+<p>
+When it’s time to end the secondary thread at the bottom of the Run method, I close the thread handle and then <BR>call endthreadex. I have made a few other simplifications <BR>in adapting CThinThread from CMultiThread, but it’s basically very similar. The StartWork method allows you to do some initialization on the second thread in derived classes. Similarly, EndWork can be overridden to add some completion code before the internal thread terminates. DoWork must be overridden to do any repetitive, separately threaded activity. </p>
+<p>
+Note the strangely typed static method, Start. A pointer to Start is passed into beginthreadex, instead of a pointer to a C function. Once inside Start I cast the generic pointer, which is passed into the method back to a pointer to my CThinThread instance. Now that I’m running on the new, encapsulated thread, I call my Run method and get to work. CThinThread’s biggest drawback is that you can’t use it to create new windows. I’ll discuss that in a little while.</p>
+<h2>Active versus Passive Multithreading</h2>
+<p>
+Now let’s look at some applications for multithreaded objects. I want to make a distinction between what I’ll call active and passive multithreading, which affects my choice of applications. In active multithreading, I am directly responsible for creating and removing all additional threads. This contrasts with passive multithreading, where some other entity can create threads that my application or component can use. An important example of passive multi&shy;threading is COM servers, such as ActiveX™ controls. You can use one of several approaches to couple the server with the client: the single or multithreaded apartment model, or eventually the free-threaded model. The approach you choose affects the design of the control in terms of issues like thread safety, but not direct thread creation and removal. See “Give ActiveX-based Web Pages a Boost with the Apartment Threading Model,” by David Platt in the February 1997 issue of <i>MSJ</i> for an excellent discussion.</p>
+<p>
+Another passive threaded framework is the ISAPI environment on Web servers. You could develop a thread-safe DLL for use in ISAPI. The DLL could then support concurrent threads of execution. Actual thread creation and removal would be done outside of your DLL and outside of your direct control, however. Passive multithreading is certainly used in interesting ways, but the multithreading is provided for you. Having made the distinction, this article will cover only active threaded architectures. Specifically, I’ll cover my seven favorite ways to use active threaded architectures.</p>
+<h2>Number 1: Refreshing a List Control with Lots of Data</h2>
+<p>
+List controls and list boxes are designed to display rows of data, and sometimes applications must use them to present many rows or records. This isn’t necessarily a difficult problem, and there are multiple ways to solve it. In CTB/McGraw-Hill’s SPCS, most of the list control displays are tidy little affairs populated by several hundred or fewer SQL Server records from a single, heavily indexed database. The OpUnit Status view, shown in Figure 4, and the similar-looking Restore Archives view are different, however. Although the user can filter the record set, the worst-case scenario involves retrieving and displaying five or ten thousand records, maybe even more. It can take a minute to get all those records and load their contents into the list control, even on a Pentium 200 class machine. </p>
+<p>
+<img src="impair4.gif" border=0></p>
+<p>
+Figure 4  OpUnit Status View</p>
+<p>
+As I mentioned, there are a couple of ways to solve this problem, and some of you may already be thinking: make the list control owner draw and only get the record contents when they must be displayed. Certainly, but that doesn’t fit easily into my existing architecture, so instead I made a separately threaded class to retrieve the records and refresh the list controls.</p>
+<p>
+Figure 5 contains the definition and code for this class, CRefreshThread. It’s multiply derived from CThinThread and CPageBase. CThinThread provides the internal threading functionality. CPageBase is a “mix-in” type base class originally developed for all the tabbed views, such as the OpUnit Status view shown in Figure 4. These views are multiply derived from MFC’s CPropertyPage and our CPageBase. CPageBase has protected methods and members to retrieve records. CPageBase was designed to be a base class and most of its useful methods are protected. In the future, I may redesign CPageBase so that I can use it to compose other classes, rather than inherit from it.</p>
+<dl>
+<dt>
+Figure 5  CRefreshThread</dt>
+<dd>
+// RefreshThread.h : header file<p>
+// Copyright (C) 1996 by CTB/McGraw-Hill, All Rights Reserved</p>
+<p>
+#ifndef REFRESHTHREAD_H</p>
+<p>
+#define REFRESHTHREAD_H</p>
+<p>
+#ifndef __AFXWIN_H__</p>
+<p>
+    #error include 'stdafx.h' before including this file for PCH</p>
+<p>
+#endif</p>
+<p>
+#include &lt;afxmt.h&gt;</p>
+<p>
+#include &quot;ThinThread.h&quot;</p>
+<p>
+#include &quot;ListCtrlEx.h&quot;</p>
+<p>
+#include &quot;OpUnitStatusMgrInc.h&quot;</p>
+<p>
+using namespace OpUnitStatusRecordSQLParts;</p>
+<p>
+#include &quot;PageBase.h&quot;</p>
+<p>
+/////////////////////////////////////////////////////////////////////////////</p>
+<p>
+class CRefreshThread : public CThinThread, public CPageBase</p>
+<p>
+{</p>
+<p>
+public:</p>
+<p>
+    CRefreshThread() {};</p>
+<p>
+    virtual ~CRefreshThread() {KillThread2();}</p>
+<p>
+    BOOL Go();</p>
+<p>
+    void Set(HWND hActive, HWND hHistory,</p>
+<p>
+             const CString&amp; csFilter,</p>
+<p>
+             const CUIntArray&amp; sortFields, BOOL bActive=TRUE);</p>
+<p>
+protected:</p>
+<p>
+    HWND m_hwndActive;</p>
+<p>
+    HWND m_hwndHistory;</p>
+<p>
+    CString m_csFilter;</p>
+<p>
+    CUIntArray m_cuiaSortFields;</p>
+<p>
+    BOOL m_bActiveTable;</p>
+<p>
+    CListCtrlEx m_LCActive;</p>
+<p>
+    CListCtrlEx m_LCHistory;</p>
+<p>
+    OURecSet* m_pRecSet;</p>
+<p>
+    int m_nRecord;</p>
+<p>
+    virtual void StartWork();     // start work</p>
+<p>
+    virtual void DoWork();        // continue doing work</p>
+<p>
+    virtual void EndWork();       // end work</p>
+<p>
+};</p>
+<p>
+#endif</p>
+<p>
+// RefreshThread.cpp : implementation file</p>
+<p>
+// Copyright (C) 1997 by CTB/McGraw-Hill, All Rights Reserved</p>
+<p>
+#include &quot;stdafx.h&quot;</p>
+<p>
+#include &quot;RefreshThread.h&quot;</p>
+<p>
+/////////////////////////////////////////////////////////////////////////////</p>
+<p>
+// CRefreshThread</p>
+<p>
+void CRefreshThread::Set(HWND hActive, HWND hHistory, const CString&amp; csFilter,                      const CUIntArray&amp; sortFields, BOOL bActive)</p>
+<p>
+{</p>
+<p>
+    m_hwndActive = hActive;</p>
+<p>
+    m_hwndHistory = hHistory;</p>
+<p>
+    m_csFilter = csFilter;</p>
+<p>
+    m_bActiveTable = bActive;</p>
+<p>
+    m_nRecord = 0;</p>
+<p>
+    int size = sortFields.GetSize();</p>
+<p>
+    m_cuiaSortFields.SetSize(size);</p>
+<p>
+    for (int i = 0; i &lt; size; i++)</p>
+<p>
+        m_cuiaSortFields.SetAt(i, sortFields.GetAt(i));</p>
+<p>
+}</p>
+<p>
+BOOL CRefreshThread::Go()</p>
+<p>
+{</p>
+<p>
+    // kick off CThinThread with no loop delay</p>
+<p>
+    return CreateThread(0, 0, NULL, 0);</p>
+<p>
+}</p>
+<p>
+void CRefreshThread::StartWork()</p>
+<p>
+{</p>
+<p>
+    // setup the listctrls</p>
+<p>
+    m_LCActive.Attach(m_hwndActive);</p>
+<p>
+    m_LCHistory.Attach(m_hwndHistory);</p>
+<p>
+    m_LCActive.DeleteAllItems();</p>
+<p>
+    m_LCHistory.DeleteAllItems();</p>
+<p>
+    m_pRecSet = m_pStatMgr-&gt;GetAllOrderedRecords((m_bActiveTable ? </p>
+<p>
+        COpUnitStatusMgr::TABLE_ACTIVE : COpUnitStatusMgr::TABLE_ARCHIVED),</p>
+<p>
+        m_cuiaSortFields, m_csFilter, FALSE, TRUE);</p>
+<p>
+    // prepare the list control to consume mass quantities</p>
+<p>
+    m_LCActive.SetItemCount(m_pRecSet-&gt;GetRecordCount());</p>
+<p>
+    // insert the data from first database record directly&nbsp;into&nbsp;the list&nbsp;control</p>
+<p>
+    if (m_pRecSet &amp;&amp; m_pRecSet-&gt;GetFirstRecord(m_nRecord++, &amp;m_LCActive));</p>
+<p>
+    else m_bEndThread = TRUE;</p>
+<p>
+}</p>
+<p>
+void CRefreshThread::DoWork()</p>
+<p>
+{</p>
+<p>
+    if (!m_pRecSet-&gt;GetNextRecord(m_nRecord++, &amp;m_LCActive))</p>
+<p>
+        m_bEndThread = TRUE;</p>
+<p>
+}</p>
+<p>
+void CRefreshThread::EndWork()</p>
+<p>
+{</p>
+<p>
+    // release the record set</p>
+<p>
+    m_pSPCSFactory-&gt;ReleaseOpUnitStatusRecordSet(m_pRecSet);</p>
+<p>
+    // select first, repaint, and set focus</p>
+<p>
+    SelectFirstItem(m_LCActive);</p>
+<p>
+    UpdatesCompleted(m_LCActive, m_LCHistory);</p>
+<p>
+    // cleanup the listctrls</p>
+<p>
+    m_LCActive.Detach();</p>
+<p>
+    m_LCHistory.Detach();</p>
+<p>
+}</p>
+</dd>
+</dl>
+<p>
+CRefreshThread primes the record retrieval pump in StartWork with calls to the record manager to GetAll&shy;OrderedRecords and GetFirstRecord. The record flow continues through DoWork and then is tidied up in EndWork. CPageBase also has protected methods to load list controls. Alert readers who have already scanned the listing <BR>are thinking: what list controls, and what are these stinking CListCtrlExs? CListCtrlEx is a list control (derived from CListCtrl) that inverts all fields in the row to indicate <BR>row selection. The class is adapted from CListViewEx in <BR>the RowList sample distributed with Visual C++&reg; 4.2 <BR>Enterprise Edition. If you want to use that class, plan <BR>on doing some work to clean up a few minor painting glitches, such as the one that occurs when the column widths are minimized.</p>
+<p>
+Getting back to CRefreshThread, let’s check out a few other points of interest. What’s up with those window handle members? If you refer back to my previous article, you’ll recall a discussion about problems in some MFC classes when they are shared between threads, due to handle mapping issues. The problem didn’t actually show up bouncing balls around the screen in the previous article, but it does show up here. To share the list controls, I pass in the handles as parameters to the Set method. When the internal thread starts up, it attaches new list control objects to the handles, which accomplishes the binding that I need to use the CListCtrlExs. Just before the thread terminates, it detaches the objects from the handles to avoid destroying the actual list controls. This process allows me to share MFC list control objects, but it doesn’t make them thread-safe. The tabbed views that have CRe&shy;freshThread members are careful to allow only one refresh operation to occur at a time. CThinThread’s IsBusy method provides the information used to disable appropriate menu and toolbar options when a refresh is in progress.</p>
+<p>
+Now, if you pay attention to experts like Mr. Beveridge and Mr. Wiener, you will know better than to even try to access MFC objects in threads initiated with beginthreadex (or beginthread). So why am I doing it here? Well, because I can. The attachment of MFC objects to handles and the subsequent use of those objects works even with begin&shy;threadex. I could have used CMultiThread here, but I opted for the lightweight approach instead. A generic CWin&shy;Thread-derived class (a UI thread) would be considerably more difficult to control or remove. A worker thread is a bad choice here, as always, because it puts you back in the C universe, which is not a happy place to be in an otherwise object-oriented architecture. So, deriving from CThinThread is workable for the kind of activity required of CRefreshThread, but if you want to create MFC windowing objects strap in tight, because there are some new bumps in the road.</p>
+<h2>Number 2: Launching Other Processes and Waiting for Results</h2>
+<p>
+Sometimes it’s necessary for one application to start another. There are two situations that require CTB/McGraw-Hill’s SPCS application to launch other processes. CJobMgr, mentioned previously, controls the work flow. It reads a sequence of operations from a file, does some minimal parsing of each operation’s input and output description, and then performs the operation. The operation is either a CLocalOp, an operation that is handled locally inside SPCS, or a separate application that can be started via the Win32 function CreateProcess. Figure 6 shows CJobMgrImp, the implementation class derived from the CJobMgr abstract base class (ABC), method DoTheOp. There are a few points of interest to note in this method. A file (disk or memory-based) is used to transfer input and output parameters between the CJobMgr and the local or remote operation. The SetParameters and GetParameters methods are responsible for loading and unloading values from the shared file. The file name, contained in the variable m_csIOFile, is passed to the operation. If I am starting a process, I must allocate STARTUPINFO and PROCESS_INFORMATION structures and pass them to CreateProcess. There is nothing for the CJobMgr instance to do until the process completes, so I block using WaitForSingleObject. After unblocking, I must remember to release the handles created in starting the other process.</p>
+<dl>
+<dt>
+Figure 6  CJobMgrImp</dt>
+<dd>
+// JobMgrImp.cpp : implementation file<p>
+// Copyright (C) 1997 by CTB/McGraw-Hill, All Rights Reserved</p>
+<p>
+/////////////////////////////////////////////////////////////////////////////</p>
+<p>
+// internal thread step methods</p>
+<p>
+/////////////////////////////////////////////////////////////////////////////</p>
+<p>
+// do the operation</p>
+<p>
+BOOL CJobMgrImp::DoTheOp()</p>
+<p>
+{</p>
+<p>
+    BOOL bRet = FALSE;</p>
+<p>
+    if (SetParameters())        // set values in the shared parameter file</p>
+<p>
+    {</p>
+<p>
+        if (m_OpVals.bLocalOp)</p>
+<p>
+        {    // local operations</p>
+<p>
+            if (m_LocalOp.DoFunction(m_csIOFile))</p>
+<p>
+            {    if (GetParameters()) bRet = TRUE;}</p>
+<p>
+            else m_csError = errCreateProc;</p>
+<p>
+        }</p>
+<p>
+        else if (m_OpVals.csOp.GetLength())</p>
+<p>
+        {                        // other operations</p>
+<p>
+            STARTUPINFO si;</p>
+<p>
+            PROCESS_INFORMATION pi;</p>
+<p>
+            si.cb             = sizeof(STARTUPINFO);</p>
+<p>
+            si.lpReserved     = NULL;</p>
+<p>
+            si.lpDesktop      = NULL;</p>
+<p>
+            si.lpTitle        = NULL;</p>
+<p>
+            si.dwFlags        = 0;</p>
+<p>
+            si.cbReserved2    = 0;</p>
+<p>
+            si.lpReserved2    = NULL;</p>
+<p>
+            if (CreateProcess(NULL,</p>
+<p>
+                (LPTSTR)(LPCTSTR)(m_OpVals.csOp + CString(&quot; &quot;) + m_csIOFile),</p>
+<p>
+                NULL, NULL, TRUE, CREATE_NEW_CONSOLE, NULL, NULL, &amp;si, &amp;pi))</p>
+<p>
+            {</p>
+<p>
+                if (WaitForSingleObject(pi.hProcess, INFINITE) != WAIT_FAILED)</p>
+<p>
+                {</p>
+<p>
+                    if (GetParameters())</p>
+<p>
+                        bRet = TRUE;</p>
+<p>
+                    CloseHandle(pi.hThread);</p>
+<p>
+                    CloseHandle(pi.hProcess);</p>
+<p>
+                }</p>
+<p>
+                else m_csError = errWaitProc;</p>
+<p>
+            }</p>
+<p>
+            else m_csError = errCreateProc;</p>
+<p>
+        }</p>
+<p>
+        else bRet = TRUE;        // no operation</p>
+<p>
+    }</p>
+<p>
+    else m_csError = errParamFile;</p>
+<p>
+    TraceWork();</p>
+<p>
+    return bRet;</p>
+<p>
+}</p>
+</dd>
+</dl>
+<p>
+Now that I’ve covered the details of this implementation, I’ll back up and review the architecture. On each server, I create a small set of CJobMgr instances, and each instance has its own internal thread. The CJobMgr assigns itself to an OpUnit, goes through a sequence of operations, releases the OpUnit, and starts over again. This approach is simple because at any point in time there are n CJobMgr instances, n or fewer OpUnits being processed, and the sequence of operations are always very similar. </p>
+<p>
+Another way to approach this problem is to create a single scheduler instance on each server and treat it like an operating system. In this scenario, each OpUnit has an associated control block that contains timing and state information. The scheduler wakes at appropriate intervals, checks and updates the chain of control blocks in order to decide what activities must occur, and returns to sleep after the pending activities are completed. This can be handled efficiently using WaitForMultipleObjects with an array of launched processes for which I am awaiting completion. The two drawbacks to this approach are increased complexity and poor utilization of multiple CPUs because the local operations must be executed sequentially.</p>
+<p>
+Now I have to decide how to implement my multiple threads. I chose to derive CJobMgr from CMultiThread. CJobMgr is a big class, so I was not too concerned about CMultiThread’s size. CThinThread lacks CWinThread support. CJobMgr instances do need to create window objects, though, and CMultiThread’s derivation from CWinThread allows it with ease. Direct use of CWinThread in either the worker or UI thread flavors is disadvantageous for the usual reasons—C implementation, poor encapsulation, poor control, and so on.</p>
+<h2>Number&nbsp;3:&nbsp;Launching&nbsp;Other&nbsp;Processes,&nbsp;Take&nbsp;Two</h2>
+<p>
+SPCS also provides an interface for the user to launch separate applications. It is found in three of the tabbed views:&nbsp;Online&nbsp;Updates&nbsp;(shown&nbsp;in&nbsp;Figure 7), Browser, and On&shy;line Reader. The user selects a row, which represents an OpUnit, and launches the other application from a menu item&nbsp;or&nbsp;toolbar&nbsp;button.&nbsp;The&nbsp;three&nbsp;tabbed&nbsp;views&nbsp;differ&nbsp;only&nbsp;in the&nbsp;OpUnits&nbsp;presented&nbsp;and&nbsp;the&nbsp;application&nbsp;that&nbsp;each&nbsp;can&nbsp;launch.</p>
+<p>
+<img src="impair7.gif" border=0></p>
+<p>
+Figure 7  Online Updates View</p>
+<p>
+This time let’s talk about architecture before implementation. Why do I need to start another application? Why not just access some code in a DLL? There are several reasons. SPCS is a control system built around a set of existing applications. The other applications are written by another development group in Visual Basic&reg;. This kind of application partitioning is typical of what you find both for in-house software tool sets and in software product suites.</p>
+<p>
+In regard to starting the other applications, the requirements are different here than in the CJobMgr. The user must be able to start as many copies of the applications as they want, without delay, from these tabbed views. When the other applications complete and the return status is updated in the appropriate database record and shown to the user, the activity is done. Here, launching is driven by user input and terminates when the activity is over. A CJobManager instance, on the other hand, is active throughout a server session, continuously launching one application in a sequence. CThinThread is the preferred base <BR>class for my tabbed views. Its lighter weight better suits having an indeterminate number of instances which are relatively short-lived. Two problems loom into view, however, in considering the use of CThinThread. First, I’ll need to display a message box if the launched app returns an error. Second, I’d like to destroy my independently threaded launch object at the time its internal thread has completed its work.</p>
+<p>
+These two issues can be resolved, and Figure 8 shows <BR>my solution. CLaunchThread, derived from CThinThread and CPageBase, is very similar to CRefreshThread. The Set method takes an unusual collection of parameters: a handle to the parent window, a handle to a CListCtrlEx, an HCURSOR, the name of the application to launch, and an OpUnit. The application name is obvious because I need to know what to launch (see CPageBase::Launch&shy;App). The OpUnit name is used several times, and the CListCtrlEx allows me to update the display in DoWork. I need the parent window to post it a message when my secondary thread terminates. CUpdatesPage::OnCommand receives this message and calls its base class method, CPageBase::<BR>LaunchDone. LaunchDone provides the answer to my problems by displaying a message box, if required, and then deleting the CLaunchThread object. I can’t delete the object directly from its internal thread because the context is wrong, so this indirect approach is the next best thing. Finally, I change the cursor prior to creating CLaunchThread to provide user feedback, and then I restore it inside CLaunchThread after a few seconds.</p>
+<dl>
+<dt>
+Figure 8  CLaunchThread</dt>
+<dd>
+// LaunchThread.h : header file<p>
+// Copyright (C) 1997 by CTB/McGraw-Hill, All Rights Reserved</p>
+<p>
+#ifndef LAUNCHTHREAD_H</p>
+<p>
+#define LAUNCHTHREAD_H</p>
+<p>
+#ifndef __AFXWIN_H__</p>
+<p>
+    #error include 'stdafx.h' before including this file for PCH</p>
+<p>
+#endif</p>
+<p>
+#include &lt;afxmt.h&gt;</p>
+<p>
+#include &quot;ThinThread.h&quot;</p>
+<p>
+#include &quot;ListCtrlEx.h&quot;</p>
+<p>
+#include &quot;OpUnitStatusMgrInc.h&quot;</p>
+<p>
+using namespace OpUnitStatusRecordSQLParts;</p>
+<p>
+#include &quot;PageBase.h&quot;</p>
+<p>
+/////////////////////////////////////////////////////////////////////////////</p>
+<p>
+class CLaunchThread : public CThinThread, public CPageBase</p>
+<p>
+{</p>
+<p>
+public:</p>
+<p>
+    CLaunchThread() {};</p>
+<p>
+    virtual ~CLaunchThread(){KillThread2();}</p>
+<p>
+    BOOL Go();</p>
+<p>
+    void Set(HWND hParent, HWND hList, HCURSOR hc,</p>
+<p>
+             const CString&amp; csLaunchee, const CString&amp; csOpUnit);</p>
+<p>
+protected:</p>
+<p>
+    HWND m_hwndParent;</p>
+<p>
+    HWND m_hwndList;</p>
+<p>
+    HCURSOR m_hCursor;</p>
+<p>
+    CString m_csLaunchee;</p>
+<p>
+    CString m_csOpUnit;</p>
+<p>
+    CListCtrlEx m_LC;</p>
+<p>
+    virtual void DoWork();    // do the work</p>
+<p>
+};</p>
+<p>
+#endif</p>
+<p>
+// LaunchThread.cpp : implementation file</p>
+<p>
+// Copyright (C) 1997 by CTB/McGraw-Hill, All Rights Reserved</p>
+<p>
+#include &quot;stdafx.h&quot;</p>
+<p>
+#include &quot;LaunchThread.h&quot;</p>
+<p>
+/////////////////////////////////////////////////////////////////////////////</p>
+<p>
+// CLaunchThread</p>
+<p>
+void CLaunchThread::Set(HWND hParent, HWND hList,  HCURSOR hc,</p>
+<p>
+                        const CString&amp; csLaunchee, const CString&amp; csOpUnit)</p>
+<p>
+{</p>
+<p>
+    m_hwndParent = hParent;</p>
+<p>
+    m_hwndList = hList;</p>
+<p>
+    m_hCursor = hc;</p>
+<p>
+    m_csLaunchee = csLaunchee;</p>
+<p>
+    m_csOpUnit = csOpUnit;</p>
+<p>
+}</p>
+<p>
+BOOL CLaunchThread::Go()</p>
+<p>
+{</p>
+<p>
+    // kick off CThinThread with no loop delay</p>
+<p>
+    return CreateThread(0, 0, NULL, 0);</p>
+<p>
+}</p>
+<p>
+void CLaunchThread::DoWork()</p>
+<p>
+{</p>
+<p>
+    CString csResult = LaunchApp(m_csLaunchee, m_csOpUnit, m_hCursor);</p>
+<p>
+    if (csResult.GetLength())</p>
+<p>
+    {</p>
+<p>
+        SetActiveState(csResult, m_csOpUnit);</p>
+<p>
+        CListCtrlEx list;</p>
+<p>
+        list.Attach(m_hwndList);</p>
+<p>
+        SelectItemRow(list, 0, m_csOpUnit);</p>
+<p>
+        list.Detach();</p>
+<p>
+    }</p>
+<p>
+    PostMessage(m_hwndParent, WM_COMMAND, (csResult.GetLength() ? 1 : 0), </p>
+<p>
+                reinterpret_cast&lt;int&gt; (this));</p>
+<p>
+    m_bEndThread = TRUE;</p>
+<p>
+}</p>
+<p>
+void CUpdatesPage::OnBegin() </p>
+<p>
+{</p>
+<p>
+    HCURSOR hCursorOld = SetCursor(AfxGetApp()-&gt;LoadCursor(IDC_PLEASEWAIT));</p>
+<p>
+    // get selected OpUnit</p>
+<p>
+    int row = m_lcOpUnitInfo.GetNextItem(-1, LVNI_ALL | LVNI_SELECTED);</p>
+<p>
+    if (row &gt; -1)</p>
+<p>
+    {</p>
+<p>
+        CString csOpUnit = m_lcOpUnitInfo.GetItemText(row, UC_ORGTP);</p>
+<p>
+        csOpUnit += &quot;,&quot;;</p>
+<p>
+        csOpUnit += m_lcOpUnitInfo.GetItemText(row, UC_STRUCTUREELEMENT);</p>
+<p>
+        csOpUnit += &quot;,&quot;;</p>
+<p>
+        csOpUnit += m_lcOpUnitInfo.GetItemText(row, UC_OPUNIT);</p>
+<p>
+        // launch the app</p>
+<p>
+        m_iLaunchCount++;</p>
+<p>
+        CLaunchThread* pThread = new CLaunchThread;</p>
+<p>
+        pThread-&gt;Set(GetSafeHwnd(), m_lcOpUnitInfo.GetSafeHwnd(), hCursorOld, </p>
+<p>
+                  pLaunchName, csOpUnit);</p>
+<p>
+        pThread-&gt;Go();</p>
+<p>
+        m_lcOpUnitInfo.SetFocus();</p>
+<p>
+    }</p>
+<p>
+}</p>
+<p>
+// launch a Winscore app</p>
+<p>
+CString CPageBase::LaunchApp(const CString&amp; csAppName,</p>
+<p>
+                             const CString&amp; csOpUnit, HCURSOR hCursor)</p>
+<p>
+{</p>
+<p>
+    CString csRet = &quot;&quot;;</p>
+<p>
+    CParamFile file;</p>
+<p>
+    SOutputStrings strOut;</p>
+<p>
+    if (csAppName.GetLength() &amp;&amp; SetParameters(&amp;file, csOpUnit))</p>
+<p>
+    {</p>
+<p>
+        STARTUPINFO si;</p>
+<p>
+        PROCESS_INFORMATION pi;</p>
+<p>
+        si.cb           = sizeof(STARTUPINFO);</p>
+<p>
+        si.lpReserved   = NULL;</p>
+<p>
+        si.lpDesktop    = NULL;</p>
+<p>
+        si.lpTitle      = NULL;</p>
+<p>
+        si.dwFlags      = 0;</p>
+<p>
+        si.cbReserved2  = 0;</p>
+<p>
+        si.lpReserved2  = NULL;</p>
+<p>
+        if (CreateProcess(NULL,</p>
+<p>
+                (LPTSTR)(LPCTSTR)(csAppName + CString(&quot; &quot;) + file.GetName()),</p>
+<p>
+                NULL, NULL, TRUE, CREATE_NEW_CONSOLE, NULL, NULL, &amp;si, &amp;pi))</p>
+<p>
+        {</p>
+<p>
+            Sleep(3000);          // to show launch cursor</p>
+<p>
+            SetCursor(hCursor);</p>
+<p>
+            if (WaitForSingleObject(pi.hProcess, INFINITE) != WAIT_FAILED)</p>
+<p>
+            {</p>
+<p>
+                CloseHandle(pi.hThread);</p>
+<p>
+                CloseHandle(pi.hProcess);</p>
+<p>
+                file.GetOutputStrings(strOut);</p>
+<p>
+                strOut.csStatus.MakeLower();</p>
+<p>
+                if (strOut.csStatus == fpvSuccess)</p>
+<p>
+                    csRet = CParamFile::Code2String(strOut.csRet1);</p>
+<p>
+            }</p>
+<p>
+        }</p>
+<p>
+        else SetCursor(hCursor);</p>
+<p>
+    }</p>
+<p>
+    Sleep(1000);                  // to wait for completion of file usage</p>
+<p>
+    CKeyValues key;</p>
+<p>
+    if (key.GetRemoveParamFile()) file.Remove();</p>
+<p>
+    return csRet;</p>
+<p>
+}</p>
+<p>
+BOOL CUpdatesPage::OnCommand(WPARAM wParam, LPARAM lParam) </p>
+<p>
+{</p>
+<p>
+    if (wParam &gt; 1)</p>
+<p>
+    {                             // message not sent by CLaunchThread</p>
+<p>
+        CPropertyPage::OnCommand(wParam, lParam);</p>
+<p>
+        return 0;</p>
+<p>
+    }</p>
+<p>
+                        // message sent by CLaunchThread</p>
+<p>
+    LaunchDone(!wParam ? pLaunchName : &quot;&quot;, lParam);</p>
+<p>
+    m_iLaunchCount--;</p>
+<p>
+    m_lcOpUnitInfo.SetFocus();</p>
+<p>
+    return CPropertyPage::OnCommand(0, lParam);</p>
+<p>
+}</p>
+<p>
+// launch completion handler</p>
+<p>
+void CPageBase::LaunchDone(const CString&amp; csAppName, LPARAM lParam)</p>
+<p>
+{</p>
+<p>
+    if (csAppName.GetLength()) AfxMessageBox(pLaunchText + csAppName);</p>
+<p>
+    delete (reinterpret_cast&lt;CLaunchThread*&gt; (lParam));</p>
+<p>
+}</p>
+<p>
+BOOL CSpcsView::CheckThreads() </p>
+<p>
+{</p>
+<p>
+BOOL bRet = TRUE;</p>
+<p>
+    CRefreshThread* pThread1 = m_pPropSheet-&gt;GetStatusPage()-&gt;GetThread();</p>
+<p>
+    CRefreshThread* pThread2 = m_pPropSheet-&gt;GetOfflinePage()-&gt;GetThread();</p>
+<p>
+    if (pThread1-&gt;IsBusy() || pThread2-&gt;IsBusy() || </p>
+<p>
+         m_pPropSheet-&gt;GetUpdatesPage()-&gt;IsLaunchActive() ||</p>
+<p>
+         m_pPropSheet-&gt;GetBrowserPage()-&gt;IsLaunchActive() || </p>
+<p>
+          m_pPropSheet-&gt;GetReaderPage()-&gt;IsLaunchActive()) bRet = FALSE;</p>
+<p>
+    return bRet;</p>
+<p>
+}</p>
+</dd>
+</dl>
+<p>
+CUpdatesPage is the class associated with the Online Updates tabbed view (shown in Figure 7). Its OnBegin method is called when the user selects the Launch Application menu item or toolbar button. This is where the new CLaunchThread object is created and activated using its Set and Go methods. As you look at the code, you may find it confusing that both CUpdatesPage and CLaunchThread call CPageBase methods like LaunchApp and LaunchDone. Remember, though, that both are derived from CPageBase. </p>
+<p>
+Most of LaunchApp should look familiar. It closely resembles CJobMgrImp::DoTheOp (from Figure 6). Both use CreateProcess to start the appropriate application, but LaunchApp must do a little extra work after the launched application completes. It calls a static method from the shared parameter file class, CParamFile::Code2String, to convert a returned value. I needed to introduce a slight delay before removing a disk-based parameter file. Presumably, there is some residual low-level activity that needs to complete after the launched app writes to the file, closes it, and exits. I included one additional method, CSpcsView::CheckThreads, which is called by CMainFrame when the application tries to exit or the session tries to end. To avoid memory leaks, I prevent either from proceeding while any launch or refresh secondary threads are running.</p>
+<h2>Number 4: Archiving and Restoring</h2>
+<p>
+In SPCS, all the data in an OpUnit is stored in a database. These databases can be sizable, ranging from megabytes to gigabytes. After an OpUnit has passed every processing operation, it can be moved to a backup medium, such as tape. In fact, it must be or the server disks eventually will overflow. In certain situations, this archived OpUnit must later be restored back to disk. This kind of functionality is common in applications that produce significant amounts of data. The medical application in my last article had a similar requirement to periodically save data, which is acquired and processed on the client, out to the server and to floppy disks. Moving large data sets from one storage medium to another is a natural activity for multithreading.</p>
+<p>
+I’m just starting the design for this component, which I call the ArchiveMgr, so I can give you some preliminary thoughts about how I plan to implement it. Unfortunately, there is no code available to see. Archiving and restoring an OpUnit both consist of several sub-operations that must be performed serially. The database is dumped to a file, the tape may need to be positioned, identifying information may need to be written to the tape, the file is transferred to the tape, and results are checked and updated in a status record. This already sounds reminiscent of the set of operations choreographed by CJobMgr, which I examined in method Number 2. </p>
+<p>
+Let’s consider some other issues that affect ArchiveMgr’s component architecture. I anticipate that ArchiveMgr will sometimes have to display message boxes or other windows. Also, ArchiveMgr’s internal thread can persist as long as the SPCS session remains active on the archive / restore server. Only one tape device is planned for this system, so only one tape operation will be active at a time. This suggests that I create only a single instance of Archive&shy;Mgr. I could potentially overlap activities that depend on separate media and make dumping or reconstituting a database concurrent with writing or reading a file from tape. If overlap is not required, ArchiveMgr could be based on CMultiThread and resemble CJobMgr. If I want to support overlap, then ArchiveMgr would need to keep track of the current state for each overlapping operation sequence. Alternatively, each concurrent activity could be handled by a separately threaded instance of a subcomponent of ArchiveMgr. I could have three subcomponents: CDumpDatabase, CRestoreDatabase, and CTapeInterface, each based on CMultiThread.</p>
+<p>
+While I’m on the subject of accessing slower devices like tape and disk drives, let me mention another cool thing I recently discovered while perusing Mr. Beveridge and Mr. Wiener’s handy book—the I/O Completion Port. This is available under Windows NT since version 3.51, and it may prove useful in managing your multiple threads. If you expect to initiate several files named pipe, or socket access operations in parallel using overlapped I/O operations, then you can create an I/O Completion Port and use it to bind your available threads to I/O request completion. When the file read or similar operation completes, the port you created will activate a waiting thread from a thread pool and pass it the results of the operation. All you have to do is create the threads, create the file handles, set up the completion port, let the threads wait on GetQueuedCom&shy;pletionStatus, and the rest happens automatically.&nbsp;Because the I/O Completion Port is provided by the operating system, I presume that it is a very efficient mechanism. Consult the Beveridge and Wiener book for an in-depth discussion and examples.</p>
+<h2>Number 5: Resolving Errors Asynchronously</h2>
+<p>
+Errors happen, and either you handle them or they handle you. Error notification, be it an assertion, an exception, or a return value indicating failure, is typically synchronous and in the thread which caused the error. This is a good thing, but in a multithreaded application you may want to postpone error resolution and focus instead on completing the work that is going successfully. Additional considerations may come in to play. Error resolution may be poorly suited for the thread that caused the error because special operations, or special priorities, are required. You may even prefer to collect several errors, and possibly reorder them, before attempting any resolution.</p>
+<p>
+In SPCS, I have separated error resolution from normal operation. CJobMgr is well equipped to process OpUnits as long as all goes well. But when an error occurs in one of the steps initiated by CJobMgr, it’s time to enlist the services of a specialist like ErrorMgr. ErrorMgr runs on a different thread than any CJobMgr instance and is responsible for trying any automated activities that might resolve the error. If ErrorMgr can’t handle the problem, then user intervention is required.</p>
+<p>
+Today, SPCS is still in its youth, not yet having achieved the splendor of maturity—right, but the point is that ErrorMgr is still pretty simple, with a limited repertoire of automated error responses. Today’s ErrorMgr determines if a step can be retried, and if it can, changes the OpUnit state which allows a CJobMgr instance to retry it. In keeping with this simplicity, ErrorMgr is currently activated by timers, rather than having its own free-running thread. Back in method Number 2, I contrasted using a job scheduler versus multiple threads to initiate asynchronous activities. ErrorMgr follows the scheduler approach. When a timer event fires, it checks to see if any OpUnits need assistance, attends to them, and goes back to sleep when the current chores are done.</p>
+<p>
+Timers are useful constructs. Extremely easy to use, they provide asynchronous activation on the thread that made the SetTimer call. They are not preemptive, or necessarily even punctual. In a Windows NT 4.0 environment you can call CreateWaitableTimer to get access to a more powerful timer which can be used with WaitForMultipleObjects and related APIs. </p>
+<p>
+Still, timers do not scale well or disperse across multiple CPUs. If automated error resolution in SPCS gets complicated, I may change ErrorMgr’s internal architecture. What would be an example of complex automated error resolution? Suppose I can get any one of several specific error codes as a result of attempting an operation like editing a database record. First I must map this code to a response strategy; certain strategies might require that a sequence of steps be executed, and some steps could take a while to complete. If I can’t edit the record, perhaps I’ll try to lock the table and then edit it. Suppose also that different information must be monitored during these steps than during normal operation. Perhaps I need to get certain relevant database parameters.</p>
+<p>
+Given these characteristics, I would change ErrorMgr. Rather than using timers, I would use internal threading. In fact, I expect this ComplexErrorMgr would then closely resemble CJobMgr. I could have a fixed number of ComplexErrorMgr instances to handle the error flow, or I might prefer to dynamically create and destroy instances so that errors can be resolved immediately. Again, I might derive from an intermediate class that closely resembles CJobMgr, but is based on CThinThread (to stay lean).</p>
+<h2>Number 6: Handling Request Packets</h2>
+<p>
+Servers typically get bombarded by requests to do things. If a server is highly specialized, all of the requests may be for one type of service. If not, the server will be asked to perform various kinds of activities. These requests can arrive at the server by different means—phone lines, network cables, and so on. Captured by a driver, bubbled up the protocol stack, they arrive at a socket named pipe, or a similar communications or IPC terminus. I might have a dispatch module that monitors the socket (or equivalent), parses the input stream to form request packets, and passes each packet on to a handler. Alternatively, I could use the I/O Completion Port, briefly mentioned earlier, instead of a dispatcher.</p>
+<p>
+Now let’s focus attention on the handler component. Because servers often have multiple CPUs and requests tend to be asynchronous and high priority, it often makes sense to handle each request on its own thread. I can create handler threads dynamically as requests are received, or I can maintain a pool of handler threads. The thread can terminate when the request is completed, or it can be deployed again when another request has arrived and is ready to be handled. </p>
+<p>
+Satisfying a request often involves retrieving data from a file, database, or memory, perhaps doing some operations on the data, possibly updating some state or associated data, and returning information to the requester. Figure 9 provides an illustration of a handler (CRequestHandler&shy;Thread) and a packet (CRequestPacket). CRequestPacket provides a framework for doing specific operations to handle a request. It does this by defining pure virtual functions for these operations which must be overridden by a concrete derived class. Once again, I could use an I/O Completion Port in my concrete RetrieveData method, if appropriate.</p>
+<dl>
+<dt>
+Figure 9  CRequestHandlerThread and CRequestPacket</dt>
+<dd>
+// HandlerThread.h : header file<p>
+// Copyright (C) 1997 by The Windward Group, All Rights Reserved</p>
+<p>
+#ifndef HANDLERTHREAD_H</p>
+<p>
+#define HANDLERTHREAD _H</p>
+<p>
+#ifndef __AFXWIN_H__</p>
+<p>
+    #error include 'stdafx.h' before including this file for PCH</p>
+<p>
+#endif</p>
+<p>
+#include &lt;afxmt.h&gt;</p>
+<p>
+#include &quot;ThinThread.h&quot;</p>
+<p>
+/////////////////////////////////////////////////////////////////////////////</p>
+<p>
+class CRequestPacket : public CObject</p>
+<p>
+{</p>
+<p>
+public:</p>
+<p>
+    int m_iPacketType;</p>
+<p>
+    int m_iStatus;</p>
+<p>
+    CString m_csInput;</p>
+<p>
+    CString m_csOutput;</p>
+<p>
+};</p>
+<p>
+/////////////////////////////////////////////////////////////////////////////</p>
+<p>
+class CRequestHandlerThread : public CThinThread</p>
+<p>
+{</p>
+<p>
+public:</p>
+<p>
+    CRequestHandlerThread() {};</p>
+<p>
+    virtual ~CRequestHandlerThread() {KillThread2();}</p>
+<p>
+    void AddRequest(CRequestPacket* pPkt);</p>
+<p>
+    BOOL Go() {return CreateThread(0, 0, NULL, 0);}</p>
+<p>
+    void Set(HWND hParent, int ID);</p>
+<p>
+protected:</p>
+<p>
+    HWND m_hwndParent;</p>
+<p>
+    int m_ID;</p>
+<p>
+    CObList m_PktList;</p>
+<p>
+    CCriticalSection m_CritSect;</p>
+<p>
+    virtual void DoWork();              // do the work</p>
+<p>
+    virtual void CheckInput() = 0;      // check packet input</p>
+<p>
+    virtual void RetrieveData() = 0;    // get required data</p>
+<p>
+    virtual void ProcessData() = 0;     // process the data</p>
+<p>
+    virtual void UpdateState() = 0;     // update any state info</p>
+<p>
+    virtual void LoadOutput() = 0;      // load packet output</p>
+<p>
+};</p>
+<p>
+#endif</p>
+<p>
+// HandlerThread.cpp : implementation file</p>
+<p>
+// Copyright (C) 1997 by The Windward Group, All Rights Reserved</p>
+<p>
+#include &quot;stdafx.h&quot;</p>
+<p>
+#include &quot;HandlerThread.h&quot;</p>
+<p>
+/////////////////////////////////////////////////////////////////////////////</p>
+<p>
+// CRequestHandlerThread</p>
+<p>
+void CRequestHandlerThread::Set(HWND hParent, int ID)</p>
+<p>
+{</p>
+<p>
+    m_hwndParent = hParent;</p>
+<p>
+    m_ID = ID;</p>
+<p>
+}</p>
+<p>
+void CRequestHandlerThread::AddRequest(CRequestPacket* pPkt)</p>
+<p>
+{</p>
+<p>
+    CSingleLock csl(&amp;m_CritSect);        // be safe</p>
+<p>
+    csl.Lock();                          // when accessing packet list</p>
+<p>
+    m_PktList.AddTail(pPkt);             // put the packet on the list</p>
+<p>
+    csl.Unlock();</p>
+<p>
+    GetEvent()-&gt;SetEvent();              // notify internal thread</p>
+<p>
+}</p>
+<p>
+void CRequestHandlerThread::DoWork()</p>
+<p>
+{</p>
+<p>
+    while (!m_PktList.IsEmpty())         // get next packet</p>
+<p>
+    {</p>
+<p>
+        CSingleLock csl(&amp;m_CritSect);    // be safe</p>
+<p>
+        csl.Lock();                      // when accessing packet list</p>
+<p>
+        CRequestPacket* pPkt = dynamic_cast&lt;CRequestPacket*&gt;</p>
+<p>
+                                 (m_PktList.RemoveHead());</p>
+<p>
+        csl.Unlock();</p>
+<p>
+        </p>
+<p>
+        CheckInput();</p>
+<p>
+        RetrieveData();</p>
+<p>
+        ProcessData();</p>
+<p>
+        UpdateState();</p>
+<p>
+        LoadOutput(); </p>
+<p>
+                                         // return packet to dispatcher</p>
+<p>
+        PostMessage(m_hwndParent, WM_COMMAND,</p>
+<p>
+                    m_ID, reinterpret_cast&lt;int&gt; (pPkt));</p>
+<p>
+    }</p>
+<p>
+}</p>
+</dd>
+</dl>
+<p>
+Packets are added to CRequestHandlerThread’s work list in the AddRequest method, and extracted in DoWork. I used a CObList as the packet container, however numerous other MFC or STL containers could easily substitute. The ObList is made thread-safe with a CCriticalSection. Of course, there is no need for a packet container in an object derived from CRequestHandlerThread that has a lifetime of only one request. When the object is finished with a request packet, it posts a message containing a pointer <BR>to the packet back to the dispatcher. The dispatcher can then route the packet back to its point of origin. If I did <BR>use an I/O Completion Port instead of an inbound request dispatch module, I would still need an outbound dispatcher to catch my message and return the request.</p>
+<p>
+CRequestPacket clearly is not a full-fledged packet class. It only hints at the information you would want to pass in a real application. Also, data members should be accessed using accessors, rather than directly. Again, this example is only intended to serve as a model for the classes that would be required to implement a real, high-throughput server handler. With some additional work, though, I could contemplate using this kind of approach in a Web server, a file server, or the second-tier server in a three-tier system.</p>
+<h2>Number 7: Parallel File Searching</h2>
+<p>
+My final favorite use for multithreading is hypothetical and again has nothing to do with SPCS. Say I wanted to search for copies of a file on multiple storage devices and I needed the results as quickly as possible. I could develop a file search class with an internal thread, then create several file search instances, and tell each instance to search a different device. Each instance posts a message to the parent window if it finds a copy of the file.</p>
+<p>
+Figure 10 shows a CThinThread-based class, CFileSearch&shy;Thread, which does a simple search. The DoWork method calls FindFirstFile to look for a specific file in a specific directory on the internal thread. If DoWork posts a file found message, the parent window can display appropriate user feedback.</p>
+<dl>
+<dt>
+Figure 10  CFileSearchThread</dt>
+<dd>
+// SearchThread.h : header file<p>
+// Copyright (C) 1997 by The Windward Group, All Rights Reserved</p>
+<p>
+#ifndef SEARCHTHREAD_H</p>
+<p>
+#define SEARCHTHREAD_H</p>
+<p>
+#ifndef __AFXWIN_H__</p>
+<p>
+    #error include 'stdafx.h' before including this file for PCH</p>
+<p>
+#endif</p>
+<p>
+#include &lt;afxmt.h&gt;</p>
+<p>
+#include &quot;ThinThread.h&quot;</p>
+<p>
+/////////////////////////////////////////////////////////////////////////////</p>
+<p>
+class CFileSearchThread : public CThinThread</p>
+<p>
+{</p>
+<p>
+public:</p>
+<p>
+    CFileSearchThread() {};</p>
+<p>
+    virtual ~CFileSearchThread() {KillThread2();}</p>
+<p>
+    BOOL Go() {return CreateThread(0, 0, NULL, 0);}</p>
+<p>
+    void Set(HWND hParent, int ID, const CString&amp; csSearchRoot, </p>
+<p>
+            const CString&amp; csSearchString);</p>
+<p>
+protected:</p>
+<p>
+    HWND m_hwndParent;</p>
+<p>
+    int m_ID;</p>
+<p>
+    CString m_csSearchRoot;</p>
+<p>
+    CString m_csSearchString;</p>
+<p>
+    virtual void DoWork();    // do the work</p>
+<p>
+};</p>
+<p>
+#endif</p>
+<p>
+// SearchThread.cpp : implementation file</p>
+<p>
+// Copyright (C) 1997 by The Windward Group, All Rights Reserved</p>
+<p>
+#include &quot;stdafx.h&quot;</p>
+<p>
+#include &quot;SearchThread.h&quot;</p>
+<p>
+#include &lt;direct.h&gt;</p>
+<p>
+/////////////////////////////////////////////////////////////////////////////</p>
+<p>
+// CFileSearchThread</p>
+<p>
+void CFileSearchThread::Set(HWND hParent, int ID, const CString&amp; csSearchRoot, </p>
+<p>
+const CString&amp; csSearchString)</p>
+<p>
+{</p>
+<p>
+    m_hwndParent = hParent;</p>
+<p>
+    m_ID = ID;</p>
+<p>
+    m_csSearchRoot = csSearchRoot;</p>
+<p>
+    m_csSearchString = csSearchString;</p>
+<p>
+}</p>
+<p>
+void CFileSearchThread::DoWork()</p>
+<p>
+{</p>
+<p>
+    WIN32_FIND_DATA fd;</p>
+<p>
+    _chdir(m_csSearchRoot);</p>
+<p>
+    HANDLE hnd = FindFirstFile(m_csSearchString, &amp;fd);</p>
+<p>
+    if (hnd != INVALID_HANDLE_VALUE)</p>
+<p>
+        PostMessage(m_hwndParent, WM_COMMAND,</p>
+<p>
+                    m_ID, reinterpret_cast&lt;int&gt; (this));</p>
+<p>
+    m_bEndThread = TRUE;</p>
+<p>
+}</p>
+</dd>
+</dl>
+<p>
+In order to be more useful, my class could do a recursive search from an input root directory. This requires additional navigation logic and a change to my message posting. Either the message would have to pass a pointer to a string containing a found directory, or the CFileSearchThread instances would instead directly update a thread-safe display window or container class. (I leave these changes as an exercise for the ambitious.) Even on a single CPU machine, CFileSearchThread (especially the recursive variety) will provide more timely results than serially searching multiple disks, CDs, tapes, and so on. This is due to the fact <BR>that seek and read operations on independent storage devices can be run concurrently.&nbsp;(Refer to Figure&nbsp;1&nbsp;in&nbsp;my previous article for a simple diagram that illustrates this concept.) The user interface for this recursive searcher could be simple text indicating each device and path <BR>where the file was found. Or it could be a more graphical representation, perhaps using a tree control and bitmaps to more close&shy;ly resemble the Windows&reg; Explorer and Windows NT Explorer.</p>
+<h2>Conclusion</h2>
+<p>
+In this article I have tried to show several situations that either require multithreading or are significantly improved by multithreaded solutions. My choice of examples are, of course, biased by my experience. But I believe that the examples I discussed contain enough complexity and real world requirements that they may be helpful for other developers encountering different requirements. I specifically steered away from passive applications of multithreading, touched only lightly on uses of inter-thread and inter-process communication in multithreading, and undoubtedly missed other important realms to consider. I suggest you look at the growing body of multithreading literature for more coverage. Finally, I would like to thank the folks at CTB/McGraw-Hill for presenting me with interesting problems to solve and their generosity in allowing me to present this discussion and code.                      u</p>
+<p>
+To obtain complete source code listings, see page 5.</p>
+</font></font></body>
+</HTML>

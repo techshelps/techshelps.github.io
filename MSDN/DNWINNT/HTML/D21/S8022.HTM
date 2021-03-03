@@ -1,0 +1,124 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Instrumenting the VGA Driver</TITLE><META HTTP-EQUIV="CONTENT-TYPE" CONTENT="text/html; charset= iso-8859-1"><style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD><BODY BGCOLOR="#FFFFFF">
+<FONT FACE="verdana,arial,helvetica" SIZE="2"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<H3>Instrumenting the VGA Driver </H3><P>In the VGA driver source module ENABLE.C we allocate the data segment into which the counters will be placed, and from which the VGACTRS.DLL will read the counters.</P>
+<P>First, add the following #include to ENABLE.C:</P>
+<P>|<P><BR></P>
+<pre><code>__________________________________________________________________<BR>
+#include "winperf.h"         // for Performance API structure definitions
+__________________________________________________________________
+</code></pre>
+<P>Now add the following global variables to ENABLE.C:</P>
+<P>|<P><BR></P>
+<pre><code>__________________________________________________________________<BR>
+HMODULE ghmodDrv = (HMODULE) 0;
+PPERF_COUNTER_BLOCK     pCounterBlock;  // data structure for counter values
+__________________________________________________________________<BR></code></pre>
+<P>Now add the following .DLL initialization routine to ENABLE.C:</P>
+<P>|<P><BR></P>
+<pre><code>__________________________________________________________________<BR>
+/*************************************************************************\
+* BOOL bInitProc(HMODULE hmod)
+*
+* DLL initialization procedure.  Save the module handle and exit.
+*
+* This routine creates a named mapped memory section that is used 
+* to communicate the driver's performance data to the extensible 
+* counter DLL. This method will only work with "user" mode driver 
+* DLL's.* Kernel or privileged drivers need to provide an IOCTL 
+* interface that will communicate the performance data to the 
+* extensible counter DLL.
+*
+\**************************************************************************/
+
+BOOL bInitProc(HMODULE hmod, ULONG Reason, LPVOID Reserved)
+{
+    HANDLE hMappedObject;
+    TCHAR  szMappedObjectName[] = TEXT("VGA_COUNTER_BLOCK");
+
+    if (Reason == DLL_PROCESS_ATTACH) {
+    //
+    //  create named section for the performance data
+    //
+    hMappedObject = CreateFileMapping((HANDLE)0xFFFFFFFF,
+                      NULL,
+                      PAGE_READWRITE,
+                      0,
+                      4096,
+                      szMappedObjectName);
+        if (hMappedObject == NULL) {
+            // Should put out an EventLog error message here
+            DISPDBG((0, "VGA: Could not Create Mapped Object for Counters %x",
+                GetLastError()));
+            pCounterBlock = NULL;
+            } else {
+            // Mapped object created okay
+            //
+            // map the section and assign the counter block pointer
+            // to this section of memory
+            //
+            pCounterBlock = (PPERF_COUNTER_BLOCK)
+                    MapViewOfFile(hMappedObject,
+                            FILE_MAP_ALL_ACCESS,
+                            0,
+                            0,
+                            0);
+            if (pCounterBlock == NULL) {
+                // Failed to Map View of file
+                DISPDBG((0, "VGA: Failed to Map View of File %x",
+                    GetLastError()));
+            }
+        }
+
+    ghmodDrv = hmod;
+    }
+
+    return(TRUE);
+
+    Reserved=Reserved;
+}
+__________________________________________________________________<BR></code></pre>
+<P>To the BITBLT.C module, add the following #include:</P>
+<P>|<P><BR></P>
+<pre><code>__________________________________________________________________<BR>
+#include &lt;winperf.h&gt;     // include performance API definitions
+__________________________________________________________________<BR></code></pre>
+<P>Add the following external declaration to BITBLT.C:</P>
+<P>|<P><BR></P>
+<pre><code>__________________________________________________________________<BR>
+// Global counter block for performance data
+extern PPERF_COUNTER_BLOCK pCounterBlock;
+__________________________________________________________________<BR></code></pre>
+<P>In the DrvBitBlt routine in BITBLT.C, add the following declaration:</P>
+<P>|<P><BR></P>
+<pre><code>__________________________________________________________________<BR>
+   PDWORD    pdwCounter;        // Pointer to counter to increment
+__________________________________________________________________<BR></code></pre>
+<P>Add the following code as the first thing the DrvBitBlt routine does:</P>
+<P>|<P><BR></P>
+<pre><code>__________________________________________________________________<BR>
+// Increment BitBlt counter
+   pdwCounter = (PDWORD) pCounterBlock;
+   (*pdwCounter)++;
+__________________________________________________________________<BR></code></pre>
+<P>To the TEXTOUT.C csource module, add the following #include:</P>
+<P>|<P><BR></P>
+<pre><code>__________________________________________________________________<BR>
+#include "winperf.h"         // performance API definitions
+__________________________________________________________________<BR></code></pre>
+<P>Add the external declaration to TEXTOUT.C:</P>
+<P>|<P><BR></P>
+<pre><code>__________________________________________________________________<BR>
+// definition of counter data area for performance counters
+extern PPERF_COUNTER_BLOCK pCounterBlock;
+__________________________________________________________________<BR></code></pre>
+<P>Add the following as the last declaration and first code to execute in the DrvTextOut routine in TEXTOUT.C:</P>
+<P>|<P><BR></P>
+<pre><code>__________________________________________________________________<BR>
+    PDWORD    pdwCounter;                        // Pointer to counter to increment
+
+// Increment TextOut counter
+   pdwCounter = ( (PDWORD) pCounterBlock  ) + 1;
+   (*pdwCounter)++;
+__________________________________________________________________<BR></code></pre>
+<P>That's all there is to it. The VGA driver is now instrumented for its two most important calls. These account for about 80% for display driver activity in the general case. So to heck with the other operations!</P></FONT></BODY></HTML>

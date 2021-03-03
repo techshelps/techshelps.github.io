@@ -1,0 +1,887 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>The Palette Manager: How and Why</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_palette"></a></sup>The Palette Manager: How and Why</h1>
+<p>
+Ron Gery<br>
+Microsoft Developer Network Technology Group</p>
+<p>
+Created: March 23, 1992</p>
+<p>
+There are two sample applications associated with this technical article.</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="264">
+</OBJECT><a href="javascript:sample1.Click()">Click to open or copy the files for the MULTIPAL sample application.</a></p>
+<p>
+<OBJECT id=sample2 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="265">
+</OBJECT><a href="javascript:sample2.Click()">Click to open or copy the files for the DIBIT sample application.</a></p>
+<h2>Abstract</h2>
+<p>
+This article is intended as a full introduction to the Microsoft® Windows™ Palette Manager. Beyond simply describing the use of the palette interface, this article attempts to explain its specific internal workings and gives reasons for its chosen implementation. Due to the complexity of the Palette Manager, this article gives some topics an initial explanation and then goes into them in greater detail later in the article. Because the result is rather long, it is recommended that you read it start to finish before using it as a reference. For a less in-depth discussion on using palettes, check out the "Palette Awareness" technical article on the Microsoft Developer Network CD (Technical Articles, Windows Articles, GDI Articles).</p>
+<p class=indent>
+<B><b>Disclaimer</b></B>&nbsp;&nbsp;&nbsp;Any and all internal details discussed in this article are subject to change without notice in future versions of Windows. Any reliance on these details must be made version-dependent on Windows versions 3.0 and 3.1.</p>
+<h2>Overview</h2>
+<p>
+The first part of this two-part article describes the design of the Microsoft® Windows™ Palette Manager and the basic process of palette realization.</p>
+<h3>Terminology</h3>
+<p>
+Before starting on the meat of this article, some commonly used terms need to be introduced. They are covered in much greater detail below, but establishing a working definition early on should help to keep them easily identifiable throughout.
+<ul type=disc>
+<li>
+Hardware palette. The color lookup table found on the hardware. Pixels on the screen are indexes into this table on palette-based display adapters.<br><br></li>
+<li>
+System palette. A copy of the hardware palette maintained by the Palette Manager. The term is often used in place of "hardware palette" to discuss the current state of the system's color table.<br><br></li>
+<li>
+Logical palette. A palette object created by an application using the <b>CreatePalette</b> function.<br><br></li>
+<li>
+Default logical palette. The DEFAULT_PALETTE stock object provided by the graphics device interface (GDI). It contains the VGA colors and is used for supporting applications that do not explicitly use palettes.<br><br></li>
+<li>
+Realization. The process of mapping a logical palette object to the system palette.<br><br></li>
+<li>
+Static colors. Twenty colors found in the system palette that cannot be set by an application. Sixteen of these colors are common across all color displays.<br><br></li>
+<li>
+Foreground/background. The currently active application is the <i>foreground</i> application, and a palette realized by this application is the foreground palette. All other applications and the palettes they realize are considered <i>background</i>.<br><br></li>
+<li>
+Foreground mapping. The way a logical palette is realized in the foreground. This mapping is constant for the life of the palette and is the basis for bitmap storage.<br><br></li>
+<li>
+Current index. Index into the system palette to which a given logical palette entry is currently mapped. This index changes based on the latest realization of the palette.</li>
+</ul>
+<h3>Introduction</h3>
+<p>
+The Windows Palette Manager, an integral part of GDI, was written so that applications can make use of a class of display adapter hardware that possesses the ability to display a vast number of colors but is restricted to only a certain number of colors at any one time. The design was targeted specifically to 8-bit display adapters with a hardware palette (or color lookup table) of 256 entries. Every pixel on the screen is stored as an 8-bit index into the hardware palette. Each entry in the hardware palette defines a color, usually 24 bits (8 each of red, green, and blue), although often only 18 bits of color information are actually used. These displays are known as <i>palette devices</i>.</p>
+<p>
+The palette solution for display adapters is not a clean one. While providing the enticement of high color resolution, it does not really deliver. The future of display hardware, it is hoped, will continue in the direction of full-color devices, supporting 24 bits of "pure" color per pixel without the limitation of a color table. In the current time frame, though, palette devices are a fact of life that are becoming widely available even on entry-level PC systems.</p>
+<p>
+The fundamental problem posed by a palette device is how do you allow <i>every</i> application to make use of all those available 256 high-resolution colors? Obviously that is not possible under Windows because Windows is intended as an environment for running multiple applications at once. Some priority system needs to be created to ensure that at least some applications are happy some of the time. That is the role the Windows Palette Manager plays. It controls the use of the system palette, the basic premise being that the current active application has priority over all other applications in setting the system palette. It also provides an interface for setting and accessing entries in the system palette.</p>
+<p>
+The Palette Manager interface is also intended to be <i>device independent</i> in nature. On nonpalette devices, some of the functions may not actually perform any work "behind the scenes," but the Palette Manager interface makes it possible for an application to attain access to as much color support as the device can provide. Devices that do support palettes are identified by having the RC_PALETTE bit set in the RASTERCAPS value returned from the <b>GetDeviceCaps</b> function.</p>
+<p>
+Should every application make use of the Palette Manager? The answer is no. Applications that are not especially concerned with color do not need to deal with palettes. On palette devices, the application simply gets a color selection similar to that of a VGA device. If that is a sufficient rainbow for the purposes of your application, ignore this article.</p>
+<h3>Note on VGAs and Palettes</h3>
+<p>
+While the standard VGA hardware does have a palette-based design, the number of available colors (64) and the number of hardware palette entries (16) are too limiting for use by the Palette Manager. As a result, the Windows standard VGA driver does not support palettes; instead, it has a fixed color table of 16 colors. The Windows Palette Manager cannot be used to alter the colors of this table.</p>
+<h3>Basic Design</h3>
+<p>
+Before going into the basics of the Palette Manager setup, this article looks at some alternatives to the Palette Manager. One possibility is to have the hardware palette preset to a color wash that roughly covers the color spectrum. This is roughly akin to expanding the VGA hardware palette from 16 colors to 256 colors. Presetting the hardware palette can achieve very effective dithering and greater color accuracy for color fills and such. The advantage of a scheme like this is that it eliminates conflict over the hardware palette. Although no application can actually get super-accurate colors (unless they happen to coincide with the predefined 256), all applications receive a reasonable palette to choose from. The disadvantage—a big one—is that there is no color accuracy. Even with the larger rainbow, an application cannot hope to effectively display a scanned image, especially not one with complex colors like flesh tones. Although images can be dithered with acceptable results, color information is lost, editing capabilities disappear, and the dithering process is complex and time consuming. Any output primitives that are not dithered by the system, including lines and text, cannot be displayed accurately. The 8514 driver shipped with Windows version 2.<i>x</i> uses this approach.</p>
+<p>
+The other possibility lies at the other end of the flexibility scale: Allow the foreground application to control the whole system palette. In this scheme, the rest of the system needs either to adjust every time the system palette is changed or simply to make do with inaccurate colors. In this scenario, the foreground application has access to 256 distinct colors and can therefore perfectly display an 8-bit image. The rest of the applications and systemwide features like window borders and menu highlights suffer the consequences.</p>
+<p>
+The Palette Manager provides a compromise between these two extremes. The system palette is broken up into two sections, one with fixed colors and one with colors that can be changed by applications. The system palette predefines 20 entries; these colors are known as the <i>static</i> or <i>reserved colors</i> and consist of the 16 colors found in the Windows version 3.0 VGA driver and 4 additional colors chosen for their visual appeal. The DEFAULT_PALETTE stock object is, as the name implies, the default palette selected into a device context (DC) and consists of these static colors. Applications can set the remaining 236 colors using the Palette Manager.</p>
+<p>
+The 20 static colors have several uses. They provide VGA color functionality for any application that does not explicitly use palettes; a color not based on a palette is mapped to these colors just as it would be on a VGA device driver, so there are no color concerns. The window manager component of Windows falls into this category of applications, and the static colors are used to draw window borders and other standard pieces. The static colors also provide a fallback set of colors for palette-using applications that are not in the foreground and that must match existing system palette colors. The use of static colors is discussed in greater detail below.</p>
+<p>
+An application can set the 236 nonstatic colors by requesting colors from the Palette Manager. The active window has the highest priority in setting these colors. The remaining windows, known as background windows, receive priority based on the Z-order. Any system entries not used by a window with a higher priority can be set by these background windows. Once the system palette has been filled with requested colors, all subsequent color requests are mapped to the closest color available in the system palette. Yes, this sounds complicated. It is discussed in much greater depth below.</p>
+<p>
+The Palette Manager provides VGA-level color to applications that are not color intensive, while simultaneously providing access to the system palette for those applications that are concerned with color accuracy.</p>
+<h3>Layout of the System Palette</h3>
+<p>
+The placement of the static colors in the system palette is of some concern. The most common raster operation (ROP) used under Windows is the XOR, which is usually used for inverting colors and then restoring them. To provide VGA-like behavior to the most basic of operations, the XOR must be made to operate in a consistent fashion. To accomplish this, the static colors are placed at either end of the system palette, 10 at the start and 10 at the end. This results in the inverse index of any one of the static colors being another static color (0 inverts to 255 and so on). The colors are ordered so that they match the index order on the VGA and result in the same inverse order. The 236 settable colors are between the two groups of static colors.</p>
+<p>
+The diagram in Figure 1 shows the basic layout of the system palette.</p>
+<p>
+<img src="palette_1.gif" border=0></p>
+<p class=label>
+<b>Figure 1. The system palette layout</b></p>
+<p>
+Table 1 shows the static colors, their logical color values, and the system palette indexes where they are located. Note that the specific values (especially for the four non-VGA colors) are specific to Windows versions 3.0 and 3.1 and may change in future releases.</p>
+<p class=label>
+<b>Table 1. The Static Colors</b></p>
+<table border=1 cellpadding=5 cols=5 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=18%><b>Index</b></td>
+<td class=label width=17%><b>Red</b></td>
+<td class=label width=17%><b>Green</b></td>
+<td class=label width=20%><b>Blue</b></td>
+<td class=label width=28%><b>Color</b></td>
+</tr>
+<tr valign=top>
+<td width=18%>0</td>
+<td width=17%>0</td>
+<td width=17%>0</td>
+<td width=20%>0</td>
+<td width=28%>black</td>
+</tr>
+<tr valign=top>
+<td width=18%>1</td>
+<td width=17%>0x80</td>
+<td width=17%>0</td>
+<td width=20%>0</td>
+<td width=28%>dark red</td>
+</tr>
+<tr valign=top>
+<td width=18%>2</td>
+<td width=17%>0</td>
+<td width=17%>0x80</td>
+<td width=20%>0</td>
+<td width=28%>dark green</td>
+</tr>
+<tr valign=top>
+<td width=18%>3</td>
+<td width=17%>0x80</td>
+<td width=17%>0x80</td>
+<td width=20%>0</td>
+<td width=28%>dark yellow</td>
+</tr>
+<tr valign=top>
+<td width=18%>4</td>
+<td width=17%>0</td>
+<td width=17%>0</td>
+<td width=20%>0x80</td>
+<td width=28%>dark blue</td>
+</tr>
+<tr valign=top>
+<td width=18%>5</td>
+<td width=17%>0x80</td>
+<td width=17%>0</td>
+<td width=20%>0x80</td>
+<td width=28%>dark magenta</td>
+</tr>
+<tr valign=top>
+<td width=18%>6</td>
+<td width=17%>0</td>
+<td width=17%>0x80</td>
+<td width=20%>0x80</td>
+<td width=28%>dark cyan</td>
+</tr>
+<tr valign=top>
+<td width=18%>7</td>
+<td width=17%>0xC0</td>
+<td width=17%>0xC0</td>
+<td width=20%>0xC0</td>
+<td width=28%>light gray</td>
+</tr>
+<tr valign=top>
+<td width=18%>8</td>
+<td width=17%>0xC0</td>
+<td width=17%>0xDC</td>
+<td width=20%>0xC0</td>
+<td width=28%>money green</td>
+</tr>
+<tr valign=top>
+<td width=18%>9</td>
+<td width=17%>0xA6</td>
+<td width=17%>0xCA</td>
+<td width=20%>0xF0</td>
+<td width=28%>sky blue</td>
+</tr>
+<tr valign=top>
+<td width=18%></td>
+<td width=17%></td>
+<td width=17%></td>
+<td width=20%></td>
+<td width=28%></td>
+</tr>
+<tr valign=top>
+<td width=18%>246</td>
+<td width=17%>0xFF</td>
+<td width=17%>0xFB</td>
+<td width=20%>0xF0</td>
+<td width=28%>cream</td>
+</tr>
+<tr valign=top>
+<td width=18%>247</td>
+<td width=17%>0xA0</td>
+<td width=17%>0xA0</td>
+<td width=20%>0xA4</td>
+<td width=28%>light gray</td>
+</tr>
+<tr valign=top>
+<td width=18%>248</td>
+<td width=17%>0x80</td>
+<td width=17%>0x80</td>
+<td width=20%>0x80</td>
+<td width=28%>medium gray</td>
+</tr>
+<tr valign=top>
+<td width=18%>249</td>
+<td width=17%>0xFF</td>
+<td width=17%>0</td>
+<td width=20%>0</td>
+<td width=28%>red</td>
+</tr>
+<tr valign=top>
+<td width=18%>250</td>
+<td width=17%>0</td>
+<td width=17%>0xFF</td>
+<td width=20%>0</td>
+<td width=28%>green</td>
+</tr>
+<tr valign=top>
+<td width=18%>251</td>
+<td width=17%>0xFF</td>
+<td width=17%>0xFF</td>
+<td width=20%>0</td>
+<td width=28%>yellow</td>
+</tr>
+<tr valign=top>
+<td width=18%>252</td>
+<td width=17%>0</td>
+<td width=17%>0</td>
+<td width=20%>0xFF</td>
+<td width=28%>blue</td>
+</tr>
+<tr valign=top>
+<td width=18%>253</td>
+<td width=17%>0xFF</td>
+<td width=17%>0</td>
+<td width=20%>0xFF</td>
+<td width=28%>magenta</td>
+</tr>
+<tr valign=top>
+<td width=18%>254</td>
+<td width=17%>0</td>
+<td width=17%>0xFF</td>
+<td width=20%>0xFF</td>
+<td width=28%>cyan</td>
+</tr>
+<tr valign=top>
+<td width=18%>255</td>
+<td width=17%>0xFF</td>
+<td width=17%>0xFF</td>
+<td width=20%>0xFF</td>
+<td width=28%>white</td>
+</tr>
+</table><br>
+<p>
+When a palette driver is first enabled and initialized, the Palette Manager sets the system palette for that device. The Palette Manager initializes the nonstatic 236 colors to a rainbow wash that is not maintained beyond the initialization phase. The rainbow allows colors placed in the lower nonstatic indexes to XOR better, but the Palette Manager never uses them for matching purposes.</p>
+<h3>Simple Use of a Logical Palette</h3>
+<p>
+Now that the Palette Manager has the system palette ready for use, it is up to the application to ask for the colors that it wants to display. An application requests colors from the Palette Manager by using a logical palette object. This object is created using the <b>CreatePalette</b> function. It consists of an array of <b>PALETTEENTRY</b> structures that define the colors that are being requested. A palette object is selected into a DC using the <b>SelectPalette</b> function. (The <b>SelectObject</b> function does not work with palettes.) Unlike other logical objects, a palette object must be explicitly realized by the application using the <b>RealizePalette</b> function. The actual color-matching work is performed during the realization step.</p>
+<p>
+The following snippet of code creates a simple palette with 64 shades of blue:</p>
+<pre><code>HPALETTE CreateBluePalette()
+{
+ &nbsp;&nbsp; PLOGPALETTE pPal;
+ &nbsp;&nbsp; HPALETTE hLogPal;
+ &nbsp;&nbsp; unsigned char blue;
+
+ &nbsp;&nbsp; pPal = (PLOGPALETTE)LocalAlloc(LMEM_FIXED, sizeof(LOGPAL) +
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 63 * sizeof(PALETTEENTRY));
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // (Extra entry in LOGPAL struct)
+ &nbsp;&nbsp; if (!pPal)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return(NULL);
+
+ &nbsp;&nbsp; pPal-&gt;palVersion = 0x300;
+ &nbsp;&nbsp; pPal-&gt;palNumEntries = 64;
+
+ &nbsp;&nbsp; // Brighter shades are placed first for higher priority.
+ &nbsp;&nbsp; for (blue = 255, i = 0; i &lt; 64; blue -= 4, i++)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pPal-&gt;palPalEntry[i].peRed = 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pPal-&gt;palPalEntry[i].peGreen = 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pPal-&gt;palPalEntry[i].peFlags = 0;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pPal-&gt;palPalEntry[i].peBlue = blue;
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; hLogPal = CreatePalette(pPal);
+ &nbsp;&nbsp; LocalFree(pPal);
+ &nbsp;&nbsp; return(hLogPal);
+}
+</code></pre>
+<p>
+The following code performs the work necessary to use the palette created above. Once it is executed, subsequent palette-based drawing will be relative to this logical palette. These two function calls are essentially always found as a pair:</p>
+<pre><code>SelectPalette(hDC, hBluePal, FALSE);
+RealizePalette(hDC);
+</code></pre>
+<p>
+The selected and realized palette is the palette used for operations to the screen until a different palette is realized. Output to the screen using another DC without first realizing a different palette is affected by the current palette realization without regard to the palette actually selected into that DC. Inadvertent palette use can be eliminated by always selecting and realizing the appropriate palette before drawing and then restoring the previous palette when the drawing is complete.</p>
+<p>
+Two distinct calls exist instead of a single select call that implicitly performs the realization for a simple reason. The reasoning is that it is valid to request a re-realization of a palette without having to reselect it. This is plausible when realizing a background palette in response to a system palette change. It is a good idea, though, to always pair the calls. Reselecting a palette that is already selected causes no harm, nor does re-realizing it.</p>
+<p>
+Palette objects follow most of the same rules as other logical objects. They should be deleted when no longer needed by using the <b>DeleteObject</b> function, and they must be deselected from all DCs before being deleted (by using <b>SelectPalette</b> to select a different palette into the DC). One notable difference is that an application can select a palette object into more than one DC (belonging to a single device) at a time, but the palette's realization remains constant for all of the DCs.</p>
+<h4>Default behavior</h4>
+<p>
+When an application does not explicitly select a palette (and before a palette is initially selected into a DC), a default palette is selected into the DC. This palette is the DEFAULT_PALETTE stock object. The default palette contains 20 entries corresponding to the static colors, and the Palette Manager trivially maps it to the system palette. All palette management is performed automatically for an application that does not explicitly use palettes.</p>
+<h4>Restoring the previous palette</h4>
+<p>
+The big question with restoring the previous palette is "Should the previous palette be realized?" The answer is "It depends." The danger is that realizing the previous palette can, in the foreground case, change the system palette and destroy any work performed with the new palette. If the previous palette is the default palette, the correct behavior is to realize the previous palette—realizing the default palette does not affect the system palette. If the previous palette is a potentially harmful palette to realize, the application can select the palette back into the DC and force it into the background (<i>bForceBackground</i> parameter set to TRUE) before realizing it to ensure that it does not affect the new palette's realization work. Simply not realizing the previous palette is a valid option, but depending on the expectation of the application that selected that palette in the first place, this approach could leave the palette hanging without a valid realization for subsequent drawing.</p>
+<h3>Basic Palette Realization</h3>
+<p>
+Once <b>RealizePalette</b> is called, the real work begins. Unfortunately, there are many little quirks involved in the realization process, so this section deals with the vanilla version only. This is the gist of the process. During selection, the logical palette is marked as being either a foreground or a background palette. In the simplest case, <b>SelectPalette</b> is called with FALSE as the last parameter. This indicates that the foreground status of the palette is determined by the state of the window that owns the given DC. If the window is the current active window or a descendent of the currently active window, the palette is a foreground palette. Otherwise the palette is a background palette.</p>
+<p>
+Each entry in the system palette can have one state: static, used, or unused. Static entries cannot be overwritten by a realization and are, in effect, permanently used. Unused entries can be set in the realization process. Once set, these entries become used—subsequent background realizations cannot overwrite the entry. What separates used entries from static entries is that a foreground realization changes all used entries to unused entries.</p>
+<p>
+The critical property of a foreground palette is that, when realized, it can overwrite all entries other than static in the system palette. The Palette Manager accomplishes this by marking all of the entries that are not static in the system palette as unused before the realization of a foreground palette, thereby eliminating all of the used entries. No preprocessing is done on the system palette for a background palette realization. The net effect is that the system palette is cleared for a foreground palette, but it is left in its current use state for a background palette.</p>
+<p>
+Now it's time for the realization itself. Each color in the logical palette is color-matched to every color in the system palette. The closest match is tracked. If an exact match is found, the color is matched and the entry in the system palette is marked as used. If no exact match exists, the Palette Manager looks for an entry that is unused. If one is found, the logical color is set in the system palette at that entry, and the entry is marked as used. A color in the system palette has thus been changed. If there are no unused entries left in the system palette (the palette is full), the logical color is mapped to the system palette entry with the closest color match. Notice that the color could be mapped to a color in the system palette that was set by the same logical palette.</p>
+<p>
+In nonalgorithmic terms, the palette being realized takes up any free entries that remain in the system palette for its own use. When there are no more entries to take, the remaining colors in the logical palette are mapped to the nearest color that is already in the system palette. The foreground palette gets to set all of the possible nonstatic colors. Background palettes can only set what remains open and are prioritized in a first come, first served manner. The priority queue starts up again the next time a foreground palette is realized.</p>
+<p>
+Using symbolically small palettes, Figure 2 shows the realization process in diagrammatic terms.</p>
+<p>
+<img src="palette_2.gif" border=0></p>
+<p>
+<img src="palette_3.gif" border=0></p>
+<p>
+<img src="palette_4.gif" border=0></p>
+<p>
+<img src="palette_5.gif" border=0></p>
+<p class=label>
+<b>Figure 2. The realization process</b></p>
+<p>
+Pretty simple, actually. The end result is that every color in the logical palette ends up with a mapping to one of the entries in the system palette. This mapping index remains current until the next time the palette is realized. An application using the logical color to draw uses this system palette mapping for actual drawing to the screen.</p>
+<p>
+If any entries in the system palette were changed during the realization, the driver is notified of the change and updates the hardware palette with the new colors. Also, if the palette was a foreground palette, the WM_PALETTECHANGED message is broadcast to the system so that other applications are aware of the systemwide change. More on the messaging process below.</p>
+<p>
+There are some interesting things that should be noted again. If a background palette is being realized and there are still entries in the system palette that are marked as unused, the background palette can set them. The foreground palette only has priority, not exclusivity. Also, if the foreground palette wants more entries than are actually available for setting in the system palette, too bad. When all of the unused system entries are used up, subsequent logical palette entries get mapped to the nearest color. As soon as a new foreground palette is realized, the system palette is effectively flushed of old priorities, and all of the nonstatic entries are once again open for use. Finally, identical colors are matched to existing entries in the system palette, eliminating color redundancy.</p>
+<h3>Bitmap Storage and Foreground Mapping</h3>
+<p>
+Device-dependent color bitmaps are stored as a collection of indexes (not colors) on palette devices. To achieve the desired color on the screen, the indexes must refer to a correct color in the hardware palette. The desired colors, though, are based on the colors of a logical palette, and the trick is to have the indexes work properly no matter how this palette is realized and mapped to the system palette. Clearly the indexes have to be relative to something in the logical palette.</p>
+<p>
+One possible solution is to have the bitmap indexes be indexes into the logical palette. When the palette is realized, a translation table is established to correspond to the way the palette was mapped to the system palette. All subsequent blting operations going from the bitmap to the screen involve translating each pixel from a logical index to a physical index. This translation greatly slows down the blts.</p>
+<p>
+To avoid this slowdown in many cases, the Palette Manager uses a slightly modified indexing system using foreground indexes. The first time a palette is realized, the Palette Manager builds up a foreground mapping for that palette. If the palette is being realized as a background palette, the foreground mapping is done without actually updating the system palette. This foreground mapping is the way the palette maps into the system palette when it is realized as a foreground palette. <i>This mapping is a constant for the palette.</i> (If any palette entries are changed, the mapping must be regenerated.) In terms of implementation, each entry in the logical palette has a foreground index associated with it.</p>
+<p>
+Any subsequent time that the palette is realized as a foreground palette, the realization work is already done, and there is no need for any color-matching. The foreground indexes set the necessary colors in the system palette, and every color in the logical palette is automatically mapped to the expected physical color. For this reason, realizing a foreground palette is faster if the palette has already been realized in the past.</p>
+<p>
+Bitmaps are stored using these foreground indexes. What does this mean for blting from memory? If the palette that corresponds to the bitmap is the currently realized foreground palette, the indexes in the bitmap refer directly to the current system palette. There is no need for translation! This makes for quite a speed improvement over constantly translating. Of course, if the palette is a background palette, translating every index in the bitmap may still be necessary. The translation in this case is from the foreground index to the current mapping index.</p>
+<p>
+As a bonus, a bitmap that is based on the default palette also requires no translation because the default palette's mapping never changes (it maps directly to the static colors). The result is that applications that do not explicitly use palettes get "fast" blting regardless of their foreground/background state.</p>
+<p>
+There are limitations to this scheme. Most critical to note is that the bitmap is inextricably tied to the palette. If a different palette is used during the blting operation, the bitmap is essentially meaningless because the indexes no longer have a valid reference point. The other limitation is a bit more subtle. Because only foreground indexes are used, and they are restricted by the presence of the static colors, an 8-bit image that does not contain all of the static colors in its original color table effectively loses whatever colors could not be set directly in the system palette. The device-dependent bitmap has lost color information.</p>
+<p>
+The application does not need to concern itself with any of the index translation work; it is all automatically handled by GDI and the driver. The application does need to worry about using the correct palette with the bitmap before blting. A more detailed discussion of blting from memory bitmaps is found below.</p>
+<p>
+Palette devices handle monochrome bitmaps the way other devices do: There is no dependence on any palette information, and monochrome-to-color blts are performed with the usual foreground/background mapping.</p>
+<h3>Messaging</h3>
+<p>
+Windows defines three palette-related messages: WM_QUERYNEWPALETTE, WM_PALETTECHANGED, and WM_PALETTEISCHANGING. The first two are useful for application implementation, but the third is a holdover from an earlier design and should be ignored.</p>
+<p>
+The WM_QUERYNEWPALETTE message indicates window activation and provides an application the opportunity to realize its palette. This is the first and ideal opportunity to realize the drawing palette in the foreground and is usually a good time to get all the palette management organized. Windows does not actually use the return value.</p>
+<p>
+The WM_PALETTECHANGED message informs all applications that the system palette has changed, changing the screen color of pixels mapped to the previous setting of the hardware palette. This message is sent when a foreground palette realization has caused at least one entry in the system palette to change. This is a purely informational message. Because this message is broadcast to the system, currently running applications receive it in Z-order, and this order determines palette priority. The usual response to this message is to re-realize any palettes currently used for display and to repaint using the new palette realization. Applications not using any palettes for the display are not affected by the change in the system palette.</p>
+<p>
+The <i>wParam</i> parameter of the message identifies the window that caused the system palette to change. To avoid excess processing and a potentially recursive situation, the application causing the WM_PALETTECHANGED message should avoid realizing another foreground palette in response to this message. </p>
+<p>
+If, in response to the WM_PALETTECHANGED message, an application simply forces a repaint without realizing its palette, the application effectively loses its place in the Z-order of realization because the resulting WM_PAINT message is processed only after all other applications have had an opportunity to realize their palettes. This can be detrimental to color accuracy.</p>
+<p>
+Below is a good starting point for palette messaging:</p>
+<pre><code>case WM_PALETTECHANGED:
+ &nbsp;&nbsp; if (wParam == hWnd)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Responding to own message.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Nothing to do.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+case WM_QUERYNEWPALETTE:
+ &nbsp;&nbsp; hDC = GetDC(hWnd);
+ &nbsp;&nbsp; hOldPal = SelectPalette(hDC, hPalCurrent, FALSE);
+ &nbsp;&nbsp; i = RealizePalette(hDC);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Realize drawing palette.
+
+ &nbsp;&nbsp; if (i)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Did the realization change?
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; InvalidateRect(hWnd, NULL, TRUE);&nbsp;&nbsp;&nbsp; // Yes, so force a 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // repaint.
+ &nbsp;&nbsp; SelectPalette(hDC, hOldPal, TRUE);
+ &nbsp;&nbsp; RealizePalette(hDC);
+ &nbsp;&nbsp; ReleaseDC(hWnd, hDC);
+ &nbsp;&nbsp; return(i);
+</code></pre>
+<p>
+More intricate responses to these messages are discussed below.</p>
+<p>
+Notice that no painting is actually performed directly in response to these messages. The messages simply provide a mechanism for realizing a palette and establishing its relative priority. Once the palette is realized, no other palette can nullify the results of that realization (until the next foreground palette is realized). For the foreground applications, the WM_QUERYNEWPALETTE message indicates that it is time to realize the foreground palette, the one that controls the system palette; its realization does not change until that application realizes a different foreground palette or the application is deactivated and loses its foreground status, allowing another application to realize a foreground palette.</p>
+<p>
+When the application does actually repaint and realizes the palette again, the mapping is already set, and the system palette does not change. Realizing a palette in response to these messages gets the palette "into" the current system palette picture so that later drawing can simply reference this earlier work.</p>
+<h3>Using Colors</h3>
+<p>
+The next step in understanding the Palette Manager is to see how it interprets the colors used by palette-using applications. The simplest colors are the ones found in the color table of a device-independent bitmap (DIB); they are always relative to the currently selected palette (based on the <i>hDC</i> parameter to <b>SetDIBits</b>, <b>StretchDIBits</b>, or <b>SetDIBitsToDevice</b>) and are color-matched to that palette on a palette device. If DIB_PAL_COLORS is used in the DIB function, the color table has indexes into the palette, so the matching is already done. Because the colors are used to define a single pixel in the image, dithering is not an option.</p>
+<p>
+Colors passed directly to GDI (for example, using the <b>CreatePen</b>, <b>SetTextColor</b>, or <b>FloodFill</b> function) are of three possible types. The easiest type uses palette indexes (the color is built using the <b>PALETTEINDEX</b> macro), and it always maps to the color referenced in the palette. Palette-relative colors (built using the <b>PALETTERGB</b> macro) specify that the color should be color-matched to the current logical palette and that the nearest color in that palette should be used; on a nonpalette device, the original RGB color is used as is. The last color type, the pure RGB color (built using the <b>RGB</b> macro), is <i>not</i> mapped to the current logical palette. It is handled by the device driver as though that driver were a VGA driver. To be precise, the color is mapped to the nearest static color, and if a brush is being created, the color is dithered using the static colors. No dithering is done for any color based on a logical palette.</p>
+<h3>Palettes on Nonpalette Devices</h3>
+<p>
+The Palette Manager also functions on devices that do not support palettes. Palette selection works the same, although the foreground/background status is not maintained. Realization is simply ignored. Explicit references to the logical palette (<b>PALETTEINDEX</b> colors, DIB_PAL_COLORS color tables) are dereferenced, and the actual RGB color in the logical palette is used for the operation. Colors defined with the <b>PALETTERGB</b> macro or the <b>RGB</b> macro are used as RGB values. No palette-related messages are sent. The goal is to allow applications to use palettes in a device-independent fashion and to not worry about the actual palette capabilities of the device driver.</p>
+<h2>More Details</h2>
+<p>
+The information above is a broad overview of the design of the Palette Manager. The Palette Manager has many nuances and side effects that a developer of a palette-using application should be aware of. The rest of this article describes these subtleties.</p>
+<h3>Device Capabilities</h3>
+<p>
+Palette devices have several entries in their capability table that are of interest. All are accessible using the <b>GetDeviceCaps</b> function. First, the RC_PALETTE bit of the RASTERCAPS word is set to indicate that this device is indeed a palette device. The number of entries in the device's hardware palette is available with the SIZEPALETTE index; this value is set to 256 on a standard palette driver. The NUMRESERVED index specifies how many static colors the device is maintaining. (This could be a number other than 20, but because there are some problems in the Palette Manager in dealing with values smaller than 20, they are not common.) The COLORRES index identifies the actual color resolution of the device, that is, the number of bits of color resolution that the device actually maintains. On 256-color devices, this value is often 18, with 6 bits each for red, green, and blue. (As a result, a color component value of 0x11111111 is equivalent to a value of 0x11111100.) The Palette Manager operates with full 8-bit color resolution, so it is up to the application to handle any decreased resolution. Seeing as how the device can support 256 colors, one might expect the NUMCOLORS index to specify 256 as the number of supported colors. This, however, is not the case. Because the driver does not control most of those colors, the appropriate value for NUMCOLORS is 20, which is the number of static colors (although this may change in future versions). Similarly, when the driver enumerates pens and brushes and defines values for NUMPENS and NUMBRUSHES, it only duplicates the functionality of a VGA driver, enumerating pen and brush variations based on the VGA colors.</p>
+<h3>Palette Creation</h3>
+<p>
+When a palette is created, the application has the ability to control how each color is mapped to the system palette by using the <b>peFlags</b> field in each color's <b>PALETTEENTRY</b> structure. The most common setting is 0, which means this is a normal color request and follows the standard rules of realization. </p>
+<p>
+The PC_EXPLICIT setting allows an application to map a palette entry directly to a specific entry in the system palette. The color in the system entry palette is not affected, so the logical palette entry is mapped to reflect the current contents of the system palette. This mapping is not affected by the foreground versus background status of the palette.</p>
+<p>
+Things get more interesting with the PC_RESERVED and PC_NOCOLLAPSE flags. The PC_RESERVED flag is used in conjunction with the <b>AnimatePalette</b> function for palette animation (more details below). A color with this flag is not color-matched to any entry in the system palette; it can only occupy an unused entry. If an unused entry is available, the Palette Manager sets the color and marks the entry as used and reserved, which means that no other logical color can be color-matched to the entry. The entry is reserved for exclusive use by this logical palette entry. If there are no unused entries available, the logical palette entry is mapped to black (index 0) in the system palette and cannot be animated. PC_NOCOLLAPSE mapping is very similar to PC_RESERVED mapping in that an unused entry is always chosen over color-matching, but the color is matched if there are no unused entries. Also, once the color is set in the system palette, it is an ordinary used entry, and other color requests can be matched to it. The PC_NOCOLLAPSE flag is useful in situations where the application needs to guarantee that its palette entries are realized as a block in the system palette. Entries marked with PC_NOCOLLAPSE cannot be animated.</p>
+<h3>Color-matching Algorithm</h3>
+<p>
+Color-matching is performed using a closest-Pythagorean-distance algorithm. The number being minimized is (deltaR2 + deltaG2 + deltaB2). While this may seem a simplistic approach, the results are actually quite good. </p>
+<h3>Methods for Displaying Multiple Palettes</h3>
+<p>
+If an application needs to display more than one palette-based image at a time, it has several options for managing the multiple palettes:
+<ul type=disc>
+<li>
+Use a rainbow palette<br><br></li>
+<li>
+Use a conglomerate palette<br><br></li>
+<li>
+Use prioritized palettes<br><br></li>
+<li>
+Use color analysis</li>
+</ul>
+<p>
+A single palette that contains a rainbow of colors allows all the images to be displayed with approximate colors. None will look accurate, with the exception of very simplistic ones made up of basic colors that are found in the rainbow. This approach has the same effect as using a 256-color driver with a fixed hardware palette and has all of the related limitations.</p>
+<p>
+Simply combining all of the palettes into a giant, conglomerate palette that is used for all drawing accomplishes the basic task. Any colors that cannot be set in the system palette are matched to existing colors. While simple concatenation of the palettes works, a better color mix can usually be encouraged with a more thorough merging (entry 0 comes from palette A, entry 1 from palette B, and so forth). If the original palettes are already sorted so that the more significant colors appear earlier in the palette, the resulting merged palette has the most significant colors from all the images at the front of the palette. Notice that the realization process will automatically collapse duplicate entries.</p>
+<p>
+The giant palette approach preserves some image quality across all images, but it may not always be convenient in coding terms. For example, adding another image for display necessitates building and realizing a new palette, which also means that all bitmaps based on the original palette must be rebuilt. Also, DIBs maintained with DIB_PAL_COLORS tables need to have the tables updated with every change to the merged palette.</p>
+<p>
+Another approach is for the application to manage the individual palettes as separate entities (this often makes managing separate images easier) and prioritize them for color-matching by forcing all but one of the palettes to be realized in the background. This is accomplished by using <b>SelectPalette</b> as follows:</p>
+<pre><code>// Select the chosen dominant palette.
+SelectPalette(hDC, hDominantPalette, FALSE);
+RealizePalette(hDC);
+
+// Select a lower priority palette.
+SelectPalette(hDC, hLowlyPalette, TRUE);
+RealizePalette(hDC);
+</code></pre>
+<p>
+When the application is in the foreground, the dominant palette establishes itself in the system palette. The lower priority palettes used by the application are then matched to the first one and, if any room remains, could change the system palette as well. The dominant image looks the best because it was the first to set colors, and the subsequent images look as good as they can given the status of the system palette. It is important to note that one palette must be realized without being forced into the background; this ensures that the application gets access to the system palette.</p>
+<p>
+For the background palette approach to work, the application must ensure that the secondary palettes are realized before any other application can realize another palette. When the application realizes its dominant palette in response to the WM_QUERYNEWPALETTE message, the application needs to realize its secondary palettes in response to the resulting WM_PALETTECHANGED message (<i>wParam</i> parameter equal to <i>hWnd</i>). Otherwise, all of the other applications have a chance to realize their palettes first, and the foreground application's background images lose out.</p>
+<pre><code>case WM_QUERYNEWPALETTE:
+ &nbsp;&nbsp; hDC = GetDC(hWnd);
+ &nbsp;&nbsp; hOldPal = SelectPalette(hDC, hDominantPal, FALSE);
+ &nbsp;&nbsp; i = RealizePalette(hDC);&nbsp;&nbsp;&nbsp;&nbsp; // Realize dominant palette.
+ &nbsp;&nbsp; SelectPalette(hDC, hOldPal, TRUE);
+ &nbsp;&nbsp; RealizePalette(hDC);
+ &nbsp;&nbsp; ReleaseDC(hWnd, hDC);
+
+ &nbsp;&nbsp; if (!i)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // No realization change, but let 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // secondaries realize.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SendMessage(hWnd, WM_PALETTECHANGED, hWnd, NULL);
+ &nbsp;&nbsp; else&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Palette did change. Repaint dominant image.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; InvalidateRect(hWnd, lpDominantRect, 1);
+ &nbsp;&nbsp; return(i);
+
+// This message is received for 3 reasons:
+//&nbsp; - Result of dominant palette realization (wParam == hWnd)
+//&nbsp; - Dominant palette did not actually change realization 
+//&nbsp;&nbsp;&nbsp; (wParam == hWnd)
+//&nbsp; - Some other application changed system palette (wParam != hWnd)
+case WM_PALETTECHANGED:
+ &nbsp;&nbsp; if (wParam == hWnd)&nbsp; // Dominant palette realization caused 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // this.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Realize the secondary palettes, forcing them into the
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // background.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // If the realization changes the system palette mapping,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // then force an appropriate repaint.
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hDC = GetDC(hWnd);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hOldPal = SelectPalette(hDC, hLowlyPalette, TRUE);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (RealizePalette(hDC))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; InvalidateRect(hWnd, lpLowlyRect, 1);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SelectPalette(hDC, hOldPal, TRUE);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RealizePalette(hDC);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ReleaseDC(hWnd, hDC);
+ &nbsp;&nbsp; } else {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Normal palette adjustment/repaint. Dominant palette
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // needs to be realized here as well.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hDC = GetDC(hWnd);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hOldPal = SelectPalette(hDC, hDominantPalette, TRUE);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (RealizePalette(hDC))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; InvalidateRect(hWnd, lpDominantRect, 1);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SelectPalette(hDC, hLowlyPalette, TRUE);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (RealizePalette(hDC))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; InvalidateRect(hWnd, lpLowlyRect, 1);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SelectPalette(hDC, hOldPal, TRUE);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RealizePalette(hDC);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ReleaseDC(hWnd, hDC);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; break;
+</code></pre>
+<p>
+The background palette approach to multiple palettes has the advantage of being very simple to code and to manage. The main limitation is that for images with many colors, only one image is displayed optimally; the other images suffer because their colors are matched to existing colors instead of being exact. The effect is identical to the Palette Manager's mechanism for handling multiple applications, each with a single palette, but in this case a single application is determining the priorities of multiple palettes. The MULTIPAL sample application on the Microsoft Developer Network CD uses this approach to manage multiple palettes.</p>
+<p>
+Color analysis can provide the optimal solution. The application can analyze the color use in the images that are to be displayed and come up with the ultimate palette that contains a mix of colors sufficient to display all of the images in the best possible manner. Of course, this can be done in varying levels of complexity and exactness and is not recommended for most applications. Once a good color-use analysis is written, it can also be used nicely for creating idealized palettes for images with 24-bit color information and for other similar color-tracking purposes. This type of approach, though potentially very pleasing visually, tends to be on the slow side and is not trivial to code.</p>
+<h3>Contending with Palette Changes</h3>
+<p>
+When the system palette is changed by the foreground application, pixels on the screen that were mapped to entries that have changed are no longer correctly colored. The rest of the system needs to adjust to this change to maintain visual integrity.</p>
+<p>
+Some applications and situations are not affected by this type of change, and they require no adjustments. Because the static colors do not change, applications that use only static colors (including all applications that do not use palettes explicitly) are not affected by the system palette change; this is one of the advantages of the static colors. Similarly, any pieces of a palette-using application that are drawn using only static colors do not change. The <b>RealizePalette</b> function returns a value for the number of entries in the logical palette that were remapped during the realization; this is the number of entries that were mapped to the system palette differently from the previous mapping. Do not confuse this with the number of entries in the system palette that changed. When the return value is 0 and the logical palette was used to draw the image currently on the screen, no pixels in the drawing were affected by the system palette change.</p>
+<p>
+It is important to remember that palette-based memory bitmaps are not affected by changes in the system palette. To display the bitmap after a system palette change, simply select and realize the associated palette and blt the bitmap to the screen. The re-realized palette ensures that the bitmap's color-mapping is based on the current system palette. The bitmap may not look as good as it did when its palette was the foreground palette, but it looks as good as it can using the available colors in the system palette.</p>
+<h4>Adjusted repaints</h4>
+<p>
+The simplest, although not usually the quickest, method of handling a system palette change is to repaint the entire client area. This approach also produces the most accurate results. To map properly to the new system palette, the logical palette being used for the drawing must be re-realized before the drawing begins. The repainting can be optimized if it is known that some parts are not affected by the palette change. Because the repainting is based on a new mapping of the logical palette, the physical colors used are based on the current system palette.</p>
+<h4>UpdateColors</h4>
+<p>
+The <b>UpdateColors</b> function allows the application to simply update all of the visible pixels in its screen DC to match to the current system palette. The Palette Manager maintains three mappings for each entry in a logical palette. Two of these, the foreground index and the current index, have already been discussed. The third is the previous index; it is simply the current index from the previous realization. After an application re-realizes its palette in response to a change in the system palette but before it repaints itself, the image displayed by the application is drawn with this previous mapping. When the <b>UpdateColors</b> function is called, the Palette Manager creates a translation table from the previous mapping to the current mapping and passes it to the device driver. The driver then translates each pixel in the application's client area from the old mapping to the current mapping. The result is that the image is now drawn using the current mapping and therefore is based on the current system palette. Note that the logical palette <i>must</i> be re-realized after the system palette change for the updating to work properly.</p>
+<p>
+The advantage of using this function is that it is simple to use and usually faster than repainting. The big disadvantage is that information is lost with every subsequent update, degrading the color quality of whatever is being updated. An application can compensate for this disadvantage by limiting the number of consecutive updates that it performs. For example, it can allow only two <b>UpdateColors</b> calls before a complete repaint:</p>
+<pre><code>case WM_QUERYNEWPALETTE:
+ &nbsp;&nbsp; hDC = GetDC(hWnd);
+ &nbsp;&nbsp; hOldPal = SelectPalette(hDC, hPalCurrent, FALSE);
+ &nbsp;&nbsp; i = RealizePalette(hDC);&nbsp;&nbsp;&nbsp;&nbsp; // Realize drawing palette.
+ &nbsp;&nbsp; SelectPalette(hDC, hOldPal, TRUE);
+ &nbsp;&nbsp; RealizePalette(hDC);
+ &nbsp;&nbsp; ReleaseDC(hWnd, hDC);
+ &nbsp;&nbsp; if (i)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Did the realization change?
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; InvalidateRect(hWnd, NULL, TRUE);&nbsp;&nbsp;&nbsp; // Yes, so force a 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // repaint.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; gUpdateCount = 0;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Starting update tracking 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // from scratch.
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; return(i);
+
+case WM_PALETTECHANGED:
+ &nbsp;&nbsp; if (wParam != hMyWnd)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hDC = GetDC(hWnd);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hOldPal = SelectPalette(hDC, hPalCurrent, TRUE);
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Only need to repaint if logical palette is remapped.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (RealizePalette(hDC))&nbsp;&nbsp;&nbsp;&nbsp; // Realize drawing palette.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // If fewer than two updates have been done, we can 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // update.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (++gUpdateCount &lt; 2)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; UpdateColors(hDC);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Otherwise, it's time to repaint from scratch.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; gUpdateCount = 0;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; InvalidateRect(hWnd, NULL, TRUE);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SelectPalette(hDC, hOldPal, TRUE);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RealizePalette(hDC);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ReleaseDC(hWnd, hDC);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; break;
+
+case WM_PAINT:
+ &nbsp;&nbsp; if (gUpdateCount &gt; 0)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // If painting after some 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // updating...
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BeginPaint(hWnd, &amp;ps);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; EndPaint(hWnd, &amp;ps);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; gUpdateCount = 0;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Starting update tracking from 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // scratch.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; InvalidateRect(hWnd, (LPRECT) NULL, TRUE);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Usual paint stuff.
+ &nbsp;&nbsp; break;
+</code></pre>
+<p>
+The update count is also reinitialized to 0 when the application repaints as a foreground application or when it needs to repaint after any part of the window has been updated with <b>UpdateColors</b>. In both cases, the entire window is invalidated to guarantee a clean and optimal repaint.</p>
+<h4>Moving into the foreground</h4>
+<p>
+When a palette-using application becomes the foreground application (that is, when the application is activated), it should re-realize its palette in the foreground and repaint as appropriate. The message to key on is the WM_QUERYNEWPALETTE message. This situation is very similar to a system palette change in that if the application doesn't have anything to repaint, it doesn't actually need to repaint. The <b>UpdateColors</b> function is of little use in this case; a full repaint is the way to go. The key operation of being activated is the realization of the palette in the foreground.</p>
+<h4>Life after application termination</h4>
+<p>
+When a palette-using application is terminated and its top-level window is destroyed, the system needs to adjust to allow other applications access to the palette. If the next application to be activated is a palette-using application, there isn't much confusion because this application realizes its palette in the foreground in response to the WM_QUERYNEWPALETTE message, and palette normalcy is restored. If, on the other hand, the next application to be activated does not use palettes, who gets to control the palette? The system behavior differs slightly between Windows version 3.0 and version 3.1. </p>
+<p>
+In Windows version 3.0, when an application's top-level window is destroyed and that window used a palette, the Palette Manager flushes out the system palette by marking all nonstatic entries as unused. This allows other applications access to the nonstatic entries. Next, the WM_PALETTECHANGED message is broadcast to the remaining applications and the desktop window.</p>
+<p>
+The Palette Manager in Windows version 3.1 behaves the same way except, in addition, it sends the WM_QUERYNEWPALETTE message to the next palette-using application in the Z-order if the new active application does not use palettes. If no palette-using applications are currently running and the desktop is drawn with a bitmap, the desktop is given palette priority. A palette-using application in this case is defined as an application that has at some point explicitly called <b>SelectPalette</b>.</p>
+<p>
+Before terminating, the terminating application only needs to worry about deleting any palette objects it created. The system handles the rest.</p>
+<h3>Memory Bitmaps</h3>
+<p>
+Bitmaps on palette devices do not contain color information. Without an accompanying palette to provide the color information, a bitmap is like a paint-by-numbers picture without the paint. </p>
+<p>
+Memory bitmaps on palette devices are mostly like bitmaps on other devices. The one glaring difference is that each pixel is an index instead of an actual color. The color information is located in the palette that was used for drawing onto the bitmap. Because of this, using the bitmaps involves also setting up the correct palette before any operation is performed. The connection between memory bitmaps and the correct palette cannot be stressed enough. A color bitmap is only meaningful when used with the palette on which it is based; the palette is the one that actually defines the color. Of course, the application must first realize the palette to make it useful.</p>
+<p>
+Monochrome bitmaps are treated the same across all devices. Because they contain no color information, there is no attached palette or a need for extra processing on a palette device.</p>
+<h4>Interesting blt behaviors</h4>
+<p>
+Blting from the screen to the screen involves no translation because all pixels are based on the same system palette, while blting from memory to the screen is done with a simple table translation that is set up by the Palette Manager during realization. On the other hand, blting from a memory bitmap to another memory bitmap is not trivial if the two bitmaps are not based on the same palette. The correct way to blt from one memory bitmap to another is to use DIBs, as follows:</p>
+<pre><code>SelectPalette(hDC, hPalette1, TRUE);
+RealizePalette(hDC);
+GetDIBits(hDC, hBitmap1, 0, height, lpBits, lpInfo, DIB_RGB_COLORS);
+
+SelectObject(hMemDC, hBitmap2);
+SelectPalette(hMemDC, hPalette2, TRUE);
+RealizePalette(hMemDC);
+StretchDIBits(hMemDC, DestX, DestY, Xext, Yext, SrcX, SrcY, Xext, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Yext, lpBits, lpInfo, DIB_RGB_COLORS, SRCCCOPY);
+</code></pre>
+<p>
+By using the DIB format, an application can disassociate the bitmap information from the palette and then establish a new relationship between the image and the second palette. Windows does not automatically perform this translation.</p>
+<p>
+If the two bitmaps share a single palette, a simple blt between the two works without modification because the indexes in both bitmaps represent the same colors. Also, if the bitmaps use only static colors (meaning that effectively they are not based on a palette), the blting needs no translation.</p>
+<h4>Stretched blts</h4>
+<p>
+The term <i>stretched blt</i> refers to a blt operation that involves the stretching or shrinking of the source rectangle to fit the destination rectangle (technically speaking, when the source and destination extents do not match). A stretched blt is not necessarily or uniquely a result of calling the <b>StretchBlt</b> function. The <b>BitBlt</b> function can result in a stretched blt if the source and destination DCs have different mapping modes and, when the coordinates are converted to device units, the extents are no longer the same. Likewise, the <b>StretchBlt</b> function can result in a blt that is not a stretched blt if the extents are equal in device units.</p>
+<p>
+The above DIB-based translation is performed automatically by GDI's stretched blt simulations. As a result, stretched blts between two DCs with different base palettes are performed with a palette translation, while a same-size blt operation is not translated. The exception to this rule is drivers that perform their own stretched blt operation (RC_STRETCHBLT bit in the RASTERCAPS capability word). These drivers circumvent GDI simulations and do not do the palette translation.</p>
+<p>
+GDI simulations for a stretched blt also possess some interesting behaviors when the source and destination are based on the same palette. Because the stretching simulation is performed with DIBs, the speed of getting and setting of the DIB data is a definite concern. In cases where the two palettes are the same, the DIB conversions are sped up using DIB_PAL_COLORS for the color table. The problem is that the source image can contain colors that are not actually in the logical palette on which it is based (for example, if a static color is used to draw in a bitmap with a palette that does not explicitly have the color). Pixels drawn with these colors cannot be color-matched to the destination palette because only indexes are used, and these pixels end up being mapped to black. This behavior is <i>not</i> limited to memory-to-memory stretched blts; it applies to all classes of palette-based stretched blts. A simple application workaround for this situation is to place the static colors in the logical palette being used—they don't take up any room in the system palette (they map to the existing static colors), and they allow the DIB_PAL_COLORS color table to reference the static colors. Keeping the source bitmap "clean" of nonpalette colors is another safe approach.</p>
+<h4>ROPs on palette devices</h4>
+<p>
+Raster operations do not mean much on palette devices. The driver views every pixel as an 8-bit value and carries out the raster operation on these values one bit at a time. The resulting 8-bit value is then an index into the hardware palette. When this value happens to be in the range of the static colors, there is consistency, but values outside this range map to whatever color happens to be there. Predicting the resulting index is further complicated by the application's not knowing how its logical palette is mapped to the system palette; finding the hardware index that is being used for a particular entry in the palette is not straightforward. On top of that, the system palette can change once the application is no longer in the foreground, and repainting based on the new colors needs to be recalculated from scratch.</p>
+<p>
+Some simple ROPs do work in a predictable manner. BLACKNESS and WHITENESS are preserved in meaning on palette devices. Also, inverting a static color results in another static color (consistent with the VGA color scheme), so simple highlighting can be accomplished.</p>
+<h3>DIB Handling</h3>
+<p>
+Converting DIBs into a device-dependent form naturally lends itself to palette use because the color table is essentially a palette. The whole format, in fact, greatly resembles the setup of a palette device with pixels represented as indexes into a color table. With 1-bit and 4-bit DIBs, if the colors in the table are boring (that is, black and white for 1-bit and the 16 VGA colors for 4-bit), using a palette is not required for color accuracy because the static colors and the default palette suffice. For 8-bit DIBs, though, a palette is useful for preserving color information on the screen.</p>
+<p>
+An application creates a palette to go along with a DIB by simply using the colors in the color table to define the palette. Note that the RGB triples in the DIB's color table are stored in reverse order. This palette is then used either to convert the DIB into a bitmap using the <b>SetDIBits</b> function (the palette then defines the bitmap) or to display the DIB directly on the device.</p>
+<p>
+If DIB_RGB_COLORS is used for the setting operation, the color table is defined as RGB values, and the Palette Manager matches each color to the current logical palette before the DIB is actually translated. The matching process is eliminated when the application uses the DIB_PAL_COLORS format for the DIB, using a table of indexes into the logical palette as the color table (this does not apply to 24-bit DIBs). Because the palette is created directly from the color table, the indexing is a one-to-one mapping. Notice that using an index table still works on nonpalette devices because every index is dereferenced back to the original color that is found in the palette. See the "Using DIBs with Palettes" technical article and the DIBIT sample application on the Microsoft Developer Network CD for more detailed information.</p>
+<p>
+DIBs stored in the 24-bits-per-pixel format do not usually come with a palette; to create a palette to enhance the image, the application may be granted a suggested palette (indicated by a nonzero <b>biClrUsed</b> field), use a generic rainbow palette, or analyze the colors actually used and build a palette to match. The process of converting a 24-bit DIB into a device-dependent bitmap on a palette device is a slow one because each color in the DIB is color-matched to the logical palette. This makes the 24-bit format not exactly ideal for palette devices. Yes, we are talking really slow.</p>
+<h4>GetDIBits on palette devices</h4>
+<p>
+Using the <b>GetDIBits</b> function on a palette device can result in loss of color information. When the destination DIB has a 1-bit format, the Palette Manager builds a color table with black and white as the colors and maps each color in the bitmap to these two colors. Similarly, it builds a color table made up of the 16 VGA colors for converting device-dependent bitmaps to 4-bit DIBs, and the colors in the bitmap are mapped down to those colors. There is no attempt at determining an optimal 16-color scheme, and if an application wants to perform that kind of work, it needs to build the 4-bit version of the DIB on its own (probably based on an 8-bit DIB). A 24-bit DIB is built by the device driver using the colors found in the accompanying palette; obviously no new color information can be generated.</p>
+<p>
+More interesting is the 8-bit DIB case. The Palette Manager builds a color table composed of the 20 static colors (10 at either end of the range) and 236 colors based on the logical palette being used. The colors are chosen by looking at the palette's foreground mapping and working backward; the resulting table is identical to the system palette when the palette is realized in the foreground. Entries that are not used by the logical palette are set to black. Any colors in the bitmap that are not in the logical palette or among the static colors are mapped to black. Because of the introduction of the static colors into the color table, color information from the original source is most likely lost. For example, calling <b>SetDIBits</b> with an 8-bit DIB containing no static colors and then calling <b>GetDIBits</b> with the same bitmap and palette does not return the same DIB. In fact, the only way colors are not lost is if the logical palette contains fewer than 237 colors that differ from the static colors. Remember, however, that "excess" colors were already effectively lost when the DIB's palette was realized; any colors not set in the system palette were color-matched to those that were.</p>
+<p>
+If the application chooses the DIB_PAL_COLORS option in the <b>GetDIBits</b> function, the Palette Manager matches the color table calculated above to the current logical palette to arrive at the indexes that are placed in the table.</p>
+<h3>Intricacies of the Realization Process</h3>
+<p>
+Here are some thoughts about a few peculiarities of the realization process that may or may not be useful information for an application writer. </p>
+<p>
+The default palette is always forced to be realized in the background. More than that, the mapping is unchanging and is never recalculated. The translation table set up for blting purposes is NULL (that is, there is no translation).</p>
+<p>
+When a palette is realized for the first time, its foreground mapping is calculated. So if the palette is being realized in the background for its first realization, two different realizations take place.</p>
+<p>
+The next time the palette is realized in the foreground, no color-matching takes place, and the previously computed foreground mapping is used to realize the palette. To force a palette to re-realize, use the <b>UnrealizeObject</b> function.</p>
+<p>
+The Palette Manager color-matches a logical color against the physical palette by starting at index 0 and scanning each entry, in order, to the end. This means that if a palette has colors that already exist in the system palette, the realization may not result in a "block" setting of colors. Colors will be mapped to existing entries instead of taking up unused spaces.</p>
+<p>
+This also leads to an interesting loophole. If an application realizes a palette that contains one of the upper 10 static colors in such a way that the color does not get color-matched (that is, with PC_NOCOLLAPSE or PC_RESERVED), that color is placed in the system palette. The next time a palette containing a high static color is realized, that color is matched to the <i>copy</i> of the static color that is present. At this point, that color has lost all of the usual features of a static color: it doesn't invert consistently, it takes up room in the nonstatic zone, and its index entry does not match the real static color. One way to work around this is to use colors that have almost the same values as the upper static colors, that is, use RGB(0,0,0xFE) instead of RGB(0,0,0xFF) for blue. Visually, the difference is indistinguishable, but to the Palette Manager the two colors are different.</p>
+<p>
+The Palette Manager tracks which of the entries in the system palette have <i>ever</i> been used. This is not the eternal <i>ever</i> of time but the <i>ever</i> of a Windows-based session—once the entry is set by an application, that entry is no longer special. Initially, only the static colors fit into this category. When a palette realization starts replacing entries in the system palette, entries that have never been used are set before entries that have been used in the past. This means that if the first foreground palette that is realized is small, the second foreground palette that is realized starts using up system palette entries at the end of the first palette's section as shown in Figure 3. The "never used" status of an entry goes away once the entry is used, whether it be by a different foreground palette or a background palette. </p>
+<p>
+<img src="palette_6.gif" border=0></p>
+<p>
+<img src="palette_7.gif" border=0></p>
+<p class=label>
+<b>Figure 3. First and second realizations of the foreground palette</b></p>
+<p>
+The result of this peculiarity is that a palette is not guaranteed to be set into the system palette starting at index 10 (first index after static color section). This feature of the Palette Manager allows two applications with small palettes to share the system palette without causing the system palette to change after the initial realization. One way for an application to ensure that its realization begins at the first index of the nonstatic section is to prefill the system palette. This can be done easily with a sufficiently large PC_NOCOLLAPSE palette of all black entries.</p>
+<h3>Writing a Device-Independent Palette Application</h3>
+<p>
+One of the goals of the Palette Manager is to allow applications to use palettes in a device-independent manner. As noted above, an application can still reference the colors in a logical palette on a nonpalette device; this capability is the key to device independence.</p>
+<p>
+DIBs can be handled using palettes on any type of device. A palette created from the color table is used on a palette device to get the proper colors into the system palette and is essentially ignored on a nonpalette device. Using RGB colors in the DIB table (DIB_RGB_COLORS) is cleaner and a bit quicker on nonpalette devices than on palette devices, but prematching the colors and using indexes in the color table (DIB_PAL_COLORS) is faster than using RGB colors on palette devices. When indexes are used on a nonpalette device, the Palette Manager pulls out the indexed colors from the logical palette so that the original RGB values are actually used for the DIB conversion. A 24-bit DIB also works with a logical palette in a device-independent fashion: the palette is not used on nonpalette device drivers and is used by the Palette Manager for color-matching on palette devices.</p>
+<p>
+Using colors outside of the DIB framework depends to a large extent on what the application wants to accomplish, although there are some general guidelines. If the application is outputting based on some working palette (for example, drawing into a bitmap that is already based on a palette), the <b>PALETTEINDEX</b>-type of color definition provides easy access to the palette. On nonpalette devices, the color in the entry being referenced is used.</p>
+<p>
+When the application is working with a more generalized palette and is looking for the best color mapping on any type of device, the <b>PALETTERGB</b> color definition is more useful than the <b>PALETTEINDEX</b> color definition. On palette devices, the RGB color is matched to the nearest entry in the logical palette. On nonpalette devices, the RGB value is used as is. A good spectrum of colors can be achieved on palette devices, as well as on full-color devices, with a carefully chosen palette.</p>
+<p>
+Here is an example of code for a device-independent color wash with blues:</p>
+<pre><code>hBluePal = CreateBluePalette();
+if (hBluePal)
+{
+ &nbsp;&nbsp; SelectPalette(hDC, hBluePal, TRUE);
+ &nbsp;&nbsp; RealizePalette(hDC);
+ &nbsp;&nbsp; SelectObject(hDC, GetStockObject(NULL_PEN));
+
+ &nbsp;&nbsp; for (blue = 255, i = 0; i &lt; 64; blue -= 4, i++)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Create a brush with desired shade of blue; use 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // palette relative to get good color on palette devices.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (hBrush = CreateSolidBrush(PALETTERGB(0, 0, blue)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hBrush = SelectObject(hDC, hBrush);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // A color block in the wash.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Rectangle(hDC, i*5, 0, i*5+4, 100);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hBrush = SelectObject(hDC, hBrush);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DeleteObject(hBrush);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; SelectPalette(hDC, GetStockObject(DEFAULT_PALETTE), TRUE);
+ &nbsp;&nbsp; RealizePalette(hDC);
+ &nbsp;&nbsp; DeleteObject(hBluePal);
+}
+</code></pre>
+<p>
+The one problem with the code above is that the wash only consists of the 64 shades found in the palette, so the reliance on the palette is not completely removed. Representing an intermediate color is not trivial. If the color is requested using the above code (by increasing the iterations through the color loop) and <b>PALETTERGB</b>, it will be mapped to the nearest logical palette color, and the wash will have repeated strokes of the same color on a palette device. Using a <b>PALETTERGB</b> intermediate color works nicely for nonpalette devices because the intermediate color can be represented either as a pure color or as a dither. </p>
+<p>
+With a 16-bit full-color device driver, colors will most likely repeat due to the resolution constraint of only 5 bits per color component, unless the driver has been written to support dithering. Similarly, palette devices with only 18 bits of color resolution per entry also lose color resolution. A possible remedy for loss of color resolution is for the application to perform its own dithering by using pattern brushes and the colors from the palette. Although this solution limits output to the logical palette's colors for all devices, the output can be improved. Of course, full device independence can be forsaken, and the application can create the dithers only on palette devices.</p>
+<h3>Palette Animation</h3>
+<p>
+The term <i>palette animation</i> refers to the process of directly changing a color in the hardware palette in order to change the color of a pixel on the screen. This technique creates the effect of motion or simply recolors an image. Using the Palette Manager for palette animation is a two-step process. First, the application creates an animating palette by marking animating entries with the PC_RESERVED flag. During realization, this entry does not match any existing colors in the system palette but instead only maps to an unused slot (when available). This system palette entry is then marked as an animating entry and is not available for mapping by any other color. Once the animating palette is created, selected, and realized, the application calls <b>AnimatePalette</b> to accomplish the animating itself.</p>
+<p>
+The <b>AnimatePalette</b> function is very similar to the <b>SetPaletteEntries</b> function in that it specifies new settings for a subsection of a logical palette. The difference is that <b>AnimatePalette</b> sets new values only for those entries that are marked with the PC_RESERVED flag, and if such an entry is mapped to an animating entry in the system palette, the entry in the system palette is set with the new color as well. The Palette Manager sends the changed entries to the device driver one entry at a time, not as a block. The driver, in turn, sets the new colors in the hardware palette. No window messaging takes place because any system palette entry that is changing is off limits to all other applications. Any pixels on the screen that are mapped to the changed entries now are displayed with the new color. Depending on how the device driver synchronizes the setting of the hardware palette with its screen refresh, some video snow may appear during the process.</p>
+<p>
+One thing to remember about animating palettes is that once the system palette has no unused entries, subsequent colors marked with the PC_RESERVED flag map to index 0 (black) and are not animated. As a result, an application realizing an animating palette in the background may end up with all the colors mapping to black, and this makes for less than optimal repainting. One possible mechanism for handling this is to create a parallel palette without the PC_RESERVED flag for painting in the background. This, of course, requires that the application refrains from animating when in the background.</p>
+<p>
+On nonpalette devices, calling <b>AnimatePalette</b> accomplishes nothing more than setting new colors in the logical palette. This palette function becomes really useful only on a palette device.</p>
+<h3>SetSystemPaletteUse</h3>
+<p>
+The <b>SetSystemPaletteUse</b> function allows an application to free up the entries used by the static colors for general realization purposes. Black and white remain static at index 0 and index 255, respectively. Although this may sound like a great thing, the usefulness of this process is restricted in many ways, not the least of which are the parts of the system and the Palette Manager that do not properly handle the lack of static colors. The term <i>system colors</i> used below refers to the colors used by Windows to draw window components; the colors are accessible via the <b>GetSysColor</b> and <b>SetSysColors</b> functions.</p>
+<p>
+To properly use the SYSPAL_NOSTATIC option, an application should follow these guidelines:
+<ul type=disc>
+<li>
+Only use the SYSPAL_NOSTATIC option when the application is the active application and its window is maximized.<br><br></li>
+<li>
+Save current system colors.<br><br></li>
+<li>
+Set new system colors using only black and white.<br><br></li>
+<li>
+Send the WM_SYSCOLORCHANGE message to inform the rest of the system of this change.<br><br></li>
+<li>
+Refrain from using explicit RGB colors, except for black and white. (The colors used should all be relative to the application's palette.)<br><br></li>
+<li>
+Any palette that is to be realized must first be unrealized using <b>UnrealizeObject</b>.</li>
+</ul>
+<p>
+When the SYSPAL_NOSTATIC option is set, all that happens internally is that the Palette Manager updates a few data structures to reflect the fact that all but two of the static colors are no longer static. The colors themselves remain in place until a realization needs those entries.</p>
+<p>
+After normal system palette use is established when the application calls <b>SetSystemPaletteUse</b> with the SYSPAL_STATIC option, the application should do the following to restore the system:
+<ol>
+<li>
+Restore the original system colors.<br><br></li>
+<li>
+Send the WM_SYSCOLORCHANGE message to inform the rest of the system of this change.<br><br></li>
+<li>
+Any palette realized with the SYSPAL_NOSTATIC setting must be unrealized using <b>UnrealizeObject</b> before its next realization.</li>
+</ol>
+<p>
+The system palette should be restored to its normal state as soon as the application is no longer the active application. When the system palette is restored to normal behavior using the SYSPAL_STATIC option, the Palette Manager simply restores the static colors and informs the device driver of this change.</p>
+<p>
+Of course, if the application can ensure that no drawing is done with the system colors (for example, a maximized window with no title bar or menus), there is no need for saving and restoring the system color information.</p>
+<p>
+The basic problem with using the <b>SetSystemPaletteUse</b> function is that the Palette Manager does not remap the default palette to use only black and white, and the device driver is not made aware of the lack of the static colors. As a result, any operation that involves using the static colors (for example, using RGB colors and drawing window borders) maps to the system palette entries that used to contain the static colors. The results on the screen are unpredictable. Why isn't the support better? Mostly because the <b>SetSystemPaletteUse</b> function is a stopgap measure to deal with the problem of insufficient palette access. The Palette Manager is designed for managing the shared use of the system palette, and once the static colors are gone, palette sharing is no longer a viable possibility; ensuring that all other applications are still color-matched in an acceptable manner is not easily possible. If you want your application to use all 256 colors, you should follow the rules above regarding the SYSPAL_NOSTATIC option so that the application does not interfere with the operation of other applications running in the system.</p>
+<p>
+The <b>GetSystemPaletteUse</b> function determines the current state of the system palette.</p>
+<h3>Other Functions</h3>
+<p>
+The Palette Manager provides a few other support functions for manipulating logical palettes and getting information about the system palette. These functions are relatively simple and straightforward.</p>
+<h4>SetPaletteEntries and GetPaletteEntries</h4>
+<p>
+The <b>SetPaletteEntries</b> function lets an application alter the color information of entries in a logical palette. To become effective, the newly changed palette needs to be re-realized. Because the palette has changed, the Palette Manager treats it as a completely new palette, and the foreground mapping is built up from scratch. Any bitmaps that were attached to the original version of the palette are no longer necessarily valid.</p>
+<p>
+The <b>GetPaletteEntries</b> function gets the contents of a logical palette. To extract all the information about the palette, use the <b>GetPaletteEntries</b> function in conjunction with the <b>GetObject</b> function, which returns the number of entries in the palette.</p>
+<h4>ResizePalette</h4>
+<p>
+The <b>ResizePalette</b> function allows for the resizing of a logical palette. Similar to <b>SetPaletteEntries</b>, the <b>ResizePalette</b> function results in a palette that must be re-realized by the application to become useful and is treated by the Palette Manager as a new palette that needs a new foreground mapping.</p>
+<h4>UnrealizeObject</h4>
+<p>
+When a logical palette is explicitly unrealized using the <b>UnrealizeObject</b> function, the Palette Manager throws out any previous realization information that was maintained for the palette. The next time the palette is realized by an application, the Palette Manager has to realize it from scratch, rebuilding the foreground mapping in the process. This function is useful in cases where you expect the palette to have a different realization, possibly matching better to the current system palette.</p>
+<h4>GetNearestPaletteIndex</h4>
+<p>
+The <b>GetNearestPaletteIndex</b> function matches a given color to a logical palette. The function returns the index of the logical palette entry whose color is chosen by the Palette Manager to be the closest. This same functionality takes place inside the Palette Manager when dealing with a <b>PALETTERGB</b> color on a palette device.</p>
+<h4>GetSystemPaletteEntries</h4>
+<p>
+As the name implies, the <b>GetSystemPaletteEntries</b> function returns information about the color values in the system palette. Only the color values are returned; internal information such as which entries are used by the foreground palette and which entries are PC_RESERVED is not accessible.</p>
+<h3>Clipboard Use with Bitmaps</h3>
+<p>
+The Clipboard data format, CF_PALETTE, is used for passing logical palettes. Its main purpose is to permit an application to properly paste a CF_BITMAP object on a palette device. Unless the bitmap is built entirely of static colors (which could be the case with applications that are not palette-aware), the palette is necessary for displaying the bitmap. Creating a new palette with the same colors does not necessarily guarantee that the bitmap color information remains valid. A palette-using application placing a palette-based bitmap in the Clipboard must also include the defining palette.</p>
+<p>
+If the source application does not provide a palette with the bitmap, the application is indicating that the default palette should be used to display the bitmap. This is the case with applications that do not use palettes.</p>
+<p>
+The best way to place an image in the Clipboard is to use a DIB. A device-independent version of the bitmap can be used by palette-savvy applications, as well as those that lack palette expertise. The DIB method further promotes device independence by being useful on nonpalette devices.</p>
+<p>
+Another way to place a bitmap in the Clipboard is to use a metafile that contains palette-based records. The following sequence of records does the job nicely:
+<ol>
+<li>
+Create a matching palette.<br><br></li>
+<li>
+Select the palette.<br><br></li>
+<li>
+Realize the palette.<br><br></li>
+<li>
+Use <b>StretchDIBits</b> on a DIB version of the bitmap with equal source and destination extents. (Or use <b>BitBlt</b> on a device-dependent bitmap, which is recorded using a DIB.)</li>
+</ol>
+<p>
+Applications not aware of palettes can play this metafile and display a palette-based bitmap without even knowing it. Meanwhile, palette-using applications probably benefit more from using the CF_DIB format because the relevant color information is more readily accessible.</p>
+<h3>The Trouble with Metafiles</h3>
+<p>
+Placing palettes into metafiles is tricky business. First, the metafile needs to be as undamaging as possible to the visuals of the application performing the playback. Second, once palette information is placed in a metafile, it is very difficult for an application to extract that information.</p>
+<p>
+To illustrate the first issue, imagine an application that is about to play two metafiles to the screen. If both metafiles contain a <b>SelectPalette</b>/<b>RealizePalette</b> pair that results in a foreground palette realization, the second metafile to be played could blow away the first one's system palette settings and thereby destroy the image. Such carnivorous behavior could be avoided by recording the metafile's palette selection so that the palette is always forced to be a background palette. In this way, when the metafile is played back, it always has a lower palette priority and does not degrade any palette-based image already displayed by the application. Unfortunately, this is not possible with Windows versions 3.0 and 3.1 due to faulty implementation that loses the <i>bForceBackground</i> parameter information during recording. When played, the <b>SelectPalette</b> call always has the parameter set to FALSE. The way to work around this problem during playback is for the application to enumerate the metafile's records, trap META_SELECTPALETTE records, and play them manually with <i>bForceBackground</i> set to TRUE:</p>
+<pre><code>// In application's EnumFunc for metafile enumeration...
+
+case META_SELECTPALETTE:
+ &nbsp;&nbsp; SelectPalette(hDC, lpHTable-&gt;objectHandle[(lpMFR-&gt;rdParm[0])], 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; TRUE);
+ &nbsp;&nbsp; break;
+</code></pre>
+<p>
+The second limitation is not a concern for most applications, but those applications that want to optimize palette use or to merge palette information need to know what colors are being used inside a metafile. Currently, the only way to do this is to use the <b>EnumMetaFile</b> function to look at each record and extract the needed color information. Color information is found in records that create and alter palettes and in DIB records that have RGB color tables.</p>
+<h3>Palette-Insensitive Applications</h3>
+<p>
+Applications that use palettes explicitly can have parts that do not have any knowledge of the Palette Manager. Palette insensitivity exists when no application-created palette is used for display purposes and only the implicitly selected default palette is in use.</p>
+<p>
+Applications that are not palette-aware continue to work on a palette device by relying on the static color scheme. These applications never request colors that are based on a palette; only RGB values are used. As mentioned above, the device driver provides VGA-level support for RGB colors by using the static colors. Applications do, however, lose the ability to use all of the available ROPs in a consistent manner on palette devices, although XOR still works. Using ROPs, it is possible for an application that is not palette-aware to end up with pixel values that do not reference a static color. This type of behavior, hopefully, is rare.</p>
+<p>
+A palette-insensitive application does not need to worry about maintaining a palette in conjunction with color bitmaps because the default palette provides all of the needed color information. Color bitmaps created by this application are based on the default palette and can represent all of the static colors, which cover the entire color range accessible by the application. Because the default palette has a fixed mapping to the system palette, no bitmap translation is needed for blting.</p>
+<p>
+It is possible for a palette-insensitive application to use a palette without knowing it by playing a metafile that contains palette-based information. The application is able to simply play the metafile and display a palette-based image. The problem that the application now faces is that it has no support for dealing with system palette changes, so the image may not be ideally displayed at all times. The Palette Manager has no support for handling this sort of situation; the application would have to be made palette-aware to permit consistent display of palette-based metafiles.</p>
+<p>
+Pasting a bitmap from the Clipboard is another potential pitfall. Because memory bitmaps on palette devices are based on a logical palette (with the exception of those made entirely of static colors), the palette that accompanies the bitmap in the Clipboard is needed for proper display. The bitmap alone is useless. Looking for an alternative Clipboard format, such as a DIB or a metafile with a built-in palette, is probably the best solution. Palette applications should be aware of this possible scenario and provide an alternative format whenever possible.</p>
+<h3>MYPAL: Tool for Tracking the System Palette</h3>
+<p>
+The MYPAL application in the Microsoft Windows version 3.1 (and version 3.0) Software Development Kit (SDK) is a useful tool for tracking the system palette. This application uses PC_EXPLICIT entries in its logical palette to mirror the contents of the system palette. With MYPAL visible, it is possible to watch the system palette as it changes. Note that the application does not repaint with the new colors; the rectangles displayed are mapped to the corresponding entries in the hardware palette and simply reflect its current status.</p>
+<p>
+Another feature of the MYPAL application is its ability to identify the hardware mapping of pixels on the screen. When you press the right mouse button in MYPAL, the application identifies the current mapping of the pixel pointed to by the cursor. By dragging the cursor to the pixel in question, it is possible to identify the color of an individual pixel. Using the ZOOMIN application, also found in the SDK, helps you get accurate pixel identification. </p>
+<p>
+The mechanism for determining the hardware mapping of a single index on the screen is rather unclean. When a pixel is chosen for identification, <b>GetPixel</b> is used to get its color value. To arrive at a hardware mapping, this color is then compared to each entry in the current system palette. When a match is found, the proper entry is identified. This algorithm depends on nonrepetition of colors in the system palette, which is not necessarily guaranteed (repeats can be set using PC_RESERVED and PC_NOCOLLAPSE entries in a logical palette). Also, the MYPAL application in the Windows version 3.0 SDK has another problem in that its internal tracking of the system palette is only updated in response to the WM_PAINT message; this is not sufficient because a change in the system palette does not cause the application to repaint. A better approach, found in MYPAL in the Windows version 3.1 SDK, is to update that information on a need-to-know basis, when the right mouse button is first pressed. Neither version competently deals with animating entries.</p>
+<h3>What the Device Driver Sees</h3>
+<p>
+All of the actual palette managing is at the GDI level. A device driver that provides palette support is simply told how to set the hardware palette and how to interpret indexes in bitmaps. For all palette-based operations, the driver does not even deal with actual colors, only indexes.</p>
+<p>
+Setting the hardware palette is fairly easy. If any change is necessitated either during realization or as a result of palette animation, the Palette Manager passes the new palette information to the driver. The driver then sets the new values into the hardware color lookup table. Poof! The colors are changed.</p>
+<p>
+With every new palette realization, the Palette Manager also provides the device driver with a corresponding bitmap translation table. This table, one entry for every possible index, defines how memory bitmaps are to be interpreted. The driver uses this table every time a memory-to-screen blt takes place; every pixel value in the memory bitmap is translated by this table to the corresponding screen pixel value. The table is built by the Palette Manager as a mapping between the logical palette's foreground indexes and its current realization indexes. In cases where the translation table is an identity table, there is no need for translation, and GDI sends the driver NULL instead of an actual table. The driver maintains a current translation table at all times, but it is not used for screen-to-screen or memory-to-memory blts.</p>
+<p>
+The device driver builds an inverse of the translation table for performing screen-to-memory blts. The inverse table is by no means guaranteed to be one-to-one when the palette is in the background, so this type of blt can very easily lose color information. To ensure a valid screen-to-memory blt, the application must be the foreground application and use the foreground palette.</p>
+<p>
+When GDI passes a color to the driver (for object realization, drawing modes, and so forth), the color can be either an RGB color or an index. If the application passed in a pure RGB value, it is passed as is to the driver, and the driver proceeds to simulate VGA behavior with the color by using the static colors in the system palette. The VGA simulation means that the color is matched to the 16 VGA colors and dithered using those colors when a solid brush is being realized. The Palette Manager converts colors that are based on a logical palette into indexes and passes these indexes to the driver. If the DC involved in the operation is a screen DC, the index is the current mapping of that color; if the DC is a memory DC, the index is the foreground mapping of the color.</p>
+<p>
+DIB operations require the Palette Manager to massage the input so that the driver can interpret the colors correctly. A palette driver never actually sees any colors in conjunction with a DIB; the communication for both getting and setting is accomplished using indexes. For converting DIBs into a device-dependent bitmap (via <b>SetDIBits</b> or <b>StretchDIBits</b>), the Palette Manager maps each entry in the DIB's color table to the current palette and then uses the palette's corresponding foreground indexes to build a new index table that is passed to the driver. The driver sees only the foreground indexes. When the DIB is to be set directly to the device (via <b>SetDIBitsToDevice</b> or <b>StretchDIBits</b>), the Palette Manager builds the driver's table using the palette's current mapping instead of the foreground mapping. Palette-based device drivers do not touch the color table when performing a <b>GetDIBits</b> operation; the Palette Manager itself fills in the color information and provides the driver with a translation table (not necessarily one-to-one) specifying the mapping from memory bitmap pixel values to DIB index values.</p>
+<p>
+For 24-bit DIBs, the translation process gets a bit uglier. Because the DIB data consists of only 24-bit RGB values, each one must be mapped to the current palette individually during a "set" operation. The driver calls a Palette Manager function for each color to get this mapping. Yes, this is slow. Many drivers implement a color caching scheme of some sort to minimize calls back to the Palette Manager. Handling a <b>GetDIBits</b> operation with a 24-bit DIB as the destination is easier than the "set" operation because the source bitmap has a limited number of colors. The Palette Manager provides the driver with a lookup table of RGB values, each corresponding to an index in the source bitmap.</p>
+<h3>Informational Limitations</h3>
+<p>
+The Palette Manager buffers applications from the actual details of the system palette. Palette realization from an application's perspective is just a black box that shields the system palette from direct outside interference. As a result, some applications do not have as much control over the realization process as they would like.</p>
+<p>
+An application cannot choose the system palette index to which a given color maps. (The PC_EXPLICIT option lets you attach an entry to a system palette entry, but it does not actually change the system palette.) Controlling exactly how a palette maps to the system palette is useful for an application that wants to use raster operations in a meaningful fashion. The PC_NOCOLLAPSE flag gives an application some control. By knowing how many static colors are in the system palette and how the Palette Manager realizes PC_NOCOLLAPSE palettes (a less polite method is to use a PC_RESERVED palette), an application can get its colors spread, in order, in the nonstatic entries of the system palette. Remember that flushing the system palette is a precaution worth taking to guarantee that the first entry used is at index 10, assuming a standard system palette. Although the application can't specifically dictate the placing of a single color, it can control the ordering and placement of an entire logical palette. Of course, this mechanism only works when the logical palette has first choice in an empty system palette (to be precise, the application needs to have the foreground palette).</p>
+<p>
+Conversely, once the Palette Manager has realized a palette, it is not trivial for an application to determine exactly where the Palette Manager has mapped each logical entry. One way to make this determination is to use the <b>GetSystemPaletteEntries</b> function to get a copy of the system palette and then search for each logical color to see where it is in the system palette. This works for colors that are actually set in the system palette, but it does not accomplish the task if the color is color-matched to the system palette. A workable, but not perfect, solution is for the application to create a logical palette from the system palette entries and use the <b>GetNearestPaletteIndex</b> function to get a mapping. The limitation that remains is that colors in the system palette may be reserved (and not used for color-matching) or have multiple copies (introduced by an application using PC_RESERVED or PC_NOCOLLAPSE).</p>
+<h3>Static Color Gamma Correction</h3>
+<p>
+A small wrench is thrown into the workings of the Palette Manager by the digital-to-analog converters (DACs) that most devices have. While the DACs may generate a linear relationship between the value of a color and the visual appearance of that color, the human eye does not work in the same manner. Without some sort of correction, the color RGB(128,0,0) does not appear to the eye to be half the intensity of the color RGB(255,0,0); in fact, it looks much darker. The process of manipulating the meanings of colors to get visual linearity is called <i>gamma correction</i>. An RGB color value is passed to the device driver, and the driver converts the value (usually by means of a lookup table for each component) into a corrected RGB value that is then passed to the hardware. The result is that, for example, the color RGB(128,0,0) is actually displayed using the hardware value RGB(192,0,0).</p>
+<p>
+To perform truly effective gamma correction, the hardware setup needs to be calibrated and setup-specific numbers must be generated. This level of color calibration is also needed for device-independent color, which is in the works for future products. Computing a generalized correction per device driver is another possibility, but at the time the Palette Manager was designed, this approach seemed a cop-out and was not implemented. Another consideration is that gamma correction inevitably causes loss of actual color resolution because the color mapping is clearly not one-to-one. Some of the dim hardware colors are not accessible, and multiple bright colors may map to the same hardware color.</p>
+<p>
+The solution used by Windows versions 3.0 and 3.1 is not entirely elegant. The driver uses values of 191 instead of 128 in the hardware palette for the low-intensity static colors. This tactic achieves a brightness comparable to a standard VGA. When the driver performs VGA simulations for RGB color-matching, it treats the low-intensity colors as though they have values of 128, so that, for example, a solid brush with the color RGB(128,0,0) maps to a solid low-intensity red and is not dithered. The Palette Manager is not aware of the gamma correction and maintains the system palette with the 191-based values for palette matching; the default palette is mapped as a special case so that its 128-based low-intensity colors map to the proper static entries in the system palette.</p>
+<p>
+The results for applications are mostly innocuous, but they do change some expectations. The color table for 8-bit DIBs returned by the <b>GetDIBits</b> function has the low-intensity static colors specified with 191-based values. These values have the very convenient property that when mapped down to VGA-resolution colors (a choice of 0, 128, or 255), the chosen mapping is 128, so the low-intensity colors are mapped correctly on VGA-type devices. A palette created from this color table has the 191-based values in it, and when it is realized, the colors map to the static colors because palette realization is based on the real values in the hardware palette.</p>
+<p>
+Confusing? Well, it gets a bit worse. The one loophole in the scheme becomes apparent when a palette is created with a 128-based color such as a DIB created on a VGA. The palette color, when realized, is matched to a true 128-based color in the hardware, getting its own entry in the system palette when appropriate. When used for drawing, the color is quite a bit darker than on a VGA. Things are even uglier if the application decides to also do some drawing that is <i>not</i> based on the palette by simply using an RGB color, because the device driver maps that color to the matching static color. When this color is used for drawing, the resulting color is much brighter than the palette-based version. This type of visual inconsistency can be avoided by not mixing palette-based and RGB-based drawing in the same application.</p>
+<p>
+One less-than-elegant workaround to the problem of DIBs stored with VGA colors is to make a special case for the color table. If the color table has the exact logical colors found on the VGA driver (specifically, colors with low intensity are based on 128 and colors with high intensity are based on 255), then the application can use the default palette (<b>GetStockObject</b>(DEFAULT_PALETTE)) for displaying the DIB instead of creating a palette based on the color table. The default palette's special mapping ensures that it is mapped to the proper indexes in the system palette and that its low-intensity colors are not dim. Note that making a copy of the default palette is not the same as using the actual default palette stock object because the copy does not maintain the stock object's special-case mapping.</p>
+<h3>Concluding Thoughts</h3>
+<p>
+As a conclusion to this rather lengthy discussion, here is a quick summary of the important concepts of the Palette Manager:
+<ul type=disc>
+<li>
+Bitmaps are inextricably tied to palettes on palette devices. Without the proper palette, the bitmap cannot be displayed properly.<br><br></li>
+<li>
+A palette's foreground mapping is constant for the life of the palette. Thus, the palette is realized quickly when in the foreground, and memory-to-screen blts for the foreground application do not require any translation. <br><br></li>
+<li>
+Once an application changes a palette using <b>SetPaletteEntries</b> or <b>ResizePalette</b> or unrealizes it with <b>UnrealizeObject</b>, the foreground mapping is lost. The next time the palette is realized, the Palette Manager must do so from scratch.<br><br></li>
+<li>
+For the palette to be effective, an application must realize the palette before drawing.<br><br></li>
+<li>
+While not necessarily the quickest approach, completely invalidating the client area and then repainting from scratch is guaranteed to generate the best possible palette-based drawing. This is an important fact when coding a response to a situation involving a palette change (WM_PALETTECHANGED and WM_QUERYNEWPALETTE).<br><br></li>
+<li>
+When an application places a bitmap (CF_BITMAP) in the Clipboard on a palette device, the application must also place the corresponding palette (CF_PALETTE) in the Clipboard. Even better, a DIB with an RGB color table can be placed in the Clipboard.<br><br></li>
+<li>
+Most palette functions do nothing on nonpalette devices. Specifically, the functions <b>RealizePalette</b>, <b>AnimatePalette</b>, and <b>SetSystemPaletteUse</b> do not affect a nonpalette device. Also, Windows does not send any of the palette messages when running on a nonpalette device.</li>
+</ul>
+</BODY>
+</HTML>

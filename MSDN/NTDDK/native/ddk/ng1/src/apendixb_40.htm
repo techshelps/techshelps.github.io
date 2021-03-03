@@ -1,0 +1,122 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML>
+<HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>B.8.3  Customizing the STREAMS Stack for Windows NT</TITLE>
+<style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD>
+<BODY BGPROPERTIES="FIXED" TEXT="#000000" BGCOLOR="#FFFFFF">
+
+<FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<H3><A NAME="DDK_B.8.3_Customizing_the_STREAMS_Stack_for_Windows_NT_NG"></A>B.8.3  Customizing the STREAMS Stack for Windows NT</H3>
+<P>
+In the UNIX kernel, process synchronization uses the <B>sleep</B>&nbsp;and <B>wakeup</B>
+functions, in conjunction with flag variables and timers. Since the Kernel is
+preemptive and a driver cannot wait while holding a spin lock, <B>sleep</B>&nbsp;is
+difficult to emulate without introducing a timing window between the <B>timeout</B>
+call and the <B>sleep</B>&nbsp;call.
+<P>
+Since common use of <B>sleep</B>&nbsp;and <B>wakeup</B>&nbsp;within transport stacks
+effectively emulates Kernel event objects, these functions are not provided
+for STREAMS. STREAMS stacks must use the appropriate synchronization facility
+instead. Usually, this facility consists of event objects.
+<P>
+<B>Example: Orderly Release Within a Close Procedure</B>
+<P>
+Consider a STREAMS driver implementing a connection-oriented protocol with
+orderly release. Suppose the original pseudocode for its close procedure is:
+<PRE><FONT FACE="Courier" SIZE="2">int thing;
+egclose(rq, ...)
+{
+&nbsp; &nbsp; flag = CLOSING;
+&nbsp; &nbsp; send release indication;
+&nbsp;
+&nbsp; &nbsp; id = timeout(timeout_handler, ...);
+&nbsp; &nbsp; sleep(&amp;thing, ...);
+&nbsp;
+&nbsp; &nbsp; untimeout(id);
+&nbsp; &nbsp; if (flag != CLOSED || sleep was interrupted) {
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; recover;
+&nbsp; &nbsp; }
+&nbsp; &nbsp; else {
+&nbsp; &nbsp; &nbsp; &nbsp; finish closing;
+&nbsp; &nbsp; }
+}
+&nbsp;
+handle_orderly_response()
+{
+&nbsp; &nbsp; &nbsp; &nbsp; flag = CLOSED;
+&nbsp; &nbsp; &nbsp; &nbsp; wakeup(&amp;thing);
+}
+&nbsp;
+timeout_handler()
+{
+&nbsp; &nbsp; &nbsp; &nbsp; wakeup(&amp;thing);
+}
+&nbsp;</FONT></PRE>
+<P>
+For Windows NT, the STREAMS stack must use a Kernel synchronization event to
+indicate that the response to the orderly release request has arrived. This
+object has the desirable property that it remains set until a thread waits on
+it and then automatically resets itself when the wait has been satisfied.
+<P>
+If several threads must wait on an object, then a Kernel notification event
+provides nearly the same semantics as <B>sleep</B>&nbsp;and <B>wakeup</B>. All
+waits for the event are satisfied when it is set to signaled, but it remains
+in the Signaled state until explicitly reset. The converted pseudocode is:
+<PRE><FONT FACE="Courier" SIZE="2">#include &lt;ntddk.h&gt;
+#include &lt;stream.h&gt;
+&nbsp;
+KEVENT CloseEvent;
+&nbsp;
+egopen(...)
+{
+&nbsp; &nbsp; KeInitializeEvent(&amp;CloseEvent, SynchronizationEvent, FALSE);
+}
+&nbsp;
+egclose(
+&nbsp; &nbsp; IN queue_t *rq,
+&nbsp; &nbsp; ...
+)
+{
+&nbsp; &nbsp; NTSTATUS status;
+&nbsp; &nbsp; LARGE_INTEGER timeout_value;
+&nbsp;
+&nbsp; &nbsp; timeout_value = StrmConvertCentisecondsToRelativeTimeout(1000);
+&nbsp; &nbsp; send release indication;
+&nbsp;
+&nbsp; &nbsp; status = StrmWaitForSingleObject(
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; rq,                 // current queue
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &amp;CloseEvent,        // pointer to the dispatcher object
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; UserRequest,        // reason for the wait
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; KernelMode,         // processor mode to wait in
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; FALSE,              // is this wait alertable?
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &amp;timeout_value);    // timeout period
+&nbsp;
+if (status == STATUS_TIMEOUT) {
+&nbsp; &nbsp; recover;
+}
+else if (!NT_SUCCESS(status)) {
+&nbsp; &nbsp; recover;
+}
+else {
+&nbsp; &nbsp; finish closing;
+}
+&nbsp;
+handle_orderly_release_response()
+{
+&nbsp; &nbsp; KeSetEvent(&amp;CloseEvent, 0, FALSE);
+}
+&nbsp;</FONT></PRE>
+<P>
+The test for STATUS_TIMEOUT after the wait returns is necessary because the <B>NT_SUCCESS</B>
+macro does not consider STATUS_TIMEOUT an error and will return TRUE. Once
+again, please remember that a driver absolutely must not wait while holding a
+spin lock. However, issuing a wait call with a timeout of 0 guarantees that
+the call will not block and can be made while a spin lock is being held. Under
+some circumstances while a spin lock is being held, it can be more efficient
+for the driver to make a 0 timeout call first. Only if this wait fails with a
+STATUS_TIMEOUT is the driver required to relinquish the spin lock and issue a
+real wait call.
+<P></FONT>
+</BODY>
+</HTML>

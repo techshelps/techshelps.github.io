@@ -1,0 +1,778 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>The Guts of Security</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><a name="msdn_secguts"></a>The Guts of Security</h1>
+<p>
+Ruediger R. Asche<br>
+Microsoft Developer Network Technology Group</p>
+<p>
+May 9, 1995</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="4082">
+</OBJECT><a href="javascript:sample1.Click()">Click to open or copy the files in the CLIAPP/SRVAPP sample applications.</a></p>
+<h2>Abstract</h2>
+<p>
+This article is second in a series of technical articles that describe the implementation and application of a C++ class hierarchy that encapsulates the Windows NT™ security application programming interface (API). The series consists of the following articles:</p>
+<p>
+<a href="msdn_seccpp.htm">"Windows NT Security in Theory and Practice"</a> (introduction)</p>
+<p>
+"The Guts of Security" (implementation of the security class hierarchy)</p>
+<p>
+<a href="msdn_bitspcs.htm">"Security Bits and Pieces"</a> (architecture of the sample application suite)</p>
+<p>
+<a href="msdn_homegrwn.htm">"A Homegrown RPC Mechanism"</a> (description of the remote communication implemented in the sample application suite)</p>
+<p>
+CLIAPP/SRVAPP, a sample application suite that consists of a database client and server, illustrates the concepts introduced in this article series.</p>
+<h2>Introduction</h2>
+<p>
+If you read <a href="msdn_seccpp.htm">"Windows NT Security in Theory and Practice,"</a> chances are that you have already played with the CLIAPP/SRVAPP client-server application suite that I provide with this article series. In that application suite, the server can secure a number of objects: mutexes, file mappings, named pipes, and a database object. In both <a href="msdn_seccpp.htm">"Windows NT Security in Theory and Practice"</a> and <a href="msdn_bitspcs.htm">"Security Bits and Pieces,"</a> I left you in the dark as to how the server actually secures these objects. In this article, I will dissect the underlying C++ classes that implement security. Please note that the sample C++ classes are <i>not</i> part of the Microsoft® Foundation Class Library (MFC) and are provided solely for demonstration purposes.</p>
+<h2>An Overview of the Security API</h2>
+<p>
+A very rough count of the security-related functions listed in the Security Overview section of the Win32® application programming interface (API) Help file yields about 75 functions. This does not include the data structures. A lot of stuff to deal with, right?</p>
+<p>
+The C++ class hierarchy I provide encapsulates the security API (providing possibly 80 percent of what you will need in a real-life, security-aware server application). However, some issues, such as auditing, are currently not implemented.</p>
+<p>
+It helps to think of the security API as consisting of subgroups of functions that provide certain functionalities. This section gives a short breakdown of functional groups to help you digest the API a little bit better.</p>
+<p>
+Four data structures are crucially important to security programming: security descriptors (SDs), access control lists (ACLs), access tokens, and security identifiers (SIDs). The functions in the security API can be categorized into five groups that closely relate to these data structures:
+<ol>
+<li>
+Functions that work on SDs. These functions initialize and manipulate SDs. The server application is responsible for allocating (and later deallocating) the memory. The functions in this group include the <b>MakeAbsoluteSD</b>, <b>MakeSelfRelativeSD</b>, <b>InitializeSD</b>, and <b>IsValidSD</b> functions, and the <b>GetSecurityDescriptor<i>xxx</i></b> and <b>SetSecurityDescriptor<i>xxx</i></b> functions. The SD examination code in the EXAMSTFF.H file in the sample application utilizes a number of the <b>GetSecurityDescriptor<i>xxx</i></b> functions.<p class=tl>
+An important subgroup consists of functions that build and maintain ACLs within SDs. ACLs consist of collections of access control elements (ACEs). Thus, a number of functions that manipulate ACLs actually work on ACEs. This subgroup includes functions such as <b>AddAccessAllowedAce</b>, <b>FindFirstFreeAce</b>, and <b>GetAce</b>. </P><p class=tl>
+We will discuss some of the functions in this group in the "Building and Maintaining ACLs" section later in this article.</P></li>
+<li>
+Functions that maintain the association between SDs and objects. This group contains functions such as <b>SetPrivateObjectSecurity</b> and <b>GetKernelObjectSecurity</b>. One of the cornerstones of this group is the <b>AccessCheck</b> function. We will discuss these functions in detail in the "Associating SDs with Objects" section later in this article.<br><br></li>
+<li>
+Functions that work on access tokens. One important subgroup (including <b>OpenProcessToken</b>, <b>OpenThreadToken</b>, <b>ImpersonateNamedPipeClient</b>, and <b>RevertToSelf</b>) retrieves access tokens, and another subgroup (including <b>AdjustTokenPrivileges</b>) manipulates access tokens. In this article, we will touch only upon the first subgroup.<br><br></li>
+<li>
+Functions that work on SIDs.<br><br></li>
+<li>
+Functions that work on auditing. Basically, auditing allows the security subsystem to monitor object access. Auditing is implemented by means of data structures called <i>system access control lists</i> (SACLs), which are similar to <i>discretionary access control lists</i> (DACLs). I will extend the class library to cover auditing in a future article.</li>
+</ol>
+<h2>More Squares and Arrows. . .</h2>
+<p>
+Figure 1 shows the class hierarchy that I designed for securable objects.</p>
+<p>
+<img src="secguts_1.gif" border=0></p>
+<p class=label>
+<b>Figure 1. Class hierarchy for securable objects</b></p>
+<p>
+The <b>CSecureableObject</b> base class contains most of the code that pertains to security. <b>CSecureableObject</b> is an abstract base class—that is, you cannot create any instances from this class. You need the derived "intermediate" classes <b>CPrivateSecObject</b>, <b>CUserSecObject</b>, and <b>CKernelSecObject</b> because of the way Windows NT™ defines security and assigns SDs to objects. (We will look at this issue in the "Associating SDs with Objects" section later in this article.)</p>
+<p>
+We will eventually create real instances from classes that are derivatives of <b>CPrivateSecObject</b>, <b>CUserSecObject</b>, and <b>CKernelSecObject</b>. In the sample application suite, these derived classes are <b>CSecuredNamedPipe</b>, <b>CMutex</b>, <b>CFileMapping</b>, and <b>ChainedQueue</b>. Coincidentally, these are also the object types that are exposed to the user of the client application through the Permissions dialog box. In your application, you will probably derive your own custom objects from <b>CPrivateSecObject</b>, <b>CUserSecObject</b>, or <b>CKernelSecObject</b>. (However, note that <b>CUserSecObject</b> and <b>CKernelSecObject</b> can serve as base classes only for objects that Windows NT defines as "securable user" or "kernel" objects; thus, most of your custom objects will probably be derived from <b>CPrivateSecObject</b>.)</p>
+<p>
+Note that being securable is generally only one property of these object types. For example, a named pipe is first of all a communication object (please refer to <a href="msdn_comclass.htm">"Communication with Class"</a> and related articles in the MSDN Library for a description of the <b>CCommunication</b> class hierarchy), and the property of "being securable" is more of a side-effect of a named pipe. Furthermore, not all instances of a securable object need to be securable; for example, the client end of a named pipe does not have anything to do with security.</p>
+<p>
+To accommodate this "optional" property of securability, the class hierarchy uses the powerful C++ multiple inheritance feature: A <b>CSecuredNamedPipe</b> object is derived from both <b>CServerNamedPipe</b> and <b>CKernelSecObject</b>. If securability is not required, we can simply derive this object from <b>CServerNamedPipe</b>. The code below is from the NPIPE.H file:</p>
+<pre><code>class CSecuredNamedPipe: public CServerNamedPipe, public CKernelSecObject
+{
+ &lt;class definition&gt;
+}
+</code></pre>
+<p>
+This implementation allows the server application to use the class members that are related to security and the class members that relate to the "real" functionality of the object without additional coding. Note that in a "dynamic" object-oriented system such as OLE, it would make perfect sense to place all the functions that pertain to security in one interface, and all other functions in another interface; such an implementation would make the coding much more elegant.</p>
+<p>
+The three files that are related to security are in the SRV\SECSTUFF subdirectory:
+<ul type=disc>
+<li>
+SEC.CPP, which implements the security base classes <b>CSecureableObject</b>, <b>CPrivateSecObject</b>, <b>CUserSecObject</b>, and <b>CKernelSecObject</b>.<br><br></li>
+<li>
+SECDIALO.CPP (generated by ClassWizard), which implements the Security dialog box.<br><br></li>
+<li>
+EXAMSTFF.CPP, which contains code adapted from the brilliant CHECK_SD sample in the Win32 Software Development Kit (SDK) Q_A\SAMPLES directory. If anything helped me understand security, it was this sample, so I decided to include the CHECK_SD code in my own sample application.<p class=tl>
+I replaced all of the <b>printfs</b> with <b>OutputDebugString</b> calls so that applications that use the security class library can call the <b>ExamineSD</b> or <b>ExamineAccessToken</b> and monitor the appropriate data structures at run time.</P></li>
+</ul>
+<p>
+Let's look at the prototypes for the class definition of <b>CSecureableObject</b>, the mother of all security classes (from SEC.H):</p>
+<pre><code>class CSecureableObject
+{
+ protected:
+  PSECURITY_DESCRIPTOR m_pSD;
+  PACL m_pDACL;
+  PACL m_pSACL;
+  PSID m_pOwner;
+  PSID m_pPrimaryGroup;
+ public:
+  int m_iSecErrorCode;
+ protected:
+  virtual BOOL SetTheDescriptor()=0;
+  virtual BOOL GetTheDescriptor()=0;
+ private:
+  BOOL GetSIDFromName(PSTR pDomainName,PSTR pAccountName,BYTE **pcSid,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; char **pcDomainName);
+ protected:
+  BOOL BuildSD(PSECURITY_DESCRIPTOR pSelfRelativeReturnSD);
+  void inline FreeDataStructures()
+  {
+ &nbsp; if (m_pSD) free (m_pSD);
+ &nbsp; if (m_pDACL) free(m_pDACL);
+ &nbsp; if (m_pSACL) free(m_pSACL);
+ &nbsp; if (m_pOwner) free(m_pOwner);
+ &nbsp; if (m_pPrimaryGroup) free(m_pPrimaryGroup);
+ &nbsp; ZeroOut();
+  };
+  void inline ZeroOut()
+  { 
+ &nbsp; m_pSD = NULL;
+ &nbsp; m_pDACL = NULL;
+ &nbsp; m_pSACL = NULL;
+ &nbsp; m_pOwner = NULL;
+ &nbsp; m_pPrimaryGroup = NULL;
+  };
+ public:
+  CSecureableObject(BOOL bProtected);&nbsp;&nbsp; 
+  ~CSecureableObject();
+  BOOL AddRightsTo(PSTR pDomainName,PSTR pAccountName,DWORD dwAccessMask,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BOOL bGranted);
+  BOOL RevokePreviouslyGrantedAccess(PSTR pAccountName,PSTR pDomainName);
+  BOOL AddSecurity(DWORD dwAccessMask, LPSTR lpTitleString);
+};
+</code></pre>
+<p>
+If you wish to plug the classes into your code without understanding the internal workings, you'll find the following members interesting:
+<ul type=disc>
+<li>
+The constructor <b>CSecureableObject</b>(<b>BOOL</b> <i>bProtected</i>):<br><br></li>
+<li>
+The <i>bProtected</i> parameter determines the initial ("default") behavior of the securable object. If this parameter is TRUE, nobody is initially granted access until security is explicitly granted. If this parameter is FALSE, access is granted to everybody until rights are explicitly denied. Note that in the sample class definition, I create all derived object types from <b>CSecureableObject</b> with this parameter set to TRUE. In some cases, you may not have to be as stringent.<br><br></li>
+<li>
+The <b>AddRightsTo</b> and <b>RevokePreviouslyGrantedAccess</b> functions:<pre><code>BOOL AddRightsTo(PSTR pDomainName,PSTR pAccountName,DWORD dwAccessMask,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BOOL bGranted);
+
+BOOL RevokePreviouslyGrantedAccess(PSTR pAccountName,PSTR pDomainName);
+</code></pre>
+<p class=tl>
+These two member functions change the security of the object. Both functions accept the user name and a domain on which the user has an account as parameters. You must also pass a <b>DWORD</b> (<i>dwAccessMask</i>) and a Boolean (<i>bGranted</i>) to <b>AddRightsTo</b>. <i>dwAccessMask</i> specifies the rights to be granted or denied (we will look at this parameter later on). If <i>bGranted</i> is FALSE, the rights specified in <b>dwAccessMask</b> will be denied to the user, if it is TRUE, access will be granted. <b>RevokePreviouslyGrantedAccess</b> will remove a previously granted right (granted or denied) from the list of rights associated with the object.</P><p class=tl>
+Both functions will return TRUE if the operation completed successfully. If an error occurred, they will return FALSE, and the <b>m_iSecErrorCode </b>member variable will contain a Win32 error code that explains why the function failed.</P><p class=tl>
+Your application probably does not need to call <b>AddRightsTo</b> or <b>RevokePreviouslyGrantedAccess</b> directly; instead, it can simply call the <b>AddSecurity</b> member function. <b>AddSecurity</b> accepts the same <i>dwAccessMask</i> parameter as <b>AddRightsTo</b> or <b>RevokePreviouslyGrantedRights</b> (which specifies a set of rights) and a string. This function displays the dialog box that is illustrated in Figure 2.</P></li>
+</ul>
+<p>
+<img src="secguts_2.gif" border=0></p>
+<p class=label>
+<b>Figure 2. Dialog box displayed by the AddSecurity function</b></p>
+<p>
+The title of the dialog box reflects the string that you passed to <b>AddSecurity</b>. The user fills in the dialog box, and the C++ class does the rest (that is, it calls <b>AddRightsTo</b> or <b>RevokePreviouslyGrantedAccess</b>, depending on the user's selections).</p>
+<p>
+We will examine the class definitions for the derived classes <b>CUserSecObject</b>, <b>CKernelSecObject</b>, and <b>CPrivateSecObject</b> in the "Associating SDs with Objects" section later in this article.</p>
+<h2>Data Structures</h2>
+<p>
+As I mentioned earlier, security-aware code must know how to manipulate four basic data structures: access tokens, SDs, ACLs, and SIDs. Very roughly, an access token represents a user who wishes to access something, and an SD is a data structure that associates users (or user groups) with rights. Typically, an SD is associated with an object (thus, the member variable <b>m_pSD</b> in the declaration of <b>CSecureableObject</b>), but SDs can also be used in different ways (for example, to associate protection with a group of objects instead of only one object).</p>
+<p>
+Embedded in SDs are ACLs, which are collections of ACEs. An ACE is a unit of security information that consists of three parts: a user identification, a list of rights, and a designation of whether the right is granted or denied. (There are also other types of ACEs that I will discuss in a later article.)</p>
+<p>
+Robert Reichel's article series on Windows NT security, which I mentioned earlier, discusses the data structures very nicely, so I will not elaborate on what SIDs, SACLs, DACLs, ACEs, and SDs are made of. However, I would like to show you an access token to make this abstract discussion a little more meaningful. I obtained the access token from a test run of the client-server application suite on one of my machines; it is shown in Appendix A (I did not want to clog up the article more than absolutely necessary).</p>
+<p>
+Note that an access token is created on behalf of a user, but obtained from a process or a thread. The reason for that, strictly speaking, is that it is never a "user" who wants to access a secured object, but a piece of code (which has to reside in a process and execute within a thread). Thus, any process that is executed "inherits" the security context (that is, the access token) of the user who is logged onto the machine on which the process is executed.</p>
+<p>
+That is the easy answer. What happens in the case of remote access, though? Through the process of <i>impersonation</i>, a server application can temporarily assume the access token of a remote client, so that access to objects on the server can be attempted within the context of the server. Please see the other articles in this series for a discussion of how the sample application suite uses impersonation to enforce protection.</p>
+<p>
+The central piece of information that belongs to an access token is a SID. A SID is a worldwide unique value that very roughly describes one user in a specific domain. The SID is built when the user registers with the domain; that is, when the user account in the domain is created. As soon as the user account is deleted and recreated, a new SID is created. As Robert Reichel describes in his article series on Windows NT security ("Inside Windows NT Security," which appeared in the April 1993 and May 1993 issues of the <i>Windows/DOS Developer's Journal</i>), the components of a SID follow a hierarchical convention; that is, a SID contains parts that identify the network, the user, and the authority that assigned the SID.</p>
+<p>
+In the sample token, we see that the user who is identified by the token is Ruediger in the domain RUEDIGERDOM. Note that this user is associated with a number of other SIDs—that is because Ruediger was assigned membership in user groups (in this case, Administrators and Users) when his user account was created. Ruediger also belongs to the "wildcard" group Everyone. Note that the SID associated with Everyone is what is called a <i>well-known SID</i>—that is, a SID that has a constant numeric value everywhere. A number of well-known SIDs represented by constant identifiers (authorities) are available: SECURITY_NULL_SID_AUTHORITY, SECURITY_WORLD_SID_AUTHORITY, SECURITY_LOCAL_SID_AUTHORITY, SECURITY_CREATOR_SID_AUTHORITY, and SECURITY_NT_AUTHORITY. </p>
+<p>
+Later in this article, we will see how it can be useful to work with well-known SIDs and how an authority can be converted to a SID.</p>
+<h2>Building and Maintaining ACLs</h2>
+<p>
+In this section, we will describe the sequence of API calls we need to build ACLs and to add ACEs to them. Let us first look at the constructor for <b>CSecureableObject</b> to see how things start to take shape. For readability reasons, I've removed all the code that catches error handling (the omissions are indicated by ellipses); please refer to SEC.CPP for the complete code.</p>
+<pre><code>CSecureableObject::CSecureableObject(BOOL bProtected)
+{
+ DWORD dwDACLLength;
+ PSID pcSid = NULL;
+ ZeroOut();&nbsp;&nbsp; // This sets a few member variables to 0.
+ SID_IDENTIFIER_AUTHORITY siaWorld = SECURITY_WORLD_SID_AUTHORITY;
+ int iTempSidLength;
+ m_pSD = malloc(sizeof(SECURITY_DESCRIPTOR)); 
+ if (!m_pSD) ... 
+ if (!InitializeSecurityDescriptor(m_pSD,SECURITY_DESCRIPTOR_REVISION)) ...
+ iTempSidLength = GetSidLengthRequired(1); // This cannot fail
+ pcSid = (PSID)malloc(iTempSidLength); 
+ if (!pcSid) ...
+ dwDACLLength = sizeof (ACL) +sizeof (ACCESS_ALLOWED_ACE) - sizeof (DWORD) + iTempSidLength;
+ m_pDACL = (PACL) malloc(dwDACLLength);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ if (!m_pDACL) ...
+if (!InitializeAcl(m_pDACL,dwDACLLength,ACL_REVISION) ||!InitializeSid(pcSid,&amp;siaWorld,1)) ...
+*(GetSidSubAuthority(pcSid,0)) = SECURITY_WORLD_RID;
+ if (bProtected)&nbsp;&nbsp; // This works like an empty DACL - fully protected.
+ {
+  if (!AddAccessAllowedAce(m_pDACL,ACL_REVISION,NULL,pcSid)) ...
+}
+ else&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // This works like a NULL DACL - unprotected.
+ {
+  if (!AddAccessAllowedAce(m_pDACL,ACL_REVISION,GENERIC_ALL|STANDARD_RIGHTS_ALL|
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SPECIFIC_RIGHTS_ALL,pcSid)) ...
+};
+if (!SetSecurityDescriptorDacl(m_pSD,TRUE,m_pDACL,FALSE)) ...
+if (pcSid) free (pcSid);
+};
+</code></pre>
+<p>
+SDs consist of a number of data structures, as illustrated in Figure 3.</p>
+<p>
+<img src="secguts_3.gif" border=0></p>
+<p class=label>
+<b>Figure 3. Embedded data structures in SDs</b></p>
+<p>
+The handling of SDs and ACLs is a little awkward because the structures come in two flavors: self-relative and absolute.</p>
+<p>
+Self-relative structures are "flat"; that is, the SD contains all of its information in one string of contiguous data—it contains no indirect pointer references. For this reason, whenever the information in an SD needs to be changed, we must reallocate a new SD that accommodates the space for all the modified data, rebuild the new SD, and free the old one. The same holds true for ACEs and ACLs.</p>
+<p>
+Absolute data structures, on the other hand, contain indirect references. In Figure 3 above, we see that the <b>m_pSD</b> security descriptor contains a pointer to the <b>m_pDACL</b> access control list. This makes the SD absolute instead of self-relative (a self-relative SD would have the entire ACL embedded within it).</p>
+<p>
+Why are there two flavors of SDs, and when do we need each? Well, you must use self-relative SDs when security information must be communicated over a network or stored on disk (for example, for files on an NTFS partition), because indirect references cannot easily be maintained on disk or over a communication line.</p>
+<p>
+The Windows NT security system handles SDs as follows: Each SD that is returned from a security function has a self-relative format. Most SDs that are passed as parameters to security functions must be in absolute format. You can use the <b>MakeSelfRelativeSD</b> and <b>MakeAbsoluteSD</b> functions to convert SDs from one format to the other.</p>
+<p>
+When an SD is assigned to an object (we will discuss this process in more detail in the section "Associating SDs with Objects"), Windows NT copies the absolute SD that the server application built to a private location in self-relative format. Thus, technically speaking, after an SD is used (that is, assigned to an object), all the memory that is associated with the SD (the SD itself as well as the ACLs) can be freed. If later on the SD must be manipulated, the code for <b>AddRightsTo</b> and <b>RevokePreviouslyGrantedAccess</b> retrieves the descriptor from the object using the <b>GetTheDescriptor</b> member function.</p>
+<p>
+Note that in order to manipulate SDs and ACLs, you never manipulate the memory directly; instead, you call Win32 API functions such as <b>InitializeSecurityDescriptor</b>, <b>InitializeAcl</b>, or <b>AddAccessAllowedAce</b> to set up and manipulate the data structures.</p>
+<p>
+The code of the <b>CSecureableObject</b> constructor builds an SD that is either fully protected (if the Boolean parameter to the constructor is TRUE) or not protected at all (a FALSE parameter). The semantics of ACLs leave wide room for variation, so this behavior can be implemented in several ways. By convention, an SD that has a NULL DACL is unprotected (that is, every attempt to access the object that is associated with the SD will succeed), whereas an SD with a DACL that is empty (it has no ACEs) is fully protected (that is, access to the object associated with the SD will fail). Note that a NULL SD is still something different: An object without an explicit SD will normally be protected according to the default DACL that is specified in the access token of the user who created the object.</p>
+<p>
+Thus, it would have been easy to design the constructor so that it translates a FALSE parameter into a NULL DACL, and a TRUE parameter into an empty DACL. However, my inborn laziness and sense for neat code took over, and I decided to find a more elegant way to code this initial SD. The problem with a NULL DACL versus an empty DACL approach is that you have to revoke previously granted rights completely differently, depending on the initial DACL. Let's assume that an ACE is added to a DACL, and the rights encoded in the ACE are removed later. If no other ACE is left, depending on whether the DACL was initially created empty or is nonexistent, you must take a totally different action to restore the initial state.</p>
+<p>
+Note that the drawback of always allocating one ACE in every DACL is that an ACE does take up memory and (in the case of SDs stored on an NTFS partition) disk space. Thus, the NULL DACL and empty DACL approach can be somewhat more efficient.</p>
+<p>
+In my code, each SD always has a DACL with at least one ACE. This ACE grants rights to the special, well-known SID that specifies Everybody. For an object that is initially protected, the access mask in that ACE is 0 (no rights granted); for an object that is initially unprotected, the access mask is GENERIC_ALL|STANDARD_RIGHTS_ALL|SPECIFIC_RIGHTS_ALL (that is, all rights). Note that I could have designed the code so that an initially protected object denies all rights to Everybody. However, in that case, the ordering of ACEs within the ACL (which we will discuss in the next section) would require some special treatment.</p>
+<p>
+Let us look at an SD created by the procedure we just described (this dump was obtained by calling the <b>ExamineSD</b> function on the newly created SD):</p>
+<pre><code>SD is valid. SD is 48 bytes long. SD revision is 1 == 
+ &nbsp; SECURITY_DESCRIPTOR_REVISION1
+SD's Owner is NULL, so SE_OWNER_DEFAULTED is ignored
+SD's Group is NULL, so SE_GROUP_DEFAULTED is ignored
+SD's Group being NULL is typical, GROUP in SD(s) is mainly for POSIX compliance
+SD's DACL is Present
+SD's DACL-Defaulted flag is FALSE
+  ACL has 1 ACE(s), 28 bytes used, 0 bytes free
+  ACL revision is 2 == ACL_REVISION2
+  ACE 0 size 20
+  ACE 0 flags 0x00
+  ACE 0 is an ACCESS_ALLOWED_ACE_TYPE
+  ACE 0 mask&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == 0x00000000
+ &nbsp;&nbsp; Standard Rights&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == 0x00000000
+ &nbsp;&nbsp; Specific Rights&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == 0x00000000
+ &nbsp;&nbsp; Access System Security == 0x00000000
+ &nbsp;&nbsp; Generic&nbsp; Rights&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == 0x00000000
+ &nbsp;&nbsp; SID domain == , Name == Everyone&nbsp;&nbsp; S-1-1-0
+ &nbsp;&nbsp; SID is the World SID
+ &nbsp;&nbsp; SID type is SidTypeWellKnownGroup
+SD's SACL is Not Present, so SE_SACL_DEFAULTED is ignored
+SD has no SACL at all (or we did not request to see it)
+</code></pre>
+<p>
+This SD illustrates what we have discussed so far: The DACL has been set up to contain one ACE, which grants no access to the world; that is, the object that is associated with this SD will be fully protected until rights are specifically granted.</p>
+<p>
+One question remains: How do we identify the owner "Everybody"? Let's look at the code that retrieves the SID (abbreviated for readability from the <b>CSecureableObject</b> constructor we reviewed earlier):</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;SID_IDENTIFIER_AUTHORITY siaWorld = SECURITY_WORLD_SID_AUTHORITY;
+ &nbsp;&nbsp; pcSid = (PSID)malloc(iTempSidLength); 
+ &nbsp;&nbsp; InitializeSid(pcSid,&amp;siaWorld,1);
+ &nbsp;&nbsp; *(GetSidSubAuthority(pcSid,0)) = SECURITY_WORLD_RID;
+</code></pre>
+<p>
+Now we can use <b>pcSid</b> to build ACEs for SDs; for example, using the function call:</p>
+<pre><code>AddAccessAllowedAce(pACL,ACL_REVISION,GENERIC_ALL|STANDARD_RIGHTS_ALL|
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SPECIFIC_RIGHTS_ALL,pcSid);
+</code></pre>
+<h3>Manipulating DACLs</h3>
+<p>
+So how do we specifically grant rights? Moe says, "That's easy: Simply run the server application that comes with this article, fill out the Permissions dialog box, and that'll take care of it."</p>
+<p>
+Ha ha. Very funny. But since a stupid answer is at times better than no answer at all, remember that the dialog box Moe mentions is displayed in response to a <b>CSecureableObject::AddSecurity</b> call, which in turn calls either <b>CSecureableObject::AddRightsTo</b> or <b>CSecureableObject::RevokePreviouslyGrantedAccess</b>. So why don't we look at the implementation of those two members? Let us first review <b>AddRightsTo</b> (from SEC.CPP). Again, this function contains a lot of code, but we can actually split up the code into different "phases," which makes it much easier to understand what's going on. Once more, I omit error handling code (replaced by ellipses) for clarity.</p>
+<pre><code>BOOL CSecureableObject::AddRightsTo(PSTR pDomainName,PSTR pAccountName,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DWORD dwAccessMask,BOOL bGranted)
+{
+ DWORD dwDACLLength;
+ char *pcDomainName;
+ BYTE *pcSid;
+ BOOL bHasDacl,bHasDefaulted;
+ PACL pCurrentAcl=NULL;
+ PACL pNewACL=NULL;
+ PSECURITY_DESCRIPTOR pNewSD=NULL;
+</code></pre>
+<p>
+First, the user and domain name passed to the function are translated into a SID using the <b>CSecureableObject::GetSidFromName</b> private member function, which calls the <b>::LookupAccountName</b> security function. Remember that when we built the initial DACL for the object, we obtained the security ID for the ACE from the <b>InitializeSid</b> function, because the Everybody user group is "well-known"; that is, it is hardcoded. However, we must retrieve the security ID for a user or group account dynamically. This is what <b>CSecureableObject::GetSidFromName</b> does:</p>
+<pre><code>&nbsp;if (!GetSIDFromName(pDomainName,pAccountName,&amp;pcSid,&amp;pcDomainName))... 
+</code></pre>
+<p>
+You will wonder why <b>CSecureableObject::GetSidFromName</b> accepts so many parameters, some of which seem to be redundant. This is because <b>GetSidFromName</b> is a wrapper for <b>LookupAccountName</b>, which also accepts these parameters. Why? It's simple: You can pass NULL as <b>pDomainName</b>, and if the function returns successfully, <b>pcDomainName</b> will contain a pointer to the name of the domain in which the name was found.</p>
+<p>
+Next, we retrieve the SD and the current DACL associated with the SD, and then we compute how large the new SD must be to accommodate the new ACE.</p>
+<p>
+Note the call to <b>GetTheDescriptor</b>, which is a virtual member function of the <b>CSecureableObject</b> class. <b>GetTheDescriptor</b> calls "up" the hierarchy into the securable object and back "down" into one of the Win32 functions—<b>GetKernelObjectSecurity</b>, <b>GetUserObjectSecurity</b>, or <b>GetPrivateObjectSecurity</b>—which retrieve the SD from a secured object. (We will examine the control flow in detail in the "Associating SDs with Objects" section.) </p>
+<pre><code>&nbsp;&nbsp;&nbsp;UINT dwNumberOfAces;
+ &nbsp; DWORD dwAceSize;
+ &nbsp; if (!GetTheDescriptor()) goto ErrorExit;&nbsp; // This will implicitly set m_pSD.
+
+ if (!GetSecurityDescriptorDacl(m_sd,&amp;bHasDacl, (PACL *)&amp;pCurrentAcl,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;bHasDefaulted)) ...
+
+ dwNumberOfAces = pCurrentAcl-&gt;AceCount;
+ dwAceSize = pCurrentAcl-&gt;AclSize;
+
+ DWORD dwCurrentSecurityDescriptorLength;
+ dwDACLLength&nbsp;&nbsp; = dwAceSize + sizeof (ACCESS_ALLOWED_ACE) -
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sizeof (DWORD) + GetLengthSid(pcSid);
+ pNewACL = (PNewACL) malloc(dwDACLLength); 
+ if (!pNewACL) ... 
+ dwCurrentSecurityDescriptorLength=GetSecurityDescriptorLength(m_pSD);&nbsp; 
+ pNewSD = malloc(dwDACLLength+dwCurrentSecurityDescriptorLength);
+ if (!pNewSD)&nbsp; ... 
+</code></pre>
+<p>
+Now we have successfully allocated a new SD and a new ACL. With the following two calls, we ask Windows NT to prepare those data structures for manipulation: </p>
+<pre><code>&nbsp;if (!InitializeSecurityDescriptor(pNewSD,SECURITY_DESCRIPTOR_REVISION)) ...
+ if (!InitializeAcl(pNewACL,dwDACLLength,ACL_REVISION)) ...
+ UINT iLoop;
+ void *pTempACL;
+</code></pre>
+<p>
+What happens next depends on whether the right is granted or denied. In both cases, we basically copy the old DACL, ACE by ACE, to the new DACL using the <b>GetAce</b> and <b>AddAce</b> functions, and add an ACE that grants or denies the desired rights to the user whose SID was retrieved earlier. The location where we add the ACE to the ACL differs: For granted rights, we add the new ACE at the very end of the ACL; for denied rights, we simply attach the ACE to the beginning of the ACL. ACCESS_DENIED_ACEs should always precede all ACCESS_ALLOWED_ACEs for the following reason: When the system validates an access request against a DACL, it always traverses the DACL from beginning to end. If it does not find the appropriate right by the end of the list, it denies the request. Thus, explicitly denying rights should be a refinement of granting rights, which overrides the default case. (See <a href="msdn_seccpp.htm">"Windows NT Security in Theory and Practice"</a> for more information on this process.)</p>
+<p>
+It seems strange that we can get away with tucking a granted right at the end of the ACL. After all, if the object is fully protected initially, <b>m_sd </b>contains an ACE that reads "grant no access to Everybody," so wouldn't this ACE end the search, forcing all subsequent ACEs to be ignored? Shouldn't we rather "splice" the new ACE in front of the "grant no access to Everybody" ACE?</p>
+<p>
+Surprisingly enough, both techniques work, but it is easier to code the "tuck the new ACE at the end" strategy. Both techniques do the same thing because of the way the right verification algorithm works: When <b>AccessCheck</b> traverses an ACL from beginning to end, it proceeds until it finds all the requested rights explicitly denied or granted or until it gets to the end of the list, whichever comes first. Thus, the "grant no access to everybody" ACE does not terminate an access check (because it contains NO rights), it acts more as a "dummy" ACE. In this respect, an ACE that reads "deny all access to Everybody" is semantically different, because such an ACE <i>does</i> terminate an access check.</p>
+<pre><code>if (!bGranted)
+ if (!AddAccessDeniedAce(pNewACL,ACL_REVISION,dwAccessMask,(PSID)pcSid)) ...
+  for (iLoop = 0; iLoop &lt; dwNumberOfAces; iLoop++)
+  {
+ &nbsp; if (! GetAce(pCurrentAcl, iLoop, &amp;pTempACL)) ...
+ &nbsp; if (!AddAce(pNewACL,ACL_REVISION,MAXDWORD,pTempACL,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ((PACE_HEADER)pTempACL)-&gt;AceSize)) ...
+  };
+ if (bGranted)
+  if (!AddAccessAllowedAce(pACL,ACL_REVISION,dwAccessMask,(PSID)pcSid)) ...
+</code></pre>
+<p>
+The rest of the code cleans up the memory we don't need anymore, verifies the validity of the new data structures, and returns. Note the call into the <b>SetTheDescriptor</b> virtual function. This call associates the object with the SD; we will discuss the coding in the next section. I'd like to mention here that the <b>SetTheDescriptor</b> code, as a side effect, frees all the memory that was previously allocated to build the SD.</p>
+<p>
+Also note that the code rebuilds only those parts of the SD that were changed. The <b>GetTheDescriptor</b> function "dissects" the previous SD into its four components (DACL, SACL, owner, and group). Each component is assigned to its respective member variable (<b>m_pDACL</b>, <b>m_pSACL</b>, <b>m_pOwner</b>, or <b>m_pPrimaryGroup</b>). The following code copies all of those members except <b>m_pDACL </b>without modification to the new SD. <b>m_pDACL</b> is rebuilt according to the security change that was requested. A member function that would modify the SACL (that is, change auditing) would leave the DACL untouched and rebuild the SACL instead.</p>
+<pre><code>// Now we may nuke the old SD because we don't need it anymore.
+// Note that we keep it until we know that security was set correctly. This way,
+// if anything fails, we'll still have the old one around...
+ &nbsp; if (!IsValidAcl(pNewACL)) ...
+ &nbsp; if (!IsValidSecurityDescriptor(pNewSD)) ...
+ &nbsp; if (!SetSecurityDescriptorDacl(pNewSD,TRUE,pNewACL,FALSE)) ...
+// Now copy all of the other relevant stuff to the new SD.
+ &nbsp; if (m_pOwner &amp;&amp; 
+ &nbsp;&nbsp;&nbsp; !SetSecurityDescriptorOwner(pNewSD,m_pOwner,FALSE)) goto ErrorExit;
+ &nbsp; if (m_pSACL &amp;&amp;
+ &nbsp;&nbsp;&nbsp; !SetSecurityDescriptorSacl(pNewSD,TRUE,m_pSACL,FALSE)) goto ErrorExit;
+ &nbsp; if (m_pPrimaryGroup &amp;&amp;
+ &nbsp;&nbsp;&nbsp; !SetSecurityDescriptorGroup(pNewSD,m_pPrimaryGroup,FALSE)) goto ErrorExit;
+ &nbsp; free(pCurrentAcl);
+ &nbsp; free(m_pSD); 
+ &nbsp; m_pSD = pNewSD;
+ &nbsp; free(m_pDACL);
+ &nbsp; m_pDACL=pNewACL;
+ &nbsp; if (!SetTheDescriptor()) goto ErrorExit;
+ &nbsp; return TRUE;
+ &nbsp; ...
+</code></pre>
+<h3>I Didn't Really Mean It. . .</h3>
+<p>
+Let's look at the code that revokes rights. This code resides in <b>CSecureableObject::RevokePreviouslyGrantedRights</b> (in SEC.CPP). Notice that the prelude (the code that looks up the user's SID) is identical to the code in <b>AddRightsTo</b>:</p>
+<pre><code>BOOL CSecureableObject::RevokePreviouslyGrantedAccess(PSTR pAccountName,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; PSTR pDomainName)
+{
+ PACL pNewACL = NULL;
+ PACL pCurrentAcl=NULL;
+ DWORD dwDACLLength;
+ char *pcDomainName;
+ BYTE *pcSid;
+ PSECURITY_DESCRIPTOR pNewSD = NULL;
+ UINT iOffendingIndex;
+
+ if (!GetSIDFromName(pDomainName,pAccountName,&amp;pcSid,&amp;pcDomainName)) ...
+</code></pre>
+<p>
+The following code provides bookkeeping: It retrieves the ACL and the current SD's length. My comments for <b>AddRightsTo</b> apply here as well.</p>
+<pre><code>&nbsp;BOOL bHasDacl;
+ BOOL bHasDefaulted;
+ UINT dwNumberOfAces;
+ DWORD dwAceSize;
+ if (!GetTheDescriptor()) ...
+ if (!GetSecurityDescriptorDacl(m_pSD,&amp;bHasDacl, (PACL *)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;pCurrentAcl,&amp;bHasDefaulted)) ...
+
+ &nbsp; dwNumberOfAces = pCurrentAcl-&gt;AceCount;
+ &nbsp; dwAceSize = pCurrentAcl-&gt;AclSize;
+ &nbsp; DWORD dwCurrentSecurityDescriptorLength;
+ &nbsp; dwCurrentSecurityDescriptorLength=GetSecurityDescriptorLength(m_sd);
+</code></pre>
+<p>
+Next, we traverse the DACL and memorize the index of the ACE that references the same SID as the one that belongs to the user (using the <b>EqualSid</b> system service to perform the comparison). If the SID is not found in the ACL, we return ERROR_PRIVILEGE_NOT_HELD. (OK, this is not exactly the return value we want, but I didn't want to invent my own error code.)</p>
+<pre><code>// Here we figure out if an ACE with the requested SID is already in the ACL...
+ &nbsp; UINT iLoop;
+ &nbsp; void *pTempACL;
+ &nbsp; for (iLoop = 0; iLoop &lt; dwNumberOfAces; iLoop++)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp; if (! GetAce(pCurrentAcl, iLoop, &amp;pTempACL)) goto ErrorExit;
+ &nbsp; if (EqualSid ((PSID) &amp;(((PACCESS_ALLOWED_ACE)pTempACL)-&gt;SidStart),pcSid))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp; };
+
+  if (iLoop &gt;= dwNumberOfAces) ...
+  iOffendingIndex = iLoop;
+</code></pre>
+<p>
+Now we allocate and initialize a new ACL and a new SD that contain the old ACL minus the matching ACE:</p>
+<pre><code>&nbsp;&nbsp;dwDACLLength = dwAceSize -
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ((PACE_HEADER)pTempACL)-&gt;AceSize; 
+  pNewACL = (PACL) malloc(dwDACLLength); 
+  if (!pNewACL) ... 
+  pNewSD = malloc(dwDACLLength+dwCurrentSecurityDescriptorLength);
+  if (!pNewSD) ... 
+  if (!InitializeSecurityDescriptor(pNewSD,SECURITY_DESCRIPTOR_REVISION)) ...
+  if (!InitializeAcl(pACL,dwDACLLength,ACL_REVISION)) ...
+</code></pre>
+<p>
+Let's copy the old ACE to the new one, leaving out the ACE with the offending SID:</p>
+<pre><code>&nbsp;&nbsp;&nbsp;for (iLoop = 0; iLoop &lt; dwNumberOfAces; iLoop++)
+ &nbsp;&nbsp; {if (iLoop == iOffendingIndex) continue;
+ &nbsp;&nbsp;&nbsp; if (! GetAce(pCurrentAcl, iLoop, &amp;pTempACL)) ...
+ &nbsp;&nbsp; if (!AddAce(pNewACL,ACL_REVISION,MAXDWORD,pTempACL,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ((PACE_HEADER)pTempACL)-&gt;AceSize)) ...
+ &nbsp; };
+ &nbsp; 
+</code></pre>
+<p>
+The postlude and cleanup code is exactly the same as in <b>AddRightsTo</b>:</p>
+<pre><code>// Now we may nuke the old SD because we don't need it anymore.
+// Note that we keep it until we know that security was set correctly. This way,
+// if anything fails, we'll still have the old one around...
+ &nbsp; if (!IsValidAcl(pNewACL)) ...
+ &nbsp; if (!IsValidSecurityDescriptor(pNewSD)) ...
+ &nbsp; if (!SetSecurityDescriptorDacl(pNewSD,TRUE,pNewACL,FALSE)) ...
+// Now copy all of the other relevant stuff to the new SD.
+ &nbsp; if (m_pOwner &amp;&amp; 
+ &nbsp;&nbsp;&nbsp; !SetSecurityDescriptorOwner(pNewSD,m_pOwner,FALSE)) goto ErrorExit;
+ &nbsp; if (m_pSACL &amp;&amp;
+ &nbsp;&nbsp;&nbsp; !SetSecurityDescriptorSacl(pNewSD,TRUE,m_pSACL,FALSE)) goto ErrorExit;
+ &nbsp; if (m_pPrimaryGroup &amp;&amp;
+ &nbsp;&nbsp;&nbsp; !SetSecurityDescriptorGroup(pNewSD,m_pPrimaryGroup,FALSE)) goto ErrorExit;
+ &nbsp; free(pCurrentAcl);
+ &nbsp; free(m_pSD); 
+ &nbsp; m_pSD = pNewSD;
+ &nbsp; free(m_pDACL);
+ &nbsp; m_pDACL=pNewACL;
+ &nbsp; if (!SetTheDescriptor()) goto ErrorExit;
+ &nbsp; return TRUE;
+ &nbsp; ...
+</code></pre>
+<p>
+You can also implement the <b>RevokePreviouslyGrantedRights</b> function a different way, using the Win32 <b>DeleteAce</b> function to remove an ACE from an ACL. Thus, instead of copying the old ACE to the new ACE without the offending element, we would simply call <b>DeleteAce</b> and leave the ACE untouched. However, this process makes it more difficult to keep track of the SD size—after a <b>DeleteAce</b> call, the ACL has a "hole," and the next time we wish to add an ACE, we first need to check whether the "hole" is large enough before allocating new memory for the SD. The security API contains functions that help you find the "hole" and fill it in appropriately (check out the <b>FindFirstFreeAce</b> function for details).</p>
+<h2>Associating SDs with Objects</h2>
+<p>
+So far, we have discussed how SDs are built and manipulated. However, one important piece is still missing from the security puzzle: We mentioned earlier that an SD must be associated with an object in order to protect that object. Our current SD is nothing but a structure in memory—it is not linked to anything. To make use of the SD, we need to establish some kind of link between the SD and an object. How does that work?</p>
+<p>
+You can enforce a security check using two methods: <i>built-in, implicit access checking</i> or <i>application-coded, explicit access checking</i>. Let's look at these methods in turn.</p>
+<h3>System-Provided Security (Built-in, Implicit Access Checking)</h3>
+<p>
+For object types that have built-in security support (almost all Windows NT kernel objects and certain user objects), object instances can be associated with SDs. The match between the object's SD and the accessing user token is made implicitly when you call a function that works on the system object. For example, you can associate a named pipe with an SD, and a client's attempt to open the named pipe using <b>CreateFile</b> may fail with error ACCESS_DENIED (which implies that <b>AccessCheck</b> is called implicitly within the <b>CreateFile</b> call).</p>
+<p>
+For this scheme to work, the system object must be permanently associated with an SD. This association can be accomplished in two ways:
+<ol>
+<li>
+The creation function for most kernel objects accepts a pointer to a variable of type <b>SECURITY_ATTRIBUTES</b>, which is basically a thin wrapper of an SD. This variable can be passed to functions that create kernel objects. Thus, you can allocate a variable of type <b>SECURITY_ATTRIBUTES</b> and party on the <b>lpSecurityDescriptor </b>member of that structure. Note that <b>SECURITY_ATTRIBUTES</b> is <i>not</i> an SD. You need to explicitly allocate a variable of type <b>SECURITY_ATTRIBUTES</b> and fill its SD member with a pointer to the SD.<br><br></li>
+<li>
+The Win32 <b>SetUserObjectSecurity</b>, <b>SetKernelObjectSecurity</b>, and <b>SetFileSecurity</b> functions allow you to dynamically associate an SD with an object. These functions accept a handle to a system object (such as a file, a mutex, or a window), an SD, and a variable of type SECURITY_INFORMATION (which roughly describes which part of security—system or discretionary access—is to be set on the object).</li>
+</ol>
+<p>
+The object hierarchy in my sample application suite employs the second approach: For example, in the <b>CNamedPipe</b> constructor, the code that creates the server end of the pipe calls <b>SetKernelObjectSecurity </b>(wrapped in a member function call to be discussed later) right after creating the pipe. Alternatively, we could have wrapped the public SD member <b>m_sd</b><i> </i>into a <b>SECURITY_ATTRIBUTES</b> structure, which we could have passed to the <b>CreateNamedPipe</b> function. (This would have corresponded to the first approach above.)</p>
+<p>
+In the <b>CSecureableObject</b> class hierarchy, the <b>SetObjectSecurity</b> function sets an object's security. There is a little programming twist here that I need to explain: Once the SD has been successfully built, the <b>AddRightsTo</b> and <b>RevokePreviouslyGrantedAccess</b> base class functions will attempt to associate the SD with the secured object. To do that, however, we need a handle to an object, which the base class does not provide, because the base class code doesn't have any idea what to secure.</p>
+<p>
+To solve this problem, the base class includes one pure virtual member function, <b>SetTheDescriptor</b>, which is implemented in the derived classes. <b>AddRightsTo</b> and <b>RevokePreviouslyGrantedAccess</b> call <b>SetTheDescriptor</b> after the SD has been manipulated successfully.</p>
+<p>
+<b>SetTheDescriptor</b>, as I said before, must be implemented in the derived classes (for example, in <b>CNamedPipe</b>), because only those objects know about their handles. However, it would be a waste of code if we didn't acknowledge the fact that functions such as <b>SetKernelObjectSecurity</b> can be applied to a multitude of objects, such as mutexes, file mappings, and semaphores. Thus the three-level class hierarchy: 
+<ul type=disc>
+<li>
+The <b>CSecureableObject</b> base class. <br><br></li>
+<li>
+The derived "intermediate" <b>CKernelSecObject</b>, <b>CUserSecObject</b>, and <b>CPrivateSecObject </b>classes, which contain the <b>SetObjectSecurity</b> member functions. (These members expect object handles as parameters and call the respective <b>Set<i>xxx</i>ObjectSecurity</b> functions.)<br><br></li>
+<li>
+Classes such as <b>CNamedPipe</b> that implement the securable object. (The <b>SetTheDescriptor</b> member functions for these classes pass their object handles down to <b>SetObjectSecurity</b>.) </li>
+</ul>
+<p>
+This approach looks a little bouncy; the base class functions call "up" the class hierarchy into the <b>SetTheDescriptor</b> calls, which call back "down" into the <b>SetObjectSecurity</b> members of the intermediate classes.</p>
+<p>
+The <b>CSecureableObject</b> class hierarchy also defines the counterpart for <b>SetTheDescriptor</b>, which is <b>GetTheDescriptor</b>. This function takes an existing SD from a secured object and stores the components in the object's member variables <b>m_pSD</b>, <b>m_pDACL</b>, <b>m_pSACL</b>, <b>m_pOwner</b>, and <b>m_pPrimaryGroup</b>. For the same reason as we discussed for <b>SetTheDescriptor</b>, a <b>GetTheDescriptor</b> call "bounces" back through the class hierarchy. </p>
+<p>
+Note that most of the code that eventually does the SD retrieval (that is, the code that resides in <b>CKernelSecObject::GetObjectSecurity</b>, <b>CUserSecObject::GetObjectSecurity</b>, and <b>CPrivateSecObject::GetObjectSecurity</b>) focuses on allocating memory chunks for the SD's components. One of the nice things about the Win32 API (that is, the parts that were not carried over from the Win16 API) is that the functions are designed very intelligently. Many security functions accept memory buffers whose sizes cannot be determined immediately as parameters, so these functions always expect both the buffers and the buffer sizes as parameters.</p>
+<p>
+Let's look at the functions (for example, <b>LookupAccountName</b> and <b>GetKernelObjectSecurity</b>) that do this type of thing. Typically, these functions are called twice: once with empty buffers and a buffer size of 0, and then with the correct buffer sizes. The first function call will return FALSE, and <b>GetLastError</b> will return ERROR_INSUFFICIENT_BUFFER. As a result, the variables that contain the buffer sizes will be set to the requested sizes, so the code can allocate the buffers and retry the operation. This design allows applications to dynamically allocate memory as needed. </p>
+<h3>You Make the Call (Application-Coded, Explicit Access Checking)</h3>
+<p>
+Very roughly, the difference between system-provided security and private security is that the Win32 API does not have any clue (and does not care, for that matter) which operations on private objects should be protected. The operations on system-defined objects, on the other hand, are well-defined. In other words, the objects that you define in your application have semantics and operations totally unknown to the system; thus, it is up to you to enforce security for your own objects.</p>
+<p>
+You enforce private security in your server application by using an SD and the Win32 <b>AccessCheck</b> function. The <b>CPrivateSecObject</b> class and its derivatives support the <b>MatchAccessRequest</b> public member function, which encapsulates <b>AccessCheck</b>. <b>MatchAccessRequest</b> takes as parameters an access mask and the handle of a thread on whose behalf the security check is made. Here is what <b>MatchAccessRequest</b> does:</p>
+<pre><code>BOOL CPrivateSecObject::MatchAccessRequest(DWORD dwMask, HANDLE hThread)
+ {
+  HANDLE hClientToken;
+  BOOL bReturn;
+  PRIVILEGE_SET ps;
+  DWORD dwStatus;
+  DWORD dwStructureSize = sizeof(PRIVILEGE_SET); 
+  if (!OpenThreadToken(hThread,TOKEN_ALL_ACCESS,FALSE,&amp;hClientToken)) 
+  { 
+ &nbsp;&nbsp; m_iSecErrorCode = GetLastError();
+ &nbsp;&nbsp; return FALSE;
+  };&nbsp; 
+  if (!AccessCheck(m_ObjectSD,hClientToken,dwMask,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;m_gmPrivateMapping,&amp;ps,&amp;dwStructureSize,&amp;dwStatus,&amp;bReturn)) 
+  {
+ &nbsp; m_iSecErrorCode = GetLastError();
+ &nbsp; return FALSE;
+  };
+  m_iSecErrorCode = ERROR_SUCCESS;
+  return bReturn;
+ };
+</code></pre>
+<p>
+Note that the error handling in this code is somewhat sloppy because FALSE is somewhat overloaded as a return value. FALSE may mean either that a system call failed or that <b>AccessCheck</b> succeeded and refused the access. A calling application should check the <b>m_iSecErrorCode </b>member variable to determine the cause of the return value. Note that returning FALSE from this function upon an error implies a stringent security check: If, for some reason, you cannot determine whether access is granted or denied, assume that the access is denied. Thus, a server application that does not check <b>m_iSecErrorCode </b>upon returning from <b>MatchAccessRequest</b> may behave unexpectedly if a system call in <b>MatchAccessRequest</b> fails, but there will never be a security leak.</p>
+<p>
+The code first retrieves an access token against which it will match the SD. This token represents the user who wants to access our object. For typical client-server applications, this token will be an impersonation token; that is, the server will temporarily assume the identity of the client. See the <a href="msdn_bitspcs.htm">"Security Bits and Pieces,"</a> technical article in the MSDN Library for details on how the sample server achieves the impersonation.</p>
+<p>
+If you have any doubts as to whether the correct access token was obtained, it is a good idea to include a call to <b>ExamineAccessToken</b> right after the <b>OpenThreadToken</b> call for debugging purposes.</p>
+<p>
+The next function that <b>MatchAccessRequest</b> calls is the famous end-of-all-security-calls, <b>AccessCheck</b>. <b>AccessCheck</b> takes four input parameters (the client token, the SD to match the access request against, an access mask, and a generic mapping structure) and four pointer parameters for storing the output (a <b>PRIVILEGE_SET</b> structure and its size, a Boolean return parameter, and a pointer to a <b>DWORD</b> that will contain the granted rights). Let's talk about the input parameters first. We know what the client token, the SD, and the access mask do, but what is a generic mapping structure, and why do we need it?</p>
+<h4>Generic rights vs. specific and standard rights</h4>
+<p>
+As I discussed in the <a href="msdn_seccpp.htm">"Windows NT Security in Theory and Practice"</a> article, a generic mapping is a useful way to hide private access rights from a server application. Let us make this a little clearer within the context of the sample application suite. The database-specific DBASE_READ and DBASE_WRITE rights are defined in the SEC.H file. You will notice that these two rights are located in the lower 16 bits of the access mask, which are defined as specific to the object (that is, Windows NT doesn't really care what those bits mean; the interpretation is up to the server application).</p>
+<p>
+When a client attempts to either add a record to, or remove a record from, the database, the communication layer in the server translates the request into a GENERIC_WRITE access mask. This makes intuitive sense: GENERIC_WRITE basically means "anything that modifies the object." The <b>AccessCheck</b> function takes the GENERIC_WRITE access mask and translates it to DBASE_WRITE. This way, any code that "sees" the object from the outside sees only generic (never specific) rights, and whenever the server deals with rights on the object, it can define the rights in generic (abstract) rather than object-specific terms. The mapping is accomplished through a process that you can also invoke directly from the server using the <b>MapGenericMask</b> function.</p>
+<p>
+How do <b>AccessCheck</b> and <b>MapGenericMask</b> perform this translation? Simple—through a data structure that is filled in when the object is created. (The following code is from the constructor for the <b>CPrivateSecObject</b> class.)</p>
+<pre><code>CPrivateSecObject::CPrivateSecObject() : CSecureableObject(TRUE)
+ {
+
+  HANDLE hProcess;
+  hProcess = GetCurrentProcess();
+  OpenProcessToken(hProcess,TOKEN_ALL_ACCESS,&amp;m_hAccessToken);&nbsp; // Error
+  m_gmPrivateMapping.GenericRead = DBASE_READ;
+  m_gmPrivateMapping.GenericWrite = DBASE_WRITE;
+  m_gmPrivateMapping.GenericExecute = STANDARD_RIGHTS_EXECUTE;
+  m_gmPrivateMapping.GenericAll = DBASE_READ|DBASE_WRITE;
+CreatePrivateObjectSecurity(NULL,NULL,&amp;m_ObjectSD,FALSE,m_hAccessToken,&amp;m_gmPrivateMapping); // Error
+  SetObjectSecurity();
+ };
+</code></pre>
+<p>
+The <b>m_gmPrivateMapping</b> structure tells us what generic rights are mapped to. Note that generic mappings are most powerful when generic rights are mapped to combinations of rights. For example, for most built-in objects, the generic read right is mapped to the object-specific right plus the STANDARD_RIGHTS_READ right, which includes a predefined right to "retrieve information from an object's DACL." Make sure that this is what you intend when you map a generic right to STANDARD_RIGHTS_READ.</p>
+<p>
+You must also define GENERIC_ALL as a superset of the mappings for GENERIC_WRITE and GENERIC_READ in the <b>GENERIC_MAPPING</b> structure; otherwise, generic rights will be mapped to no rights.</p>
+<p>
+Note that the implementation of <b>SetObjectSecurity</b> differs somewhat between the <b>CUserSecObject</b> and <b>CKernelSecObject</b> classes on one hand, and the <b>CPrivateSecObject</b> class on the other, because a call to <b>SetPrivateObjectSecurity</b> is more complex than a call to <b>SetUserObjectSecurity</b> or <b>SetKernelObjectSecurity</b>: The latter two calls accept an object handle and an SD as parameters, whereas <b>SetPrivateObjectSecurity</b> does not accept an object handle, but two SDs (yes!), an access token, and a <b>GENERIC_MAPPING</b> structure.</p>
+<p>
+Yikes! Why is this? Isn't the whole thing complicated enough as is?</p>
+<p>
+Quite possibly, but this isn't that difficult to understand. <b>SetPrivateObjectSecurity</b> does not accept an object handle because a private SD is not associated with any object per se—the security, as we discussed before, is enforced through explicit calls to <b>AccessCheck</b>. The two SDs and the generic mapping structure make sense because, as we noticed before, the logic that builds and maintains the SDs (as well as the code that requests access later on) deals with generic rather than specific rights, whereas the "internal" representation of the SD deals with standard and specific rights. Using the <b>GENERIC_MAPPING</b> structure, <b>SetPrivateObjectSecurity</b> converts the SD that is passed as the second parameter to an SD that is returned. </p>
+<p>
+The access token that <b>SetPrivateObjectSecurity</b> expects as the last parameter is part of a "meta-security" issue. The target SD that <b>SetPrivateObjectSecurity</b> expects should have been created by a <b>CreatePrivateObjectSecurity</b> call. To ensure that a malicious user does not manipulate a private SD, the user assigned to the SD is derived from the access token passed into <b>CreatePrivateObjectSecurity</b>. Any attempt to change the SD using <b>SetPrivateObjectSecurity</b> is validated against the access token of the user who tries to manipulate the security.</p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;It is possible to use "free-flowing" private security, that is, to call <b>AccessCheck</b> against an SD that is not maintained by the <b>CreatePrivateObjectSecurity</b> and <b>SetPrivateObjectSecurity</b> functions. Remember that <b>SetPrivateObjectSecurity</b> converts one SD into another, so you could use the "input" SD to do your access check. However, using the private security API is a safeguard against unauthorized attempts to change SDs.</p>
+<h2>Summary</h2>
+<p>
+After reading this article, you should have a solid understanding of security programming under Windows NT. In the next article in this series, <a href="msdn_bitspcs.htm">"Security Bits and Pieces,"</a> you will see the <b>CSecureableObject</b> class hierarchy put into effect.</p>
+<h2>Appendix. A Sample Access Token</h2>
+<pre><code>Token's User SID
+ &nbsp;&nbsp; This is a SID that is used to compare to SIDs in DACL(s) and SACL(s)
+  SID domain == RUEDIGERDOM, Name == ruediger&nbsp;&nbsp; S-1-5-21-52177637-1330004027-2027761767-1001
+  SID type is SidTypeUser
+Token's User SID Attributes == 0x00000000
+ &nbsp;&nbsp; These should always be 0 - see \mstools\h\winnt.h right after
+ &nbsp;&nbsp;&nbsp;&nbsp; the defines such as SE_GROUP_LOGON_ID - there are no user
+ &nbsp;&nbsp;&nbsp;&nbsp; attributes yet defined
+Token groups (5)
+ &nbsp;&nbsp; These SID(s) also are used to compare to SIDs in DACL(s) and SACL(s)
+  Token group (0)
+ &nbsp;&nbsp; SID domain == RUEDIGERDOM, Name == Domain Users&nbsp;&nbsp; S-1-5-21-52177637-1330004027-2027761767-513
+ &nbsp;&nbsp; SID type is SidTypeGroup
+  Token's group (0) attributes == 0x00000007
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 SE_GROUP_MANDATORY&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_GROUP_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000004 SE_GROUP_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token group (1)
+ &nbsp;&nbsp; SID domain == , Name == Everyone&nbsp;&nbsp; S-1-1-0
+ &nbsp;&nbsp; SID is the World SID
+ &nbsp;&nbsp; SID type is SidTypeWellKnownGroup
+  Token's group (1) attributes == 0x00000007
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 SE_GROUP_MANDATORY&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_GROUP_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000004 SE_GROUP_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token group (2)
+ &nbsp;&nbsp; SID domain == BUILTIN, Name == Administrators&nbsp;&nbsp; S-1-5-32-544
+ &nbsp;&nbsp; SID type is SidTypeAlias
+  Token's group (2) attributes == 0x0000000f
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 SE_GROUP_MANDATORY&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_GROUP_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000004 SE_GROUP_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000008 SE_GROUP_OWNER&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token group (3)
+ &nbsp;&nbsp; SID domain == BUILTIN, Name == Users&nbsp;&nbsp; S-1-5-32-545
+ &nbsp;&nbsp; SID type is SidTypeAlias
+  Token's group (3) attributes == 0x00000007
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 SE_GROUP_MANDATORY&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_GROUP_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000004 SE_GROUP_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token group (4)
+ &nbsp;&nbsp; SID domain == NT AUTHORITY, Name == NETWORK&nbsp;&nbsp; S-1-5-2
+ &nbsp;&nbsp; SID is the Network SID
+ &nbsp;&nbsp; SID type is SidTypeWellKnownGroup
+  Token's group (4) attributes == 0x00000007
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 SE_GROUP_MANDATORY&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_GROUP_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000004 SE_GROUP_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+Token privileges (16)
+  NOTE: Most token privileges are not enabled by default.
+ &nbsp;&nbsp; For example the privilege to reboot or logoff is not.
+ &nbsp;&nbsp; 0x00000000 for attributes implies the privilege is not enabled.
+ &nbsp;&nbsp; Use care when enabling privileges. Enable only those needed,
+ &nbsp;&nbsp;&nbsp;&nbsp; and leave them enabled only for as long as they are needed.
+</code></pre>
+<pre><code>&nbsp;&nbsp;Token's privilege (00) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeChangeNotifyPrivilege
+  Token's privilege (00) attributes == 0x00000003
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SE_PRIVILEGE_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_PRIVILEGE_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token's privilege (01) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeSecurityPrivilege
+  Token's privilege (01) attributes == 0x00000003
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SE_PRIVILEGE_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_PRIVILEGE_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token's privilege (02) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeBackupPrivilege
+  Token's privilege (02) attributes == 0x00000003
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SE_PRIVILEGE_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_PRIVILEGE_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token's privilege (03) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeRestorePrivilege
+  Token's privilege (03) attributes == 0x00000003
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SE_PRIVILEGE_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_PRIVILEGE_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token's privilege (04) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeSystemtimePrivilege
+  Token's privilege (04) attributes == 0x00000003
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SE_PRIVILEGE_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_PRIVILEGE_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token's privilege (05) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeShutdownPrivilege
+  Token's privilege (05) attributes == 0x00000003
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SE_PRIVILEGE_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_PRIVILEGE_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token's privilege (06) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeRemoteShutdownPrivilege
+  Token's privilege (06) attributes == 0x00000003
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SE_PRIVILEGE_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_PRIVILEGE_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token's privilege (07) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeTakeOwnershipPrivilege
+  Token's privilege (07) attributes == 0x00000003
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SE_PRIVILEGE_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_PRIVILEGE_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token's privilege (08) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeDebugPrivilege
+  Token's privilege (08) attributes == 0x00000003
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SE_PRIVILEGE_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_PRIVILEGE_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token's privilege (09) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeSystemEnvironmentPrivilege
+  Token's privilege (09) attributes == 0x00000003
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SE_PRIVILEGE_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_PRIVILEGE_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token's privilege (10) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeSystemProfilePrivilege
+  Token's privilege (10) attributes == 0x00000003
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SE_PRIVILEGE_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_PRIVILEGE_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token's privilege (11) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeProfileSingleProcessPrivilege
+  Token's privilege (11) attributes == 0x00000003
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SE_PRIVILEGE_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_PRIVILEGE_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token's privilege (12) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeIncreaseBasePriorityPrivilege
+  Token's privilege (12) attributes == 0x00000003
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SE_PRIVILEGE_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_PRIVILEGE_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token's privilege (13) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeLoadDriverPrivilege
+  Token's privilege (13) attributes == 0x00000003
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SE_PRIVILEGE_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_PRIVILEGE_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token's privilege (14) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeCreatePagefilePrivilege
+  Token's privilege (14) attributes == 0x00000003
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SE_PRIVILEGE_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_PRIVILEGE_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  Token's privilege (15) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeIncreaseQuotaPrivilege
+  Token's privilege (15) attributes == 0x00000003
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SE_PRIVILEGE_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_PRIVILEGE_ENABLED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+</code></pre>
+<pre><code>Token's default-owner-SID for created objects
+ &nbsp;&nbsp; This is NOT a SID that is used to compare to SIDs in DACL(s) and SACL(s)
+  SID domain == BUILTIN, Name == Administrators&nbsp;&nbsp; S-1-5-32-544
+  SID type is SidTypeAlias
+Token's Primary Group SID
+ &nbsp;&nbsp; (Current uses are Posix and Macintosh client support)
+  SID domain == RUEDIGERDOM, Name == Domain Users&nbsp;&nbsp; S-1-5-21-52177637-1330004027-2027761767-513
+  SID type is SidTypeGroup
+Token's default-DACL for created objects
+  ACL has 2 ACE(s), 52 bytes used, 120 bytes free
+  ACL revision is 2 == ACL_REVISION2
+  ACE 0 size 24
+  ACE 0 flags 0x00
+  ACE 0 is an ACCESS_ALLOWED_ACE_TYPE
+  ACE 0 mask&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == 0x10000000
+ &nbsp;&nbsp; Standard Rights&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == 0x00000000
+ &nbsp;&nbsp; Specific Rights&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == 0x00000000
+ &nbsp;&nbsp; Access System Security == 0x00000000
+ &nbsp;&nbsp; Generic&nbsp; Rights&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == 0x10000000
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x10000000 GENERIC_ALL&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; SID domain == BUILTIN, Name == Administrators&nbsp;&nbsp; S-1-5-32-544
+ &nbsp;&nbsp; SID type is SidTypeAlias
+  ACE 1 size 20
+  ACE 1 flags 0x00
+  ACE 1 is an ACCESS_ALLOWED_ACE_TYPE
+  ACE 1 mask&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == 0x10000000
+ &nbsp;&nbsp; Standard Rights&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == 0x00000000
+ &nbsp;&nbsp; Specific Rights&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == 0x00000000
+ &nbsp;&nbsp; Access System Security == 0x00000000
+ &nbsp;&nbsp; Generic&nbsp; Rights&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == 0x10000000
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x10000000 GENERIC_ALL&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; SID domain == NT AUTHORITY, Name == SYSTEM&nbsp;&nbsp; S-1-5-18
+ &nbsp;&nbsp; SID is the LocalSystem SID
+ &nbsp;&nbsp; SID type is SidTypeWellKnownGroup
+Token's Source
+  Source Name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == NTLanMan
+  Source Identifier&nbsp; == 0x0000000000000000
+Token's Type is TokenImpersonation
+ &nbsp;&nbsp; Hence the token's TokenImpersonationLevel can be examined
+  Token is a SecurityImpersonation impersonation token
+Token's Statistics
+  TokenId&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == 0x0000000000005687
+  AuthenticationId&nbsp;&nbsp; == 0x0000000000005643
+  ExpirationTime&nbsp;&nbsp;&nbsp;&nbsp; == (not supported in this release of Windows NT)
+  TokenType&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == See token type above
+  ImpersonationLevel == See impersonation level above (only if TokenType is not TokenPrimary)
+  DynamicCharged&nbsp;&nbsp;&nbsp;&nbsp; == 500
+  DynamicAvailable&nbsp;&nbsp; == 300
+  GroupCount&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == 5
+  PrivilegeCount&nbsp;&nbsp;&nbsp;&nbsp; == 16
+  ModifiedId&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == 0x0000000000005649
+</code></pre>
+</BODY>
+</HTML>

@@ -1,0 +1,319 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Using a Multithreaded Multiple Document Interface Application</title>
+<link disabled rel=stylesheet href=../../backsdk3.css>
+<style type="text/css">
+@import url(../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h2><a name="_win32_using_a_multithreaded_multiple_document_interface_application"></a>Using a Multithreaded Multiple Document Interface Application</h2>
+<p>
+The example in this topic shows how to use multiple threads in a multiple document interface (MDI) process. The process has a single main window, but can have any number of child windows. The primary thread of the process performs initialization and also handles messages to all windows through the application-defined MainWndProc and ChildWndProc functions. </p>
+<p>
+Each time a child window is created, a new thread is also created. In the example, the new thread continually checks a global variable to see if it is time to terminate. </p>
+<p>
+The <code>ThreadFunc</code> function is specified in the <a href="prothred_4084.htm"><b>CreateThread</b></a> function as the code for the new thread to execute. The handle to the child window associated with the thread is passed as a parameter to <code>ThreadFunc</code>. The child window's handle is also a parameter to <code>ChildWndProc</code> when a message is dispatched to the child window. A handle is necessary for any communication between a child window and its corresponding thread. Both <code>ThreadFunc</code> and <code>ChildWndProc</code> use the window handle in the <object id=alink_1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="../../notopic_0pk4.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="_win32_setwindowlong">
+</object><a href=JavaScript:alink_1.Click()><b>SetWindowLong</b></a> function to access the value that is reserved for application use in each window structure. In the example, the value is a termination flag. When <code>ChildWndProc</code> gets the <object id=alink_2 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="../../notopic_0pk4.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="_win32_wm_close">
+</object><a href=JavaScript:alink_2.Click()>WM_CLOSE</a> message, it sets the flag; <code>ThreadFunc</code> checks the flag each time through its loop. </p>
+<p>
+The example demonstrates how to use normal priority for the primary thread and below-normal priority for the other threads. Because the primary thread handles all messages for both the main window and the child windows, its higher relative priority ensures responsiveness to user input. </p>
+<p>
+When the user terminates the process by closing the main window, the primary thread sets the global parameter to indicate that worker threads should terminate. The primary thread waits for each child thread to terminate before proceeding. This is necessary only if you want the threads to clean up, save changes to a file, or detach from DLLs before closing. If the primary thread does not wait, no other threads will be able to execute, because they have a lower priority. </p>
+<pre><code>#include &lt;windows.h&gt; 
+#include &lt;stdio.h&gt; 
+#include &lt;stdlib.h&gt; 
+ 
+#define MM_NEWWIN       8001 
+typedef struct _PTHREADLIST 
+{ 
+   HANDLE hThread; 
+   LPVOID lpvNext; 
+} THREADLIST, *PTHREADLIST; 
+ 
+HANDLE hModule;            // handle to .EXE file for this process 
+HWND   hwndMain = NULL;    // handle to main window 
+BOOL fKillAll = FALSE;     // sets TRUE to terminate all threads 
+PTHREADLIST pHead = NULL;  // head of thread information linked list 
+ 
+BOOL InitializeApp(VOID); 
+LRESULT CALLBACK MainWndProc(HWND, UINT, WPARAM, LPARAM); 
+LRESULT CALLBACK ChildWndProc(HWND, UINT, WPARAM, LPARAM); 
+DWORD ThreadFunc(HWND); 
+VOID AddThreadToList(HANDLE); 
+VOID ErrorExit(LPSTR); 
+ 
+// Primary thread:  Initialize the application and dispatch messages. 
+ 
+int WINAPI WinMain( HINSTANCE hInst, 
+   HINSTANCE hPrevInst, 
+   LPSTR lpszCmdLn, 
+   int nShowCmd) 
+{ 
+   MSG msg; 
+   hModule = GetModuleHandle(NULL); 
+   if (! InitializeApp()) 
+      ErrorExit("InitializeApp failure!"); 
+   while (GetMessage(&amp;msg, NULL, 0, 0)) 
+   { 
+      TranslateMessage(&amp;msg); 
+      DispatchMessage(&amp;msg); 
+   } 
+   return 1; 
+   UNREFERENCED_PARAMETER(hInst); 
+   UNREFERENCED_PARAMETER(hPrevInst); 
+   UNREFERENCED_PARAMETER(lpszCmdLn); 
+   UNREFERENCED_PARAMETER(nShowCmd); 
+} 
+ 
+// Register window classes and create the main window. 
+ 
+BOOL InitializeApp(VOID) 
+{ 
+   HMENU hmenuMain, hmenuPopup; 
+   WNDCLASS wc; 
+ 
+// Register a window class for the main window. 
+ 
+   wc.style            = CS_OWNDC; 
+   wc.lpfnWndProc      = MainWndProc; 
+   wc.cbClsExtra       = 0; 
+   wc.cbWndExtra       = 0; 
+   wc.hInstance        = hModule; 
+   wc.hIcon            = LoadIcon(NULL,IDI_APPLICATION); 
+   wc.hCursor          = LoadCursor(NULL, IDC_ARROW); 
+   wc.hbrBackground    = (HBRUSH)(COLOR_BACKGROUND+1); 
+   wc.lpszMenuName     = NULL; 
+   wc.lpszClassName    = "MainWindowClass"; 
+   if (! RegisterClass(&amp;wc)) 
+      return FALSE; 
+ 
+// Register a window class for child windows. 
+ 
+   wc.lpfnWndProc      = ChildWndProc; 
+   wc.lpszClassName    = "ThreadWindowClass"; 
+   if (! RegisterClass(&amp;wc)) 
+      return FALSE; 
+
+// Create a menu for the main window. 
+ 
+   hmenuMain = CreateMenu(); 
+   hmenuPopup = CreateMenu(); 
+   if (!AppendMenu(hmenuPopup, MF_STRING, MM_NEWWIN, "&amp;New Window")) 
+      return FALSE; 
+   if (!AppendMenu(hmenuMain, MF_POPUP, (UINT)hmenuPopup, "&amp;Threads")) 
+      return FALSE; 
+ 
+// Create the main window. 
+ 
+   hwndMain = CreateWindow("MainWindowClass", "Primary Window", 
+      WS_OVERLAPPED | WS_CAPTION | WS_BORDER | WS_THICKFRAME | 
+      WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_CLIPCHILDREN | 
+      WS_VISIBLE | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 
+      CW_USEDEFAULT, CW_USEDEFAULT, NULL, hmenuMain, hModule, 
+      NULL); 
+   if (hwndMain == NULL) 
+      return FALSE; 
+ 
+// Set the initial focus. 
+ 
+   SetFocus(hwndMain); 
+   return TRUE; 
+} 
+ 
+// Main window procedure: Handle messages for the main window. 
+ 
+LRESULT CALLBACK MainWndProc(HWND hwnd, UINT uiMessage, 
+   WPARAM wParam, LPARAM lParam) 
+{ 
+   static HWND hwndClient; 
+   static DWORD dwCount = 1; 
+   CLIENTCREATESTRUCT ccsClientCreate; 
+   HWND hwndChildWnd; 
+   DWORD IDThread; 
+   PTHREADLIST pNode; 
+ 
+   switch (uiMessage) 
+   { 
+   // Create a client window to receive child window messages. 
+
+      case WM_CREATE: 
+         ccsClientCreate.hWindowMenu = NULL; 
+         ccsClientCreate.idFirstChild = 1; 
+         hwndClient = CreateWindow("MDICLIENT", NULL, 
+            WS_CHILD | WS_CLIPCHILDREN | WS_VISIBLE, 0, 0, 0, 0, 
+            hwnd, NULL, hModule, (LPVOID)&amp;ccsClientCreate); 
+         return 0L; 
+ 
+   // Close the main window. First set fKillAll to TRUE to 
+   // terminate all threads. Then wait for the threads to exit 
+   // before passing a close message to a default handler.  If you 
+   // don't wait for threads to terminate, the process terminates 
+   // with no chance for thread cleanup. 
+ 
+      case WM_CLOSE: 
+         fKillAll = TRUE; 
+         pNode = pHead; 
+         while (pNode) 
+         { 
+            DWORD dwRes; 
+            SetThreadPriority(pNode-&gt;hThread, 
+               THREAD_PRIORITY_HIGHEST); 
+            dwRes = WaitForSingleObject(pNode-&gt;hThread, 
+               INFINITE); 
+            pNode = (PTHREADLIST) pNode-&gt;lpvNext; 
+         } 
+         return DefFrameProc(hwnd, hwndClient, uiMessage, 
+            wParam, lParam); 
+ 
+   // Terminate the process. 
+ 
+      case WM_DESTROY: 
+         PostQuitMessage(0); 
+         return 0L; 
+ 
+   // Handle the menu commands. 
+ 
+      case WM_COMMAND: 
+         switch (LOWORD(wParam)) 
+         { 
+         // Create a child window and start a thread for it. 
+            case MM_NEWWIN: 
+               HANDLE hThrd; 
+               MDICREATESTRUCT mdicCreate; 
+               TCHAR tchTitleBarText[32]; 
+               LONG lPrev; 
+ 
+               sprintf(tchTitleBarText, "Thread Window %d", dwCount); 
+               mdicCreate.szClass = "ThreadWindowClass"; 
+               mdicCreate.szTitle = tchTitleBarText; 
+               mdicCreate.hOwner  = hModule; 
+               mdicCreate.x = mdicCreate.y = 
+               mdicCreate.cx = mdicCreate.cy = CW_USEDEFAULT; 
+               mdicCreate.style = mdicCreate.lParam = 0L; 
+ 
+            // Send a "create child window" message to the 
+            // client window. 
+ 
+               hwndChildWnd = (HWND) SendMessage(hwndClient, 
+                  WM_MDICREATE, 0L, (LONG)&amp;mdicCreate); 
+               if (hwndChildWnd == NULL) 
+                  ErrorExit("Failed in Creating Thread Window!"); 
+ 
+            // Window structure used to pass a quit message to 
+            // the thread. 
+ 
+               lPrev = SetWindowLong(hwndChildWnd, GWL_USERDATA, 0); 
+ 
+            // Create a suspended thread; alter its priority before 
+            // calling ResumeThread. 
+ 
+               hThrd = CreateThread(NULL,  // no security attributes 
+                         0,                // use default stack size 
+                         (LPTHREAD_START_ROUTINE) ThreadFunc, 
+                         (LPVOID)hwndChildWnd, // param to thread func 
+                         CREATE_SUSPENDED, // creation flag 
+                         &amp;IDThread);       // thread identifier 
+               if (hThrd == NULL) 
+                  ErrorExit("CreateThread Failed!"); 
+               AddThreadToList(hThrd); 
+               dwCount++; 
+ 
+            // Set the priority lower than the primary (input) 
+            // thread, so the process is responsive to user 
+            // input.  Then resume the thread. 
+ 
+               if (!SetThreadPriority(hThrd, 
+                  THREAD_PRIORITY_BELOW_NORMAL)) 
+                  ErrorExit("SetThreadPriority failed!"); 
+               if ((ResumeThread(hThrd)) == -1) 
+                  ErrorExit("ResumeThread failed!"); 
+               return 0L; 
+ 
+            default: 
+               return DefFrameProc(hwnd, hwndClient, uiMessage, 
+                  wParam, lParam); 
+         } 
+ 
+      default: 
+         return DefFrameProc(hwnd, hwndClient, uiMessage, 
+            wParam, lParam); 
+   } 
+} 
+ 
+// Process messages for the child windows. 
+ 
+LRESULT CALLBACK ChildWndProc(HWND hwnd, UINT uiMessage, WPARAM 
+   wParam, LPARAM lParam) 
+{ 
+   LONG lPrevLong; 
+   switch (uiMessage) 
+   { 
+   // Use a window structure to pass "close" message to thread. 
+ 
+      case WM_CLOSE: 
+         lPrevLong = SetWindowLong(hwnd, GWL_USERDATA, 1); 
+         return DefMDIChildProc(hwnd, uiMessage, wParam, lParam); 
+ 
+      case WM_DESTROY: 
+         return 0L; 
+ 
+      default: 
+         return DefMDIChildProc(hwnd, uiMessage, wParam, lParam); 
+   } 
+} 
+ 
+// Each child window has a thread that can be used to perform tasks 
+// associated with that window--for example, drawing its contents. 
+ 
+DWORD ThreadFunc(HWND hwnd) 
+{ 
+   LONG lKillMe = 0L; 
+   while (TRUE) 
+   { 
+      lKillMe = GetWindowLong(hwnd, GWL_USERDATA); 
+      if (fKillAll || lKillMe) break; 
+ 
+   // Perform tasks. 
+ 
+   } 
+ 
+   // Perform actions needed before thread termination. 
+ 
+   return 0; 
+} 
+ 
+VOID AddThreadToList(HANDLE hThread) 
+{ 
+   PTHREADLIST pNode; 
+   pNode = (PTHREADLIST) LocalAlloc(LPTR, sizeof(PTHREADLIST)); 
+   if (pNode == NULL) 
+   {
+      ErrorExit("malloc Failed!"); 
+   }
+   pNode-&gt;hThread = hThread; 
+   pNode-&gt;lpvNext = (LPVOID) pHead; 
+   pHead = pNode; 
+} 
+ 
+VOID ErrorExit(LPSTR lpszMessage) 
+{ 
+   MessageBox(hwndMain, lpszMessage, "Error", MB_OK); 
+   ExitProcess(0); 
+} 
+ </code></pre>
+<p>&nbsp;</p></body>
+</HTML>

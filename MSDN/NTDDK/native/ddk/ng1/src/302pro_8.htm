@@ -1,0 +1,243 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML>
+<HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>2.4  Receiving Data in a Protocol Driver</TITLE>
+<style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD>
+<BODY BGPROPERTIES="FIXED" TEXT="#000000" BGCOLOR="#FFFFFF">
+
+<FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<H2><A NAME="DDK_Receiving_Data_in_a_Protocol_Driver_NG"></A>2.4  Receiving Data in a Protocol Driver </H2>
+<P>
+Underlying NIC drivers can indicate packets in two ways:
+<UL>
+<LI>
+A NIC driver calls <B>NdisMIndicateReceivePacket</B>, passing a pointer to an
+array of packet descriptor pointer(s) to one or more full packets and
+relinquishing ownership of the resources for these packets to the overlying
+drivers, which can consume the data and return the packet resources at a later
+time.
+<P>
+<LI>
+A NIC driver calls a filter-specific <B>NdisM</B><I>Xxx</I><B>IndicateReceive</B>
+function, passing a pointer to a lookahead buffer, the size of the lookhead
+buffer, and the total size of the received net packet. 
+</UL>
+<P>
+Every protocol driver must have at least one of two possible receive handlers
+and can have both of the following:
+<OL>
+<LI>
+ProtocolReceive is a required function that is called with a pointer to a
+lookahead buffer. 
+<P>
+After ProtocolReceive examines the lookahead data and determines that the
+packet is intended for one or more of its clients, it must copy the lookahead
+data into a protocol-allocated buffer, possibly to be chained to a
+protocol-allocated packet descriptor. If the size of the lookahead buffer is
+less than the total size of the received packet, ProtocolReceive must call <B>NdisTransferData</B>
+with the protocol-allocated packet descriptor to obtain the rest of the
+received data, which the underlying driver copies into the protocol-supplied
+buffer.
+<P>
+<LI>
+ProtocolReceivePacket is an optional function that receives a pointer to
+packet descriptor specifying a buffered full network packet. 
+<P>
+ProtocolReceivePacket also examines the packet data and determines whether the
+packet is intended for one or more of its clients. If so, the protocol can
+give its TDI client(s) ownership of the indicated packet resources, including
+direct read-only access to the buffered net packet data, by returning a
+nonzero value (a count of clients to which the protocol forwarded the receive
+indication) from ProtocolReceivePacket. The protocol driver&#39;s client(s)
+must subsequently return the packet descriptor and all the resources it
+specifies to the underlying driver by calling <B>TdiReturnChainedReceives</B>
+with a pointer to the packet descriptor. Each client must make this call with
+the packet descriptor until all clients&#39; calls total the nonzero value
+returned from ProtocolReceivePacket for that receive indication. 
+<P>
+When the protocol driver&#39;s client(s) call <B>TdiReturnChainedReceives</B>
+the required number of times, they relinquish ownership of the returned packet
+resources to the underlying NIC driver that originally indicated the receive. 
+<P>
+On the other hand, if a protocol driver returns zero from
+ProtocolReceivePacket, it relinquishes ownership of the packet resources when
+ProtocolReceivePacket returns. Relinquishing such a received packet
+immediately could occur, for instance, if the client for the packet has closed
+the connection or in some manner become unavailable, or if the protocol copies
+the indicated data into buffers of its own and processes the data internally
+before indicating up to its clients. 
+</OL>
+<H4>Implementing a ProtocolReceivePacket Handler</H4>
+<P>
+When an underlying NIC driver indicates an array of one or more packet
+descriptors with <B>NdisMIndicateReceivePacket</B>, NDIS will usually call a
+bound protocol driver’s ProtocolReceivePacket function with each packet
+descriptor, thereby allowing the protocol driver (or its TDI clients) to
+retain the packet descriptor and all the resources it specifies until the
+protocol or its client(s) have consumed the data and returned the packet
+descriptor. Two kinds of NIC drivers typically call <B>NdisMIndicateReceivePacket</B>
+with an array of packet descriptors:
+<OL>
+<LI>
+A NIC driver managing a busmaster DMA adapter that is capable of receiving
+several packets at a time into a ring of buffers
+<P>
+<LI>
+A NIC driver that provides out-of-band data containing media-specific
+information, such as packet priority, in the NDIS_PACKET_OOB_DATA block
+associated with the packet descriptor 
+<P>
+Such a driver need not be the driver of a busmaster DMA device.
+</OL>
+<P>
+If a protocol driver is aware that it is (or might be) bound to such a NIC
+driver, it should have a ProtocolReceivePacket function. This allows the
+protocol driver to do all of the following:
+<UL>
+<LI>
+To receive indications of full network packets from the underlying NIC driver
+<P>
+<LI>
+To read the OOB data associated with each packet descriptor using
+NDIS-supplied macros
+<P>
+<LI>
+To retain ownership of the input packet descriptor and direct read-only access
+to the buffered data specified by the descriptor if the protocol makes copies
+of the data for its clients, or even to forward the indicated packet
+descriptor to its client(s) after selecting the range of packet data of
+interest to the client(s)
+<P>
+<LI>
+To return the packet descriptor and the resources it described, possibly along
+with other retained packet descriptors, with <B>NdisReturnPackets</B>&nbsp;when the
+protocol has consumed the indicated data if it retains ownership of the input
+packet descriptor; otherwise, to have clients to which the protocol forwarded
+a receive indication return the packet descriptor with calls to <B>TdiReturnChainedReceives</B>
+</UL>
+<P>
+Even when a protocol driver provides a ProtocolReceivePacket handler, there
+are cases when a call by a NIC driver to <B>NdisMIndicateReceivePacket</B>
+results in a call to the protocol driver’s ProtocolReceive function. Since a
+NIC driver temporarily relinquishes ownership of driver-allocated resources
+when it calls <B>NdisMIndicateReceivePacket</B>, the underlying driver depends
+on the consumers of those packets to return them in a timely manner.
+Otherwise, the NIC driver can run short of receive resources, such as receive
+buffer space in the NIC. When it does, the NIC driver sets
+NDIS_STATUS_RESOURCES in the OOB block associated with a packet descriptor in
+the packet array it passes to <B>NdisMIndicateReceivePacket</B>. Indicating a
+packet with this status causes NDIS to call the overlying driver&#39;s
+ProtocolReceive function with such a packet and with any subsequent packets in
+the array, thus forcing the protocol driver to copy the packet data
+immediately, rather than retaining the NIC-driver-allocated packet resources. 
+<P>
+If the protocol driver requires the OOB data associated with a packet
+descriptor but is called at ProtocolReceive, it must call <B>NdisQueryReceiveInformation</B>
+to copy the media-specific information into a protocol-supplied buffer and
+possibly the <B>TimeSent</B>&nbsp;and <B>TimeReceived</B>&nbsp;values if the underlying
+NIC driver provides these timestamps. 
+<H4>Implementing a ProtocolReceive Handler</H4>
+<P>
+If the underlying NIC driver calls a filter-specific <B>NdisM</B><I>Xxx</I><B>IndicateReceive
+</B>function, NDIS always calls the ProtocolReceive function of each bound
+protocol driver. If one or more of such a protocol driver&#39;s clients are
+the target of the packet and the lookahead buffer size is less than the total
+packet size, ProtocolReceive must do the following:
+<OL>
+<LI>
+Copy the lookahead data into an internal buffer mapped by a protocol-allocated
+packet descriptor.
+<P>
+<LI>
+Chain buffer descriptor(s) mapping sufficient protocol-allocated buffers to
+contain the rest of the network packet data to a protocol-allocated packet
+descriptor.
+<P>
+<LI>
+Call <B>NdisTransferData</B>&nbsp;with the packet descriptor, so the underlying
+driver copies the rest of the received data into the protocol&#39;s buffer(s).
+</OL>
+<P>
+When <B>NdisTransferData</B>&nbsp;returns STATUS_SUCCESS or the
+ProtocolTransferDataComplete function is called, the lookahead buffer can be
+chained to the packet descriptor containing this transferred data and
+indicated up to any interested client(s). 
+<P>
+<B>NdisTransferData</B>&nbsp;can only be called once for each receive indication.
+It is the responsibility of the protocol driver to set up its packet
+descriptor with chained buffers of a sufficient size to contain the full
+network packet. After <B>NdisTransferData</B>&nbsp;returns, the received data is no
+longer available from the underlying NIC driver.
+<P>
+The size of the lookahead buffer passed to ProtocolReceive is the minimum of
+the size returned by a call to <B>NdisRequest</B>&nbsp;with
+OID_GEN_CURRENT_LOOKAHEAD and the total packet size. All data in the lookahead
+buffer is read-only to the ProtocolReceive. 
+<P>
+If the call to ProtocolReceive occurred because the underlying NIC driver set
+the status for one or more packets in a packet array to NDIS_STATUS_RESOURCES
+before calling <B>NdisMIndicateReceivePacket</B>, the size of the lookahead
+buffer will always be equal to the size of the full network packet. In these
+circumstances, the protocol driver never calls <B>NdisTransferData</B>&nbsp;because
+ProtocolReceive can copy the full indication into an internal buffer
+immediately.
+<P>
+If the NDIS_MAC_OPTION_COPY_LOOKAHEAD_DATA bit is set in response to an
+OID_GEN_MAC_OPTIONS request, a protocol driver can use any means to copy
+lookahead data into an internal buffer, such as calling <B>NdisMoveMemory</B>.
+If this flag was <I>not</I>&nbsp;set, the protocol driver <I>must</I>&nbsp;call <B>TdiCopyLookaheadData</B>
+to copy the indicated data; otherwise, the results from a copy operation are
+indeterminate. 
+<P>
+ProtocolReceive must execute as quickly as possible. The protocol driver must
+insure that it has protocol-allocated packet resources available before it
+receives incoming indications. After the protocol driver examines the packet
+and determines that the packet is not one it will copy, ProtocolReceive should
+simply return NDIS_STATUS_NOT_ACCEPTED.
+<P>
+ProtocolReceive must not process the received data as soon as it is copied
+since that would adversely impact system performance, as well as possibly
+causing dropped receives in the underlying NIC driver. Instead, the protocol
+driver processes the received data later in its ProtocolReceiveComplete
+function. Following one or more receive indications, ProtocolReceiveComplete
+is called when the underlying NIC driver calls <B>NdisM</B><I>Xxx</I><B>IndicateReceiveComplete</B>.
+Typically, this occurs when the underlying NIC driver has received and
+indicated a miniport-determined number of packets or before it exits its
+DPC-level receive handler. The protocol driver must queue the received data in
+ProtocolReceive so that it is available to ProtocolReceiveComplete for
+postprocessing.
+<H4>Accessing OOB Information</H4>
+<P>
+When a received network packet is indicated to ProtocolReceive, it forces the
+driver to copy the received data into a protocol-supplied buffer. If such an
+indication has associated media-specific and/or timestamp information in the
+OOB block associated with the packet descriptor, a protocol driver can call <B>NdisQueryReceiveInformation</B>
+to copy the media-specific information, as well as any <B>TimeSent</B>&nbsp;and <B>TimeReceived</B>
+timestamps. 
+<P>
+If a received packet is passed to ProtocolReceivePacket, the protocol driver
+can copy the information from the associated OOB block using NDIS-supplied
+macros as follows: 
+<UL>
+<LI>
+Media-specific information is copied using NDIS_GET_MEDIA_SPECIFIC_INFO.
+<P>
+<LI>
+<B>TimeSent</B>&nbsp;is copied using NDIS_GET_TIME_SENT.
+<P>
+<LI>
+<B>TimeReceived</B>&nbsp;is copied using NDIS_GET_TIME_RECEIVED.
+</UL>
+<P>
+<B>TimeSent</B>&nbsp;is the time a packet was sent by the NIC driver on the remote
+node, and is retrieved and stored by the underlying NIC driver on the local
+node if available. <B>TimeReceived</B>&nbsp;is the time that the incoming packet
+was received on the underlying NIC on the local node. 
+<P>
+The current system time can be determined using <B>NdisGetCurrentSystemTime</B>
+or <B>KeQuerySystemTime</B>&nbsp;if the protocol converts these timestamps into
+another format. 
+<P></FONT>
+</BODY>
+</HTML>

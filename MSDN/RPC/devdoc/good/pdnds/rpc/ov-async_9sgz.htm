@@ -1,0 +1,156 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Client-side Asynchronous RPC</title>
+<link disabled rel=stylesheet href=../../../backsdk3.css>
+<style type="text/css">
+@import url(../../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h1><a name="_rpc_client_side_asynchronous_rpc"></a>Client-side Asynchronous RPC</h1>
+<p>
+Client-side asynchronous function handling has three components:
+<ul>
+<li>
+Making the asychronous call.</li>
+<li>
+Waiting for the reply.</li>
+<li>
+Receiving the reply.</li>
+</ul>
+
+<h4><a name="_rpc_making_the_asynchronous_call"></a>Making the Asynchronous Call</h4>
+<p>
+The client must initialize the asynchronous handle, which is a pointer to the <a href="pr-dtype_876t.htm"><b>RPC_ASYNC_STATE</b></a> structure, before it can make an asynchronous remote call. Every outstanding call must have its own unique asynchronous handle. After making the call, the client uses the asynchronous handle to query the status of the call, wait on the call, and to receive the reply. </p>
+<p>
+The client must also ensure that the buffers it supplies for the <b>out</b> parameters and the <b>in, out</b> parameters remain allocated until the remote procedure call is logically completed, that is, when it has received the reply from the server. </p>
+
+<h4><a name="_rpc_waiting_for_the_reply"></a>Waiting For the Reply</h4>
+<p>
+The client waits to be notified of a reply from the server. The client can receive this notification in any one of the following ways:
+<ul>
+<li>
+<b>Event.</b> The client can specify an event to be fired when the call has completed. </li>
+<li>
+<b>Polling.</b> The client can repeatedly call <a href="pr-func1_76er.htm"><b>RpcAsyncGetCallStatus</b></a>. If the return value is anything other than RPC_S_ASYNC_CALL_PENDING, the call is complete. This method uses more CPU time than the other methods described here.</li>
+<li>
+<b>APC.</b> The client can specify an asynchronous procedure call (APC) that gets called when the call completes. The APC is called with the <i>CompletionFlags</i> field set to RPC_ASYNC_CALL_COMPLETE. For APCs to get dispatched, the client thread must be in an alertable wait state. <p>
+If the <i>hThread</i> field in the asynchronous handle is set to 0, the APCs are queued on the thread that made the asynchronous call. If it is non-zero, the APCs are queued on the thread specified by <i>hThread</i>. See Asynchronous Procedure Calls in the Windows Base Services documentation for more information on APCs.
+</li>
+<li>
+<b>IOC.</b> The I/O completion port is notified with the parameters specified in the asynchronous handle. </li>
+<li>
+<b>Windows handle</b>. A message is posted to the specified window handle (HWND). not ready for Beta 1</li>
+</ul>
+<p>
+The client can, at any time, request cancellation of an outstanding call by calling <a href="pr-func1_3bvw.htm"><b>RpcAsyncCancelCall</b></a>.</p>
+
+<h4><a name="_rpc_receiving_the_reply"></a>Receiving The Reply</h4>
+<p>
+Once it is notified that the server has sent a reply, the client calls <a href="pr-func1_6pnw.htm"><b>RpcAsyncCompleteCall</b></a><b> </b>with the asynchronous handle to receive the reply. When <b>RpcAsyncCompleteCall</b> has completed successfully, <i>*Reply</i> contains the return value of the remote function, and the buffers supplied by the user for the <b>out</b> and <b>in, out</b> parameters of that remote function are valid. If the client calls <b>RpcAsyncCompleteCall </b>before the server has sent the reply, that call will fail with RPC_S_ASYNC_CALL_PENDING.</p>
+<h4>Example</h4>
+<p>
+This example shows a client-side asynchronous call that employs a user-mode asynchronous procedure call (APC) for the notification mechanism. Scroll down to see an example of the same call using notification by event.</p>
+<pre><code>//CALL_COOKIE is a user-defined object that keeps
+//track of the asynchronous call. It includes the 
+//RPC_ASYNC_STATE structure
+typedef struct {
+    RPC_ASYNC_STATE Async ;
+    int c ;
+    BOOL CallFinished ;
+    } CALL_COOKIE ;
+ 
+#define APP_ERROR -1
+ 
+//This function calls the asynchronous remotefunction, MyAsyncFunc
+void AsyncUsingAPC( RPC_BINDING_HANDLE Binding )
+{
+CALL_COOKIE *Cookie ;
+int retval ;
+ 
+  Cookie =new CALL_COOKIE ;
+  Cookie-&gt;CallFinished = 0;
+ 
+//let the runtime initialize the RPC_ASYNC_STATE struct:
+  RpcAsyncInitializeHandle(&amp;(Cookie-&gt;Async));
+ 
+//now set the remaining RPC_ASYNC_STATE fields:
+  Cookie-&gt;Async.NotificationType = notification_type_apc ;
+  Cookie-&gt;Async.u.APC.NotificationRoutine = MyAsyncFuncAPCRoutine ;
+  Cookie-&gt;Async.u.APC.hThread = 0;
+  Cookie-&gt;Async.UserInfo = (void *) Cookie ;
+  
+ 
+//call the asynchronous function. The buffers supplied for the [out] 
+//and [in, out] parameters should be valid until the logical RPC 
+//has completed.
+  MyAsyncFunc(&amp;Cookie-&gt;Async, Binding, 10, 20, &amp;Cookie-&gt;c) 
+ 
+//The client application can do other work here, while the 
+//call is in progress.
+//SleepEx causes the thread to enter a wait state until an APC is
+//queued to the thread. The fAlertable flag must be set to TRUE
+  if (SleepEx(INFINITE, TRUE) != WAIT_IO_COMPLETION
+      || Cookie-&gt;CallFinished == 0)
+      {
+      RpcRaiseException(APP_ERROR) ;
+      }
+  RpcAsyncCompleteCall (&amp;Cookie-&gt;Async, &amp;retval) ;
+//retval now contains the return value for MyAsyncFunc  
+}     //end AsyncUsingAPC
+ 
+// make the asynchronous function call
+// the buffers supplied for the [out] and the [in, out] params
+// should be valid until the logical RPC call has completed.
+ 
+ 
+//This routine is called when an asynchronous call completes. 
+//For an APC to be dispatched, the client thread must be waiting
+//in an alertable state. 
+void MyAsyncFuncAPCRoutine ( IN PRPC_ASYNC_STATE pAsync,
+                             IN void *Context,
+                             IN unsigned int Flags )
+{
+CALL_COOKIE *Cookie = (CALL_COOKIE *) pAsync-&gt;UserInfo ;
+if (Flags &amp; RPC_ASYNC_CALL_COMPLETE)
+   {
+   Cookie-&gt;CallFinished = 1;
+   }
+}  end MyAsyncFuncAPCRoutine
+//End APC example.
+ </code></pre>
+<h4>Example 2</h4>
+<p>
+In this example the client uses an event as the notification mechanism.</p>
+<pre><code>//XAsyncCl.c (fragment)
+ 
+void AsyncUsingEvent( IN RPC_BINDING_HANDLE Binding )
+//This function calls MyAsyncFunc, the actual asynchronous function.
+{
+HANDLE HandleToThread ;
+CALL_COOKIE *Cookie ; //as defined in first example
+Cookie = new CALL_COOKIE ;
+int a = 10, b = 20;
+Cookie-&gt;Async.Size = sizeof(RPC_ASYNC_STATE) ;
+Cookie-&gt;Async.Flags = 0;
+Cookie-&gt;Async.u.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL) ;
+if (Cookie-&gt;Async.u.hEvent == 0)
+   {
+   RpcRaiseException(APP_ERROR) ;
+   }
+Cookie-&gt;Async.NotificationType = notification_type_event ;
+Cookie-&gt;Async.UserInfo = (void *) Cookie ;
+// call the asynchronous function
+// the buffers supplied for the [out] and the [in, out] params
+// should be valid until the logical RPC call has completed. 
+MyAsyncFunc(&amp;Cookie-&gt;Async, Binding, a, b, &amp;Cookie-&gt;c) ;
+ 
+WaitForSingleObject(Cookie-&gt;Async.u.hEvent, INFINITE) ;
+RpcAsyncCompleteCall (&amp;Cookie-&gt;Async, &amp;retval) ;
+}    //end AsyncUsingEvent
+ </code></pre>
+<p>&nbsp;</p></body>
+</HTML>

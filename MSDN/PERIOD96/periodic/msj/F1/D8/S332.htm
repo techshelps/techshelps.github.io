@@ -1,0 +1,1916 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Extending the Windows Explorer with Name Space Extensions</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  Extending the Windows Explorer with Name Space Extensions</H1><P>David Campbell</P>
+<P>David Campbell is a Support Engineer on the Microsoft Premier Developer Support team who specializes in Windows shell extensions as well as Microsoft Visual C++. He also likes cheese.</P>
+<P>Windows¨95 and Windows NT¨ 4.0 contain a mechanism that allows information to be integrated into the internal hierarchical data structures of the Windows Explorer. This hierarchical data, the "name space," contains information about objects displayed in the Explorer's panes. A name space is a collection of symbols, such as database keys or file and directory names.</P>
+<P>The Windows 95 shell uses a single hierarchical name space to organize all objects such as files, storage devices, printers, network resources, and anything else that can be viewed using Explorer. The root of this unified name space is the Windows 95 desktop. While similar to a file system's directory structure, the name space contains more types of objects than just files and directories.</P>
+<P>OK, but why do I care? This name space mechanism can be extended to include new items. You can write a name space extension to add your own custom data, and custom views on that data, into the Explorer's internal name space. With a freshly installed Windows 95 or Windows NT 4.0, a standard name space is part of the product. This name space includes the standard components you see with a clean install of Windows. There is code in the operating systems that interact with Explorer to represent the standard name space. Therefore, your name space extension is additional code that allows Explorer to represent your additional name space data.</P>
+<P>Since the name space extension mechanism is based on COM, I will assume you are familiar with COM. You should also be familiar with writing shell extensions. If not, read Jeff Prosise's article "Integrate Your Applications with the Windows 95 User Interface Using Shell Extensions" in the March 1995 issue of <I>MSJ</I>. </P>
+<P>Note that the information presented here is subject to change and is based on the Cab File Viewer sample recently released by Microsoft. The Cab File Viewer was released as part of the Power Toys collection of applications and extensions to enhance Windows 95. Download the Power Toys collection from http://www.microsoft.com/windows/software/powertoy.htm. The Cab File Viewer extends the name space to allow Explorer to browse into CABinet files. These are compressed archive files, similar to ZIP files, that Microsoft uses to distribute software, including Windows 95. The Cab File Viewer name space extension provides code that Explorer can use to display CAB file contents. You can get source for the Cab File Viewer along with preliminary documentation on Explorer's name space mechanism from http://www.microsoft.com/win32dev. To build a name space extension, you will also need an updated version of ShlObj.H, which is included in the Cab File Viewer sample source and should also be in the next release of the Win32¨ SDK. </P>
+<P>The name space is a very large topic, and even the subset implemented in the Cab File Viewer is too large to be adequately covered in this article. Rather than walk you painfully through the code, I will instead cover information on the name space mechanism itself to allow you to understand the basics of name space extensions. You'll then be able to review the sample code on your own along with the new header files, and explore some of the more advanced topics, including the ability to generate per item context menus, icon handlers, and support for drag and drop. </P>
+<P> </P>
+<H2><A NAME="sec0"></A>  What is the Shell Name Space?</H2><P>Windows 95 and Windows NT 4.0 use a data structure—the name space—that represents the hierarchy of objects all the way from the desktop to every item that can be seen in Explorer. From the desktop you can view Network Neighborhood, My Briefcase, Recycle Bin, and My Computer. From My Computer you can get to drives, Control Panel, Printers, and Dial-Up Networking. Look at the left pane of Explorer to see the hierarchy of objects clearly. These items are called virtual folders—virtual because they refer to items in the name space that can contain other name space items, as opposed to groups of files.</P>
+<P>Explorer uses COM interfaces to let the user access and manipulate internal name space data and to display it in a graphical form. In the COM paradigm, you are supposed to manipulate and extend the internal name space structures using COM interfaces instead of directly accessing the name space data.</P>
+<P>You may have already noticed that the EnumDesk sample from the MSDN CD and the Windows Explorer look almost exactly the same. This is because both Explorer and EnumDesk walk though the name space and display the information in the name space. Both Explorer and EnumDesk call into the name space to enumerate the contents of a folder. They can then step through the items in the folder and call another interface to find out what to display. I will go through these steps in more detail later in this article.</P>
+<P> </P>
+<H2><A NAME="sec1"></A>  Types of Name Space Extensions</H2><P>There are two high-level topics to discuss on name space extensions before I jump into the details: rooted versus nonrooted name space extensions and the point of entry.</P>
+<P>The difference between rooted extensions and nonrooted extensions is how they're used. There is no code difference between the two. A rooted extension is meant to stand alone. Essentially, the extension is the root of the tree and can only see its own branches. To see an example of a rooted extension, right-click on the Windows 95 taskbar, choose Properties, click the Start Menu Programs tab, and click the Advanced button. You will see an Explorer-like window with the Start Menu folder as the root, as in <B>Figure 1</B>. In the case of the Cab File Viewer (see <B>Figure 2</B>), it is also a rooted extension, since the window shown does not let you step backwards to the CAB file.</P>
+<P><img src="name1.gif"></P>
+<P><B> Figure 1  Rooted name space.</B></P>
+<P><img src="name2.gif"></P>
+<P><B> Figure 2  CAB File Viewer</B></P>
+<P>A nonrooted use of a name space extension keeps the entire name space in mind. Right click on the Windows 95 Start button on the taskbar and select Explore from the pop-up menu. In this case, the exact same name space extension is shown in an Explorer window (see <B>Figure 3</B>), except you can step back from the Start Menu folder and traipse around the rest of the name space.</P>
+<P><img src="name3.gif"></P>
+<P><B> Figure 3  Nonrooted name space.</B></P>
+<P>The implementation of the name space extension is basically the same for both kinds. Which method you use depends on your extension and is a matter of style and common sense as much as anything else. </P>
+<P>Now let's talk about entry points. The root, or top level, of your name space is referred to as the junction point. In the case of the Cab File Viewer, the junction point is the CAB file itself. There is a restriction in the current Explorer—any name space that is implemented with a file (like CAB) as its junction point must be rooted, since the Explorer does not support exploring directly into files.</P>
+<P>An alternative is to use a directory as the junction point. To do this, you must create a directory, change the directory's attributes to read-only, and place a file called Desktop.ini into it. This INI file then specifies the CLSID of your extension:</P>
+<P> </P>
+<P><BR></P>
+<PRE> [.ShellClassInfo]
+CLSID={CLSID}</PRE>
+<P> </P>
+<P>This file basically replaces the CAB entry in the registry.</P>
+<P>Yet another alternative is to use the CLSID of your name space extension as the file extension of a folder. If you wanted to create a folder called Cheese that was really the junction point of a name space extension, you would actually create a folder named "Cheese.{CLSID}".</P>
+<P>Another difference between name space implementations is the actual "entry point" from the user's point of view. The user can enter via an icon like the Recycle Bin on the desktop or in the My Computer folder, for example. Or the entry point can be a file type (or directory) that is registered to your extension, like the Cab File Viewer. </P>
+<P>You can place an entry point on the desktop or in the My Computer folder in several ways. First, you can put information in the registry that results in an icon being placed on the desktop, the icon coming from the CLSID in this registry entry:</P>
+<P> </P>
+<P><BR></P>
+<PRE> HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\
+Explorer\Desktop\Namespace\{CLSID}\(default) = 
+     "Description of my extension"</PRE>
+<P> </P>
+<P>This is what you'd use to place the icon in the My Computer folder:</P>
+<P> </P>
+<P><BR></P>
+<PRE> HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\
+Explorer\MyComputer\Namespace\{CLSID}\(default) =     
+     "Description of my extension"</PRE>
+<P> </P>
+<P>So should you implement a rooted or nonrooted extension? And should the entry point be on the desktop or somewhere else? It depends on your extension. Does your extension fit into the logical hierarchy of the name space? Does it make sense to move up a level in the hierarchy from your name space? If not, a rooted extension may make more sense. </P>
+<P>Suppose you are implementing an extension to browse Usenet newsgroups. Does it make sense to have more than one entry point? Not really, so an entry point on the desktop seems reasonable. What about rooting? You could argue either way, but I would think that it should be rooted. What if you wanted to browse into a database file of some sort? Well, since it's reasonable for more than one to exist on your machine, it makes sense to use the location of the file itself as the entry point. As for rooting, if you use the file as the junction point, a rooted extension is your only option. </P>
+<P> </P>
+<H2><A NAME="sec2"></A>  Registering the Extension</H2><P>Like all shell extensions, a name space extension is registered in the Windows registry so that Explorer can determine its location and what services are available. </P>
+<P>Here's the basic layout and options for the registry. First, if you are registering a file type to be treated like a name space extension, you need:</P>
+<P> </P>
+<P><BR></P>
+<PRE> HKEY_CLASSES_ROOT\.EXT\(default)=CLSID\{CLSID}  ; </PRE>
+<P> </P>
+<P>This is only necessary if you are registering an extension for a specific file.</P>
+<P>The rest is similar to other shell extensions,</P>
+<P> </P>
+<P><BR></P>
+<PRE> HKEY_CLASSES_ROOT\CLSID\{0CD7A5C0-9F37-11CE-AE65-08002B2E1262}\InProcServer32\(default) =
+     "C:\\WINDOWS\\SYSTEM\\ShellExt\\CabView.dll"</PRE>
+<P> </P>
+<P>and </P>
+<P> </P>
+<P><BR></P>
+<PRE> HKEY_CLASSES_ROOT\CLSID\{0CD7A5C0-9F37-11CE-AE65-08002B2E1262}\InProcServer32\"ThreadingModel" =
+     "Apartment"</PRE>
+<P> </P>
+<P>Of course you must also have a CLSID entry that matches</P>
+<P> </P>
+<P><BR></P>
+<PRE> HKEY_CLASSES_ROOT\CLSID\{CLSID}</PRE>
+<P> </P>
+<P>and the keys shown in <B>Figure 4</B> under it.</P>
+<P><B> Figure 4  Registry Keys</B></P>
+<P><BR></P>
+<PRE> HKEY_CLASSES_ROOT\CLSID\{CLSID}\InProcServer32\(default)= path\filename.dll
+HKEY_CLASSES_ROOT\CLSID\{CLSID}\InProcServer32\"ThreadingModel" = "Apartment"
+HKEY_CLASSES_ROOT\CLSID\{CLSID}\DefaultIcon\(default)="path\filename.dll", IconIndex ; Icon to use for the name space data file itself (i.e. .CAB file)
+HKEY_CLASSES_ROOT\CLSID\{CLSID}\Shell\Open\Command\(default) = c:\windows\Explorer.exe /root,%1
+HKEY_CLASSES_ROOT\CLSID\{CLSID}\Shell\Explore\Command\(default) = c:\windows\Explorer.exe /e,/root,%1
+HKEY_CLASSES_ROOT\CLSID\{CLSID}\ShellFolder\Attributes = 00 00 00 00 ; i.e. IShellFolder::GetAttributes() ; optional</PRE>
+<P>The Cab File Viewer registers the extension under the file extension for CAB files, similar to the way you register context menu handlers, property sheet extensions, and other shell extensions.</P>
+<P> </P>
+<P><BR></P>
+<PRE> HKEY_CLASSES_ROOT\.cab\(default)="CLSID\\{0CD7A5C0- 
+     9F37-11CE-AE65-08002B2E1262}"</PRE>
+<P> </P>
+<P>Then a key is created for the CLSID,</P>
+<P> </P>
+<P><BR></P>
+<PRE> HKEY_CLASSES_ROOT\CLSID\{0CD7A5C0-9F37-11CE-AE65-08002B2E1262}</PRE>
+<P> </P>
+<P>Next, the following entries are added. Note the reference to the CLSID for the CabView.dll and the rooted Explorer.</P>
+<P> </P>
+<P><BR></P>
+<PRE> HKEY_CLASSES_ROOT\CLSID\{0CD7A5C0-9F37-11CE-AE65-08002B2E1262}\InProcServer32\(default)=   
+     "C:\\WINDOWS\\SYSTEM\\ShellExt\\CabView.dll"
+HKEY_CLASSES_ROOT\CLSID\{0CD7A5C0-9F37-11CE-AE65-08002B2E1262}\InProcServer32\"ThreadingModel" =   
+     "Apartment"
+HKEY_CLASSES_ROOT\CLSID\{0CD7A5C0-9F37-11CE-AE65-08002B2E1262}\DefaultIcon\(default)= 
+     "C:\\WINDOWS\\SYSTEM\\ShellExt\\CabView.dll"
+HKEY_CLASSES_ROOT\CLSID\{0CD7A5C0-9F37-11CE-AE65-08002B2E1262}\shell\open\command\(default)= "Explorer /
+     root,{0CD7A5C0-9F37-11CE-AE65-08002B2E1262},%1"</PRE>
+<P> </P>
+<P>Explorer invokes your extension using the exact command line you registered, so you can test your command line by executing it directly with the Run command on the Start menu. For example, executing </P>
+<P> </P>
+<P><BR></P>
+<PRE> Explorer.exe /root, {your CLSID}, [path] </PRE>
+<P> </P>
+<P>should start up the Explorer and your extension.</P>
+<P> </P>
+<H2><A NAME="sec3"></A>  The Difference Between a Shell Extension and a Name Space Extension</H2><P>Shell extensions are code that modifies or enhances the functionality of the entire operating system shell. Name space extensions are just one type of shell extension. Therefore, all name space extensions are shell extensions. Because of this, there is some standard shell extension code you will need to use when writing your name space extension (which I will cover in a moment).</P>
+<P>Let me clear something up. The terms "shell" and "Explorer" are often used interchangeably in some of Microsoft's documentation. This is because Explorer.exe is the entire Windows shell. A shell extension is in fact an Explorer extension. It is confusing because most people think of the Explorer as the window (shown in <B>Figure 5</B>) that explores the name space. Explorer is also the application that owns and controls the desktop and the name space data. When you're implementing a name space extension (or any shell extension), think of the big picture as just a collection of shell extensions, all owned by Explorer. Other parts of Windows 95 system code also use these extensions, including the File Open and File Save common dialogs.</P>
+<P><img src="name5.gif"></P>
+<P><B> Figure 5  Explorer</B></P>
+<P>A name space extension is to Explorer as an interpreter is to a tourist. Since your custom name space data is in a language Explorer does not natively know, your name space extension will translate your custom data to a format that Explorer can understand.</P>
+<P>OK, so what's a browser? A browser is an application that interacts with the name space to provide the user with a visual representation and a mechanism to manipulate the data. The EnumDesk sample (see <B>Figure 6</B>) from the MSDN CD is a browser. The Explorer window in <B>Figure 5</B> is also a browser. The goal of name space extensions is to eliminate the need to write a complete browser.</P>
+<P><img src="name6.gif"></P>
+<P><B> Figure 6  EnumDesk</B></P>
+<H2><A NAME="sec4"></A>  Why Write a Name Space Extension?</H2><P>A name space extension enables Explorer to let users view and manipulate custom data objects in familiar Explorer-like ways. Until now, developers wanting this level of integration had to implement their own custom browser (like EnumDesk) that handled their own data type information along with the standard name space. This meant that the user needed a different browser for each custom data type! Further, the custom browser solution doesn't allow you to take advantage of future enhancements in Explorer's browser technology (when Windows 2001 comes out, users won't want to be forced to still use EnumDesk!). With a name space extension, not only does the user only need one browser (Explorer's), but users will be able to take advantage of enhancements to Explorer and continue to use your data.</P>
+<P> </P>
+<H2><A NAME="sec5"></A>  Anatomy of a Name Space Extension</H2><P>A name space extension allows you to define a new object that a name space browser like Explorer can explore and allows the user to interact with. Your extension code, which is implemented as an OLE inproc server, manages the display of the icon images and text that the user sees while viewing your data, as well as the menus and toolbars the user can use to interact with your data. This new object can be used for any number of things, including displaying the contents of your email inbox or Internet newsgroups, the contents of a zip file or a database of some sort, document management system or whatever, assuming that the information can be presented reasonably in a graphical way. Very sophisticated name space extensions can actually do things like take the symbol in your name space and decode it on the screen. An example would be if there was a URL in your name space, but you displayed the Web page in the browser instead of the URL. In this example, the data being displayed by the browser is not the actual data in the name space; instead it is something referenced by the data in the name space. However, deviating from name space extensions that essentially list items and attributes to full-featured document-style editing is better handled through ActiveX, which is not covered in this article.</P>
+<P>To see an extension in action, download and install the Cab File Viewer, and then browse into a CAB file, such as the ones on your Windows 95 install CD or the Plus! Pack. <B>Figure 7</B> shows a directory containing CAB files. Explorer recognizes the CAB file format once the viewer is installed, and displays the icons registered to the extension in the registry under the {CLSID}\DefaultIcon key. (In this case the icon is similar to the one displayed for directories.)</P>
+<P><img src="name7.gif"></P>
+<P><B> Figure 7  CAB Files</B></P>
+<P>Nothing magic so far, since you can register an icon for almost any type of file. Open one of the CAB files and you'll see the extension in action (refer back to <B>Figure 2</B>). Notice how the contents of the CAB file appear as if the files were in a directory. </P>
+<P>Cab File Viewer works by registering its file type, CAB, as a name space extension and provides the information required by Explorer to display its name space contents. In this case CAB File Viewer provides a list of file names, icons, and attributes just as if the CAB file was a directory containing files.</P>
+<P> </P>
+<H2><A NAME="sec6"></A>  Implementing an Extension</H2><P>So what do you have to implement to create a name space extension? Your extension has to provide Explorer several things:</P>
+<OL><LI> A list of the items in your name space, called the ID list.</LI><LI>A view of the items, usually icons and text labels</LI><LI>Optional custom context menus for the items, and other UI goodies such as drag and drop functionality.</LI></OL><P>You probably feel like you have seen this before—the MFC document/view architecture works on a very similar fashion. The list of the IDs in the name space correlate to the MFC document object, and the view of the items relate to the MFC view object.</P>
+<P> </P>
+<H2><A NAME="sec7"></A>  Name Space Extension Core Code</H2><P>As mentioned earlier, all shell extensions (and hence your name space extension) must be implemented as OLE inproc DLLs. They must contain at least the functions DllMain, DllGetClassObject, DllCanUnloadNow, and the standard IUnknown interface. Finally, all shell extensions must be implemented using the apartment threading model. The apartment threading model allows your process to contain more than one thread of execution because it uses message passing to deal with multiple objects running concurrently.</P>
+<P>That's what's required to create a basic, albeit bland, OLE inproc DLL that can be used as the frame for an extension. From there, extensions deviate since the interfaces and methods they support depend on the type of extension being implemented.</P>
+<P>A name space extension must implement the IShellFolder, IEnumIDList, IPersistFolder and IShellView interfaces. Their methods (see <B>Figure 8</B>) are used to interact with Explorer. Explorer makes calls into the extensions using the IShellFolder and IShellView interfaces, and the extension can call back into Explorer using its IShellBrowser implementation.</P>
+<P><img src="name8.gif"></P>
+<P><B> Figure 8  Calling into a Name Space Extension</B></P>
+<P> </P>
+<H2><A NAME="sec8"></A>  Name Space Extension Specialized Code</H2><P>Once you have your core code, then you need to add the code that is specific to your name space.  The "Name Space Extensions—Quick Reference" pullout (between pages 48 and 49) lists the key interfaces and their methods, as well as brief descriptions. The Win32 SDK and the MSDN CD contain complete descriptions of these interfaces, including parameter descriptions, return values and some sample usage code in some cases. These interfaces and methods are defined in ShlObj.h and ShlGuid.h, which have recently changed to include the new interface definitions necessary to implement name space extensions. These files will be included in the next Win32 SDK, but in the meantime you can find them with the sample code for this article.</P>
+<P>When Explorer goes to display the contents of your name space, it loads your extension via OLE, using the CLSID you registered to locate your inproc server DLL. It then calls your extension's QueryInterface to get the interfaces and methods it needs. For example, Explorer will query for IPersistFolder once your DLL is loaded. If Explorer receives a valid interface pointer, it will initialize your code by calling the IPersistFolder::Initialize member and will pass your extension a pointer to an ID list (or PIDL). A PIDL points to a data structure that identifies your code in the overall name space.</P>
+<P> </P>
+<H2><A NAME="sec9"></A>  PIDLing Around with ID Lists</H2><P>An ID list is a group of shell item IDs. Each identifier is an array of bytes that contains data specific to the name space code that allocated the identifier. The first two bytes of this array must be a byte count that defines the length of the item, but the rest of the data is not used by any code outside the name space extension. The rest of the data identifies the item to the name space extension that allocated it. For example, an identifier that points to a file on disk may be as follows:</P>
+<P> </P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="140pt" VALIGN="TOP"><COL WIDTH="301pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P> Bytes 0–1</P></TD><TD VALIGN="TOP"><P>Byte count</P></TD></TR><TR><TD VALIGN="TOP"><P> Bytes 2–<I>n</I></P></TD><TD VALIGN="TOP"><P>Full path</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P> </P>
+<P>If the name space extension wants to cache away details, it could make the identifier as follows:</P>
+<P> </P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="171pt" VALIGN="TOP"><COL WIDTH="234pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P> Bytes 0–1</P></TD><TD VALIGN="TOP"><P>Byte count</P></TD></TR><TR><TD VALIGN="TOP"><P> Bytes 2–258</P></TD><TD VALIGN="TOP"><P>Path and file name</P></TD></TR><TR><TD VALIGN="TOP"><P> Bytes 259–260</P></TD><TD VALIGN="TOP"><P>File's size in bytes</P></TD></TR><TR><TD VALIGN="TOP"><P> Bytes 260–261</P></TD><TD VALIGN="TOP"><P>Create date</P></TD></TR><TR><TD VALIGN="TOP"><P> Bytes 262–263</P></TD><TD VALIGN="TOP"><P>Attributes</P></TD></TR><TR><TD VALIGN="TOP"><P> Bytes 264–<I>n</I></P></TD><TD VALIGN="TOP"><P>Icon</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P> </P>
+<P>In this case, caching away the file details speeds up the name space's responses to Explorer's queries, which improves UI performance.</P>
+<P>When these identifiers are formed into an ID list, they are simply concatenated one after another and a final ID with a zero byte count is used as a terminator. An ID list that contains only one ID is called a simple ID list, one with more than one ID is called a complex ID list. For consistency, most methods that accept a shell item ID as a parameter take a PIDL, although you must watch out since some methods expect simple ID lists and others can handle complex ID lists. For example, CompareIDs, GetAttributesOf, GetUIObjectOf, and SetNameOf expect simple ID lists, while BindToObject, BindToStorage, and GetDisplayNameOf can be passed complex ID lists. The documentation indicates which methods handle complex ID lists.</P>
+<P>Using a directory structure as an analogy for the name space, a PIDL can be compared to a path. Just as there are absolute and relative paths in DirectoryStructureLand, there are absolute and relative PIDLs. A relative PIDL is only meaningful inside its name space location. In the case of a name space extension's items, the PIDL is pointing to a buffer of data that only has meaning to the name space extension itself. Since this item can be any structure you wish, you may want to include information such as a friendly name, actual location, attributes, and other details that the extension can use for speedy access. </P>
+<P> </P>
+<H2><A NAME="sec10"></A>  ID List Rules and Regs</H2><P>An important note about ID lists is that they must not be dependent on where they are stored in memory. They cannot contain pointers to data within themselves or any data external to them. This is because an ID list can be saved to persistent storage (for example, shortcut files contain a persisted ID list), and then read back into memory later and presented back to the IShellFolder that first enumerated the item (except the ID list is now in a different chunk of memory). An ID list can also be duplicated into another memory block, and then be presented to the IShellFolder. In the example of an identifier that refers to a file on disk, this means that the identifier/structure pointed to by the PIDL must contain the actual path, not just a pointer to a character string that contains the path. The identifier must be</P>
+<P> </P>
+<P><BR></P>
+<PRE> USHORT; char[__MAXPATH]; </PRE>
+<P> </P>
+<P>not </P>
+<P> </P>
+<P><BR></P>
+<PRE> USHORT; char*;</PRE>
+<P> </P>
+<P>This also means all IShellFolder implementations need to be both backward- and forward-compatible with ID lists that they write out. That is, if the ID list format for a folder is revised, it must work well (not crash!) with old and new implementations of the IShellFolder. Be very careful when designing the format of your ID lists. A very good way to do this is to have an ID type field immediately after the byte count. For example, while bytes 0–1 are used to indicate the byte count for the ID, bytes 2–3 should be used to "tag" the rest of the data in the ID with some format code. If the name space extension does not recognize the format code, it knows (from the byte count) how many bytes to skip, and therefore can ignore the ID gracefully.</P>
+<P> </P>
+<H2><A NAME="sec11"></A>  Enumerating the ID List</H2><P>Once initialized, Explorer will request an IShellFolder interface to access information about your name space's contents. Explorer uses IShellFolder::EnumObjects to get a list of your extension's contents, IShellFolder::GetUIObjectOf to get the appropriate icons and menus, and IShellFolder::GetAttributesOf to get various attributes of each item, including whether or not that item has subfolders. Since the contents of your name space are known only to your name space extension, all information required by Explorer regarding your data must be implemented by your name space extension code. </P>
+<P>How does Explorer walk through the items in your name space and identify each one to your code when it needs a menu or an icon? This is where the PIDL comes in. Explorer walks through your identifiers using your name space extension's exposed IEnumIDList interface to get each item's PIDL.</P>
+<P>Because Explorer calls IShellFolder::CompareIDs to locate an item in your name space using an identifier you returned earlier, you must be consistent with your IDs. CompareIDs is also used when sorting lists such as the tree in the Explorer. Explorer can also use CompareIDs to check whether or not two PIDLs actually point to the same object.</P>
+<P> </P>
+<H2><A NAME="sec12"></A>  Implementing a View of Your Namespace</H2><P>The IShellBrowser interface (also shown in the "Name Space Extensions—Quick Reference" pullout) is implemented within Explorer, not your name space extension code. It provides a way for your extension to communicate back to the Explorer with visible feedback to the user, including menus, status text, and toolbars. IShellBrowser also gives you a private stream to store persistent state information, such as the layout of items, the viewing mode selected (large icon, small icon, list, or details) or whatever the extension might need the next time this name space is explored.</P>
+<P>When the user enters or opens a name space extension, Explorer must create a view object to display the contents. This is done by calling the name space extension's IShellFolder::CreateViewObject member function and getting an IShellView interface. The Explorer then calls IShellView::CreateViewWindow, which tells the extension to create the view of its folder's contents. Typically you would use a listview control to display your contents, as the Cab File Viewer does. Your extension uses the IShellBrowser::GetWindow method to get a window handle of its parent and it passes a RECT pointer to determine the window's position.</P>
+<P>When the Explorer calls IShellView::CreateViewWindow, it passes an IShellBrowser interface pointer, which allows the extension to call back into Explorer to add status information, menus, and toolbar buttons. The relationship between the IShellBrowser and IShellView interfaces is similar to that of IOleInPlaceFrame and IOleActiveObject. </P>
+<P>The UI mechanism used is similar to OLE's in-place activation mechanism, with a few differences. First, the view window, which the extension creates, can exist even though it may not have the input focus. It has to maintain three states: deactivated, activated with focus, and activated without focus. The view window can present a different set of menus depending on the state. Explorer notifies the extension of any state changes by calling its IShellView::UIActivate member. The Shell View object, in return, calls IShellBrowser::OnViewWindowActivate when the view window is activated by the user with a mouse click. </P>
+<P>Unlike a typical OLE in-place activation, Explorer does not support any type of layout negotiation, but it does let the view window add toolbar buttons and set status bar text, and the view window can communicate with these controls through calls to IShellBrowser::GetControlWindow or IShellBrowser::SendControlMsg. </P>
+<P>Finally, Explorer allows the view window to add menu items to its pulldown menus and insert top-level pulldown menus.  The view object is allowed to insert menu items to submenus returned from IShellBrowser::InsertMenusSB. For Explorer to dispatch menu messages correctly, menu item IDs must be between FCIDM_SHVIEWFIRST and FCIDM_SHVIEWLAST, which are defined in the ShlObj.h file. While OLE's standard in-place mechanism allows the UI active object to add pull-down menus (where you don't need to worry about menu item IDs), the shell's UI negotiation mechanism also allows the active view to add menu items to parents' pull-down menus. Action menu items (such as Open or Cut) should only be available if the view is activated with focus. This is done by manipulating the menu attached to the control window via standard Win32 menu APIs.</P>
+<P>When you navigate around the name space on your computer, you are going to be bouncing around all different types of name spaces and associated views. For example, you may click on the Control Panel folder in the left pane of Explorer and then click on the folder CHEESE.CHZ under the Drive C: folder. In this example, your view changes from a Control Panel applet view to a file directory view.</P>
+<P>To keep the user from going batty, Explorer strives to keep the same look and feel when switching views. If you were in Details mode when looking at Control Panel, Explorer assumes you want to look at the file directory in details mode also. Explorer maintains a little data structure called State Information that's passed from the soon-to-disappear view to the soon-to-appear view. In the example mentioned above, the State Information would indicate Details mode.</P>
+<P>When your view window is created, you are given this State Information as a parameter in your IShellView::CreateViewWindow method. Likewise, your IShellView::GetCurrentInfo method must supply this State Information when it is called by Explorer.</P>
+<P>For consistency, Explorer passes a pointer to the IShellView interface used for the previously active view as a parameter to your IShellView::CreateViewWindow before calling the previously active view's DestroyViewWindow. This allows your view object to transfer appropriate state information from the previous view object.</P>
+<P>The IShellBrowser::GetViewStateStream method gets a pointer to a stream to store your state and attribute settings when your IShellView::SaveViewState method is called. This gives you a place to store the current view settings so you can restore them in your next session. </P>
+<P><B>Figure 9</B> is a table that lists the files in the Cab File Viewer, the interface(s) implemented in the file, highlighting those covered here. The files are excerpted in<B> </B><B>Figure 10</B>. I'm not going to walk through the code, but it's a good idea to review it and use it as a reference for adding features to your own name space extension. One of the best places to look for information regarding shell interfaces is the SHLOBJ.H file itself.</P>
+<P><B> Figure 9  CAB File Viewer Source Files</B></P>
+
+<TABLE COLS="3" BORDER="0"><COLGROUP><COL WIDTH="135pt" VALIGN="TOP"><COL WIDTH="141pt" VALIGN="TOP"><COL WIDTH="166pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P><B> File(s)</B></P></TD><TD VALIGN="TOP"><P><B>Contents</B></P></TD><TD VALIGN="TOP"><P><B>Description</B></P></TD></TR><TR><TD VALIGN="TOP"><P> THISDLL.H, THISDLL.CPP</P></TD><TD VALIGN="TOP"><P>IClassFactory</P></TD><TD VALIGN="TOP"><P>Generic OLE DLL routines</P></TD></TR><TR><TD VALIGN="TOP"><P> FOLDER.H, FOLDER.CPP</P></TD><TD VALIGN="TOP"><P>IPersistFolder and IShellFolder </P></TD><TD VALIGN="TOP"><P>Implementation file for CCabFolder</P></TD></TR><TR><TD VALIGN="TOP"><P> SFVWND.H, SFVWND.CPP</P></TD><TD VALIGN="TOP"><P>IShellView and IDropSource</P></TD><TD VALIGN="TOP"><P>Implementation file for CSFVDropSource and CSFViewDlg</P></TD></TR><TR><TD VALIGN="TOP"><P> MENU.H, MENU.CPP</P></TD><TD VALIGN="TOP"><P>IContextMenu</P></TD><TD VALIGN="TOP"><P>Implementation file for CCabItemMenu</P></TD></TR><TR><TD VALIGN="TOP"><P> ICON.H, ICON.CPP</P></TD><TD VALIGN="TOP"><P>IExtractIcon</P></TD><TD VALIGN="TOP"><P>Implementation file for CCabItemIcon</P></TD></TR><TR><TD VALIGN="TOP"><P> ENUM.H, ENUM.CPP</P></TD><TD VALIGN="TOP"><P>IEnumIDList</P></TD><TD VALIGN="TOP"><P>Implementation for CEnumCabObjs</P></TD></TR><TR><TD VALIGN="TOP"><P> DATAOBJ.H, DATAOBJ.CPP</P></TD><TD VALIGN="TOP"><P>IDataObject, IEnumFORMATETC</P></TD><TD VALIGN="TOP"><P>Implementation file for CObjFormats and CCabObj</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P></P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="221pt" VALIGN="TOP"><COL WIDTH="221pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P><B> File(s)</B></P></TD><TD VALIGN="TOP"><P><B>Description</B></P></TD></TR><TR><TD VALIGN="TOP"><P> DEBUG.H, DEBUG.C</P></TD><TD VALIGN="TOP"><P>Debugging routines</P></TD></TR><TR><TD VALIGN="TOP"><P> XICON.H, XICON.CPP</P></TD><TD VALIGN="TOP"><P>Implementation file for CIconTemp and CXIcon</P></TD></TR><TR><TD VALIGN="TOP"><P> VIEW.H, VIEW.CPP</P></TD><TD VALIGN="TOP"><P>Implementation file for CCabView</P></TD></TR><TR><TD VALIGN="TOP"><P> UNKNOWN.H, UNKNOWN.CPP</P></TD><TD VALIGN="TOP"><P>Custom CUnknown implementations</P></TD></TR><TR><TD VALIGN="TOP"><P> STRINGS.H, STRINGS.C</P></TD><TD VALIGN="TOP"><P>DBCS-aware string routines</P></TD></TR><TR><TD VALIGN="TOP"><P> SFVIEW.H, SFVIEW.CPP</P></TD><TD VALIGN="TOP"><P>Implementation file for CSFView</P></TD></TR><TR><TD VALIGN="TOP"><P> PATH.H, PATH.C</P></TD><TD VALIGN="TOP"><P>Useful path manipulation routines</P></TD></TR><TR><TD VALIGN="TOP"><P> OS.H, OS.CPP</P></TD><TD VALIGN="TOP"><P>Implementation file for CFileTime</P></TD></TR><TR><TD VALIGN="TOP"><P> DLG.H, DLG.CPP</P></TD><TD VALIGN="TOP"><P>Implementation file for CDlg, CFileDlg and CPropPage</P></TD></TR><TR><TD VALIGN="TOP"><P> CABITMS.H, CABITMS.CPP</P></TD><TD VALIGN="TOP"><P>Implementation file for CMemFile, CCabEnum and CCabExtract</P></TD></TR><TR><TD VALIGN="TOP"><P> SFVMENU.CPP</P></TD><TD VALIGN="TOP"><P>Implementation file for CSFView menu related methods</P></TD></TR><TR><TD VALIGN="TOP"><P> IUTIL.C</P></TD><TD VALIGN="TOP"><P>Implementation of Shell_MergeMenus and some other useful routines</P></TD></TR><TR><TD VALIGN="TOP"><P> DA.C</P></TD><TD VALIGN="TOP"><P>Implementation of dynamic pointer arrays (DPAs)</P></TD></TR><TR><TD VALIGN="TOP"><P> FDI.LIB, FDI.H</P></TD><TD VALIGN="TOP"><P>Header and corresponding library for the File Decompression Interface</P></TD></TR><TR><TD VALIGN="TOP"><P> THISGUID.H</P></TD><TD VALIGN="TOP"><P>Definition of GUID for ThisDll</P></TD></TR><TR><TD VALIGN="TOP"><P> PCH.H</P></TD><TD VALIGN="TOP"><P>Common precompiled header file</P></TD></TR><TR><TD VALIGN="TOP"><P> DPDA.H</P></TD><TD VALIGN="TOP"><P>Definitions of dynamic pointer array routines</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P><B> Figure 10  CAB File Viewer Source Excerpts</B></P>
+<P><BR></P>
+<PRE> </PRE>
+<P>ThisDll.h</P>
+<P><BR></P>
+<PRE> //***********************************************************************
+//                Generic OLE header file 
+// Copyright (c) 1994 - 1996 Microsoft Corporation. All rights reserved
+//***********************************************************************
+.
+.
+.
+class CWaitCursor
+{
+public:
+    CWaitCursor() {m_cOld=SetCursor(LoadCursor(NULL, IDC_WAIT));}
+    ~CWaitCursor() {SetCursor(m_cOld);}
+private:
+    HCURSOR m_cOld;
+} ;
+
+class CRefCount
+{
+public:
+    CRefCount() : m_cRef(0) {};
+    UINT AddRef()  {return(++m_cRef);}
+    UINT Release() {return(--m_cRef);}
+    UINT GetRef()  {return(  m_cRef);}
+
+private:
+    UINT m_cRef;
+} ;
+
+class CThisDll
+{
+public:
+    CThisDll() {
+        m_hInst=NULL;
+    }
+    // Make no destructor for global classes (requires CRT stuff)
+    void SetInstance(HINSTANCE hInst) {m_hInst=hInst;}
+    HINSTANCE GetInstance() {return(m_hInst);}
+
+    CRefCount m_cRef;
+    CRefCount m_cLock;
+private:
+    HINSTANCE    m_hInst;
+} ;
+.
+.
+.
+</PRE>
+<P>ThisDll.cpp</P>
+<P><BR></P>
+<PRE> // ******************************************************************
+//                Generic OLE DLL routines
+// Copyright (c) 1994 - 1996 Microsoft Corporation. All rights reserved
+// ******************************************************************
+.
+.
+.
+// ******************************************************************
+// DllMain
+STDAPI_(BOOL) APIENTRY DllMain(
+   HINSTANCE hDll, 
+   DWORD dwReason, 
+   LPVOID lpReserved)
+{
+   switch(dwReason)
+   {
+      case DLL_PROCESS_ATTACH:
+         g_ThisDll.SetInstance(hDll);
+         // Initialize the various modules.
+         //
+         break;
+      case DLL_PROCESS_DETACH:
+         break;
+      case DLL_THREAD_ATTACH:
+         break;
+      case DLL_THREAD_DETACH:
+         break;
+      default:
+         break;
+        } // switch
+   return(TRUE);
+}
+
+// DllCanUnloadNow
+STDAPI DllCanUnloadNow()
+{
+    HRESULT retval = (HRESULT)((g_ThisDll.m_cRef.GetRef() == 0)
+        &amp;&amp; (g_ThisDll.m_cLock.GetRef() == 0) ? S_OK : S_FALSE);
+    return(retval);
+}
+.
+.
+.
+
+class CThisDllClassFactory : public IClassFactory
+{
+public:
+    // *** IUnknown methods ***
+    STDMETHODIMP QueryInterface(REFIID riid,
+        LPVOID FAR* ppvObj);
+    STDMETHODIMP_(ULONG) AddRef(void);
+    STDMETHODIMP_(ULONG) Release(void);
+     // *** IClassFactory methods ***
+    STDMETHODIMP CreateInstance(LPUNKNOWN pUnkOuter,
+        REFIID riid,
+        LPVOID FAR* ppvObject);
+    STDMETHODIMP LockServer(BOOL fLock);
+private:
+    CRefDll m_cRefDll;
+    CRefCount m_cRef;
+};
+
+// DllGetClassObject
+STDAPI DllGetClassObject(
+   REFCLSID rclsid, 
+   REFIID riid, 
+   LPVOID FAR* ppvObj)
+{
+    *ppvObj = NULL;
+    if(! (rclsid == CLSID_ThisDll))
+    {
+        return(E_FAIL);
+    }
+    CThisDllClassFactory *pcf = new CThisDllClassFactory;
+    if (!pcf)
+    {
+        return(E_OUTOFMEMORY);
+    }
+
+    // Note if the QueryInterface fails, the Release will delete the object
+    pcf-&gt;AddRef();
+    HRESULT hRes = pcf-&gt;QueryInterface(riid, ppvObj);
+    pcf-&gt;Release(); 
+     return(hRes);
+}
+
+// CImpIClassFactory member functions
+// *** IUnknown methods ***
+STDMETHODIMP CThisDllClassFactory::QueryInterface(REFIID riid, 
+                                                  LPVOID FAR* ppvObj)
+{
+    *ppvObj = NULL;
+    // Any interface on this object is the object pointer
+    if((riid == IID_IUnknown) || (riid == IID_IClassFactory))
+    {
+        *ppvObj = (LPVOID)(IClassFactory *)this;
+    }
+    if(*ppvObj)
+    {
+        ((LPUNKNOWN)*ppvObj)-&gt;AddRef();
+        return NOERROR;
+    }
+    return(E_NOINTERFACE);
+}
+
+STDMETHODIMP_(ULONG) CThisDllClassFactory::AddRef(void)
+{
+    return(m_cRef.AddRef());
+}
+
+STDMETHODIMP_(ULONG) CThisDllClassFactory::Release(void)
+{
+    if (!m_cRef.Release())
+    {
+        delete this;
+        return(0);
+    }
+  return(m_cRef.GetRef());
+}
+ 
+// *** IClassFactory methods ***
+STDMETHODIMP CThisDllClassFactory::CreateInstance(LPUNKNOWN pUnkOuter,
+        REFIID riid,
+        LPVOID FAR* ppvObj)
+{
+    // we do not support aggregation
+    if(pUnkOuter)
+    {
+        return(CLASS_E_NOAGGREGATION);
+    }
+    return(::CreateInstance(riid, ppvObj));
+}
+
+STDMETHODIMP CThisDllClassFactory::LockServer(BOOL fLock)
+{
+    if(fLock)
+    {
+        g_ThisDll.m_cLock.AddRef();
+    }
+    else
+    {
+        g_ThisDll.m_cLock.Release();
+    }
+    return(NOERROR);
+}
+.
+.
+.
+</PRE>
+<P>Folder.h</P>
+<P><BR></P>
+<PRE> // ******************************************************************
+//                Definitions of CCabFolder and CCabItemList
+// Copyright (c) 1994 - 1996 Microsoft Corporation. All rights reserved
+// ******************************************************************
+.
+.
+.
+class CCabFolder : public IPersistFolder, public IShellFolder
+{
+public:
+    CCabFolder() : m_pidlHere(0), m_lItems(1024/sizeof(LPVOID)) {}
+    ~CCabFolder()
+    {
+        if (m_pidlHere)
+        {
+            ILFree(m_pidlHere);
+        }
+    }
+
+    // *** IUnknown methods ***
+    STDMETHODIMP QueryInterface(
+        REFIID riid, 
+        LPVOID FAR* ppvObj);
+    STDMETHODIMP_(ULONG) AddRef(void);
+    STDMETHODIMP_(ULONG) Release(void);
+
+    // *** IParseDisplayName method ***
+    STDMETHODIMP ParseDisplayName(
+        HWND hwndOwner,
+        LPBC pbc, 
+        LPOLESTR lpszDisplayName,
+        ULONG FAR* pchEaten, 
+        LPITEMIDLIST * ppidl,
+        ULONG *pdwAttributes);
+    
+    //
+    // *** IOleContainer methods ***
+    //
+    STDMETHODIMP EnumObjects(
+        HWND hwndOwner, 
+        DWORD grfFlags,
+        LPENUMIDLIST * ppenumIDList);
+
+    //
+    // *** IShellFolder methods ***
+    //
+    STDMETHODIMP BindToObject(
+        LPCITEMIDLIST pidl, 
+        LPBC pbc,
+        REFIID riid, 
+        LPVOID FAR* ppvObj);
+    STDMETHODIMP BindToStorage(
+        LPCITEMIDLIST pidl, 
+        LPBC pbc,
+        REFIID riid, 
+        LPVOID FAR* ppvObj);
+    STDMETHODIMP CompareIDs(
+        LPARAM lParam, 
+        LPCITEMIDLIST pidl1,
+        LPCITEMIDLIST pidl2);
+    STDMETHODIMP CreateViewObject(
+        HWND hwndOwner, 
+        REFIID riid,
+        LPVOID FAR* ppvObj);
+    STDMETHODIMP GetAttributesOf(
+        UINT cidl, 
+        LPCITEMIDLIST FAR* apidl,
+        ULONG FAR* rgfInOut);
+    STDMETHODIMP GetUIObjectOf(
+        HWND hwndOwner, 
+        UINT cidl, 
+        LPCITEMIDLIST FAR* apidl, 
+        REFIID riid, 
+        UINT FAR* prgfInOut, 
+        LPVOID FAR* ppvObj);
+    STDMETHODIMP GetDisplayNameOf(
+        LPCITEMIDLIST pidl, 
+        DWORD dwReserved, 
+        LPSTRRET lpName);
+    STDMETHODIMP SetNameOf(
+        HWND hwndOwner, 
+        LPCITEMIDLIST pidl,
+        LPCOLESTR lpszName, 
+        DWORD dwReserved,
+        LPITEMIDLIST FAR* ppidlOut);
+    //
+    // *** IPersist methods ***
+    //
+    STDMETHODIMP GetClassID(
+        LPCLSID lpClassID);
+    //
+    // *** IPersistFolder methods ***
+    //
+     STDMETHODIMP Initialize(
+        LPCITEMIDLIST pidl);
+
+public:
+    static LPITEMIDLIST CreateIDList(LPCSTR pszName, DWORD dwFileSize,
+        UINT uFileDate, UINT uFileTime, UINT uFileAttribs);
+    static void GetNameOf(LPCABITEM pit, LPSTRRET lpName);
+    static void GetTypeOf(LPCABITEM pit, LPSTRRET lpName);
+
+    BOOL GetPath(LPSTR szPath);
+
+private:
+    static void CALLBACK EnumToList(LPCSTR pszFile, DWORD dwSize, UINT date,
+        UINT time, UINT attribs, LPARAM lParam);
+
+    HRESULT InitItems();
+
+private:
+    CRefDll m_cRefDll;
+
+    CRefCount m_cRef;
+
+    LPITEMIDLIST m_pidlHere;        // maintains the current pidl
+
+    CCabItemList m_lItems;
+
+    friend class CEnumCabObjs;
+} ;
+.
+.
+.
+</PRE>
+<P>folder.cpp</P>
+<P><BR></P>
+<PRE> // ******************************************************************    
+//                CAB Files Shell Extension
+// Copyright (c) 1994 - 1996 Microsoft Corporation. All rights reserved
+// ******************************************************************
+.
+.
+.
+// *** IUnknown methods ***
+STDMETHODIMP CCabFolder::QueryInterface(
+   REFIID riid, 
+   LPVOID FAR* ppvObj)
+{
+    *ppvObj = NULL;
+
+    LPVOID pObj;
+ 
+    if (riid == IID_IUnknown)
+    {
+        pObj = (IUnknown*)((IShellFolder*)this); 
+        // The (IShellFolder*) ^^^ up there is to disambiguate the reference
+    }
+    else if (riid == IID_IShellFolder)
+    {
+        pObj = (IShellFolder*)this;
+    }
+    else if (riid == IID_IPersistFolder)
+    {
+        pObj = (IPersistFolder*)this;
+    }
+    else
+    {
+           return(E_NOINTERFACE);
+    }
+
+    ((LPUNKNOWN)pObj)-&gt;AddRef();
+    *ppvObj = pObj;
+
+    return(NOERROR);
+}
+
+
+STDMETHODIMP_(ULONG) CCabFolder::AddRef(void)
+{
+    return(m_cRef.AddRef());
+}
+
+
+STDMETHODIMP_(ULONG) CCabFolder::Release(void)
+{
+    if (!m_cRef.Release())
+    {
+           delete this;
+        return(0);
+    }
+
+    return(m_cRef.GetRef());
+}
+
+// *** IParseDisplayName method ***
+STDMETHODIMP CCabFolder::ParseDisplayName(
+   HWND hwndOwner,
+   LPBC pbc, 
+   LPOLESTR lpszDisplayName,
+   ULONG FAR* pchEaten, 
+   LPITEMIDLIST * ppidl,
+   ULONG *pdwAttributes)
+{
+    return(E_NOTIMPL);
+}
+
+// *** IOleContainer methods ***
+//**********************************************************************
+// CCabFolder::EnumObjects
+// Purpose:
+//      Creates an item enumeration object 
+//      (an IEnumIDList interface) that can be used to 
+//      enumerate the contents of a folder.
+// Parameters:
+//       HWND hwndOwner       -    handle to the owner window
+//       DWORD grFlags        -    flags about which items to include
+//       LPENUMIDLIST *ppenumIDList - address that receives IEnumIDList
+//                                    interface pointer 
+//********************************************************************
+STDMETHODIMP CCabFolder::EnumObjects(
+   HWND hwndOwner, 
+   DWORD grfFlags,
+   LPENUMIDLIST * ppenumIDList) // LPENUMUNKNOWN FAR* ppenumUnknown)
+{
+    CEnumCabObjs *pce = new CEnumCabObjs(this, grfFlags);
+    if (!pce)
+    {
+        return(E_OUTOFMEMORY);
+    }
+
+    pce-&gt;AddRef();
+    HRESULT hRes = pce-&gt;QueryInterface(IID_IEnumIDList, (LPVOID*)ppenumIDList);
+    pce-&gt;Release();
+
+    return(hRes);
+}
+
+// *** IShellFolder methods ***
+// subfolders not implemented
+STDMETHODIMP CCabFolder::BindToObject(
+   LPCITEMIDLIST pidl, 
+   LPBC pbc,
+   REFIID riid, 
+   LPVOID FAR* ppvObj)
+{
+    return(E_NOTIMPL);
+}
+
+
+STDMETHODIMP CCabFolder::BindToStorage(
+   LPCITEMIDLIST pidl, 
+   LPBC pbc,
+   REFIID riid, 
+   LPVOID FAR* ppvObj)
+{
+    return(E_NOTIMPL);
+}
+
+//**********************************************************************
+// CCabFolder::CompareIDs
+// Purpose:
+//      Determines the relative ordering of two file
+//      objects or folders, given their item identifier lists
+// Parameters:
+//      LPARAM lParam         -    type of comparison
+//      LPCITEMIDLIST pidl1   -    address to ITEMIDLIST
+//      LPCITEMIDLIST pidl2   -    address to ITEMIDLIST
+//********************************************************************
+STDMETHODIMP CCabFolder::CompareIDs(
+   LPARAM lParam, 
+   LPCITEMIDLIST pidl1,
+   LPCITEMIDLIST pidl2)
+{
+    LPCABITEM pit1 = (LPCABITEM)pidl1;
+    LPCABITEM pit2 = (LPCABITEM)pidl2;
+    short nCmp = 0;
+    switch (lParam)
+    {
+    case CV_COL_NAME:
+        break;
+    case CV_COL_SIZE:
+        if (pit1-&gt;dwFileSize &lt; pit2-&gt;dwFileSize)
+        {
+            nCmp = -1;
+        }
+        else if (pit1-&gt;dwFileSize &gt; pit2-&gt;dwFileSize)
+        {
+            nCmp = 1;
+        }
+        break;
+    case CV_COL_TYPE:
+    {
+        STRRET srName1, srName2;
+        GetTypeOf(pit1, &amp;srName1);
+        GetTypeOf(pit2, &amp;srName2);
+        nCmp = (SHORT)lstrcmp(srName1.cStr, srName2.cStr);
+        break;
+    }
+    case CV_COL_MODIFIED:
+        FILETIME ft1, ft2;
+        DosDateTimeToFileTime(pit1-&gt;uFileDate, pit1-&gt;uFileTime, &amp;ft1);
+        DosDateTimeToFileTime(pit2-&gt;uFileDate, pit2-&gt;uFileTime, &amp;ft2);
+        nCmp = (SHORT)CompareFileTime(&amp;ft1, &amp;ft2);
+        break;
+    default:
+        break;
+    }
+    if (nCmp != 0)
+    {
+        return(ResultFromShort(nCmp));
+    }
+    return(ResultFromShort(lstrcmpi(pit1-&gt;szName, pit2-&gt;szName)));
+}
+
+//**********************************************************************
+// CCabFolder::CreateViewObject
+// Purpose:
+//      IShellbrowser calls this to create a ShellView object 
+// Parameters:
+//      HWND   hwndOwner     -
+//      REFIID riid          -  interface ID
+//      LPVOID * ppvObj      -  pointer to the Shellview object
+// Return Value:
+//      NOERROR
+//      E_OUTOFMEMORY
+//      E_NOINTERFACE
+// Comments:
+//      ShellBrowser interface calls this to request the ShellFolder
+//      to create a ShellView object
+//********************************************************************
+STDMETHODIMP CCabFolder::CreateViewObject(
+   HWND hwndOwner, 
+   REFIID riid,
+   LPVOID FAR* ppvObj)
+{
+    IUnknown *pObj = NULL;
+    if (riid == IID_IShellView)
+    {
+        // Create a call back for the ShellView
+        IShellFolderViewCallback *pcb;
+        HRESULT hRes = CabView_CreateCallback(&amp;pcb);
+        hRes = CreateShellFolderView(this, pcb, (LPSHELLVIEW FAR*)&amp;pObj);
+        if (pcb)
+        {
+            // The ShellFolderView should have AddRef'ed if it needed it.
+            pcb-&gt;Release();
+        }
+        if (FAILED(hRes))
+        {
+            return(hRes);
+        }
+    }
+    else
+    {
+        return(E_NOINTERFACE);
+    }
+    if (!pObj)
+    {
+        return(E_OUTOFMEMORY);
+    }
+    // The ref count is already 1
+    HRESULT hRes = pObj-&gt;QueryInterface(riid, ppvObj);
+    pObj-&gt;Release();
+    return(NOERROR);
+}
+// ***************************************************************************
+// CCabFolder::GetAttributesOf
+// Purpose: Retrieves attributes of one of more file objects
+// Parameters:
+//    UINT cidl                -    number of file objects
+//    LPCITEMIDLIST  *apidl    -    pointer to array of ITEMIDLIST
+//    ULONG *rgfInOut          -    array of values that specify file object
+//                                  attributes
+// Return Value:
+//     NOERROR
+//********************************************************************
+STDMETHODIMP CCabFolder::GetAttributesOf(
+   UINT cidl, 
+   LPCITEMIDLIST FAR* apidl,
+   ULONG FAR* rgfInOut)
+{
+    *rgfInOut &amp;= SFGAO_CANCOPY;
+    return(NOERROR);
+}
+
+//********************************************************************
+// CCabFolder::GetUIObjectOf
+// Purpose: Returns an interface that can be used to carry out actions on
+//          the specified file objects or folders
+// Parameters:
+//        HWND hwndOwner        -    handle of the Owner window
+//        UINT cidl             -    Number of file objects
+//        LPCITEMIDLIST *apidl  -    array of file object pidls
+//        REFIID                -    Identifier of interface to return
+//        UINT * prgfInOut      -    reserved
+//        LPVOID *ppvObj        -    address that receives interface pointer
+// Return Value:
+//         E_INVALIDARG
+//         E_NOINTERFACE
+//         E_OUTOFMEMORY
+// **********************************************************************
+STDMETHODIMP CCabFolder::GetUIObjectOf(
+   HWND hwndOwner, 
+   UINT cidl, 
+   LPCITEMIDLIST FAR* apidl, 
+   REFIID riid, 
+   UINT FAR* prgfInOut, 
+   LPVOID FAR* ppvObj)
+{
+    LPUNKNOWN pObj = NULL;
+    if (riid == IID_IExtractIcon)
+    {
+        if (cidl != 1)
+        {
+            return(E_INVALIDARG);
+        }
+        LPCABITEM pci = (LPCABITEM)*apidl;
+        pObj = (LPUNKNOWN)(IExtractIcon *)(new CCabItemIcon(pci-&gt;szName));
+    }
+    else if (riid == IID_IContextMenu)
+    {
+        if (cidl &lt; 1)
+        {
+            return(E_INVALIDARG);
+        }
+        pObj = (LPUNKNOWN)(IContextMenu *)(new CCabItemMenu(hwndOwner, this,
+            (LPCABITEM *)apidl, cidl));
+    }
+    else if (riid == IID_IDataObject)
+    {
+        if (cidl &lt; 1)
+        {
+            return(E_INVALIDARG);
+        }
+        pObj = (LPUNKNOWN)(IDataObject *)(new CCabObj(hwndOwner, this,
+            (LPCABITEM *)apidl, cidl));
+    }
+    else
+    {
+        return(E_NOINTERFACE);
+    }
+    if (!pObj)
+    {
+        return(E_OUTOFMEMORY);
+    }
+    pObj-&gt;AddRef();
+    HRESULT hRes = pObj-&gt;QueryInterface(riid, ppvObj);
+    pObj-&gt;Release();
+    return(hRes);
+}
+
+// **********************************************************************
+// CCabFolder::GetDisplayNameOf
+// Purpose: Retrieves the display name for the specified file object or 
+//          subfolder.
+// Parameters:
+//        LPCITEMIDLIST    pidl    -    pidl of the file object
+//        DWORD  dwReserved        -    Value of the type of display name to 
+//                                      return
+//        LPSTRRET  lpName         -    address holding the name returned        
+// **********************************************************************
+STDMETHODIMP CCabFolder::GetDisplayNameOf(
+   LPCITEMIDLIST pidl, 
+   DWORD dwReserved, 
+   LPSTRRET lpName)
+{
+    LPCABITEM pit = (LPCABITEM)pidl;
+    GetNameOf(pit, lpName);
+    return(NOERROR);
+}
+
+STDMETHODIMP CCabFolder::SetNameOf(
+   HWND hwndOwner, 
+   LPCITEMIDLIST pidl,
+   LPCOLESTR lpszName, 
+   DWORD dwReserved,
+   LPITEMIDLIST FAR* ppidlOut)
+{
+    return(E_NOTIMPL);
+}
+// *** IPersist methods ***
+//**********************************************************************
+// CCabFolder::GetClassID
+// Purpose: Return the class id
+// Parameters:
+//      LPCLSID lpClassID       -   pointer to the ClassID member
+// Return Value:
+//      NOERROR
+// Comments:
+//      This routine returns the Class ID for the DLL
+//********************************************************************
+STDMETHODIMP CCabFolder::GetClassID(
+   LPCLSID lpClassID)
+{
+    *lpClassID = CLSID_ThisDll;
+    return NOERROR;
+}
+
+// *** IPersistFolder methods ***
+//**********************************************************************
+// CCabFolder::Initialize folder
+// Purpose: Explorer calls this while initializing the ShellFolder 
+//          object
+// Parameters:
+//      LPCITEMIDLIST pidl        -   pidl passed by IShellBrowser
+// Return Value:
+//      S_OK
+// Comments:
+//      This routine is called by Explorer during initialization
+//**********************************************************************
+STDMETHODIMP CCabFolder::Initialize(
+   LPCITEMIDLIST pidl)
+{
+    if (m_pidlHere)
+    {
+        ILFree(m_pidlHere);
+    }
+    // Clone the pidl passed by the explorer
+    m_pidlHere = ILClone(pidl);
+    if (!m_pidlHere)
+    {
+        return(E_OUTOFMEMORY);
+    }
+    return(S_OK);
+}
+
+// **********************************************************************
+// CCabFolder::CreateIDList
+// Purpose: Creates an item identifier list for the objects in the namespace
+// **********************************************************************
+LPITEMIDLIST CCabFolder::CreateIDList(LPCSTR pszName, DWORD dwFileSize,
+    UINT uFileDate, UINT uFileTime, UINT uFileAttribs)
+{
+    // We'll assume no name is longer than MAX_PATH
+    // Note the terminating NULL is already in the sizeof(CABITEM)
+    BYTE bBuf[sizeof(CABITEM) + MAX_PATH + sizeof(WORD)];
+    LPCABITEM pci = (LPCABITEM)bBuf;
+    UINT uNameLen = lstrlen(pszName);
+    if (uNameLen &gt;= MAX_PATH)
+    {
+        uNameLen = MAX_PATH;
+    }
+    pci-&gt;wSize = (WORD)(sizeof(CABITEM) + uNameLen);
+    pci-&gt;dwFileSize = dwFileSize;
+    pci-&gt;uFileDate = (USHORT)uFileDate;
+    pci-&gt;uFileTime = (USHORT)uFileTime;
+    pci-&gt;uFileAttribs = (USHORT)uFileAttribs;
+    lstrcpyn(pci-&gt;szName, pszName, uNameLen+1);
+    // Terminate the IDList
+    *(WORD *)(((LPSTR)pci)+pci-&gt;wSize) = 0;
+
+    return(ILClone((LPCITEMIDLIST)pci));
+}
+
+// **********************************************************************
+// CCabFolder::GetPath
+// Purpose: Get the Path for the current pidl
+// Parameters:
+//        LPSTR szPath        -    return pointer for path string
+// **********************************************************************
+BOOL CCabFolder::GetPath(LPSTR szPath)
+{
+    if (!m_pidlHere || !SHGetPathFromIDList(m_pidlHere, szPath))
+    {
+        *szPath = '\0';
+        return(FALSE);
+    }
+    return(TRUE);
+}
+
+void CCabFolder::GetNameOf(LPCABITEM pit, LPSTRRET lpName)
+{
+    lpName-&gt;uType = STRRET_OFFSET;
+    lpName-&gt;uOffset = FIELDOFFSET(CABITEM, szName);
+    SHFILEINFO sfi;
+    if (SHGetFileInfo(pit-&gt;szName, 0, &amp;sfi, sizeof(sfi),
+        SHGFI_USEFILEATTRIBUTES | SHGFI_DISPLAYNAME)
+        &amp;&amp; lstrcmp(sfi.szDisplayName, pit-&gt;szName) != 0)
+    {
+        lpName-&gt;uType = STRRET_CSTR;
+        lstrcpy(lpName-&gt;cStr, sfi.szDisplayName);
+    }
+}
+
+void CCabFolder::GetTypeOf(LPCABITEM pit, LPSTRRET lpName)
+{
+    lpName-&gt;uType = STRRET_CSTR;
+    lpName-&gt;cStr[0] = '\0';
+    SHFILEINFO sfi;
+    if (SHGetFileInfo(pit-&gt;szName, 0, &amp;sfi, sizeof(sfi),
+        SHGFI_USEFILEATTRIBUTES | SHGFI_TYPENAME))
+    {
+        lstrcpy(lpName-&gt;cStr, sfi.szTypeName);
+    }
+}
+// **********************************************************************
+// CCabFolder::EnumToList
+// Purpose: This notify callback is called by the FDI routines. It adds the
+//          file object from the cab file to the list.  
+// **********************************************************************
+void CALLBACK CCabFolder::EnumToList(LPCSTR pszFile, DWORD dwSize, UINT date,
+                                     UINT time, UINT attribs, LPARAM lParam)
+{
+    CCabFolder *pThis = (CCabFolder *)lParam;
+    pThis-&gt;m_lItems.AddItem(pszFile, dwSize, date, time, attribs);
+}
+
+HRESULT CCabFolder::InitItems()
+{
+    switch (m_lItems.GetState())
+    {
+    case CCabItemList::State_Init:
+        return(NOERROR);
+    case CCabItemList::State_OutOfMem:
+        return(E_OUTOFMEMORY);
+    case CCabItemList::State_UnInit:
+    default:
+        break;
+    }
+    // Force the list to initialize
+    m_lItems.InitList();
+    char szHere[MAX_PATH];
+    // the m_pidl has been set to current dir
+    // get the path to the current directory
+    if (!GetPath(szHere))
+    {
+        return(E_UNEXPECTED);
+    }
+    CCabItems ciHere(szHere);
+    if (!ciHere.EnumItems(EnumToList, (LPARAM)this))
+    {
+        return(E_UNEXPECTED);
+    }
+    return(NOERROR);
+}
+
+// **********************************************************************
+// CreateInstance
+// Purpose: Create a CCabFolder object and returns it
+// Parameters:
+//        REFIID riid        -    a reference to the interface that is
+//                                being queried    
+//        LPVOID *ppvObj    -    an out parameter to return a pointer to
+//                               interface being queried
+// **********************************************************************
+HRESULT CreateInstance(REFIID riid, LPVOID *ppvObj)
+{   IUnknown *pObj = NULL;
+    *ppvObj = NULL;
+    if(riid == IID_IPersistFolder)
+    {
+        pObj = (IUnknown *)(IPersistFolder *)(new CCabFolder);
+    }
+    else if(riid == IID_IShellFolder)
+    {
+        pObj = (IUnknown *)(IShellFolder *)(new CCabFolder);
+    }
+    else
+    {
+        return(E_NOINTERFACE);
+    }
+    if (!pObj)
+    {
+        return(E_OUTOFMEMORY);
+    }
+    pObj-&gt;AddRef();
+    HRESULT hRes = pObj-&gt;QueryInterface(riid, ppvObj);
+    pObj-&gt;Release();
+    return(hRes);
+}
+.
+.
+.
+</PRE>
+<P>Enum.h</P>
+<P><BR></P>
+<PRE> // **********************************************************************
+//
+//                Definition of CEnumCabObjs
+//
+//  Copyright (c) 1994 - 1996 Microsoft Corporation. All rights reserved
+//
+// **********************************************************************
+.
+.
+.
+
+// Enumeration object for the CabFolder
+class CEnumCabObjs : public IEnumIDList
+{
+public:
+    CEnumCabObjs(CCabFolder *pcf, DWORD uFlags) : m_iCount(0)
+    {
+        m_uFlags = uFlags;
+        m_pcfThis=pcf;
+        pcf-&gt;AddRef();
+    }
+    ~CEnumCabObjs()
+    {
+        m_pcfThis-&gt;Release();
+    }
+    // *** IUnknown methods ***
+    STDMETHODIMP QueryInterface(REFIID riid, LPVOID * ppvObj);
+    STDMETHODIMP_(ULONG) AddRef();
+    STDMETHODIMP_(ULONG) Release();
+    // *** IEnumIDList methods ***
+    STDMETHODIMP Next(ULONG celt,
+              LPITEMIDLIST *rgelt,
+              ULONG *pceltFetched);
+    STDMETHODIMP Skip(ULONG celt);
+    STDMETHODIMP Reset();
+    STDMETHODIMP Clone(IEnumIDList **ppenum);
+private:
+    CRefDll m_cRefDll;
+    CRefCount m_cRef;
+    CCabFolder *m_pcfThis;
+    UINT m_iCount;
+    DWORD m_uFlags;
+} ;
+.
+.
+.
+
+</PRE>
+<P>Enum.cpp</P>
+<P><BR></P>
+<PRE> // **********************************************************************
+//                Implementation for CEnumCabObjs
+// Copyright (c) 1994 - 1996 Microsoft Corporation. All rights reserved
+// **********************************************************************
+.
+.
+.
+// *** IUnknown methods ***
+STDMETHODIMP CEnumCabObjs::QueryInterface(
+   REFIID riid, 
+   LPVOID FAR* ppvObj)
+{
+    *ppvObj = NULL;
+    LPUNKNOWN pObj;
+    if (riid == IID_IUnknown)
+    {
+        pObj = (IUnknown*)((IEnumIDList*)this); 
+    }
+    else if (riid == IID_IEnumIDList)
+    {
+        pObj = (IUnknown*)((IEnumIDList*)this); 
+    }
+    else
+    {
+           return(E_NOINTERFACE);
+    }
+    pObj-&gt;AddRef();
+    *ppvObj = pObj;
+    return(NOERROR);
+}
+
+STDMETHODIMP_(ULONG) CEnumCabObjs::AddRef(void)
+{
+    return(m_cRef.AddRef());
+}
+
+STDMETHODIMP_(ULONG) CEnumCabObjs::Release(void)
+{
+    if (!m_cRef.Release())
+    {
+        delete this;
+        return(0);
+    }
+    return(m_cRef.GetRef());
+}
+
+// *** IEnumIDList methods ***
+STDMETHODIMP CEnumCabObjs::Next(ULONG celt,
+          LPITEMIDLIST *rgelt,
+          ULONG *pceltFetched)
+{
+    *rgelt = NULL;
+    if (pceltFetched)
+    {
+        *pceltFetched = 0;
+    }
+    HRESULT hRes = m_pcfThis-&gt;InitItems();
+    if (FAILED(hRes))
+    {
+        return(hRes);
+    }
+    for ( ; ; ++m_iCount)
+    {
+        if (m_iCount &gt;= m_pcfThis-&gt;m_lItems.GetCount())
+        {
+            return(S_FALSE);
+        }
+        LPCABITEM pit = m_pcfThis-&gt;m_lItems[m_iCount];
+        if ((m_uFlags&amp;(SHCONTF_FOLDERS|SHCONTF_NONFOLDERS))
+            != (SHCONTF_FOLDERS|SHCONTF_NONFOLDERS))
+        {
+            DWORD gfInOut = SFGAO_FOLDER;
+            if (FAILED(m_pcfThis-&gt;GetAttributesOf(1, (LPCITEMIDLIST *)&amp;pit,
+                &amp;gfInOut)))
+            {
+                continue;
+            }
+            if (!(m_uFlags&amp;SHCONTF_FOLDERS) &amp;&amp; (gfInOut&amp;SFGAO_FOLDER))
+            {
+                continue;
+            }
+            if ((m_uFlags&amp;SHCONTF_FOLDERS) &amp;&amp; !(gfInOut&amp;SFGAO_FOLDER))
+            {
+                continue;
+            }
+        }
+        if (!(m_uFlags&amp;SHCONTF_INCLUDEHIDDEN)
+            &amp;&amp; (pit-&gt;uFileAttribs&amp;
+               (FILE_ATTRIBUTE_HIDDEN|FILE_ATTRIBUTE_SYSTEM)))
+        {
+            continue;
+        }
+        break;
+    }
+    *rgelt = ILClone((LPCITEMIDLIST)m_pcfThis-&gt;m_lItems[m_iCount]);
+    ++m_iCount;
+    if (*rgelt)
+    {
+        if (pceltFetched)
+        {
+            *pceltFetched = 1;
+        }
+        return(S_OK);
+    }
+    return(E_OUTOFMEMORY);
+}
+
+STDMETHODIMP CEnumCabObjs::Skip(ULONG celt)
+{
+    return(E_NOTIMPL);
+}
+
+STDMETHODIMP CEnumCabObjs::Reset()
+{
+    m_iCount = 0;
+
+    return(NOERROR);
+}
+
+STDMETHODIMP CEnumCabObjs::Clone(IEnumIDList **ppenum)
+{
+    return(E_NOTIMPL);
+}
+.
+.
+.
+
+</PRE>
+<P>SFWnd.h</P>
+<P><BR></P>
+<PRE> //**********************************************************************
+//     Definitions of CListView, CSFViewDlg, CAccelerator, CSFView
+//  Copyright (c) 1994 - 1996 Microsoft Corporation. All rights reserved
+//**********************************************************************
+.
+.
+.
+#define IDC_ARRANGE_BY (FCIDM_SHVIEWFIRST + 0x100)
+.
+.
+.
+#define SFV_CONTEXT_FIRST (FCIDM_SHVIEWFIRST + 0x1000)
+#define SFV_CONTEXT_LAST (FCIDM_SHVIEWFIRST + 0x2000)
+BOOL StrRetToStr(LPSTR szOut, UINT uszOut, LPSTRRET pStrRet, LPCITEMIDLIST pidl);
+class CListView
+{
+public:
+    CListView() {}
+    ~CListView() {}
+    operator HWND() const {return(m_hwndList);}
+    void Init(HWND hwndList, HWND hwndLB, UINT idiDef)
+    {
+        m_hwndList = hwndList;
+        m_cxi.Init(hwndLB, idiDef);
+        ListView_SetImageList(hwndList, m_cxi.GetIML(TRUE), LVSIL_NORMAL);
+        ListView_SetImageList(hwndList, m_cxi.GetIML(FALSE), LVSIL_SMALL);
+    }
+    int InsertItem(LV_ITEM *pItem)
+    {
+        return(ListView_InsertItem(m_hwndList, pItem));
+    }
+    void DeleteAllItems() {ListView_DeleteAllItems(m_hwndList);}
+    enum
+    {
+        AI_LARGE = CXIcon::AI_LARGE,
+        AI_SMALL = CXIcon::AI_SMALL,
+    } ;
+    int GetIcon(IShellFolder *psf, LPCITEMIDLIST pidl)
+    {
+        return(m_cxi.GetIcon(psf, pidl));
+    }
+private:
+    HWND m_hwndList;
+    CXIcon m_cxi;
+} ;
+.
+.
+.
+// CSFView - IShellView implementation
+class CSFView : public CUnknown, public IShellView
+{
+public:
+    CSFView(LPSHELLFOLDER psf, IShellFolderViewCallback *psfvcb);
+    virtual ~CSFView();
+    STDMETHODIMP QueryInterface(REFIID riid, LPVOID * ppvObj);
+    STDMETHODIMP_(ULONG) AddRef();
+    STDMETHODIMP_(ULONG) Release();
+    // *** IOleWindow methods ***
+    STDMETHODIMP GetWindow(HWND * lphwnd);
+    STDMETHODIMP ContextSensitiveHelp(BOOL fEnterMode);
+    // *** IShellView methods ***
+    STDMETHODIMP TranslateAccelerator(LPMSG lpmsg);
+    STDMETHODIMP EnableModeless(BOOL fEnable);
+    STDMETHODIMP UIActivate(UINT uState);
+    STDMETHODIMP Refresh();
+    STDMETHODIMP CreateViewWindow(IShellView  *lpPrevView,
+                    LPCFOLDERSETTINGS lpfs, IShellBrowser  * psb,
+                    RECT * prcView, HWND  *phWnd);
+    STDMETHODIMP DestroyViewWindow();
+    STDMETHODIMP GetCurrentInfo(LPFOLDERSETTINGS lpfs);
+    STDMETHODIMP AddPropertySheetPages(DWORD dwReserved,
+                                       LPFNADDPROPSHEETPAGE lpfn, 
+                                       LPARAM lparam);
+    STDMETHODIMP SaveViewState();
+    STDMETHODIMP SelectItem(LPCITEMIDLIST pidlItem, UINT uFlags);
+    STDMETHODIMP GetItemObject(UINT uItem, REFIID riid, LPVOID *ppv);
+private:
+    static int CALLBACK CSFView::CompareIDs(LPVOID p1, LPVOID p2, 
+                                            LPARAM lParam);
+    void AddColumns();
+    BOOL SaveColumns(LPSTREAM pstm);
+    void RestoreColumns(LPSTREAM pstm, int nCols);
+    void RestoreViewState();
+    void ColumnClick(int iCol)
+    {
+        m_sfState.lParamSort = (LPARAM)DPA_GetPtr(m_aParamSort, iCol);
+        m_cView.SortItems(CompareIDs);
+    }
+    HRESULT CallCB(UINT uMsg, WPARAM wParam, LPARAM lParam)
+    {
+        return(m_psfvcb ? m_psfvcb-&gt;Message(uMsg, wParam, 
+                                            lParam) : E_NOTIMPL);
+    }
+    int GetMenuIDFromViewMode();
+    BOOL IsInCommDlg() {return(m_pCDB != NULL);}
+    HRESULT IncludeObject(LPCITEMIDLIST pidl)
+    {
+        return(IsInCommDlg() ? m_pCDB-&gt;IncludeObject(this, pidl) : S_OK);
+    }
+    HRESULT OnDefaultCommand()
+    {
+        return(IsInCommDlg() ? m_pCDB-&gt;OnDefaultCommand(this) : S_FALSE);
+    }
+    HRESULT OnStateChange(UINT uFlags)
+    {
+        return(IsInCommDlg() ? m_pCDB-&gt;OnStateChange(this, uFlags) : S_FALSE);
+    }
+    void InitFileMenu(HMENU hmInit);
+    void InitEditMenu(HMENU hmInit);
+    void InitViewMenu(HMENU hmInit);
+    int AddObject(LPCITEMIDLIST pidl);
+    HRESULT FillList(BOOL bInteractive);
+    BOOL ShowAllObjects() {return(TRUE);}
+    void MergeArrangeMenu(HMENU hmView);
+    void MergeViewMenu(HMENU hmenu, HMENU hmMerge);
+    BOOL OnActivate(UINT uState);
+    BOOL OnDeactivate();
+    IContextMenu * GetSelContextMenu();
+    void ReleaseSelContextMenu();
+    BOOL OnInitMenuPopup(HMENU hmInit, int nIndex, BOOL fSystemMenu);
+    void OnCommand(IContextMenu *pcm, WPARAM wParam, LPARAM lParam);
+    void CheckToolbar();
+    void MergeToolBar();
+    BOOL GetArrangeText(int iCol, UINT idFmt, LPSTR pszText, UINT cText);
+    void GetCommandHelpText(UINT id, LPSTR pszText, UINT cchText, BOOL bToolTip);
+    LRESULT OnMenuSelect(UINT idCmd, UINT uFlags, HMENU hmenu);
+    LPSHELLFOLDER m_psf;                       // ShellFolder pointer
+    ICommDlgBrowser *m_pCDB;                   // ICommdlgBrowser
+    IShellFolderViewCallback *m_psfvcb;        // pointer to ShellFolderView 
+                                               // callback
+    CEnsureRelease m_erFolder; 
+    CEnsureRelease m_erCB;
+    CSFViewDlg m_cView;                        //  ViewDlg which contains the
+                                               //  listview in the right pane
+    HWND m_hwndMain;
+    FOLDERSETTINGS m_fs;
+    IShellBrowser *m_psb;
+    SFSTATE m_sfState;
+    CMenuTemp m_cmCur;
+    UINT m_uState;
+    IContextMenu *m_pcmSel;
+    HDPA m_aParamSort;                         // maintains a sorted list of 
+                                               // items in a DPA
+    CAccelerator m_cAccel;
+    CSafeMalloc m_cMalloc;
+    friend class CSFViewDlg;
+} ;
+.
+.
+.
+</PRE>
+<P>Sfview.cpp</P>
+<P><BR></P>
+<PRE> // **********************************************************************
+//                Implementation file for CSFView
+//  Copyright (c) 1994 - 1996 Microsoft Corporation. All rights reserved
+// **********************************************************************
+.
+.
+.
+CSFView::CSFView(LPSHELLFOLDER psf, IShellFolderViewCallback *psfvcb) :
+    m_psf(psf), m_erFolder(psf), m_erCB(psfvcb), m_pCDB(NULL), m_cView(this),
+    m_uState(SVUIA_DEACTIVATE), m_pcmSel(NULL), m_cAccel(IDA_MAIN)
+{
+    m_psfvcb = psfvcb;
+    if (psfvcb)
+    {
+        psfvcb-&gt;AddRef();
+    }
+    psf-&gt;AddRef();
+    m_aParamSort = DPA_Create(4);
+    m_sfState.lParamSort = 0;
+}
+.
+.
+.
+CSFView::~CSFView()
+{
+    ReleaseSelContextMenu();
+}
+
+STDMETHODIMP CSFView::QueryInterface(REFIID riid, LPVOID * ppvObj)
+{
+    static const IID *apiid[] = { &amp;IID_IShellView, NULL };
+    LPUNKNOWN aobj[] = { (IShellView *)this };
+
+    return(QIHelper(riid, ppvObj, apiid, aobj));
+}
+
+STDMETHODIMP_(ULONG) CSFView::AddRef()
+{
+    return(AddRefHelper());
+}
+
+STDMETHODIMP_(ULONG) CSFView::Release()
+{
+    return(ReleaseHelper());
+}
+
+STDMETHODIMP CSFView::GetWindow(HWND * lphwnd)
+{
+    return(E_NOTIMPL);
+}
+
+STDMETHODIMP CSFView::ContextSensitiveHelp(BOOL fEnterMode)
+{
+    return(E_NOTIMPL);
+}
+
+// **********************************************************************
+// CSFView::TranslateAccelerator
+// Purpose: Handle the accelerator keystrokes
+// Parameters:
+//        LPMSG lpmsg    -    message structure
+// **********************************************************************
+STDMETHODIMP CSFView::TranslateAccelerator(LPMSG lpmsg)
+{
+    return(m_cAccel.TranslateAccelerator(m_cView, lpmsg) ? S_OK : S_FALSE);
+}
+
+STDMETHODIMP CSFView::EnableModeless(BOOL fEnable)
+{
+    return(E_NOTIMPL);
+}
+
+// **********************************************************************
+// CSFView:UIActivate
+// Purpose: The explorer calls this member function whenever the activation         
+//  state of the view window is changed by a certain event that is           
+//  NOT caused by the shell view itself.
+// Parameters:
+//        UINT uState    -    UI activate flag
+// **********************************************************************
+STDMETHODIMP CSFView::UIActivate(UINT uState)
+{
+    if (uState)
+    {
+        OnActivate(uState);
+    }
+    else
+    {
+        OnDeactivate();
+    }
+    return S_OK;
+}
+
+STDMETHODIMP CSFView::Refresh()
+{
+    return(E_NOTIMPL);
+}
+
+// **********************************************************************
+// CSFView::CreateViewWindow
+// Purpose: Called by IShellBrowser to create a contents pane window
+// Parameters:
+//    IShellView  *lpPrevView    -    previous view
+//    LPCFOLDERSETTINGS lpfs     -    folder settings for the view
+//    IShellBrowser *psb         -    pointer to the shell browser
+//    RECT * prcView             -    view Rectangle
+//    HWND * phWnd               -    pointer to Window handle
+// **********************************************************************
+STDMETHODIMP CSFView::CreateViewWindow(IShellView  *lpPrevView,
+                                       LPCFOLDERSETTINGS lpfs, 
+                                       IShellBrowser  * psb, RECT * prcView,
+                                       HWND  *phWnd)
+{
+    *phWnd = NULL;
+    if ((HWND)m_cView)
+    {
+        return(E_UNEXPECTED);
+    }
+    m_fs = *lpfs;
+    m_psb = psb;
+    // get the main window handle from shell browser
+    psb-&gt;GetWindow(&amp;m_hwndMain);
+    // bring up the contents pane
+    if (!m_cView.DoModeless(IDD_VIEW, m_hwndMain))
+    {
+        return(E_OUTOFMEMORY);
+    }
+    *phWnd = m_cView;
+    // map the current view mode into menu id and set the contents pane
+    // view mode accordingly
+    OnCommand(NULL, GET_WM_COMMAND_MPS(GetMenuIDFromViewMode(), 0, 0));
+    AddColumns();
+    RestoreViewState();
+    // size the contents pane
+    SetWindowPos(m_cView, NULL, prcView-&gt;left, prcView-&gt;top,
+                 prcView-&gt;right-prcView-&gt;left, prcView-&gt;bottom-prcView-&gt;top,
+                 SWP_NOZORDER|SWP_SHOWWINDOW);
+    FillList(TRUE);
+    return(NOERROR);
+}
+
+STDMETHODIMP CSFView::DestroyViewWindow()
+{
+    if (!(HWND)m_cView)
+    {
+        return(E_UNEXPECTED);
+    }
+    m_cView.DestroyWindow();
+    return(NOERROR);
+}
+
+STDMETHODIMP CSFView::GetCurrentInfo(LPFOLDERSETTINGS lpfs)
+{
+    *lpfs = m_fs;
+    return(NOERROR);
+}
+
+STDMETHODIMP CSFView::AddPropertySheetPages(DWORD dwReserved,
+                                            LPFNADDPROPSHEETPAGE lpfn, 
+                                            LPARAM lparam)
+{
+    return(E_NOTIMPL);
+}
+
+STDMETHODIMP CSFView::SaveViewState()
+{
+    SFSTATE_HDR hdr;
+    LPSTREAM pstm;
+    HRESULT hres = m_psb-&gt;GetViewStateStream(STGM_WRITE, &amp;pstm);
+    if (FAILED(hres))
+    {
+        return(hres);
+    }
+    CEnsureRelease erStr(pstm);
+    pstm-&gt;Write(&amp;hdr, sizeof(hdr), NULL);
+    hdr.clsThis = CLSID_ThisDll;
+    hdr.sfState = m_sfState;
+    hdr.nCols = SaveColumns(pstm);
+    ULARGE_INTEGER libCurPosition;
+    LARGE_INTEGER dlibMove;
+    dlibMove.HighPart = 0;
+    dlibMove.LowPart = 0;
+    pstm-&gt;Seek(dlibMove, STREAM_SEEK_SET, &amp;libCurPosition);
+    hres = pstm-&gt;Write(&amp;hdr, sizeof(hdr), NULL);
+    return(hres);
+}
+
+STDMETHODIMP CSFView::SelectItem(LPCITEMIDLIST pidlItem, UINT uFlags)
+{
+    return(E_NOTIMPL);
+}
+
+STDMETHODIMP CSFView::GetItemObject(UINT uItem, REFIID riid,
+                LPVOID *ppv)
+{
+    return(E_NOTIMPL);
+}
+
+int CSFView::AddObject(LPCITEMIDLIST pidl)
+{
+    // Check the commdlg hook to see if we should include this
+    // object.
+    if (IncludeObject(pidl) != S_OK)
+    {
+        return(-1);
+    }
+    return(m_cView.AddObject(pidl));
+}
+
+int CALLBACK CSFView::CompareIDs(LPVOID p1, LPVOID p2, LPARAM lParam)
+{
+    PFNDPACOMPARE pfnCheckAPI = CompareIDs;
+    CSFView *pThis = (CSFView *)lParam;
+    HRESULT hres = pThis-&gt;m_psf-&gt;CompareIDs(pThis-&gt;m_sfState.lParamSort,
+        (LPITEMIDLIST)p1, (LPITEMIDLIST)p2);
+    return (hres);
+}
+
+// **********************************************************************
+// CSFView::FillList
+// Purpose: Enumerates the objects in the namespace and fills up the
+//          data structures
+// **********************************************************************
+HRESULT CSFView::FillList(BOOL bInteractive)
+{
+    m_cView.DeleteAllItems();
+    // Setup the enum flags.
+    DWORD dwEnumFlags = SHCONTF_NONFOLDERS;
+    if (ShowAllObjects())
+    {
+        dwEnumFlags |= SHCONTF_INCLUDEHIDDEN ;
+    }
+    if (!(m_fs.fFlags &amp; FWF_NOSUBFOLDERS))
+    {
+        dwEnumFlags |= SHCONTF_FOLDERS;
+    }
+    // Create an enum object and get the IEnumIDList ptr
+    LPENUMIDLIST peIDL;
+    HRESULT hres = m_psf-&gt;EnumObjects(bInteractive ? m_hwndMain : NULL,
+                                      dwEnumFlags, &amp;peIDL);
+    // Note the return may be S_FALSE which indicates no enumerator.
+    // That's why we shouldn't use if (FAILED(hres))
+    if (hres != S_OK)
+    {
+        if (hres == S_FALSE)
+        {
+            return(NOERROR);
+        }
+        return(hres);
+    }
+    CEnsureRelease erEnum(peIDL);
+    HDPA hdpaNew = DPA_Create(16);
+    if (!hdpaNew)
+    {
+        return(E_OUTOFMEMORY);
+    }
+    LPITEMIDLIST pidl;
+    ULONG celt;
+    // Enumerate the idlist and insert into the DPA
+    while (peIDL-&gt;Next(1, &amp;pidl, &amp;celt) == S_OK)
+    {
+        if (DPA_InsertPtr(hdpaNew, 0x7fff, pidl) == -1)
+        {
+            m_cMalloc.Free(pidl);
+        }
+    }
+    DPA_Sort(hdpaNew, CompareIDs, (LPARAM)this);
+    int cNew = DPA_GetPtrCount(hdpaNew);
+    for (int i=0; i&lt;cNew; ++i)
+    {
+        LPITEMIDLIST pidl = (LPITEMIDLIST)DPA_GetPtr(hdpaNew, i);
+        if (AddObject(pidl) &lt; 0)
+        {
+            m_cMalloc.Free(pidl);
+        }
+    }
+    return(NOERROR);
+}
+// **********************************************************************
+// CSFView::AddColumns
+// Purpose: Adds columns to the contents pane listview
+// **********************************************************************
+void CSFView::AddColumns()
+{
+    UINT cxChar = m_cView.CharWidth();
+    // add columns to the listview in the contents pane
+    for (int i=0; ; ++i)
+    {
+        SFVCB_GETDETAILSOF_DATA gdo;
+        gdo.pidl = NULL;
+        // get the first column
+        HRESULT hres = CallCB(SFVCB_GETDETAILSOF, i, (LPARAM)&amp;gdo);
+        if (hres != S_OK)
+        {
+            if (i != 0)
+            {
+                break;
+            }
+            // If there is no first column, fake one up
+            gdo.fmt = LVCFMT_LEFT;
+            gdo.cChar = 40;
+            gdo.lParamSort = 0;
+            gdo.str.uType = STRRET_CSTR;
+            LoadString(g_ThisDll.GetInstance(), IDS_NAME, gdo.str.cStr,  
+                       sizeof(gdo.str.cStr));
+        }
+        char szText[MAX_PATH];
+        // init the column info for the details view ...
+        LV_COLUMN col;
+        col.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM;
+        col.fmt = gdo.fmt;
+        col.cx = gdo.cChar * cxChar;
+        col.pszText = szText;
+        col.cchTextMax = sizeof(szText);
+        col.iSubItem = i;
+        StrRetToStr(szText, sizeof(szText), &amp;gdo.str, NULL);
+        // insert the column into the list view
+        if (m_cView.InsertColumn(i, &amp;col)&gt;=0 &amp;&amp; m_aParamSort)
+        {
+            DPA_InsertPtr(m_aParamSort, 0x7fff, (LPVOID)gdo.lParamSort);
+        }
+        if (hres != S_OK)
+        {
+            break;
+        }
+    }
+}
+
+// Save (and check) column header information
+// Returns TRUE if the columns are the default width, FALSE otherwise
+// Side effect: the stream pointer is left right after the last column
+BOOL CSFView::SaveColumns(LPSTREAM pstm)
+{
+    UINT cxChar = m_cView.CharWidth();
+    BOOL bDefaultCols = TRUE;
+    for (int i=0; ; ++i)
+    {
+        SFVCB_GETDETAILSOF_DATA gdo;
+        gdo.pidl = NULL;
+        if (CallCB(SFVCB_GETDETAILSOF, i, (LPARAM)&amp;gdo) != S_OK)
+        {
+            break;
+        }
+        LV_COLUMN col;
+        col.mask = LVCF_WIDTH;
+        if (!m_cView.GetColumn(i, &amp;col))
+        {
+            // There is some problem, so just assume
+            // default column widths
+            bDefaultCols = TRUE;
+            break;
+        }
+        if (col.cx != (int)(gdo.cChar * cxChar))
+        {
+            bDefaultCols = FALSE;
+        }
+        // HACK: I don't really care about column widths larger
+        // than 64K
+        if (FAILED(pstm-&gt;Write(&amp;col.cx, sizeof(USHORT), NULL)))
+        {
+            // There is some problem, so just assume
+            // default column widths
+            bDefaultCols = TRUE;
+            break;
+        }
+    }
+    return(bDefaultCols ? 0 : i);
+}
+
+void CSFView::RestoreColumns(LPSTREAM pstm, int nCols)
+{
+    for (int i=0; i&lt;nCols; ++i)
+    {
+        LV_COLUMN col;
+        col.mask = LVCF_WIDTH;
+        if (FAILED(pstm-&gt;Read(&amp;col.cx, sizeof(USHORT), NULL)))
+        {
+            break;
+        }
+        m_cView.SetColumn(i, &amp;col);
+    }
+}
+
+void CSFView::RestoreViewState()
+{
+    SFSTATE_HDR hdr;
+    LPSTREAM pstm;
+    // get the stream for storing view specific info
+    if (FAILED(m_psb-&gt;GetViewStateStream(STGM_READ, &amp;pstm)))
+    {
+        return;
+    }
+    CEnsureRelease erStr(pstm);
+    if (FAILED(pstm-&gt;Read(&amp;hdr, sizeof(hdr), NULL)))
+    {
+        return;
+    }
+    // Validate the header
+    if (hdr.clsThis != CLSID_ThisDll)
+    {
+        return;
+    }
+    m_sfState = hdr.sfState;
+    RestoreColumns(pstm, hdr.nCols);
+    MergeToolBar();
+}
+
+void CSFView::CheckToolbar()
+{
+    UINT idCmdCurView = GetMenuIDFromViewMode();
+    for (UINT idCmd=IDC_VIEW_ICON; idCmd&lt;=IDC_VIEW_DETAILS; ++idCmd)
+    {
+        m_psb-&gt;SendControlMsg(FCW_TOOLBAR, TB_CHECKBUTTON, idCmd,
+            (LPARAM)(idCmd == idCmdCurView), NULL);
+    }
+}
+
+void CSFView::MergeToolBar()
+{
+    enum
+    {
+        IN_STD_BMP = 0x4000,
+        IN_VIEW_BMP = 0x8000,
+    } ;
+    static const TBBUTTON c_tbDefault[] =
+    {
+        { STD_COPY | IN_STD_BMP, IDC_EDIT_COPY, TBSTATE_ENABLED,
+          TBSTYLE_BUTTON, {0,0}, 0, -1},
+        { 0,    0,        TBSTATE_ENABLED, TBSTYLE_SEP, {0,0}, 0, -1 },
+        // the bitmap indexes here are relative to the view bitmap
+        { VIEW_LARGEICONS | IN_VIEW_BMP, IDC_VIEW_ICON,
+          TBSTATE_ENABLED, TBSTYLE_BUTTON, {0,0}, 0L, -1 },
+        { VIEW_SMALLICONS | IN_VIEW_BMP, IDC_VIEW_SMALLICON,
+          TBSTATE_ENABLED, TBSTYLE_BUTTON, {0,0}, 0L, -1 },
+        { VIEW_LIST       | IN_VIEW_BMP, IDC_VIEW_LIST,         TBSTATE_ENABLED, TBSTYLE_BUTTON, {0,0}, 0L, -1 },
+        { VIEW_DETAILS    | IN_VIEW_BMP, IDC_VIEW_DETAILS,      TBSTATE_ENABLED, TBSTYLE_BUTTON, {0,0}, 0L, -1 },
+    } ;
+
+    LRESULT iStdBMOffset;
+    LRESULT iViewBMOffset;
+    TBADDBITMAP ab;
+    ab.hInst = HINST_COMMCTRL;        // hinstCommctrl
+    ab.nID   = IDB_STD_SMALL_COLOR;    // std bitmaps
+    m_psb-&gt;SendControlMsg(FCW_TOOLBAR, TB_ADDBITMAP, 8, (LPARAM)&amp;ab, &amp;iStdBMOffset);
+
+    ab.nID   = IDB_VIEW_SMALL_COLOR;    // std view bitmaps
+    m_psb-&gt;SendControlMsg(FCW_TOOLBAR, TB_ADDBITMAP, 8, (LPARAM)&amp;ab, &amp;iViewBMOffset);
+
+    TBBUTTON tbActual[ARRAYSIZE(c_tbDefault)];
+
+    for (int i=0; i&lt;ARRAYSIZE(c_tbDefault); ++i)
+    {
+        tbActual[i] = c_tbDefault[i];
+        if (!(tbActual[i].fsStyle &amp; TBSTYLE_SEP))
+        {
+            if (tbActual[i].iBitmap &amp; IN_VIEW_BMP)
+            {
+                tbActual[i].iBitmap = (tbActual[i].iBitmap &amp; ~IN_VIEW_BMP) + iViewBMOffset;
+            }
+            else if (tbActual[i].iBitmap &amp; IN_STD_BMP)
+            {
+                tbActual[i].iBitmap = (tbActual[i].iBitmap &amp; ~IN_STD_BMP) + iStdBMOffset;
+            }
+        }
+    }
+
+    m_psb-&gt;SetToolbarItems(tbActual, ARRAYSIZE(c_tbDefault), FCT_MERGE);
+
+    CheckToolbar();
+}
+
+
+HRESULT CreateShellFolderView(LPSHELLFOLDER psf, 
+                              IShellFolderViewCallback *psfvcb,
+                              LPSHELLVIEW * ppsv)
+{
+    CSFView *pSFView = new CSFView(psf, psfvcb);
+    if (!pSFView)
+    {
+        return(E_OUTOFMEMORY);
+    }
+
+    pSFView-&gt;AddRef();
+    HRESULT hRes = pSFView-&gt;QueryInterface(IID_IShellView, (LPVOID *)ppsv);
+    pSFView-&gt;Release();
+
+    return(hRes);
+}
+.
+.
+.</PRE>
+<P></P>
+<P> </P>
+<H2><A NAME="sec13"></A>  Debugging</H2><P>Debugging shell extensions can be tricky and name space extensions are no exception. My favorite method is to use the Just-in-Time debugging capabilities of Visual C++¨ 4.<I>x</I>. I code a DebugBreak into my extension at a strategic location and let Windows 95 invoke the debugger automatically for me when the DebugBreak statement is executed. The nice thing about the DebugBreak API is that you don't have to exit Explorer and restart it within the debugger. The extension is running under the same circumstances it will ultimately be running in when it's complete. At the point where I hit the DebugBreak call, I'll be looking at the assembly language. If I step out of that function and close the assembly window I'll be looking at my source code, which Visual C++ automatically locates and loads. The other nice thing about using DebugBreak is that you can program the DebugBreak statement to be hit under a certain set of circumstances,  for example, if a flag changes state or a counter drops below zero or whatever. </P>
+<P>Now that you're having fun debugging your extension, here are a couple of common implementation errors to watch for. First, all accesses to nonconstant global variables of DLLs must be serialized by a critical section or a mutex. Otherwise, you risk having your global data manipulated unexpectedly by other threads. Second, objects returned from IShellView::CreateViewObject or IShellView::GetUIObjectOf(IShellView, IDropTarget, IContextMenu, and so on) must be newly allocated each time they're called. Implementing an IShellView interface in the same object that implements IShellFolder (using C++ multiple inheritance) is a very common mistake. Having a pointer to your IShellView in the IShellFolder object is another bad idea, since one IShellFolder object can have multiple dynamically changing views.</P>
+<P> </P>
+<H2><A NAME="sec14"></A>  Beyond the Basics: Name Space Giblets</H2><P>So far I've discussed only a basic implementation of a namespace extension that can be viewed from Explorer. Your extension can implement much more: drag and drop, printing, copying, toolbars, and so on. The following can be used to enhance the functionality of your name space extension. </P>
+<P>IExtractIcon can be implemented to provide custom "on-the-fly" icons for different data types within your name space. To support drag and drop, your view must support the standard OLE IDropSource and/or IDropTarget interfaces, depending on whether you want to support dragging, dropping, or both. IContextMenu interface can be implemented to provide context menus for your items.</P>
+<P> </P>
+<H2><A NAME="sec15"></A>  Considerations for Windows NT 4.0</H2><P>Almost any extension written for Windows 95 should work on Windows NT 4.0 (with the same compatibility considerations as apps) with only an additional registry key, and if you are writing a shell extension for Windows 95 you should take the extra time to test your application on the Windows NT 4.0 beta currently available. </P>
+<P>I cannot stress enough the importance of testing your extension carefully on both Windows 95 and Windows NT 4.0. Although the systems strive for compatibility, they are separate operating systems and there can be differences. While most differences encountered are minor, they are much easier to fix before you release your code than after. </P>
+<P>Make sure your code checks the platform it's running on and uses only features that are available on that platform. Although almost all Win32 API are supported on both, the Win32 SDK does contain some that are targeted at a specific platform. (The Win32 SDK documentation can tell you which APIs are platform-specific.) </P>
+<P>The Microsoft Knowledgebase Article Q92395 contains information on determining the platform you are running on. At the very least give the user a reasonable message saying that this platform is not supported, such as "Tough luck, Bozo!"</P>
+<P>For the vast majority of shell extensions, the only new requirement for Windows NT is that it has an "approved" list of shell extensions in the registry and you must add yourself to this list before your shell extension will run. </P>
+<P> </P>
+<P><BR></P>
+<PRE> HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\WindowsNT\CurrentVersion\
+ShellExtensions\Approved\{CLSID}="Name of Extension"</PRE>
+<P> </P>
+<P>The only other thing to be aware of is that Windows NT also provides UNICODEª support for shell extensions, although it is compatible with the Windows 95 ANSI implementations.</P>
+<P> </P>
+<H2><A NAME="sec16"></A>  Conclusion</H2><P>One of the more tedious tasks of developing name space extensions is that you have to implement a fair number of small methods that barely change from implementation to implementation to be fully consistent with Windows and the internal name space. In fact, many are implemented by the shell itself. It would be nice if a custom name space implementation could aggregate the existing shell interfaces, allowing developers to concentrate on customizing a particular area, rather than having to totally redevelop entire interfaces. Hopefully this will change in a future version.</P>
+<P>Finally, remember that question: "Just because you can do it, should you?" I bring this up not to discourage you from using the name space extension mechanism, but rather to provoke you into thinking carefully about what you are trying to accomplish and whether or not it's the best solution. A name space extension is a complex piece of code and may be overkill in many cases. Sometimes just registering an application and its data file type in the registry is what you really want.</P>
+<P><I>The author would like to thank Dhananjay Mahajan, Chris Guzak, Satoshi Nakajima, Mary Kirtland, and Francis Hogle for their help.</I></P>
+<P><I>This article is reproduced from Microsoft Systems Journal. Copyright </I>©<I> 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P><I>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</I></P>
+<P></P></font></body></HTML>

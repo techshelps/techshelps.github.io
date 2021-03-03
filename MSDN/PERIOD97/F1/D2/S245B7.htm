@@ -1,0 +1,388 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Under the Hood</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF">
+<font face="verdana,arial,helvetica" size="2">
+<H1>Under the Hood</H1><P>Matt Pietrek</P>
+<P>Matt Pietrek is the author of Windows 95 System Programming Secrets (IDG Books, 1995). He works at NuMega Technologies Inc., and can be reached at mpietrek@sprynet.com.</P>
+<P>QI want to implement an exception handler that can be used as the default exception handler for each thread. The exception handler should record two kinds of information: variable information provided by the failing application and system information such as the name of the routine where the exception occurred and a (symbolic) call tree of how it got to that point in the code.</P>
+<P><I>Ari Erev</I></P>
+<P>via the Internet</P>
+<P></P>
+<P>AThis is an excellent question, because to answer it I'll have to cover a variety of topics that readers have expressed interest in. In fact, there's so much to cover that I've split the answer into two parts. This month, I'll set up a basic framework for intercepting unhandled exceptions and writing a report file with some basic information. I'll include some simple code for walking the stack on the Intel platform, which is something I'm asked about often. Next month, I'll go into the various types of debug information and describe what they're used for. From there, I'll show you how to use IMAGEHLP.DLL to access debug information and walk the stack in a portable manner.</P>
+<P>The first question that needs to be addressed in writing this code is how to receive control when an unhandled exception occurs. By unhandled I mean that none of the program's installed exception handlers (for example, _try blocks in C++) have elected to handle the exception. The exception is destined to go to the operating system, which will render the death penalty to the errant process. In Windows&reg; 3.x, you could request to be notified of certain exceptions that occurred in any task in the system with the InterruptRegister API from TOOLHELP.DLL. Diagnostic programs like Dr. Watson were written to sit in the background and wait for "bad" exceptions to occur in other tasks. When&nbsp;they&nbsp;occurred,&nbsp;the&nbsp;diagnostic&nbsp;program&nbsp;sprang&nbsp;into&nbsp;action and&nbsp;recorded&nbsp;all&nbsp;sorts&nbsp;of&nbsp;information&nbsp;about&nbsp;the&nbsp;doomed&nbsp;task.</P>
+<P>By design, Win32&reg; doesn't let you arbitrarily monitor exceptions in other processes. The only exceptions your process can see are its own and exceptions for which it is acting as a debugger. This latter case is how programs like DRWTSN32.EXE and "just in time" debuggers work. Based upon the AeDebug key in the registry, the system invokes a program (DRWTSN32.EXE, for example) that attaches to a faulting task as a debugger. DRWTSN32.EXE uses the magical powers of Win32 debuggers to probe the faulting process and generate a report about the state of the process when it faulted. </P>
+<P>Although DRWTSN32.EXE and "just in time" debuggers are great for application developers, users may not have them installed, and even if they do, the information that something like DRWTSN32 provides may not be everything they need to know. The solution is to dispense with the debugger approach and grab the unhandled exception within your own code. With this approach, you can tailor the exception report to include whatever information you desire, and make that code a part of your application. </P>
+<P>To get back to the original question, the key to grabbing unhandled exceptions is the SetUnhandledExceptionFilter API. Using this API, a program can install a callback that will be invoked whenever a regular exception handler (for example, a _try/_except block) doesn't handle an exception. As I showed you in my January 1997 <I>MSJ</I> article on structured exception handling, the callback is invoked as part of KERNEL32's UnhandledExceptionFilter API. The parameter for your callback function is a pointer to an EXCEPTION_POINTERS struct. The information that can be obtained from this structure consists of information about the exception and the CPU registers at the time of the exception. As I'll soon show, there's quite a bit you can learn from just this information.</P>
+<P>Using the SetUnhandledExceptionFilter API as the basis for what I needed to do, I set out to design an exception reporting framework (see Figure 1). The first criterion was that my framework shouldn't require any changes to the application's source code. Likewise, it shouldn't require you to haul around an additional DLL. This implies that the framework code should be linked into your EXE. My second criterion was that the framework should avoid using library calls from the application's runtime library since the library's data might be trashed at the time of an exception. Therefore, the framework uses only Win32 API calls and a few "safe" C++ runtime library calls. For fancy output formatting, I implemented a simple version of printf using the Win32 API. Finally, because I'm somewhat of a programming masochist, I made the code compilable as either ANSI or Unicode.</P>
+<P><B>Figure 1  Exception Reporting Framework</B></P>
+<P></P>
+<P>msjexhnd.h</P>
+
+<PRE>#ifndef __MSJEXHND_H__
+#define __MSJEXHND_H__
+
+class MSJExceptionHandler
+{
+    public:
+    
+    MSJExceptionHandler( );
+    ~MSJExceptionHandler( );
+    
+    void SetLogFileName( PTSTR pszLogFileName );
+
+    private:
+
+    // entry point where control comes on an unhandled exception
+    static LONG WINAPI MSJUnhandledExceptionFilter(
+                                PEXCEPTION_POINTERS pExceptionInfo );
+
+    // where report info is extracted and generated 
+    static void GenerateExceptionReport( PEXCEPTION_POINTERS pExceptionInfo );
+
+    // Helper functions
+    static LPTSTR GetExceptionString( DWORD dwCode );
+    static BOOL GetLogicalAddress(  PVOID addr, PTSTR szModule, DWORD len,
+                                    DWORD&amp; section, DWORD&amp; offset );
+    static void IntelStackWalk( PCONTEXT pContext );
+    static int __cdecl _tprintf(const TCHAR * format, ...);
+
+    // Variables used by the class
+    static TCHAR m_szLogFileName[MAX_PATH];
+    static LPTOP_LEVEL_EXCEPTION_FILTER m_previousFilter;
+    static HANDLE m_hReportFile;
+};
+
+extern MSJExceptionHandler g_MSJExceptionHandler;   //  global instance of class
+
+#endif</PRE>
+<P></P>
+<P>msjexhnd.cpp</P>
+
+<PRE>//==========================================
+// Matt Pietrek
+// Microsoft Systems Journal, April 1997
+// FILE: MSJEXHND.CPP
+//==========================================
+#include &lt;windows.h&gt;
+#include &lt;tchar.h&gt;
+#include "msjexhnd.h"
+//============================== Global Variables =============================
+//
+// Declare the static variables of the MSJExceptionHandler class
+//
+TCHAR MSJExceptionHandler::m_szLogFileName[MAX_PATH];
+LPTOP_LEVEL_EXCEPTION_FILTER MSJExceptionHandler::m_previousFilter;
+HANDLE MSJExceptionHandler::m_hReportFile;
+
+MSJExceptionHandler g_MSJExceptionHandler;  // Declare global instance of class
+//============================== Class Methods =============================
+//=============
+// Constructor 
+//=============
+MSJExceptionHandler::MSJExceptionHandler( )
+{
+    // Install the unhandled exception filter function
+    m_previousFilter = SetUnhandledExceptionFilter(MSJUnhandledExceptionFilter);
+
+    // Figure out what the report file will be named, and store it away
+    GetModuleFileName( 0, m_szLogFileName, MAX_PATH );
+
+    // Look for the '.' before the "EXE" extension.  Replace the extension
+    // with "RPT"
+    PTSTR pszDot = _tcsrchr( m_szLogFileName, _T('.') );
+    if ( pszDot )
+    {
+        pszDot++;   // Advance past the '.'
+        if ( _tcslen(pszDot) &gt;= 3 )
+            _tcscpy( pszDot, _T("RPT") );   // "RPT" -&gt; "Report"
+    }
+}
+//============
+// Destructor 
+//============
+MSJExceptionHandler::~MSJExceptionHandler( )
+{
+    SetUnhandledExceptionFilter( m_previousFilter );
+}
+//==============================================================
+// Lets user change the name of the report file to be generated 
+//==============================================================
+void MSJExceptionHandler::SetLogFileName( PTSTR pszLogFileName )
+{
+    _tcscpy( m_szLogFileName, pszLogFileName );
+}
+//===========================================================
+// Entry point where control comes on an unhandled exception 
+//===========================================================
+LONG WINAPI MSJExceptionHandler::MSJUnhandledExceptionFilter(
+                                    PEXCEPTION_POINTERS pExceptionInfo )
+{
+    m_hReportFile = CreateFile( m_szLogFileName,
+                                GENERIC_WRITE,
+                                0,
+                                0,
+                                OPEN_ALWAYS,
+                                FILE_FLAG_WRITE_THROUGH,
+                                0 );
+
+    if ( m_hReportFile )
+    {
+        SetFilePointer( m_hReportFile, 0, 0, FILE_END );
+
+        GenerateExceptionReport( pExceptionInfo );
+
+        CloseHandle( m_hReportFile );
+        m_hReportFile = 0;
+    }
+
+    if ( m_previousFilter )
+        return m_previousFilter( pExceptionInfo );
+    else
+        return EXCEPTION_CONTINUE_SEARCH;
+}
+//===========================================================================
+// Open the report file, and write the desired information to it.  Called by 
+// MSJUnhandledExceptionFilter                                               
+//===========================================================================
+void MSJExceptionHandler::GenerateExceptionReport(
+    PEXCEPTION_POINTERS pExceptionInfo )
+{
+    // Start out with a banner
+    _tprintf( _T("//=====================================================\n") );
+
+    PEXCEPTION_RECORD pExceptionRecord = pExceptionInfo-&gt;ExceptionRecord;
+
+    // First print information about the type of fault
+    _tprintf(   _T("Exception code: %08X %s\n"),
+                pExceptionRecord-&gt;ExceptionCode,
+                GetExceptionString(pExceptionRecord-&gt;ExceptionCode) );
+
+    // Now print information about where the fault occured
+    TCHAR szFaultingModule[MAX_PATH];
+    DWORD section, offset;
+    GetLogicalAddress(  pExceptionRecord-&gt;ExceptionAddress,
+                        szFaultingModule,
+                        sizeof( szFaultingModule ),
+                        section, offset );
+
+    _tprintf( _T("Fault address:  %08X %02X:%08X %s\n"),
+                pExceptionRecord-&gt;ExceptionAddress,
+                section, offset, szFaultingModule );
+
+    PCONTEXT pCtx = pExceptionInfo-&gt;ContextRecord;
+
+    // Show the registers
+    #ifdef _M_IX86  // Intel Only!
+    _tprintf( _T("\nRegisters:\n") );
+
+    _tprintf(_T("EAX:%08X\nEBX:%08X\nECX:%08X\nEDX:%08X\nESI:%08X\nEDI:%08X\n"),
+            pCtx-&gt;Eax, pCtx-&gt;Ebx, pCtx-&gt;Ecx, pCtx-&gt;Edx, pCtx-&gt;Esi, pCtx-&gt;Edi );
+
+    _tprintf( _T("CS:EIP:%04X:%08X\n"), pCtx-&gt;SegCs, pCtx-&gt;Eip );
+    _tprintf( _T("SS:ESP:%04X:%08X  EBP:%08X\n"),
+                pCtx-&gt;SegSs, pCtx-&gt;Esp, pCtx-&gt;Ebp );
+    _tprintf( _T("DS:%04X  ES:%04X  FS:%04X  GS:%04X\n"),
+                pCtx-&gt;SegDs, pCtx-&gt;SegEs, pCtx-&gt;SegFs, pCtx-&gt;SegGs );
+    _tprintf( _T("Flags:%08X\n"), pCtx-&gt;EFlags );
+
+    // Walk the stack using x86 specific code
+    IntelStackWalk( pCtx );
+
+    #endif
+
+    _tprintf( _T("\n") );
+}
+//======================================================================
+// Given an exception code, returns a pointer to a static string with a 
+// description of the exception                                         
+//======================================================================
+LPTSTR MSJExceptionHandler::GetExceptionString( DWORD dwCode )
+{
+    #define EXCEPTION( x ) case EXCEPTION_##x: return _T(#x);
+
+    switch ( dwCode )
+    {   EXCEPTION( ACCESS_VIOLATION )
+        EXCEPTION( DATATYPE_MISALIGNMENT )
+        EXCEPTION( BREAKPOINT )
+        EXCEPTION( SINGLE_STEP )
+        EXCEPTION( ARRAY_BOUNDS_EXCEEDED )
+        EXCEPTION( FLT_DENORMAL_OPERAND )
+        EXCEPTION( FLT_DIVIDE_BY_ZERO )
+        EXCEPTION( FLT_INEXACT_RESULT )
+        EXCEPTION( FLT_INVALID_OPERATION )
+        EXCEPTION( FLT_OVERFLOW )
+        EXCEPTION( FLT_STACK_CHECK )
+        EXCEPTION( FLT_UNDERFLOW )
+        EXCEPTION( INT_DIVIDE_BY_ZERO )
+        EXCEPTION( INT_OVERFLOW )
+        EXCEPTION( PRIV_INSTRUCTION )
+        EXCEPTION( IN_PAGE_ERROR )
+        EXCEPTION( ILLEGAL_INSTRUCTION )
+        EXCEPTION( NONCONTINUABLE_EXCEPTION )
+        EXCEPTION( STACK_OVERFLOW )
+        EXCEPTION( INVALID_DISPOSITION )
+        EXCEPTION( GUARD_PAGE )
+        EXCEPTION( INVALID_HANDLE )
+    }
+
+    // If not one of the "known" exceptions, try to get the string
+    // from NTDLL.DLL's message table.
+    static TCHAR szBuffer[512] = { 0 };
+
+    FormatMessage(  FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_FROM_HMODULE,
+                    GetModuleHandle( _T("NTDLL.DLL") ),
+                    dwCode, 0, szBuffer, sizeof( szBuffer ), 0 );
+
+    return szBuffer;
+}
+//==============================================================================
+// Given a linear address, locates the module, section, and offset containing  
+// that address.                                                               
+//                                                                             
+// Note: the szModule paramater buffer is an output buffer of length specified 
+// by the len parameter (in characters!)                                       
+//==============================================================================
+BOOL MSJExceptionHandler::GetLogicalAddress(
+        PVOID addr, PTSTR szModule, DWORD len, DWORD&amp; section, DWORD&amp; offset )
+{
+    MEMORY_BASIC_INFORMATION mbi;
+
+    if ( !VirtualQuery( addr, &amp;mbi, sizeof(mbi) ) )
+        return FALSE;
+
+    DWORD hMod = (DWORD)mbi.AllocationBase;
+
+    if ( !GetModuleFileName( (HMODULE)hMod, szModule, len ) )
+        return FALSE;
+
+    // Point to the DOS header in memory
+    PIMAGE_DOS_HEADER pDosHdr = (PIMAGE_DOS_HEADER)hMod;
+
+    // From the DOS header, find the NT (PE) header
+    PIMAGE_NT_HEADERS pNtHdr = (PIMAGE_NT_HEADERS)(hMod + pDosHdr-&gt;e_lfanew);
+
+    PIMAGE_SECTION_HEADER pSection = IMAGE_FIRST_SECTION( pNtHdr );
+
+    DWORD rva = (DWORD)addr - hMod; // RVA is offset from module load address
+
+    // Iterate through the section table, looking for the one that encompasses
+    // the linear address.
+    for (   unsigned i = 0;
+            i &lt; pNtHdr-&gt;FileHeader.NumberOfSections;
+            i++, pSection++ )
+    {
+        DWORD sectionStart = pSection-&gt;VirtualAddress;
+        DWORD sectionEnd = sectionStart
+                    + max(pSection-&gt;SizeOfRawData, pSection-&gt;Misc.VirtualSize);
+
+        // Is the address in this section???
+        if ( (rva &gt;= sectionStart) &amp;&amp; (rva &lt;= sectionEnd) )
+        {
+            // Yes, address is in the section.  Calculate section and offset,
+            // and store in the "section" &amp; "offset" params, which were
+            // passed by reference.
+            section = i+1;
+            offset = rva - sectionStart;
+            return TRUE;
+        }
+    }
+
+    return FALSE;   // Should never get here!
+}
+//============================================================
+// Walks the stack, and writes the results to the report file 
+//============================================================
+void MSJExceptionHandler::IntelStackWalk( PCONTEXT pContext )
+{
+    _tprintf( _T("\nCall stack:\n") );
+
+    _tprintf( _T("Address   Frame     Logical addr  Module\n") );
+
+    DWORD pc = pContext-&gt;Eip;
+    PDWORD pFrame, pPrevFrame;
+    
+    pFrame = (PDWORD)pContext-&gt;Ebp;
+
+    do
+    {
+        TCHAR szModule[MAX_PATH] = _T("");
+        DWORD section = 0, offset = 0;
+
+        GetLogicalAddress((PVOID)pc, szModule,sizeof(szModule),section,offset );
+
+        _tprintf( _T("%08X  %08X  %04X:%08X %s\n"),
+                    pc, pFrame, section, offset, szModule );
+
+        pc = pFrame[1];
+
+        pPrevFrame = pFrame;
+
+        pFrame = (PDWORD)pFrame[0]; // precede to next higher frame on stack
+
+        if ( (DWORD)pFrame &amp; 3 )    // Frame pointer must be aligned on a
+            break;                  // DWORD boundary.  Bail if not so.
+
+        if ( pFrame &lt;= pPrevFrame )
+            break;
+
+        // Can two DWORDs be read from the supposed frame address?          
+        if ( IsBadWritePtr(pFrame, sizeof(PVOID)*2) )
+            break;
+
+    } while ( 1 );
+}
+//============================================================================
+// Helper function that writes to the report file, and allows the user to use 
+// printf style formating                                                     
+//============================================================================
+int __cdecl MSJExceptionHandler::_tprintf(const TCHAR * format, ...)
+{
+    TCHAR szBuff[1024];
+    int retValue;
+    DWORD cbWritten;
+    va_list argptr;
+          
+    va_start( argptr, format );
+    retValue = wvsprintf( szBuff, format, argptr );
+    va_end( argptr );
+
+    WriteFile( m_hReportFile, szBuff, retValue * sizeof(TCHAR), &amp;cbWritten, 0 );
+
+    return retValue;
+}</PRE>
+<P></P>
+<P>Fulfilling the criterion of not requiring any source code changes was easy. I defined a C++ class called MSJExceptionHandler. In the source file containing the class's member functions, I also declared a single global instance of the class. By simply linking the resulting OBJ file into my project, I've put the framework in place. I put the code that calls SetUnhandledExceptionFilter in the class's constructor. Since the single instance of the class is global in scope, its constructor is called automatically when the program starts. </P>
+<P>After the MSJExceptionHandler constructor executes, you've got a callback function, MSJExceptionHandler::MSJUnhandledExceptionFilter, that is invoked whenever an unhandled exception occurs. The first order of business in this function is to open up the file that the exception report will be appended to. By default, the report file has the same name as the executable file, but with an .RPT extension. If you don't like this name, you can call MSJExceptionHandler::SetLogFileName to override it. It's worth noting that I opened the file with the FILE_FLAG_WRITE_THROUGH attribute. In case the exception report generation code itself blows up, at least the data already written should be safely on the disk. </P>
+<P>Assuming the report file opened OK, the MSJUnhandledExceptionFilter method seeks to the end of the file and calls the GenerateExceptionReport method. GenerateExceptionReport encapsulates writing out whatever sort of information you might want to the report file. Finally, MSJUnhandledExceptionFilter closes the file and chains on to any previously installed UnhandledException-Filter functions.</P>
+<P>Inside the GenerateExceptionReport method, the code begins by printing a banner and some basic information about the exception. First out of the gate is the exception number, along with some descriptive text that identifies the exception. Getting this text turned out to be an interesting diversion. If you look at the end of the GetExceptionString method, you'll see that the descriptive strings for each exception that appear in the system's fault dialog are kept in the MessageTable resource of NTDLL.DLL. Unfortunately, I wasn't able to get the FormatMessage API to always give me the raw, unformatted strings, despite my passing the FORMAT_MESSAGE_IGNORE_INSERTS flag. Thus, for common exceptions, the GetExceptionString method returns the #define name from WINBASE.H (for example, "ACCESS_VIOLATION"). If the exception isn't a common one, my code uses FormatMessage on NTDLL's MessageTable and hopes for the best. </P>
+<P>After the GenerateExceptionReport method emits the exception number and description, the next step is to print out the faulting address. I first print the linear address of the exception, which usually isn't that helpful, but it's what you'd see in a debugger or the system fault dialog. Following the linear address on the line is the logical address. The logical address consists of the name of the EXE or DLL that the linear address falls within, and the section number and offset within that section. For example, the logical address</P>
+
+<PRE>01:00000099 E:\COLUMN\col43\MSJTESTEXC.exe
+</PRE>
+<P>means 0x99 bytes into section 1 of MSJTESTEXC.EXE. Given a .MAP file for the faulting module (in this case, MSJTESTEXC.MAP), you could look up the address 01:00000099. Now, you usually won't find an exact address match in a .MAP file—what you're after is the symbol with a logical address that's the closest to your logical address, while still being less than or equal to it. The fault is probably somewhere within that function.</P>
+<P>You may be wondering what sort of voodoo you need to derive a logical address given just the linear address of the exception. It's really not hard if you understand some basics about the structure of Win32 portable executable files. The MSJExceptionHandler::GetLogicalAddress method shows how to convert a linear address to its logical form in less than 40 lines of code. The trick is to use the VirtualQuery function to figure out which module the linear address belongs to. Once the module is known, the code finds the module's section table in memory and walks through the table, looking for the section that encompasses the linear address. We'll see the GetLogicalAddress method again later in this column.</P>
+<P>After printing out the type and address of the exception, the GenerateExceptionReport method shows the register values at the time of the exception. It gets this information from a CONTEXT structure. The address of a CONTEXT structure is passed as part of the PEXCEPTION_POINTERS argument to the unhandled exception callback. Currently, my code prints out only the registers for Intel CPUs, but it wouldn't be hard to add code for other CPUs (conditionally compiled, of course).</P>
+<P>The last job of the GenerateExceptionReport method is to emit a call stack, which it does by invoking the IntelStackWalk function. As with the register values, I wrote code only for the Intel CPU. (Next month I'll show you how IMAGEHLP.DLL provides a portable method of walking the stack.) After the stack walk, the GenerateExceptionReport method is done. If you want to extend my code to print out additional information, such as the value of program variables, this is a good place to do so. Remember, my code is just a framework; I hope you'll find it a useful starting point for your own exception reporting needs.</P>
+<P>I'll finish up this month by describing stack frames and walking the stack in Intel CPU code. In the general case of 32-bit code, the call stack for Intel CPUs is very straightforward. Think of each stack frame as a node in a linked list. After finding the head of the list, you simply follow the "next" pointer that's a part of each frame. Each frame lies somewhere within the thread's stack region, and each successive node must be at a higher linear address in memory. This is a natural by-product of the way stack frames are generated.</P>
+<P>If you've looked at the assembly code that compilers generate for the beginning of a function, you've probably seen these instructions:</P>
+
+<PRE>PUSH EBP
+MOV EBP,ESP
+</PRE>
+<P>Since this instruction sequence is usually at the very beginning of the function's code, it's not hard to picture what the stack looks like at this point. When the CPU called the function, it pushed a return address onto the stack. Then, the instructions above put the current EBP value right below the return address on the stack, before setting EBP to the same value as the stack pointer (the ESP register). The net effect is that afterwards, the EBP value is a pointer to 2 DWORDS on the stack that look like this:</P>
+
+<PRE>DWORD ;; EBP+4 = ReturnAddress
+DWORD ;; EBP+0 = Previous EBP value
+</PRE>
+<P>That's it! At the bare minimum, a stack frame consists of those two DWORDS. Generally speaking, the EBP register points to the current function's stack frame. This is a key point, so go back and reread the sentence and ponder the implications. The first DWORD of the current function's stack frame is really a pointer to the stack frame for the calling function. If you then examine the first DWORD of that frame, you have a pointer to the stack frame for the calling function. As I mentioned earlier, the call stack is really nothing more than a linked list of these stack frames.</P>
+<P>Walking the list of stack frames isn't immediately useful in itself. However, each frame you encounter also happens to have a code address in it. Now we're getting somewhere! You can use these return addresses to figure out what function in your code they correspond to. A very minimal call stack display would simply walk the call stack and write out the return address that it finds in each node. </P>
+<P>Next, you need to know how to start the stack walk. Remember the CONTEXT structure that I mentioned earlier? In the context structure, you'll find the instruction pointer (EIP) at the time of the exception. The first address in a stack walk is traditionally the instruction pointer. Subsequent addresses are obtained from walking the stack frames. How do you find the first stack frame? Easy! Get the EBP register value, which is also in the CONTEXT structure, and use it as a pointer to the first frame. </P>
+<P>The last bit of advice I'll give you on stack walking this month is to know when to stop walking. There are no hard and fast rules here. Most stack-walking code stops when it encounters a frame address that doesn't look valid. There are several tests that you can do to determine if a frame address is valid. For starters, each frame has to be at a higher address than the preceding frame. Another condition is that the frame address has to be a multiple of four bytes, because the stack pointer is always a multiple of four (assuming that a bug or error hasn't crept in somewhere). Yet another frame validity test is that you need to be able to read and write memory at the frame's address. There are other tests you could apply, but the two I mentioned are usually sufficient to terminate the stack walk at the right time.</P>
+<P>My code that implements the algorithm described above is in the IntelStackWalk method (see Figure 1). For each frame, the code prints the code address, the associated stack frame's address, and the logical address of the code. To obtain the logical address for each frame, I used the GetLogicalAddress method described earlier. Armed with just a .MAP file, you should be able to look up the logical addresses to get a stack walk that has the names of your functions. Of course, this is just the sort of busy work that computers are good for. Next month, I'll extend MSJExceptionHandler to use IMAGEHLP.DLL functions to create stack walks with symbolic function names.</P>
+<P>At this point, it's necessary to interject a word of warning: compilers don't always emit stack frames. As you can guess, this makes walking the stack essentially impossible in this situation without outside help. Compilers usually will include stack frames when compiling without optimizations. Unoptimized code is typically created when building in debug mode (as opposed to release mode). If you build your program in release mode, you probably won't have stack frames, and the stack-walking code won't get very far. However, you can force the compiler to emit stack frames regardless of the optimization setting; in Visual C++&reg;, the command-line option is /Oy-. Next month, I'll show how IMAGEHLP.DLL is able to walk the call stack of code compiled with a Microsoft compiler, even when there aren't any stack frames present.</P>
+<P>To wrap up this month, let me explain a couple of limitations of the MSJExceptionHandler code. First, if an exception occurs before the class constructor is called, the unhandled exception filter won't be set up yet. This is most likely to happen if you have other static classes with constructors. Since it can be messy to predict the order the constructors will be invoked, it's possible that another class's constructor could blow up before MSJExceptionHandler has initialized. Another related limitation involves DLLs. Because Windows invokes the DllMain functions of all implicitly loaded DLLs before it begins execution in the executable, one of the DllMains may blow up. Again, MSJExceptionHandler won't be initialized yet so you won't get a report. Despite these limitations, I think you'll find the framework I've created to be a useful addition to your bag of diagnostic tricks. More next month!</P>
+<P>Have a question about programming in Windows? Send it to Matt at mpietrek@sprynet.com</P>
+<P><I>This article is reproduced from Microsoft Systems Journal. Copyright &copy; 1997 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S. and Canada, or (303) 678-0439 in all other countries. For other inquiries, call (415) 905-2200.</P>
+<P></P></font></body></HTML>

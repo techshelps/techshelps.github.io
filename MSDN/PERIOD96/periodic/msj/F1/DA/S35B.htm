@@ -1,0 +1,2228 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Our Exclusive Class Library Speeds Building Windows NT Kernel-Mode Device Drivers</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  Our Exclusive Class Library Speeds Building Windows NT Kernel-Mode Device Drivers</H1><P>John Elliot and Jeff Huckins</P>
+<P>Jeff Huckins is a senior software engineer for Intel Corporation in the Intel Communication Group. He can be reached at Jeffrey_Huckins@ccm.jf.intel.com.</P>
+<P>John Elliott is a senior software engineer for Intel Corporation in the Intel Communication Group. He can be reached at John_Darren_Elliott@ccm.jf.intel.com.</P>
+<P>Microsoft¨ Windows¨ NT is a modular operating system that defines a number of user-mode objects and kernel-mode objects. These objects lend themselves to having classes written around them because, typically, each object has a set of routines. A pointer to the object is passed to the routine along with other parameters. The MFC class library from Microsoft encapsulates most of the user-mode objects. Likewise, a class can encapsulate a kernel-mode object and its methods into one C++ object. That's what we will do in this article. In some cases you have to supply a variety of routines as callbacks from the operating system. These callback routines can also be encapsulated in the C++ object, as can any additional data and routines associated with a particular kernel-mode object (such as a device extension).</P>
+<P>A device driver is composed of three sets of methods and data. The first set encompasses the device driver object itself (the Windows NT DDK DRIVER_OBJECT). The second set encompasses the actual device objects running under the device driver (the DDK's DEVICE_OBJECT). The third set of methods and data is device driver specific. The framework we develop here defines a virtual interface for the third set of methods by encapsulating the first two sets in C++ classes, giving you the basis for writing a kernel-mode device driver for Windows NT 3.51 or 4.0. This framework is a set of simple classes that wraps up the functionality of kernel-mode objects (drivers, devices, interrupts, and so on) and contains much of the boilerplate code needed for most drivers. Although it's not a complete framework, it's a good starting place. You will still need the Windows NT DDK and a C++ compiler (we used Microsoft Visual C++¨ 4.1).</P>
+<P> </P>
+<H2><A NAME="sec0"></A>  Driver and Device Objects</H2><P>A Windows NT kernel-mode device driver is represented by a software element, the driver object (DRIVER_OBJECT), and a hardware element, the device object (DEVICE_OBJECT). The driver object provides all of the entry points for the operating system to carry out user and system requests. There can be more than one device object, but there's only one driver object for a given device driver. The device objects store all of the needed state information for a particular piece of real or virtual hardware. The basis of our framework is two classes that encapsulate these objects: CDriverObject and CDeviceObject. Their relationship to each other as well as to the DRIVER_OBJECT and DEVICE_OBJECTs is shown in <B>Figure 1</B>.</P>
+<P><img src="kernel1.gif"></P>
+<P><B> Figure 1  CDriverObject and CDeviceObject Classes</B></P>
+<P>You create the CDriverObject statically so there can be only one per driver. The DRIVER_OBJECT is created for you by the Windows NT I/O Manager and passed to the driver's entry point, DriverEntry (discussed later). At this point, the instance of CDriverObject is bound to the DRIVER_OBJECT. Static instantiation is enforced in our class by providing CDriverObject with an operator new member, which returns NULL.</P>
+<P>When CDriverObject is instantiated, it fills in the necessary driver entry points for handling the common I/O Request Packets (IRPs), overlapped I/O, and termination. CDriverObject performs all the work required to get a driver loaded, assign the callbacks, and create device objects. CDriverObject is an abstract base class, so you must define the member CreateDevices in your actual driver code to instantiate a derived class. In addition to resolving this pure virtual method, there are a handful of virtual methods in the CDriverObject class that you can override to implement a driver (for example, OnInitialize, OnUnload, OnStartIo, and OnIrpMjXxx).</P>
+<P>The DriverEntry routine is called when a driver is loaded. This routine does some initialization of the runtime environment and then calls CDriverObject::DriverEntry, which fills in the bare minimum DRIVER_OBJECT entry point, DriverUnload. This is required by our framework to clean up when the driver is unloaded. That accomplished, CDriverObject::DriverEntry calls CDriverObject::Initialize.Thisiswhere CDeviceObjects are created (via CreateDevices) and initialized (via InitDevices). If successful, the CDriverObject::OnInitialize method is called. At this point you can optionally add support for DEVICE_OBJECTs that are not part of this framework and provide other driver specific initialization. The base class CDriverObject::OnInitalize sets up the most common dispatch table routines and DriverStartIo.</P>
+<P>The DriverUnload routine of the DRIVER_OBJECT is called when a driver is unloaded. This invokes CDriverObject::Unload, which lets you clean up by calling CDriverObject::OnUnload, then calls CDriverObject::UnloadDevices. Within CDriverObject::OnUnload, you must clean up any DEVICE_OBJECTs that are not part of this framework. CDriverObject::UnloadDevices iterates through all remaining CDeviceObjects and unloads them before freeing them from memory.</P>
+<P>All driver I/O dispatch entry points contained in the DRIVER_OBJECT data structure are by default routed to device objects through the CDriverObject::IrpMjXxx method. The default CDriverObject::OnIrpMjXxx method calls the associated CDeviceObject::OnIrpMj<I>Yyy</I> methods, where <I>Yyy</I> is based on the actual IRP's major function code—IRP_MJ_CREATE would invoke CDeviceObject::OnIrpMjCreate. With this model, a CDriverObject object can filter all entry-point calls for its associated devices. Most driver objects will simply set these calls to pass through to the device objects.</P>
+<P>The DriverStartIo entry point is routed through CDriverObject::StartIo if it is set up in CDriverObject::OnInitialize. CDriverObject::StartIo then invokes CDriverObject::OnStartIo and, by default, passes the call on to one of three methods: CDeviceObject::OnStartReadIo for a read request, CDeviceObject::OnStartWriteIo for a write request, or CDeviceObject::OnStartIo for any other case.</P>
+<P>Using this model, it is possible for the CDriverObject object to act as an entry point call filter for all of the DEVICE_OBJECTS that it creates whether or not they are part of our framework (CDeviceObject objects). <B>Figure 2</B> shows the implementation of CDriverObject.</P>
+<P><B> Figure 2  CDriverObject</B></P>
+<P>driver.h</P>
+<P><BR></P>
+<PRE> ////////////////////////////////////////////////////////////////////////////////
+// Module Name:    driver.h
+// Abstract:        CDriverObject Interface
+// Environment:    Windows NT 3.51/4.0, MS Visual C++ 4.x
+// Notes:
+//    CDriverObject encapsulates the DRIVER_OBJECT data structure.
+//
+//    IMPORTANT:
+//        A CDriverObject class object MUST be statically instantiated by the
+//        user. Dynamic instantiation is not supported. Each driver object
+//        represents the image of a loaded kernel-mode driver. A pointer to
+//        the driver object is an input parameter to a driver's DriverEntry
+//        and optional Reinitialize routines and to its Unload routine, if
+//        any.
+//
+////////////////////////////////////////////////////////////////////////////////
+
+#ifndef driver_h
+#define driver_h
+
+#include "device.h"
+
+class CDriverObject 
+{
+public:
+    // ctor/dtor
+    CDriverObject( PCWSTR DriverClassName = NULL );
+    virtual ~CDriverObject();
+
+    // Simply returns NULL because dynamic instantiation of an
+    // object of this class is not supported.
+    PVOID operator new( size_t size );
+
+    // Cast operator for PDRIVER_OBJECT.
+    operator PDRIVER_OBJECT();
+
+    VOID SetDriverObject( PDRIVER_OBJECT DriverObject );
+
+    // called from within DriverEntry routine. Must call
+    // IoRegisterDriverReinitialization passing this pointer as Context
+    // argument. Then must call virtual OnInitialize() member.
+    NTSTATUS Initialize( PUNICODE_STRING RegistryPath );
+
+    // called from within DriverUnload() routine. This routine MUST:
+    //        1. Call m_DeviceObject-&gt;Unload()
+    //        2. Call virtual OnUnload()
+    static VOID Unload( PDRIVER_OBJECT DriverObject );
+
+    // Driver Entry routine exported to IOManager.
+    static NTSTATUS DriverEntry( PDRIVER_OBJECT DriverObject, 
+                                 PUNICODE_STRING RegistryPath );
+
+    // Calls IoAssignResources().
+    NTSTATUS AssignResources(
+        IN PUNICODE_STRING RegistryPath, 
+        IN PIO_RESOURCE_REQUIREMENTS_LIST RequestedResources, 
+        OUT PCM_RESOURCE_LIST* AllocatedResources );
+
+    NTSTATUS AssignSlotResources(
+        IN PUNICODE_STRING RegistryPath, 
+        IN INTERFACE_TYPE BusType,  
+        IN ULONG BusNumber, 
+        IN ULONG SlotNumber, 
+        OUT PCM_RESOURCE_LIST* AllocatedResources );
+
+    // calls IoReportResourceUsage().
+    NTSTATUS ReportResourceUsage(
+        IN PCM_RESOURCE_LIST DriverList, 
+        IN ULONG DriverListSize, 
+        IN BOOLEAN bOverRideConflict, 
+        OUT PBOOLEAN bConflictDetected );
+
+    // set in constructor
+    PUNICODE_STRING GetClassName( VOID );
+
+    PUNICODE_STRING GetHardwareDatabase( VOID );
+
+protected:
+    // called from Unload() member, gives derived classes an opportunity to
+    // cleanup before UnloadDevices is called (e.g. if driver supports a
+    // DEVICE_OBJECT that is not a CDeviceObject)
+    virtual VOID OnUnload( void );
+
+    // called by Initialize() routine, gives derived classes an opportunity to
+    // perform additional initialization (e.g. if driver supports a
+    // DEVICE_OBJECT that is not a CDeviceObject)
+    virtual NTSTATUS OnInitialize( PUNICODE_STRING RegistryPath );
+
+    // calls IoRegisterDriverReinitialization().
+    VOID RegisterDriverReinitialization(
+        PDRIVER_REINITIALIZE DriverReinitializationRoutine,
+        PVOID Context );
+
+    // createDevices must create a device object during
+    // CDriverObject::Initialize(). Following is an example of how a derived
+    // class MUST create a CDeviceObject object:
+    //        CDeviceObject* CMyDriverObject::CreateDevice()
+    //        {
+    //            NTSTATUS status;
+    //            new( *this, DeviceName, DeviceType, DeviceCharacteristics,
+    //                bExclusive, status ) CMyDeviceObject( this );
+    //            return status;
+    //        }
+    virtual NTSTATUS CreateDevices( void ) = 0;
+
+    // setup as StartIo callback for DRIVER_OBJECT, calls OnStartIo()
+    static VOID StartIo( IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp );
+
+    // calls OnReadStartIo(), OnWriteStartIo(), or OnStartIo members of
+    // CDeviceObject. Override to perform custom StartIo handling (e.g.
+    // if driver supports a DEVICE_OBJECT that is not a CDeviceObject)
+    virtual VOID OnStartIo( IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp );
+
+    // dispatch handler, calls OnIrpMjXxx
+    static NTSTATUS IrpMjXxx( IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp );
+
+    // overridable dispatch handler. Override to perform custom StartIo
+    // handling (e.g. if driver supports a DEVICE_OBJECT that is not a
+    // CDeviceObject)
+    virtual NTSTATUS OnIrpMjXxx( IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp );
+
+private:
+    // methods
+    NTSTATUS InitDevices( PUNICODE_STRING RegistryPath );
+    VOID UnloadDevices( VOID );
+
+    // members
+    PDRIVER_OBJECT m_DriverObject;
+
+    // the only driver object
+    static CDriverObject* s_DriverObject;
+
+    //    Set in constructor
+    UNICODE_STRING m_ClassName;
+};
+
+////////////////////////////////////////////////////////////////////////////////
+// inlines
+//
+inline CDriverObject::operator PDRIVER_OBJECT()
+{
+    return m_DriverObject;
+}
+
+inline VOID CDriverObject::SetDriverObject( IN PDRIVER_OBJECT DriverObject )
+{
+    ASSERT( NULL == m_DriverObject );
+    ASSERT( NULL != DriverObject );
+
+    m_DriverObject = DriverObject;
+    return;
+}
+
+inline PUNICODE_STRING CDriverObject::GetClassName( void )
+{
+    return &amp;m_ClassName;
+}
+
+inline PUNICODE_STRING CDriverObject::GetHardwareDatabase( void )
+{
+    return m_DriverObject-&gt;HardwareDatabase;
+}
+
+#endif driver_h</PRE>
+<P></P>
+<P>driver.cpp</P>
+<P><BR></P>
+<PRE> ////////////////////////////////////////////////////////////////////////////////
+// Module Name:    driver.cpp
+// Abstract:        CDriverObject Implementation
+// Environment:    Windows NT 3.51/4.0, MS Visual C++ 2.x
+////////////////////////////////////////////////////////////////////////////////
+
+// disable some warnings
+#pragma warning( disable: 4699 )    // Note: Creating precompiled header
+#pragma warning( disable: 4201 )    // nameless struct/union
+#pragma warning( disable: 4514 )    // unreferenced inline function has been removed
+#pragma warning( disable: 4705 )    // statement has no effect
+#pragma warning( disable: 4711 )    // function 'function' selected for automatic inline expansion
+
+#include &lt;idrivrpp.h&gt;
+#include "cppx.h"
+#include "driver.h"
+
+#define DEFAULT_CLASS_NAME L"Other"
+
+////////////////////////////////////////////////////////////////////////////////
+// static initialization
+//
+CDriverObject* CDriverObject::s_DriverObject = NULL;
+
+////////////////////////////////////////////////////////////////////////////////
+// ctor/dtor
+//
+CDriverObject::CDriverObject( IN PCWSTR DriverClassName /* = NULL */ )
+    :    m_DriverObject( NULL )
+{
+    // Set the class name for the driver
+    //@@@ why not use our CUnicodeString class
+    if( NULL != DriverClassName )
+    {
+        RtlInitUnicodeString( &amp;m_ClassName, DriverClassName );
+    }
+    else
+    {
+        RtlInitUnicodeString( &amp;m_ClassName, DEFAULT_CLASS_NAME );
+    }
+
+    ASSERT( NULL != s_DriverObject );
+    s_DriverObject = this;
+    return;
+}
+
+CDriverObject::~CDriverObject()
+{
+    s_DriverObject = NULL;
+    return;
+}
+
+PVOID CDriverObject::operator new( IN size_t /* size */ )
+{
+    // Dynamic allocation not supported.
+    return NULL;
+}
+
+NTSTATUS CDriverObject::DriverEntry(
+    IN PDRIVER_OBJECT DriverObject,
+    IN PUNICODE_STRING RegistryPath )
+{
+    s_DriverObject-&gt;SetDriverObject( DriverObject );
+    DriverObject-&gt;DriverUnload = Unload;
+    DriverObject-&gt;DriverStartIo = StartIo;
+
+    // Setup the entry points.
+    DriverObject-&gt;MajorFunction[ IRP_MJ_CLEANUP ] = IrpMjXxx;
+    DriverObject-&gt;MajorFunction[ IRP_MJ_CLOSE ] = IrpMjXxx;
+    DriverObject-&gt;MajorFunction[ IRP_MJ_CREATE ] = IrpMjXxx;
+    DriverObject-&gt;MajorFunction[ IRP_MJ_DEVICE_CONTROL ] = IrpMjXxx;
+    DriverObject-&gt;MajorFunction[ IRP_MJ_FLUSH_BUFFERS ] = IrpMjXxx;
+    DriverObject-&gt;MajorFunction[ IRP_MJ_INTERNAL_DEVICE_CONTROL ] = IrpMjXxx;
+    DriverObject-&gt;MajorFunction[ IRP_MJ_QUERY_INFORMATION ] = IrpMjXxx;
+    DriverObject-&gt;MajorFunction[ IRP_MJ_READ ] = IrpMjXxx;
+    DriverObject-&gt;MajorFunction[ IRP_MJ_SET_INFORMATION ] = IrpMjXxx;
+    DriverObject-&gt;MajorFunction[ IRP_MJ_SHUTDOWN ] = IrpMjXxx;
+    DriverObject-&gt;MajorFunction[ IRP_MJ_WRITE ] = IrpMjXxx;
+
+    return s_DriverObject-&gt;Initialize( RegistryPath );
+}
+
+NTSTATUS CDriverObject::Initialize( IN PUNICODE_STRING RegistryPath )
+{
+    // create the devices for this driver
+    NTSTATUS status;
+    if( NT_SUCCESS( status = CreateDevices() ) )
+    {
+        // If we successfully create all of the devices, finish the
+        // initialization of the driver object.
+        if( NT_SUCCESS( status = InitDevices( RegistryPath ) ) )
+        {
+            // Register for shutdown notifications for all devices
+            // @@@ don't we need to register for each device?
+            IoRegisterShutdownNotification( m_DriverObject-&gt;DeviceObject );
+            status = OnInitialize( RegistryPath );
+
+            // either by CreateDevices or OnInitialize, there should be at
+            // least one device (though not necessarily a CDeviceObject)
+            ASSERT( NULL != m_DriverObject-&gt;DeviceObject );
+        }
+        else
+        {
+            // InitDevices failed... unload the driver
+            Unload( m_DriverObject );
+        }
+    }
+
+    return status;
+}
+
+NTSTATUS CDriverObject::OnInitialize( IN PUNICODE_STRING /* RegistryPath */ )
+{
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CDriverObject::InitDevices( PUNICODE_STRING RegistryPath )
+{
+    // loop through list of devices (maintained by IO Manager)
+    PDEVICE_OBJECT pDeviceObject = m_DriverObject-&gt;DeviceObject;
+    while( NULL != pDeviceObject )
+    {
+        // get device object
+        CDeviceObject* pDevice = (CDeviceObject*) pDeviceObject-&gt;DeviceExtension;
+        ASSERT( NULL != pDevice );
+
+        // call the most-derived's Initialize routine
+        NTSTATUS status;
+        if( ! NT_SUCCESS( (status = pDevice-&gt;Initialize( RegistryPath )) ) )
+        {
+            // Initialize failed... return (CDriverObject::Initialize 
+            // will cleanup)
+            return status;
+        }
+
+        // get the next device
+        pDeviceObject = pDeviceObject-&gt;NextDevice;
+    }
+    
+    return STATUS_SUCCESS;
+}
+
+VOID CDriverObject::Unload( IN PDRIVER_OBJECT /* DriverObject */ )
+{
+    ASSERT( NULL != s_DriverObject );
+    s_DriverObject-&gt;OnUnload();
+    s_DriverObject-&gt;UnloadDevices();
+
+    cppShutdown();
+    return;
+}
+
+VOID CDriverObject::OnUnload()
+{
+    return;
+}
+
+VOID CDriverObject::UnloadDevices()
+{
+    // loop through list of devices (maintained by IO Manager)
+    PDEVICE_OBJECT pDeviceObject = m_DriverObject-&gt;DeviceObject;
+    while( NULL != pDeviceObject )
+    {
+        // get device object
+        CDeviceObject* pDevice = 
+          (CDeviceObject*) pDeviceObject-&gt;DeviceExtension;
+        ASSERT( NULL != pDevice );
+
+        // call the most-derived device object's Unload routine
+        pDevice-&gt;Unload();
+
+        // get the next device (before we delete this one)
+        pDeviceObject = pDeviceObject-&gt;NextDevice;
+
+        // delete the device object
+        delete pDevice;
+    }
+
+    return;
+}
+
+VOID CDriverObject::StartIo( IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp )
+{
+    ASSERT( NULL != s_DriverObject );
+    s_DriverObject-&gt;OnStartIo( DeviceObject, Irp );
+    return;
+}
+
+VOID CDriverObject::OnStartIo( IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp )
+{
+    ASSERT_IRQL_EQ( DISPATCH_LEVEL );
+
+    // get device object
+    CDeviceObject* pObject = (CDeviceObject*) DeviceObject-&gt;DeviceExtension;
+    ASSERT( NULL != pObject );
+
+    // get stack location
+    PIO_STACK_LOCATION CurrentStackLocation = IoGetCurrentIrpStackLocation( Irp );
+    ASSERT( NULL != CurrentStackLocation );
+
+    // dispatch to the CDeviceObject derived handlers
+    switch( CurrentStackLocation-&gt;MajorFunction )
+    {
+    case IRP_MJ_READ:
+        pObject-&gt;OnStartReadIo( Irp );
+        break;
+
+    case IRP_MJ_WRITE:
+        pObject-&gt;OnStartWriteIo( Irp );
+        break;
+
+    default:
+        pObject-&gt;OnStartIo( Irp );
+        break;
+    }
+
+    return;
+}
+
+NTSTATUS CDriverObject::IrpMjXxx(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN PIRP Irp )
+{
+    ASSERT( NULL != s_DriverObject );
+    return s_DriverObject-&gt;OnIrpMjXxx( DeviceObject, Irp );
+}
+
+NTSTATUS CDriverObject::OnIrpMjXxx(
+    IN PDEVICE_OBJECT DeviceObject, 
+    IN PIRP Irp )
+{
+    // get device object
+    CDeviceObject* pObject = (CDeviceObject*) DeviceObject-&gt;DeviceExtension;
+    ASSERT( NULL != pObject );
+
+    // get stack location
+    PIO_STACK_LOCATION CurrentStackLocation = IoGetCurrentIrpStackLocation(Irp );
+    ASSERT( NULL != CurrentStackLocation );
+
+    // dispatch to the CDeviceObject-derived handlers
+    // @@@ we could add parameter "crackers" to these calls... (i.e. pass as
+    // @@@ parameters the most commonly used members of the IO_STACK_LOCATION)
+    switch( CurrentStackLocation-&gt;MajorFunction )
+    {
+    case IRP_MJ_CREATE:
+        return pObject-&gt;OnIrpMjCreate( Irp );
+
+    case IRP_MJ_CLEANUP:
+        return pObject-&gt;OnIrpMjCleanup( Irp );
+
+    case IRP_MJ_CLOSE:
+        return pObject-&gt;OnIrpMjClose( Irp );
+
+    case IRP_MJ_READ:
+        return pObject-&gt;OnIrpMjRead( Irp );
+
+    case IRP_MJ_WRITE:
+        return pObject-&gt;OnIrpMjWrite( Irp );
+
+    case IRP_MJ_DEVICE_CONTROL:
+        return pObject-&gt;OnIrpMjDeviceControl( Irp );
+
+    case IRP_MJ_INTERNAL_DEVICE_CONTROL:
+        return pObject-&gt;OnIrpMjInternalDeviceControl( Irp );
+
+    case IRP_MJ_QUERY_INFORMATION:
+        return pObject-&gt;OnIrpMjQueryInformation( Irp );
+
+    case IRP_MJ_SET_INFORMATION:
+        return pObject-&gt;OnIrpMjSetInformation( Irp );
+    case IRP_MJ_FLUSH_BUFFERS:
+        return pObject-&gt;OnIrpMjFlushBuffers( Irp );
+
+    case IRP_MJ_SHUTDOWN:
+        return pObject-&gt;OnIrpMjShutdown( Irp );
+    }
+
+    TRACE( "CDriverObject::OnIrpMjXxx - received an Irp that wasn't "
+           "setup in the dispatch table!" );
+    Irp-&gt;IoStatus.Information = 0;
+    Irp-&gt;IoStatus.Status = STATUS_SUCCESS;
+    IoCompleteRequest( Irp, IO_NO_INCREMENT );
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CDriverObject::ReportResourceUsage(
+    IN PCM_RESOURCE_LIST DriverList, 
+    IN ULONG DriverListSize, 
+    IN BOOLEAN OverRideConflict, 
+    OUT PBOOLEAN ConflictDetected )
+{
+    ASSERT( NULL != DriverList );
+    ASSERT( NULL != ConflictDetected );
+
+    return IoReportResourceUsage(
+        &amp;m_ClassName, 
+        m_DriverObject, 
+        DriverList, 
+        DriverListSize, 
+        NULL, 
+        NULL, 
+        0, 
+        OverRideConflict,
+        ConflictDetected );
+}
+
+NTSTATUS CDriverObject::AssignSlotResources(
+    IN PUNICODE_STRING RegistryPath, 
+    IN INTERFACE_TYPE BusType,  
+    IN ULONG BusNumber, 
+    IN ULONG SlotNumber, 
+    OUT PCM_RESOURCE_LIST* AllocatedResources )
+{
+    ASSERT( NULL != RegistryPath );
+    ASSERT( NULL != AllocatedResources );
+
+    // If this CDeviceObject is an exclusive device object for this driver, NULL
+    // should be passed as the DeviceObject argument to alAssignSlotResources(),
+    // so that device-specific registry management is not required. If this is
+    // not an exclusive CDeviceObject object, then it is necessary to create and
+    // update the registry path passed to the DriverEntry routine in order to
+    // maintain device-specific resource data for each set of resources claimed
+    // under the driver-specific path contained in the DriverEntry's
+    // RegistryPath.
+    return HalAssignSlotResources( 
+        RegistryPath, 
+        &amp;m_ClassName,
+        m_DriverObject,
+        NULL,
+        BusType,
+        BusNumber,
+        SlotNumber,
+        AllocatedResources );
+}
+
+NTSTATUS CDriverObject::AssignResources(
+    IN PUNICODE_STRING RegistryPath, 
+    IN PIO_RESOURCE_REQUIREMENTS_LIST RequestedResources, 
+    OUT PCM_RESOURCE_LIST* AllocatedResources )
+{
+    ASSERT( NULL != RegistryPath );
+    ASSERT( NULL != RequestedResources );
+    ASSERT( NULL != AllocatedResources );
+
+    return IoAssignResources( 
+        RegistryPath, 
+        &amp;m_ClassName,
+        m_DriverObject,
+        NULL,
+        RequestedResources,
+        AllocatedResources );
+}
+
+VOID CDriverObject::RegisterDriverReinitialization(
+    IN PDRIVER_REINITIALIZE DriverReinitializationRoutine, 
+    IN PVOID Context )
+{
+    ASSERT_IRQL_EQ( PASSIVE_LEVEL );
+    ASSERT( NULL != DriverReinitializationRoutine );    
+    IoRegisterDriverReinitialization( *this, DriverReinitializationRoutine,
+                                      Context );
+    return;
+}
+
+extern "C" NTSTATUS DriverEntry(
+    IN PDRIVER_OBJECT DriverObject, 
+    IN PUNICODE_STRING RegistryPath )
+{
+    cppInit();
+
+    NTSTATUS status = CDriverObject::DriverEntry( DriverObject, RegistryPath );
+
+    // if DriverEntry does not return success, Unload is not called,
+    // so we need to call it for ourselves.
+    if( STATUS_SUCCESS != status )
+    {
+        CDriverObject::Unload( DriverObject );
+    }
+
+    return status;
+}</PRE>
+<P></P>
+<P>The CDeviceObject class encapsulates the common functionality and behavior associated with a DEVICE_OBJECT. As described previously, all device-oriented dispatch entry points contained in DRIVER_OBJECT are by default routed to CDeviceObject::OnIrpMj<I>Yyy</I> methods.</P>
+<P>There are two ways to associate a CDeviceObject with a DEVICE_OBJECT. The first approach is to call the DDK's IoCreateDevice (requesting no extra space for the DeviceExtension), and then allocate the CDeviceObject from the non-paged pool using the DDK's ExAllocatePool API. Bind the two objects together by setting the DeviceExtension field of the DEVICE_OBJECT to point to the CDeviceObject and setting the m_DeviceObject member of the CDeviceObject to point to the DEVICE_OBJECT.</P>
+<P>The second approach is to define an alternate form of CDeviceObject::operator new that makes the call to IoCreateDevice. This allows the I/O Manager to allocate the memory for CDeviceObject via the DeviceExtension field in DEVICE_OBJECT, then bind CDeviceObject to DEVICE_OBJECT. A CDeviceObject::operator delete performs the call to the DDK's IoDeleteDevice. This frees up system resources associated with the DEVICE_OBJECT. We used this approach in our framework.</P>
+<P>The CDriverObject class declares a pure virtual method, CreateDevices, which is called from within the Initialize method of CDriverObject. This is the context by which a CDriverObject can instantiate one or more CDeviceObject objects using the CDeviceObject::operator new. The standard operator new for CDeviceObject simply returns NULL to enforce the use of the alternate operator. In the same manner, when a CDriverObject is being unloaded, it frees the resources associated with its CDeviceObject objects by using CDeviceObject::operator delete.</P>
+<P>To provide handlers for the various dispatch requests, you need to override the OnIrpMj<I>Yyy</I> virtual methods defined in CDeviceObject. The default methods implemented in CDeviceObject, with the exception of OnIrpMjWrite and OnIrpMjRead, simply complete the IRP by calling the DDK's IoCompleteRequest and returning STATUS_SUCCESS. CDeviceObject's implementations of OnIrpMjWrite and OnIrpMjRead mark the IRP pending with a call to the DDK's IoMarkIrpPending, call the CDeviceObject::StartPacket method, and then return STATUS_PENDING. If the device is not busy, either CDeviceObject::OnStartReadIo or CDeviceObject::OnStartWriteIo will be called in CDeviceObject to complete the IRP by calling IoCompleteRequest and returning STATUS_SUCCESS. CDeviceObject also provides the basic support required to cancel IRPs.</P>
+<P>CDeviceObject provides default handlers for various callbacks from two more classes in our framework, CInterruptObject and CDpcObject. CInterruptObject will generate, by default, a callback for every interrupt to the CDeviceObject::OnInterrupt method. If a CDeviceObject is connected to some hardware that generates interrupts, it should override this method and provide the appropriate implementation. It could use the default deferred procedure call (DPC) facility provided with the DEVICE_OBJECT; the CDpcObject generates callbacks to the CDeviceObject::OnDpc method for every DPC that it receives. You should override this method and provide the appropriate implementation. The other two possible callbacks come from the CInterruptObject. These callbacks, for synchronizing execution for read or write I/O, are CDeviceObject::OnSychronizeExecutionForRead and CDeviceObject::OnSychronizeExecutionForWrite. They are called when a driver calls the methods CInterruptObject::SychronizeExecutionForRead or CInterruptObject::SychronizeExecutionForWrite and provide exclusion from the interrupt handler for accessing shared data structures or hardware.</P>
+<P>The CDeviceObject supports finding and claiming hardware resources via the PciFindDevice, AssignSlotResources, IoAssignResources, and ReportResourcesUsage member functions (see <B>Figure 3</B>). Presently, it finds hardware on a PCI bus only, but it would not be difficult to add support for other busses.</P>
+<P><B> Figure 3  CDeviceObject</B></P>
+<P>device.h</P>
+<P><BR></P>
+<PRE> ////////////////////////////////////////////////////////////////////////////////
+// Module Name:    device.h
+// Abstract:        CDeviceObject Interface
+// Environment:    Windows NT 3.51/4.0, MS Visual C++ 4.x
+////////////////////////////////////////////////////////////////////////////////
+
+#ifndef device_h
+#define device_h 
+
+#include "debug.h"
+
+// forward declarations
+class CDriverObject;
+
+// CDeviceObject encapsulates the NTDDK DEVICE_OBJECT structure.
+class CDeviceObject 
+{
+public:
+    // ctor/dtor
+    CDeviceObject( IN CDriverObject* DriverObject = NULL );
+    virtual ~CDeviceObject();
+
+    // This operator new must return NULL.
+    PVOID operator new( size_t size );
+
+    // Calls IoCreateDevice() passing pointer to stack PDEVICE_OBJECT and size
+    // as DeviceExtensionSize. Upon return from IoCreateDevice(),
+    // m_DeviceObject data member will be set by casting
+    // pDeviceObject-&gt;DeviceExtension to CDeviceObject.
+    PVOID operator new(
+        IN size_t size, 
+        IN PDRIVER_OBJECT DriverObject, 
+        IN PUNICODE_STRING DeviceName, 
+        IN PUNICODE_STRING Win32DeviceName, 
+        IN DEVICE_TYPE DeviceType, 
+        IN ULONG DeviceCharacteristics, 
+        IN BOOLEAN Exclusive, 
+        OUT NTSTATUS&amp; status );
+
+    // Should do nothing, since the IOManager will call IoDeleteDevice() when
+    // a driver is unloaded.
+    VOID operator delete( IN PVOID p, IN size_t size );
+
+    // Cast operator for PDEVICE_OBJECT.
+    operator PDEVICE_OBJECT();
+
+    // called from CDriverObject::Initialize. This call is made from the
+    // DriverEntry routine running at IRQL_PASSIVE_LEVEL.
+    // IMPORTANT:
+    //        This routine MUST create the CInterruptObject and CDpcObject
+    //        objects contained by value by derived CDeviceObject class to setup
+    //        callbacks to OnInterrupt() and OnDpc(), respectively.
+    NTSTATUS Initialize( IN PUNICODE_STRING RegistryPath );
+
+    // Nonvirtual called by CDriverDevice::Unload() when the driver is
+    // unloading in order to perform cleanup.
+    VOID Unload( VOID );
+
+    CDriverObject* GetDriver( VOID );
+
+    // called by CInterruptObject::SynchronizeExecutionForXXX() to
+    // synchronize device I/O programming.
+    virtual BOOLEAN OnSynchronizeExecutionForRead( VOID );
+    virtual BOOLEAN OnSynchronizeExecutionForWrite( VOID );
+
+    // called by CInterruptObject::OnInterrupt()
+    virtual BOOLEAN OnInterrupt( VOID );
+
+    // called from CDpcObject::Dpc()
+    virtual VOID OnDpc( IN PIRP Irp, IN PVOID Context );
+
+    // overridable IO handlers
+    virtual VOID OnStartIo( IN PIRP Irp );
+    virtual VOID OnStartReadIo( IN PIRP Irp );
+    virtual VOID OnStartWriteIo( IN PIRP Irp );
+
+    // overridable dispatch handlers
+    virtual NTSTATUS OnIrpMjCleanup( IN PIRP Irp );
+    virtual NTSTATUS OnIrpMjClose( IN PIRP Irp );
+    virtual NTSTATUS OnIrpMjCreate( IN PIRP Irp );
+    virtual NTSTATUS OnIrpMjDeviceControl( IN PIRP Irp );
+    virtual NTSTATUS OnIrpMjInternalDeviceControl( IN PIRP Irp );
+    virtual NTSTATUS OnIrpMjFlushBuffers( IN PIRP Irp );
+    virtual NTSTATUS OnIrpMjQueryInformation( IN PIRP Irp );
+    virtual NTSTATUS OnIrpMjRead( IN PIRP Irp );
+    virtual NTSTATUS OnIrpMjSetInformation( IN PIRP Irp );
+    virtual NTSTATUS OnIrpMjShutdown( IN PIRP Irp );
+    virtual NTSTATUS OnIrpMjWrite( IN PIRP Irp );
+
+    virtual VOID GetDeviceDescription( OUT PDEVICE_DESCRIPTION DeviceDescription );
+
+protected:
+    // called from Unload() member.
+    virtual VOID OnUnload( VOID );
+
+    // called by CDeviceObject::Initialize(), which is called from
+    // CDriverObject::Initialize() during driver initialization.
+    // IMPORTANT:
+    //        A class derived from CDeviceObject MUST call
+    //        CInterruptObject::Initialize() for its CInterruptObject member,
+    //        if it exists.
+    virtual NTSTATUS OnInitialize( IN PUNICODE_STRING RegistryPath );
+
+    // called by Cancel().
+    virtual VOID OnCancel( IN PIRP Irp );
+
+    // calls IoStartPacket() with itself as the target device object.
+    VOID StartPacket( IN PIRP Irp, IN PULONG Key = NULL, 
+                      IN BOOLEAN bCancellable = TRUE );
+
+    // calls IoInitializeTimer(). A driver's IoTimer routine is called once per
+    // second after the driver enables the timer by calling IoStartTimer. The
+    // driver can disable the timer by calling StopTimer and can re-enable it
+    // again with StartTimer. Callers of IoInitializeTimer must be running at
+    // IRQL PASSIVE_LEVEL. Should be called by derived class object in its
+    // OnInitialize() routine.
+    NTSTATUS InitializeTimer( IN PIO_TIMER_ROUTINE TimerRoutine, 
+                              IN PVOID Context );
+
+    // Calls IoRaiseHardError().
+    VOID RaiseHardError( IN PIRP Irp, IN PVPB Vpb );
+
+    // Calls IoRequestDpc().
+    VOID RequestDpc( IN PIRP Irp, IN PVOID Context );
+
+    // Calls IoStartNextPacket().
+    VOID StartNextPacket( IN BOOLEAN bCancellable = TRUE );
+
+    // Calls IoStartNextPacketByKey().
+    VOID StartNextPacket( IN BOOLEAN bCancellable, ULONG Key );
+
+    // Calls IoStartTimer().
+    VOID StartTimer( VOID );
+
+    // Calls IoStopTimer().
+    VOID StopTimer( VOID );
+
+    // Calls IoUnregisterShutdownNotification().
+    VOID UnregisterShutdownNotification( VOID );
+
+    // Calls IoRegisterShutdownNotification().
+    NTSTATUS RegisterShutdownNotification( VOID );
+
+    // Calls IoCancelIrp(). IoCancelIrp() is bracketed by
+    // IoAquireCancelSpinLock() and IoReleaseCancelSpinLock().
+    BOOLEAN CancelIrp( IN PIRP Irp );
+
+    BOOLEAN PciFindDevice(
+        IN USHORT VendorId, 
+        IN USHORT DeviceId, 
+        OUT PULONG BusNumber, 
+        OUT PPCI_SLOT_NUMBER PciSlotNumber, 
+        OUT PPCI_COMMON_CONFIG PciCommonConfig );
+
+    // Calls HalAssignSlotResources()
+    NTSTATUS AssignSlotResources(
+        IN PUNICODE_STRING RegistryPath, 
+        IN PUNICODE_STRING DriverClassName, 
+        IN INTERFACE_TYPE BusType,  
+        IN ULONG BusNumber, 
+        IN ULONG SlotNumber, 
+        OUT PCM_RESOURCE_LIST* AllocatedResources );
+
+    // Calls IoAssignResources().
+    NTSTATUS AssignResources(
+        IN PUNICODE_STRING RegistryPath, 
+        IN PUNICODE_STRING DriverClassName, 
+        IN PIO_RESOURCE_REQUIREMENTS_LIST RequestedResources, 
+        OUT PCM_RESOURCE_LIST* AllocatedResources );
+
+    NTSTATUS ReportResourceUsage(
+        IN PUNICODE_STRING DriverClassName,
+        IN PCM_RESOURCE_LIST DeviceList,
+        IN ULONG DeviceListSize,
+        IN BOOLEAN bOverRideConflict,
+        OUT PBOOLEAN bConflictDetected );
+
+private:
+    // cancel routine.
+    static VOID Cancel( IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp );
+
+protected:
+    // members
+    PDEVICE_OBJECT m_DeviceObject;
+    CDriverObject* m_DriverObject;
+    UNICODE_STRING m_Win32DeviceName;
+    UNICODE_STRING m_RegistryPath;
+};
+
+////////////////////////////////////////////////////////////////////////////////
+// inlines
+//
+inline CDriverObject* CDeviceObject::GetDriver( void )
+{
+    return m_DriverObject;
+}
+
+inline NTSTATUS CDeviceObject::InitializeTimer( PIO_TIMER_ROUTINE TimerRoutine,
+                                                PVOID Context )
+{
+    return IoInitializeTimer( *this, TimerRoutine, Context );
+}
+
+inline VOID CDeviceObject::StartTimer( void )
+{
+    IoStartTimer( m_DeviceObject );
+    return;
+}
+
+inline VOID CDeviceObject::StopTimer( void )
+{
+    IoStopTimer( m_DeviceObject );
+    return;
+}
+
+inline VOID CDeviceObject::RaiseHardError( PIRP Irp, PVPB Vpb )
+{
+    IoRaiseHardError( Irp, Vpb, m_DeviceObject );
+    return;
+}
+
+inline VOID CDeviceObject::StartPacket(
+    PIRP Irp,
+    PULONG Key /* = NULL */,
+    BOOLEAN bCancellable /* = TRUE*/ )
+{
+    ASSERT_IRQL_LE( DISPATCH_LEVEL );
+    IoStartPacket( m_DeviceObject, Irp, Key, bCancellable ? Cancel : NULL );
+    return;
+}
+
+inline VOID CDeviceObject::StartNextPacket( BOOLEAN bCancellable /* = TRUE */ )
+{
+    IoStartNextPacket( m_DeviceObject, bCancellable );
+    return;
+}
+
+inline VOID CDeviceObject::StartNextPacket( BOOLEAN bCancellable, ULONG Key )
+{
+    IoStartNextPacketByKey( m_DeviceObject, bCancellable, Key );
+    return;
+}
+
+inline NTSTATUS CDeviceObject::RegisterShutdownNotification( void )
+{
+    return IoRegisterShutdownNotification( m_DeviceObject );
+}
+
+inline VOID CDeviceObject::UnregisterShutdownNotification( void )
+{
+    IoUnregisterShutdownNotification( m_DeviceObject );
+    return;
+}
+
+inline VOID CDeviceObject::GetDeviceDescription( OUT PDEVICE_DESCRIPTION DeviceDescription )
+{
+    RtlZeroMemory( DeviceDescription, sizeof DEVICE_DESCRIPTION );
+    return;
+}
+
+inline VOID CDeviceObject::RequestDpc( PIRP Irp, PVOID Context )
+{
+    IoRequestDpc( m_DeviceObject, Irp, Context );
+    return;
+}
+
+#endif device_h
+</PRE>
+<P>device.cpp</P>
+<P><BR></P>
+<PRE> ////////////////////////////////////////////////////////////////////////////////
+// Module Name:        device.cpp
+// Abstract:            CDeviceObject Implementation
+// Environment:        Windows NT 3.51/4.0, MS Visual C++ 4.x
+////////////////////////////////////////////////////////////////////////////////
+
+// disable some warnings
+#pragma warning( disable: 4699 )    // Note: Creating precompiled header
+#pragma warning( disable: 4201 )    // nameless struct/union
+#pragma warning( disable: 4514 )    // unreferenced inline function 
+                                    // has been removed
+#pragma warning( disable: 4355 )    // 'this' : used in base member 
+                                    // initializer list
+#pragma warning( disable: 4705 )    // Statement has no effect
+#pragma warning( disable: 4711 )    // function 'function' selected for
+                                    // automatic inline expansion
+
+#include &lt;idrivrpp.h&gt;
+#include "driver.h"
+#include "device.h"
+
+////////////////////////////////////////////////////////////////////////////////
+// ctor/dtor
+//
+CDeviceObject::CDeviceObject( IN CDriverObject* DriverObject /* = NULL */ )
+    :    m_DriverObject( DriverObject )
+{
+    // initialize structures (do not initialize m_Win32Device - 
+    // it is done in new)
+    m_RegistryPath.Buffer = NULL;
+    m_RegistryPath.Length = 0;
+    m_RegistryPath.MaximumLength = 0;
+}
+
+CDeviceObject::~CDeviceObject()
+{
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// storage management
+//
+PVOID CDeviceObject::operator new( size_t /*size*/ )
+{
+    return NULL;
+}
+
+PVOID CDeviceObject::operator new(
+    IN size_t size, 
+    IN PDRIVER_OBJECT DriverObject, 
+    IN PUNICODE_STRING DeviceName, 
+    IN PUNICODE_STRING Win32DeviceName, 
+    IN DEVICE_TYPE DeviceType, 
+    IN ULONG DeviceCharacteristics, 
+    IN BOOLEAN Exclusive, 
+    OUT NTSTATUS&amp; status )
+{
+    ASSERT( NULL != DriverObject );
+    ASSERT( NULL != DeviceName );
+    ASSERT( NULL != Win32DeviceName );
+
+    PDEVICE_OBJECT DeviceObject = NULL;
+     CDeviceObject* pThis = NULL;
+
+    // create the device, allocating space for this object
+    if( STATUS_SUCCESS ==
+        (status = IoCreateDevice(
+            DriverObject, 
+            size, 
+            DeviceName, 
+            DeviceType, 
+            DeviceCharacteristics, 
+            Exclusive, 
+            &amp;DeviceObject )) )
+    {
+        ASSERT( NULL != DeviceObject );
+        pThis = (CDeviceObject*) DeviceObject-&gt;DeviceExtension;
+
+        // The device extension area will be this object's image.
+        // Set up the data member pointing to the DEVICE_OBJECT allocated
+        // by the IOManager.
+        ASSERT( NULL != pThis );
+        pThis-&gt;m_DeviceObject = DeviceObject;
+
+        // @@@ do we need to force the client to create this symbolic link?
+        if( STATUS_SUCCESS == (status = IoCreateSymbolicLink
+                                          ( Win32DeviceName, DeviceName )) )
+        {
+            // allocate space for m_Win32DeviceName
+            // @@@ can we use CUnicodeString here
+            pThis-&gt;m_Win32DeviceName.Buffer = 
+                PWSTR( new( PagedPool ) char[ Win32DeviceName-&gt;MaximumLength ] );
+            if( NULL != pThis-&gt;m_Win32DeviceName.Buffer )
+            {
+                // set maximum length to allocated length
+                pThis-&gt;m_Win32DeviceName.MaximumLength = 
+                    Win32DeviceName-&gt;MaximumLength;
+
+                // copy the string
+                RtlCopyUnicodeString( &amp;pThis-&gt;m_Win32DeviceName, 
+                                      Win32DeviceName );
+            }
+            else
+            {
+                TRACE( "CDeviceObject::operator new - Failed to allocate "
+                       "space for m_Win32DeviceName!" );
+                // cleanup occurs in operator delete()
+            }
+        }
+        else
+        {
+            TRACE( "CDeviceObject::operator new - Failed on call to "
+                   "IoCreateSymbolicLink!" );
+            // cleanup occurs in operator delete()
+        }
+    }
+    else
+    {
+        TRACE( "CDeviceObject::operator new - Failed on call to "
+               "IoCreateDevice, returning NULL!" );
+    }
+
+    return pThis;
+}
+
+VOID CDeviceObject::operator delete( IN PVOID p, IN size_t /*size*/ )
+{
+    ASSERT( NULL != p );
+    CDeviceObject* pDevice = (CDeviceObject*) p;
+
+    // did we assign the device object member
+    if( NULL != pDevice-&gt;m_DeviceObject )
+    {
+        // did we allocate and assign the m_Win32DeviceNmae member
+        if( NULL != pDevice-&gt;m_Win32DeviceName.Buffer )
+        {
+            ASSERT( 0 != pDevice-&gt;m_Win32DeviceName.Length );
+
+            // delete the symbolic link
+            IoDeleteSymbolicLink( &amp;pDevice-&gt;m_Win32DeviceName );
+            delete pDevice-&gt;m_Win32DeviceName.Buffer;
+
+            // reset members
+            pDevice-&gt;m_Win32DeviceName.Buffer = NULL;
+            pDevice-&gt;m_Win32DeviceName.Length = 0;
+            pDevice-&gt;m_Win32DeviceName.MaximumLength = 0;
+        }
+
+        // Free up the DEVICE_OBJECT
+        IoDeleteDevice( pDevice-&gt;m_DeviceObject );
+    }
+
+    return;
+}
+
+CDeviceObject::operator PDEVICE_OBJECT()
+{
+    return m_DeviceObject;
+}
+
+NTSTATUS CDeviceObject::Initialize( PUNICODE_STRING RegistryPath )
+{
+    // allocate space for m_RegistryPath
+    // @@@ can we use CUnicodeString here?
+    // @@@ do we really need to allocate MaximumLength... 
+    // why not Length + 1, also
+    // @@@ aren't MaximumLength and Length in bytes not chars 
+    // (i.e. new(...) char[ size ])
+    m_RegistryPath.Buffer = 
+        new( PagedPool ) WCHAR[ RegistryPath-&gt;MaximumLength ];
+    if( NULL == m_RegistryPath.Buffer )
+    {
+        TRACE( "CDeviceObject::Initialize - Failed to allocate buffer "
+               "for RegistryPath!" );
+        return STATUS_NO_MEMORY;
+    }
+
+    m_RegistryPath.MaximumLength = RegistryPath-&gt;MaximumLength;
+    RtlCopyUnicodeString( &amp;m_RegistryPath, RegistryPath );
+
+    return OnInitialize( RegistryPath );
+}
+
+NTSTATUS CDeviceObject::OnInitialize( PUNICODE_STRING /* RegistryPath */ )
+{
+    return STATUS_SUCCESS;
+}
+
+// This object should not be deleted by CDriverObject until after this call
+VOID CDeviceObject::Unload()
+{
+    OnUnload();
+
+    // did we allocate and assign the m_RegistryPath member
+    if( NULL != m_RegistryPath.Buffer )
+    {
+        // free up the memory for the registry path buffer.
+        delete m_RegistryPath.Buffer;
+
+        // reset members
+        m_RegistryPath.Buffer = NULL;
+        m_RegistryPath.Length = 0;
+        m_RegistryPath.MaximumLength = 0;
+    }
+
+    return;
+}
+
+VOID CDeviceObject::OnUnload( void )
+{
+    return;
+}
+
+BOOLEAN CDeviceObject::OnSynchronizeExecutionForRead( void )
+{
+    return TRUE;
+}
+
+BOOLEAN CDeviceObject::OnSynchronizeExecutionForWrite( void )
+{
+    return TRUE;
+}
+
+VOID CDeviceObject::OnStartIo( IN PIRP Irp )
+{
+    ASSERT_IRQL_EQ( DISPATCH_LEVEL );
+
+    // Complete the request
+    Irp-&gt;IoStatus.Status = STATUS_SUCCESS;
+    Irp-&gt;IoStatus.Information = 0;
+    IoCompleteRequest( Irp, IO_NO_INCREMENT );
+}
+
+VOID CDeviceObject::OnStartReadIo( IN PIRP Irp )
+{
+    ASSERT_IRQL_EQ( DISPATCH_LEVEL );
+
+    PIO_STACK_LOCATION CurrentStackLocation =
+        IoGetCurrentIrpStackLocation( Irp );
+
+    Irp-&gt;IoStatus.Status = STATUS_SUCCESS;
+    Irp-&gt;IoStatus.Information = CurrentStackLocation-&gt;Parameters.Read.Length;
+    // @@@ do we want to set Information to 0 and call IoCompleteRequest
+}
+
+VOID CDeviceObject::OnStartWriteIo( IN PIRP Irp )
+{
+    ASSERT_IRQL_EQ( DISPATCH_LEVEL );
+
+    PIO_STACK_LOCATION CurrentStackLocation = IoGetCurrentIrpStackLocation( Irp );
+
+    Irp-&gt;IoStatus.Status = STATUS_SUCCESS;
+    Irp-&gt;IoStatus.Information = CurrentStackLocation-&gt;Parameters.Write.Length;
+    // @@@ do we want to set Information to 0 and call IoCompleteRequest
+}
+
+NTSTATUS CDeviceObject::OnIrpMjCleanup( IN PIRP Irp )
+{
+    // Complete the request
+    Irp-&gt;IoStatus.Status = STATUS_SUCCESS;
+    Irp-&gt;IoStatus.Information = 0;
+    IoCompleteRequest( Irp, IO_NO_INCREMENT );
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CDeviceObject::OnIrpMjClose( IN PIRP Irp )
+{
+    // Complete the request
+    Irp-&gt;IoStatus.Status = STATUS_SUCCESS;
+    Irp-&gt;IoStatus.Information = 0;
+    IoCompleteRequest( Irp, IO_NO_INCREMENT );
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CDeviceObject::OnIrpMjCreate( IN PIRP Irp )
+{
+    // Complete the request
+    Irp-&gt;IoStatus.Status = STATUS_SUCCESS;
+    Irp-&gt;IoStatus.Information = 0;
+    IoCompleteRequest( Irp, IO_NO_INCREMENT );
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CDeviceObject::OnIrpMjDeviceControl( IN PIRP Irp )
+{
+    // Complete the request
+    Irp-&gt;IoStatus.Status = STATUS_SUCCESS;
+    Irp-&gt;IoStatus.Information = 0;
+    IoCompleteRequest( Irp, IO_NO_INCREMENT );
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CDeviceObject::OnIrpMjInternalDeviceControl( IN PIRP Irp )
+{
+    // Complete the request
+    Irp-&gt;IoStatus.Status = STATUS_SUCCESS;
+    Irp-&gt;IoStatus.Information = 0;
+    IoCompleteRequest( Irp, IO_NO_INCREMENT );
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CDeviceObject::OnIrpMjFlushBuffers( IN PIRP Irp )
+{
+    // Complete the request
+    Irp-&gt;IoStatus.Status = STATUS_SUCCESS;
+    Irp-&gt;IoStatus.Information = 0;
+    IoCompleteRequest( Irp, IO_NO_INCREMENT );
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CDeviceObject::OnIrpMjQueryInformation( IN PIRP Irp )
+{
+    // Complete the request
+    Irp-&gt;IoStatus.Status = STATUS_SUCCESS;
+    Irp-&gt;IoStatus.Information = 0;
+    IoCompleteRequest( Irp, IO_NO_INCREMENT );
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CDeviceObject::OnIrpMjRead( IN PIRP Irp )
+{
+    // Mark the request pending
+    IoMarkIrpPending( Irp );
+    StartPacket( Irp, NULL );
+
+    return STATUS_PENDING;
+}
+
+NTSTATUS CDeviceObject::OnIrpMjSetInformation( IN PIRP Irp )
+{
+    // Complete the request
+    Irp-&gt;IoStatus.Status = STATUS_SUCCESS;
+    Irp-&gt;IoStatus.Information = 0;
+    IoCompleteRequest( Irp, IO_NO_INCREMENT );
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CDeviceObject::OnIrpMjShutdown( IN PIRP Irp )
+{
+    // Complete the request
+    Irp-&gt;IoStatus.Status = STATUS_SUCCESS;
+    Irp-&gt;IoStatus.Information = 0;
+    IoCompleteRequest( Irp, IO_NO_INCREMENT );
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CDeviceObject::OnIrpMjWrite( IN PIRP Irp )
+{
+    // Mark the request pending
+    IoMarkIrpPending( Irp );
+    StartPacket( Irp, NULL );
+
+    return STATUS_PENDING;
+}
+
+BOOLEAN CDeviceObject::OnInterrupt( VOID )
+{
+    return FALSE;
+}
+
+VOID CDeviceObject::OnDpc( IN PIRP /* Irp */, IN PVOID /* Context */ )
+{
+    return;
+}
+
+BOOLEAN CDeviceObject::CancelIrp( IN PIRP Irp )
+{
+    KIRQL Irql;
+    IoAcquireCancelSpinLock( &amp;Irql );
+
+    BOOLEAN bResult = IoCancelIrp( Irp );
+
+    IoReleaseCancelSpinLock( Irql );
+
+    return bResult;
+}
+
+VOID CDeviceObject::Cancel( IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp )
+{
+    CDeviceObject* pDevice = (CDeviceObject*) DeviceObject-&gt;DeviceExtension;
+    ASSERT( NULL != pDevice );
+
+    pDevice-&gt;OnCancel( Irp );
+    return;
+}
+
+VOID CDeviceObject::OnCancel( IN PIRP Irp )
+{
+    Irp-&gt;IoStatus.Status = STATUS_CANCELLED;
+    Irp-&gt;IoStatus.Information = 0;
+    IoCompleteRequest( Irp, IO_NO_INCREMENT );
+    return;
+}
+
+BOOLEAN CDeviceObject::PciFindDevice(
+    IN USHORT VendorId, 
+    IN USHORT DeviceId, 
+    OUT PULONG BusNumber, 
+    OUT PPCI_SLOT_NUMBER PciSlotNumber, 
+    OUT PPCI_COMMON_CONFIG PciCommonConfig )
+{
+    // initialize parameters
+    *BusNumber = 0;
+    PciSlotNumber-&gt;u.AsULONG = 0;
+
+    BOOLEAN bFound = FALSE;
+    while( FALSE == bFound )
+    {
+        // get bus data
+        ULONG ulReturn = HalGetBusData( 
+            PCIConfiguration, 
+            *BusNumber, 
+            PciSlotNumber-&gt;u.AsULONG, 
+            PciCommonConfig, 
+            sizeof PCI_COMMON_CONFIG );
+        
+        // pci bus does not exist (assume that these start at 
+        // 0 and go up with no gaps)
+        if( 0 == ulReturn )
+        {
+            break;
+        }
+        else if( sizeof PCI_COMMON_CONFIG == ulReturn )
+        {
+            // found a card... see if it is ours
+            if( VendorId == PciCommonConfig-&gt;VendorID &amp;&amp; 
+                DeviceId == PciCommonConfig-&gt;DeviceID )
+            {
+                // found our card... get its information
+                bFound = TRUE;
+                break;
+            }
+        }
+        
+        //@@@ it appears that only the DeviceNumber of the SlotNumber is used... 
+        //@@@ maybe if you have two or more of the same card it is used
+        //@@@ if it is never used or if it should be stepped first we could
+        //@@@ simplify the code 
+        
+        // step our BusNumber and/or SlotNumber
+        if( 31 == PciSlotNumber-&gt;u.bits.DeviceNumber &amp;&amp; 
+             7 == PciSlotNumber-&gt;u.bits.FunctionNumber )
+        {
+            // try the next bus
+            *BusNumber++;
+            PciSlotNumber-&gt;u.AsULONG = 0;
+        }
+        else if( 7 == PciSlotNumber-&gt;u.bits.FunctionNumber )
+        {
+            // try the next device number
+            PciSlotNumber-&gt;u.bits.DeviceNumber++;
+            PciSlotNumber-&gt;u.bits.FunctionNumber = 0;
+        }
+        else
+        {
+            // try the next function number
+            PciSlotNumber-&gt;u.bits.FunctionNumber++;
+        }
+    }
+
+    #ifdef _DEBUG
+    //@@@ did we find a device, validate its size
+    if( bFound )
+    {
+        ASSERT( sizeof( PCI_COMMON_CONFIG ) ==
+            HalSetBusData(
+                PCIConfiguration,
+                *BusNumber,
+                PciSlotNumber-&gt;u.AsULONG,
+                PciCommonConfig,
+                sizeof PCI_COMMON_CONFIG ) );
+    }
+    #endif
+    
+    return bFound;
+}
+
+NTSTATUS CDeviceObject::AssignSlotResources(
+    IN PUNICODE_STRING RegistryPath, 
+    IN PUNICODE_STRING DriverClassName, 
+    IN INTERFACE_TYPE BusType,  
+    IN ULONG BusNumber, 
+    IN ULONG SlotNumber, 
+    OUT PCM_RESOURCE_LIST* AllocatedResources )
+{
+    // If this CDeviceObject is an exclusive device object for this driver,
+    // NULL should be passed as the DeviceObject argument to
+    // HalAssignSlotResources(), so that device-specific registry
+    // management is not required. If this is not an exclusive 
+    // CDeviceObject object, then it is necessary to create and update the
+    // registry path passed to the DriverEntry routine in order
+    // to maintain device-specific resource data for each set of
+    // resources claimed under the driver-
+    // specific path contained in the DriverEntry's RegistryPath.
+    return HalAssignSlotResources( 
+        RegistryPath, 
+        DriverClassName,
+        (PDRIVER_OBJECT) *m_DriverObject,
+        m_DeviceObject,
+        BusType,
+        BusNumber,
+        SlotNumber,
+        AllocatedResources );
+}
+
+NTSTATUS CDeviceObject::AssignResources(
+    IN PUNICODE_STRING RegistryPath, 
+    IN PUNICODE_STRING DriverClassName, 
+    IN PIO_RESOURCE_REQUIREMENTS_LIST RequestedResources, 
+    OUT PCM_RESOURCE_LIST* AllocatedResources )
+{
+    return IoAssignResources( 
+        RegistryPath, 
+        DriverClassName,
+        (PDRIVER_OBJECT) *m_DriverObject,
+        m_DeviceObject,
+        RequestedResources,
+        AllocatedResources );
+}
+
+NTSTATUS CDeviceObject::ReportResourceUsage(
+    IN PUNICODE_STRING DriverClassName,
+    IN PCM_RESOURCE_LIST DeviceList,
+    IN ULONG DeviceListSize,
+    IN BOOLEAN bOverRideConflict,
+    OUT PBOOLEAN bConflictDetected )
+{
+    return IoReportResourceUsage(
+        DriverClassName,
+        (PDRIVER_OBJECT) *m_DriverObject,
+        NULL,
+        0,
+        m_DeviceObject,
+        DeviceList,
+        DeviceListSize,
+        bOverRideConflict,
+        bConflictDetected );
+}</PRE>
+<P></P>
+<P> </P>
+<H2><A NAME="sec1"></A>  A Typical CDeviceObject</H2><P>Although only CDriverObject and CDeviceObject are required in this framework, typically several other objects are used in association with a CDeviceObject. These objects include CInterruptObject, CDpcObject, CSpinLock, CCustomDpcObject, CDeviceQueue, CAdapterObject, CRegistryKey, and CUnicodeString (see <B>Figure 4</B>). If a device handles hardware interrupts, it could use CInterruptObject, CDpcObject, and CSpinLock. If a device handles overlapped I/O (simultaneous reads and writes), it could use CCustomDpcObject and CDeviceQueue as well. If a device performs DMA operations, it could use CAdapterObject. Many devices will need to access the registry or perform system calls that require Unicode strings through CRegistryKey and CUnicodeString. </P>
+<P><B> Figure 4  Commonly Used Framework Classes</B></P>
+<P> </P>
+
+<TABLE COLS="3" BORDER="0"><COLGROUP><COL WIDTH="113pt" VALIGN="TOP"><COL WIDTH="108pt" VALIGN="TOP"><COL WIDTH="221pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P><B> C++ Class</B></P></TD><TD VALIGN="TOP"><P><B>Cardinality </B></P></TD><TD VALIGN="TOP"><P><B>Associated DDK Data Structures</B></P></TD></TR><TR><TD VALIGN="TOP"><P> CDpcObject </P></TD><TD VALIGN="TOP"><P>0–1</P></TD><TD VALIGN="TOP"><P>None—simply registers DPC routine and gets CDeviceObject pointer from DeviceExtension of PDEVICE_OBJECT argument passed into DPC routine and invokes its OnDpc member function</P></TD></TR><TR><TD VALIGN="TOP"><P> CSpinLock</P></TD><TD VALIGN="TOP"><P>0..<I>n</I></P></TD><TD VALIGN="TOP"><P>KSPIN_LOCK, KIRQL</P></TD></TR><TR><TD VALIGN="TOP"><P> CRegistryKey</P></TD><TD VALIGN="TOP"><P>0..<I>n</I> </P></TD><TD VALIGN="TOP"><P>HANDLE, PUNICODE_STRING</P></TD></TR><TR><TD VALIGN="TOP"><P> CUnicodeString</P></TD><TD VALIGN="TOP"><P>0..<I>n</I></P></TD><TD VALIGN="TOP"><P>UNICODE_STRING</P></TD></TR><TR><TD VALIGN="TOP"><P> CInterruptObject</P></TD><TD VALIGN="TOP"><P>0–1</P></TD><TD VALIGN="TOP"><P>KINTERRUPT</P></TD></TR><TR><TD VALIGN="TOP"><P> CAdapterObject</P></TD><TD VALIGN="TOP"><P>0..<I>n</I> </P></TD><TD VALIGN="TOP"><P>ADAPTER_OBJECT</P></TD></TR><TR><TD VALIGN="TOP"><P> CCustomDpcObject</P></TD><TD VALIGN="TOP"><P>0..<I>n</I> </P></TD><TD VALIGN="TOP"><P>KDPC</P></TD></TR><TR><TD VALIGN="TOP"><P> CDeviceQueue</P></TD><TD VALIGN="TOP"><P>0..<I>n</I></P></TD><TD VALIGN="TOP"><P>KDEVICE_QUEUE</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P></P>
+<P>Let's look at CInterruptObject first. CInterruptObject encapsulates and simplifies the handling of a hardware interrupt object (KINTERRUPT). A CInterruptObject is normally contained within a CDeviceObject. As such, its constructor can bind it to a specific CDeviceObject. CInterruptObject assigns the static CInterruptObject::Isr  routine as the ISR handler in a call to the DDK's IoConnectInterrupt. When it receives an interrupt callback in its Isr method, CInterruptObject calls the CDeviceObect::OnInterrupt method to handle the interrupt, but you can override the CInterruptObject::OnInterrupt method to do something else.</P>
+<P>CInterruptObject's SynchronizeExecutionForRead and SynchronizeExecutionForWrite methods provide synchronized read and write operations to access data or hardware referenced in an interrupt handler. These methods are often called from within CDeviceObject::StartIO. CInterruptObject::SynchronizeExecutionForRead and CInterruptObject::SynchronizeExecutionForWrite simply call the KeSynchronizeExecution routine, passing pointers to CInterruptObject's static methods, SynchronizeRoutineForRead and SynchronizeRoutineForWrite, as the synchronization routines. The SynchronizeRoutineForRead and SynchronizeRoutineForWrite methods then invoke CDeviceObject's SychronizeExecutionForRead and SynchronizeExecutionForWrite, which in turn invoke CDeviceObject::OnSynchronizeExecutionForRead and CDeviceObject::OnSynchronizeExecutionForWrite. CInterruptObject also provides a generic SynchronizeExecution method so you can create your own synchronization callback routine for I/O operations other than read and write or in a context other than CDeviceObject.</P>
+<P>CInterruptObject::Initialize must be called at an IRQL less than or equal to PASSIVE_LEVEL. Our class library obtains the interrupt vector, IRQL, and processor affinity for the requested interrupt via a call to the DDK's HalGetInterruptVector. After successfully obtaining the interrupt information, the method will call CInterruptObject::OnInitialize to give you a chance to perform some additional initialization. </P>
+<P>CInterruptObject::Connect calls the DDK's IoConnectInterrupt to hook the interrupt and assign the member m_InterruptObject to the KINTERRUPT returned by the call. CInterruptObject::Disconnect must be called no later than during CDeviceObject::OnUnload, resulting in a call to the DDK's IoDisconnectInterrupt routine to unhook the interrupt. It also resets the m_InterruptObject member to NULL. Both of these methods must be called at an IRQL less than or equal to PASSIVE_LEVEL.</P>
+<P>CDpcObject encapsulates the functionality of the DpcForIsr that is a part of a DEVICE_OBJECT. A DPC is used to complete the work of an interrupt handler. To use CDpcObject for this purpose, you need to initialize it by calling CDpcObject::InitializeDpcRequest with a pointer to the CDeviceObject to call back from the DPC routine. CDpcObject::InitalizeDpcRequest calls the IoInitializeDpcRequest routine, passing CDpcObject::Dpc as the DPC routine. When the CDeviceObject object that set up the CDpcObject calls CDeviceObject::RequestDpc, eventually the CDpcObject::Dpc method is called at an IRQL of DISPATCH_LEVEL. CDpcObject::Dpc calls the owning CDeviceObject's OnDpc method, passing the IRP and Context arguments passed in to it.</P>
+<P>CCustomDpcObject encapsulates the functionality and behavior of a custom DPC. Since a DEVICE_OBJECT can be associated with only one DpcForIsr, it is frequently necessary to create custom DPC objects instead of or in addition to the DpcForIsr. A CDeviceObject need not instantiate a CDpcObject at all. Instead, it may instantiate one or more CCustomDpcObject objects, one for each I/O operation that can overlap another I/O operation. A driver may, for example, support overlapping reads and writes. To initialize a CCustomDpcObject, call CCustomDpcObject::InitializeDpcRequest, passing in a DPC routine and a DeferredContext. The DPC routine conforms to a certain calling convention, so it must be either a C-style function or a static member of a class. The DeferredContext is passed to the DPC routine when it is executed to provide the necessary state to carry out the DPC. You can queue a custom DPC request by calling CCustomDpcObject::InsertQueue with up to two arguments. Again, these arguments are passed to the DPC routine. </P>
+<P>There are at least two strategies you can employ in using the CCustomDpcObject. You can create static methods in a class (usually a CDeviceObject-derived class) that serve as callback methods, and pass the class "this" pointer as the DeferredContext. You can also derive a class based on CCustomDpcObject that contains a callback method, and register another object with this class to carry out the actual callbacks (such as a CDeviceObject). Either method provides similar capabilities.</P>
+<P>CAdapterObject encapsulates the functionality of an ADAPTER_OBJECT used for allocating common DMA buffers. The kernel-mode drivers that we initially intended this framework for did not use the system DMA controller, so our CAdapterObject is simplified. You could derive a CDmaAdapterObject class from CAdapterObject or enhance CAdapterObject to support use of the system DMA controller.</P>
+<P>One of two overloaded CAdapterObject::Initialize methods should be called from CDeviceObject::OnInitialize at initialization time. Which one depends on whether the driver wants to allocate a common buffer at startup or later. In either case, the caller needs to supply a PDEVICE_DESRIPTION parameter. This can be obtained, assuming it has been overridden, by calling CDeviceObject::GetDeviceDescription. The driver will need to allocate and initialize a separate CAdapterObject for each common buffer it needs. The actual allocation of the common buffer supports an arbitrary alignment (at the expense of memory).</P>
+<P>CDeviceQueue encapsulates and enhances the functionality provided by a KDEVICE_QUEUE object. CDeviceQueueEntry is a helper class derived from the DDK's _KDEVICE_QUEUE_ENTRY structure. The two objects together give you the ability to add additional device queues beyond the one provided with a DEVICE_OBJECT. This is useful when a driver can support overlapped I/O. CDeviceQueue provides one set of methods that takes CDeviceQueueEntry pointers as a parameter and another set that takes void pointers as a parameter. </P>
+<P>To insert a piece of data into a CDeviceQueue, wrap the data up into a CDeviceQueueEntry and then call CDeviceQueue::Insert. You can also call CDeviceQueue::InsertData, which does the wrapping automatically. To remove a piece of data from a CDeviceQueue, call CDeviceQueue::Remove and then pull the data out of the returned CDeviceQueueEntry. CDeviceQueue::RemoveData does the unwrapping automatically. The Insert, InsertData, Remove, and RemoveData methods are overloaded to take a SortKey as well. The one exception is removing a specific entry on the queue; you must call CDeviceQueue::RemoveEntry and pass the CDeviceQueueEntry that should be removed.</P>
+<P>CSpinLock encapsulates a KSPIN_LOCK. It protects resources that are shared between DPCs and other portions of a driver (excluding interrupt handlers). A CSpinLock can be acquired by calling either CSpinLock::Acquire or CSpinLock::AcquireAtDpcLevel. The latter is used when acquiring a CSpinLock from within a DPC routine. To release a CSpinLock, call either CSpinLock::Release or CSpinLock::ReleaseFromDpcLevel. Again, the latter is used when releasing a CSpinLock from within a DPC routine. The destructor for a CSpinLock will release it if possible.</P>
+<P>CRegistryKey is used to access the Windows NT registry. You can open a registry key by calling CRegistryKey::Create or get information about a registry key by calling CRegistryKey::Query. To read a registry key's value, call the CRegistryKey::QueryValue method or one of the simpler methods, CRegistryKey::QueryValueULONG or CRegistryKey::QueryValueString. Set key values by calling CRegistryKey::SetValue or one of the simpler methods, CRegistryKey::SetValueULONG or CRegistryKey::SetValueString.</P>
+<P>CUnicodeString encapsulates the UNICODE_STRING object. Windows NT uses Unicode strings to represent all text within the operating system, so you'll have to use Unicode strings on occasion. The CUnicodeString object lets you either own the memory for the buffer or simply point at a buffer allocated from a pool. To initialize a CUnicodeString from a wide character string, call CUnicodeString::Init. To copy a wide character string or a UNICODE_STRING, call CUnicodeString::Copy or use the CUnicodeString::operator =. Append to a CUnicodeString by calling CUnicodeString::Append or using the CUnicodeString::operator +=. To change the pool a string buffer is allocated from, call CUnicodeString::Convert.</P>
+<P> </P>
+<H2><A NAME="sec2"></A>  Miscellaneous Objects</H2><P>There are several additional objects defined in the framework that you can use or that are used internally in the framework itself (see <B>Figure 5</B>). For example, CFile encapsulates a file object and is used to access a file from within a driver. It is simply a wrapper around the Zw<I>Yyy</I> file routines. It exports the following methods: Create, Read, Write, Close, QueryInformation, and SetInformation. </P>
+<P><B> Figure 5  Miscellaneous Framework Objects</B></P>
+<P> </P>
+
+<TABLE COLS="3" BORDER="0"><COLGROUP><COL WIDTH="117pt" VALIGN="TOP"><COL WIDTH="112pt" VALIGN="TOP"><COL WIDTH="212pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P><B> C++ Class</B></P></TD><TD VALIGN="TOP"><P><B>Cardinality</B></P></TD><TD VALIGN="TOP"><P><B>Associated DDK Data Structures</B></P></TD></TR><TR><TD VALIGN="TOP"><P> CFile</P></TD><TD VALIGN="TOP"><P>0..<I>n</I></P></TD><TD VALIGN="TOP"><P>HANDLE</P></TD></TR><TR><TD VALIGN="TOP"><P> CTimeOut</P></TD><TD VALIGN="TOP"><P>0..<I>n</I> </P></TD><TD VALIGN="TOP"><P>None—uses KeQuerySystemTime to implement a passive timer object</P></TD></TR><TR><TD VALIGN="TOP"><P> CObject</P></TD><TD VALIGN="TOP"><P>0(abstract)</P></TD><TD VALIGN="TOP"><P>HANDLE, PVOID pointing to system object body returned by ObReferenceObjectByHandle</P></TD></TR><TR><TD VALIGN="TOP"><P> CNamedObject</P></TD><TD VALIGN="TOP"><P>0(abstract)</P></TD><TD VALIGN="TOP"><P>UNICODE_STRING for object name. CNamedObject is a descendant of CObject  CRegistryKey is an example of an instantiable CNamedObject class type</P></TD></TR><TR><TD VALIGN="TOP"><P> CFileObject</P></TD><TD VALIGN="TOP"><P>0(abstract)</P></TD><TD VALIGN="TOP"><P>None of its own—CFileObject is a descendant of CNamedObject and is really just a more general and less complete implementation of CFile</P></TD></TR><TR><TD VALIGN="TOP"><P> CLargeInteger</P></TD><TD VALIGN="TOP"><P>0..<I>n</I></P></TD><TD VALIGN="TOP"><P>LARGE_INTEGER</P></TD></TR><TR><TD VALIGN="TOP"><P> CThread</P></TD><TD VALIGN="TOP"><P>0..<I>n</I></P></TD><TD VALIGN="TOP"><P>KTHREAD</P></TD></TR><TR><TD VALIGN="TOP"><P> CDList</P></TD><TD VALIGN="TOP"><P>0..<I>n</I></P></TD><TD VALIGN="TOP"><P>PLIST_ENTRY for doubly linked list</P></TD></TR><TR><TD VALIGN="TOP"><P> CUpperDeviceObject </P></TD><TD VALIGN="TOP"><P>0..<I>n</I></P></TD><TD VALIGN="TOP"><P>Two PDEVICE_OBJECTS: one for the object CUpperDeviceObject is attached to, and one that it owns by virtue of the fact that CUpperDeviceObject is derived from CDeviceObject</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P></P>
+<P>The CTimeOut class stores a timeout value passed to it in the constructor. It stores the current system time by calling its member function StartTimer and makes a comparison between the time period that it represents and the elapsed time since calling StartTimer. It does this comparison in response to calling its IsExpired member function.</P>
+<P>CObject encapsulates Win32¨ objects that are accessible from a device driver (such as files or registry keys). It provides support to get an object pointer from an object handle by calling its GetObjectPtr member function. It also supports proper cleanup via a Close method and a destructor that dereferences the object pointer (if necessary). A CNamedObject can be referred to by Unicode string, an example of which is CRegistryKey. It adds the additional methods to set the name, SetName, and get the name, GetName. CFileObject is a named object that represents a file. It adds an additional method to create the file: Create.</P>
+<P>CLargeInteger encapsulates the LARGE_INTEGER object. Large integers are used to represent 64-bit values and are occasionally required by drivers (PHYSICAL_ADDRESS is a 64-bit value, for example). The CLargeInteger class defines a new type based on LARGE_INTEGER. It defines all of the basic addition and relational operators, and two members are references to the fields within the contained LARGE_INTEGER. This allows you to treat a CLargeInteger exactly as you would a LARGE_INTEGER. You might use this when passing a CLargeInteger to macros that expect a LARGE_INTEGER.</P>
+<P>CThread encapsulates a system thread. This is used to perform non-time-critical operations. It can be useful to perform file I/O in kernel mode. To start the thread execution, call Create. When the thread wishes to terminate, it can call the Terminate member function or simply return. The latter is preferable. You can adjust thread's priority by calling the SetBasePriority or SetPriority member functions. To use the CThread class, derive a new class and override the OnStart member function and, optionally, the OnTerminate method. The OnStart method is the thread's entry point. Upon returning from OnStart, OnTerminate is called and the thread is terminated.</P>
+<P>CUpperDeviceObject is a CDeviceObject that provides support for device layering (see <B>Figure 6</B>). It allows the device to attach to a lower-level device either by name or by pointer. By attaching to a lower-level device, a device makes itself a filter of I/O requests. Alternately, an upper-level device can create a lower-level device and then issue I/O requests to the lower-level driver by calling the CallDriver member function.</P>
+<P><B> Figure 6  CUpperDeviceObject</B></P>
+<P><BR></P>
+<PRE> ////////////////////////////////////////////////////////////////////////////////
+// Module Name:    uldevice.h
+// Abstract:        CUpperDeviceObject Interface
+// Environment:    Windows NT 3.51/4.0, MS Visual C++ 4.1
+// Notes:
+//        CDeviceObject which attaches to a lower-level device. The destructor
+//        must call IoDetachDevice() in order to decrement the reference count
+//        for the target device object.
+////////////////////////////////////////////////////////////////////////////////
+
+#ifndef uldevice_h
+#define uldevice_h
+
+#include "device.h"
+
+class CUpperDeviceObject : public CDeviceObject 
+{
+public:
+    CUpperDeviceObject( IN CDriverObject* DriverObject );
+    virtual ~CUpperDeviceObject();
+
+protected:
+    // attachDevice attaches the caller's device object to a named target
+    // device object, so that I/O requests bound for the target device are
+    // routed first to the caller.
+    NTSTATUS AttachDeviceObject( IN PUNICODE_STRING TargetDeviceName );
+    NTSTATUS AttachDeviceObject( IN PDEVICE_OBJECT TargetDeviceObject );
+
+    // detachDeviceObject releases an attachment between the caller's device
+    // object and a lower driver's device object.
+    VOID DetachDeviceObject( VOID );
+
+    // calls IoBuildDeviceIoControlRequest() passing m_AttachedDevice as
+    // target DEVICE_OBJECT.
+    PIRP BuildDeviceIoControlRequest(
+          IN ULONG IoControlCode, 
+          IN PVOID InputBuffer, 
+          IN ULONG InputBufferLength, 
+          IN PVOID OutputBuffer, 
+          IN ULONG OutputBufferLength, 
+          IN BOOLEAN bInternalDeviceIoControl, 
+          IN PKEVENT Event, 
+          OUT PIO_STATUS_BLOCK StatusBlock );
+
+    // IoCallDriver returns the NTSTATUS value that a lower driver set in the
+    // IO status block for the given request or STATUS_PENDING if the request
+    // was queued for additional processing.
+    // Comments:
+    //        IoCallDriver assigns the DeviceObject input parameter to the device
+    //        object field of the IRP stack location for the next lower driver.
+    //        An IRP passed in a call to IoCallDriver becomes inaccessible to the
+    //        higher-level driver, unless the higher-level driver has set up its
+    //        IoCompletion routine for the IRP with IoSetCompletionRoutine. If it
+    //        does, the IRP input to the driver-supplied IoCompletion routine has
+    //        its I/O status block set by the lower driver(s) and all lower-level
+    //        driver(s)' I/O stack locations filled with zeros.
+    NTSTATUS CallDriver( IN PIRP Irp );
+
+    // calls IoSetHardErrorOrVerifyDevice().
+    // Passes m_AttachedDeviceObject as target.
+    VOID SetHardErrorOrVerifyDevice( IN PIRP Irp );
+
+    CCHAR GetAttachedDeviceStackSize( VOID );
+
+private:
+    // lower-level driver device object that is obtained in call to Attach().
+    PDEVICE_OBJECT m_AttachedDeviceObject;
+};
+
+////////////////////////////////////////////////////////////////////////////////
+// inlines
+//
+inline NTSTATUS CUpperDeviceObject::CallDriver( IN PIRP Irp )
+{
+    ASSERT_IRQL_LE( DISPATCH_LEVEL );
+    return IoCallDriver( m_AttachedDeviceObject, Irp );
+}
+
+inline VOID CUpperDeviceObject::SetHardErrorOrVerifyDevice( IN PIRP Irp )
+{
+    ASSERT_IRQL_LE( DISPATCH_LEVEL );
+    IoSetHardErrorOrVerifyDevice( Irp, m_AttachedDeviceObject );
+    return;
+}
+
+inline CCHAR CUpperDeviceObject::GetAttachedDeviceStackSize( void )
+{
+    return (NULL != m_AttachedDeviceObject) ?
+        m_AttachedDeviceObject-&gt;StackSize : 0;
+}
+
+#endif uldevice_h</PRE>
+<P></P>
+<P>CDlist provides support for manipulating doubly linked lists.</P>
+<P> </P>
+<H2><A NAME="sec3"></A>  Startup Code</H2><P>In general, C++ doesn't require any special treatment to operate correctly in the context of a kernel-mode driver. However, C++ global or static objects need to be initialized at startup. Normally, this is done by a variant of the startup code that is shipped with libc.lib, but libc.lib cannot be used in kernel-mode drivers. The C++ compiler generates code to the constructors of these objects, and the startup code calls this code. This startup code is shipped with the Microsoft Visual C++ compilers, so it seems fairly simple to take this code and simply add it to the framework. Well, it almost is. The startup code makes explicit use of some symbols found only in libc.lib. The good new is, these symbols can be found in a single object file, crt0init.obj. To use these symbols, we extracted this module from libc.lib. Global destructors work in a similar manner. The C++ compiler generates atexit calls to register exit callbacks that invoke the destructors, so we had to provide an atexit routine.</P>
+<P>You can override the global new operator to use the DDK's ExAllocatePool. Our framework does this. As a global new cannot be defined with a default parameter, all such allocations must specify the pool from which you will allocate. Of course, since we defined a global new, we also had to define a global delete—it simply calls the DDK's ExFreePool.</P>
+<P>To facilitate good debugging support we added ASSERT and TRACE macro support. We also added a set of ASSERT_IRQL_XX macros that ensure the current IRQL is within an expected range.</P>
+<P><B>Figure 7</B> lists the header files used from within the framework. One of these is the master external include file idrivrpp.h. To build the framework library, use the Build utility that ships with the Microsoft Windows NT DDK.</P>
+<P><B> Figure 7  Header Files</B></P>
+<P><BR></P>
+<PRE> #include "dpc.h"        // CDpcOjbect
+#include "mem.h"        // globlal new and delete
+#include "intrpt.h"     // CInterruptObject
+#include "uldevice.h"   // CUpperDeviceObject
+#include "driver.h"     // CDriverObject
+#include "device.h"     // CDeviceObject
+#include "adapter.h"    // CAdapterObject
+#include "bertdev.h"    // CBertDevice
+#include "dlist.h"      // CDListEntry, CDList
+#include "unicode.h"    // CUnicodeString
+#include "custdpc.h"    // CCustomDpcObject
+#include "linteger.h"   // CLargeInteger
+#include "file.h"       // CFile
+#include "timeout.h"    // CTimeOut
+#include "object.h"     // CObject
+#include "thread.h"     // CThread
+#include "devqueue.h"   // CDeviceQueueEntry, CDeviceQueue
+#include "spinlock.h"   // CSpinLock
+#include "regkey.h"     // CRegistryKey</PRE>
+<P></P>
+<P> </P>
+<H2><A NAME="sec4"></A>  A Sample Driver</H2><P>Our sample driver demonstrates the implementation of the framework (see <B>Figure 8</B>). Full source code is available via the services listed on page 5. We will describe just the key concepts for successfully implementing a device driver. These key concepts include driver initialization, CDeviceObject object creation, synchronized device access, and driver deinitialization. You can review the remaining code for implementation details such as dispatch routine handling.</P>
+<P><B> Figure 8</B></P>
+<P>sampdev.cpp</P>
+<P><BR></P>
+<PRE> //    ******************************************************
+//    *  Module Name:    sampdev.cpp
+//    *  Abstract:    SampleDevice Device object class implementation
+//    *  Environment:
+//    *
+//    *  Notes:
+//    * &lt;Assumptions&gt;
+//    * &lt;Other of interest&gt;
+//    *
+//    ******************************************************
+#pragma warning (disable : 4201 )    // nonstandard extension used :
+                                     // nameless struct/union 
+#pragma warning (disable : 4514 )    // unreferenced inline function has
+                                     // been removed
+
+#include "sampdev.h"
+#include "debug.h"
+
+///////////////////////////////////////////////////////////////////////////////
+// ctor/dtor
+///////////////////////////////////////////////////////////////////////////////
+CSampleDevice::CSampleDevice():
+                             CPciDevice( NULL ),
+                             m_InputDmaSize( 0  ),
+                             m_OutputDmaSize( 0 )
+{
+}
+
+CSampleDevice::CSampleDevice( IN CDriverObject *DriverObject ) :
+                              CPciDevice( DriverObject ),
+                              m_InputDmaSize( 256 ),
+                              m_OutputDmaSize( 256 )
+{
+}
+
+CSampleDevice::~CSampleDevice()
+{
+}
+
+NTSTATUS CSampleDevice::OnInitialize( IN PUNICODE_STRING RegistryPath )
+{
+    NTSTATUS    status = CPciDevice::OnInitialize( RegistryPath );
+
+    if( status != STATUS_SUCCESS )
+        return status;
+
+    // Initialize the adapter objects
+    // Each gets a page-size, cache-enabled common buffer
+    DEVICE_DESCRIPTION    DeviceDescription;
+    
+    GetDeviceDescription( &amp;DeviceDescription );
+        
+    TRACE("OnInitialize");
+
+    if( STATUS_SUCCESS != 
+        (status = m_ReadAdapter.Initialize( 
+                        RegistryPath,            // RegistryPath
+                        m_InputDmaSize,          // Size of common buffer
+                        0x1000,                  // Alignment
+                        FALSE,                   // Cache enabled common buffer
+                        &amp;DeviceDescription )) )  // Device description
+    {
+        TRACE("OnInitialize Failed to initialize read adapter!");
+        return status;
+    }
+    ASSERT( 0L == m_ReadAdapter.GetCommonBufferLogicalAddress().HighPart );
+
+    if( STATUS_SUCCESS != 
+        (status = m_WriteAdapter.Initialize( 
+                        RegistryPath,           // RegistryPath
+                        m_OutputDmaSize,        // Size of common buffer
+                        0x1000,                 // Alignment
+                        FALSE,                  // Cache enabled common buffer
+                        &amp;DeviceDescription )) ) // Device description
+    {
+        TRACE("OnInitialize Failed to initialize write adapter!");
+        return status;
+    }
+    ASSERT( 0L == m_WriteAdapter.GetCommonBufferLogicalAddress().HighPart );
+    TRACE("Read Common Buffer Phys = %X, Virt = %X", 
+          m_ReadAdapter.GetCommonBufferLogicalAddress().LowPart,
+          m_ReadAdapter.GetCommonBuffer() );
+    TRACE("Write Common Buffer Phys = %X, Virt = %X", 
+          m_WriteAdapter.GetCommonBufferLogicalAddress().LowPart,
+          m_WriteAdapter.GetCommonBuffer() );
+
+    // Setup the custom DPCs
+    m_DpcForWriteIsr.InitializeDpcRequest( DpcForWriteIsr, this );
+    m_DpcForReadIsr.InitializeDpcRequest( DpcForReadIsr, this );
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CSampleDevice::OnIrpMjDeviceControl( IN PIRP Irp )
+{
+    TRACE("OnIrpMjDeviceControl");
+    PIO_STACK_LOCATION request = IoGetCurrentIrpStackLocation( Irp );
+    NTSTATUS Status = STATUS_INVALID_PARAMETER;
+    ULONG Information = 0;
+
+    CompleteRequest( Irp, Status, Information ); 
+    return Status;
+}
+
+NTSTATUS CSampleDevice::OnIrpMjRead( IN PIRP Irp )
+{
+    TRACE("OnIrpMjRead");
+
+    NTSTATUS Status = STATUS_PENDING;
+
+    // If we're not busy, start the IRP
+    if( !m_ReadQueue.InsertData( Irp ) )
+    {
+        // Only one outstanding write request supported
+        if( NULL != m_ReadRequest.Irp )
+        {
+            TRACE("OnIrpMjRead - Invalid Device Request!!!");
+            Status = STATUS_INVALID_DEVICE_REQUEST;
+        }
+        else
+        {
+            PIO_STACK_LOCATION request = IoGetCurrentIrpStackLocation( Irp );
+
+            // Cache the Irp
+            m_ReadRequest.SpinLock.Acquire();
+            m_ReadRequest.Irp = Irp;
+            m_ReadRequest.Buffer = MmGetSystemAddressForMdl( Irp-&gt;MdlAddress );
+            m_ReadRequest.Length = request-&gt;Parameters.Read.Length;
+            m_ReadRequest.SpinLock.Release();
+
+            // Synchronize device manipulation for reading from device
+            m_Interrupt.SynchronizeExecutionForRead();
+        }
+    }
+
+    if( STATUS_PENDING != Status )
+        CompleteRequest( Irp, Status );
+    else
+        IoMarkIrpPending( Irp );
+
+    return Status;
+}
+
+NTSTATUS CSampleDevice::OnIrpMjWrite( IN PIRP Irp )
+{
+    TRACE("OnIrpMjWrite");
+
+    NTSTATUS Status = STATUS_PENDING;
+
+    // If we're not busy, start the IRP
+    if( !m_WriteQueue.InsertData( Irp ) )
+    {
+        // Only one outstanding write request supported
+        if( NULL != m_WriteRequest.Irp )
+        {
+            TRACE("OnIrpMjWrite - Invalid Device Request!!!");
+            Status = STATUS_INVALID_DEVICE_REQUEST;
+        }
+        else
+        {
+            PIO_STACK_LOCATION request = IoGetCurrentIrpStackLocation( Irp );
+
+            // Cache the Irp
+            m_WriteRequest.SpinLock.Acquire();
+            m_WriteRequest.Irp = Irp;
+            m_WriteRequest.Buffer = MmGetSystemAddressForMdl( Irp-&gt;MdlAddress );
+            m_WriteRequest.Length = request-&gt;Parameters.Write.Length;
+            m_WriteRequest.SpinLock.Release();
+
+            // Synchronize device manipulation for writing to device
+            m_Interrupt.SynchronizeExecutionForWrite();
+        }
+    }
+
+    if( STATUS_PENDING != Status )
+        CompleteRequest( Irp, Status );
+    else
+        IoMarkIrpPending( Irp );
+
+    return Status;
+}
+
+VOID CSampleDevice::OnUnload()
+{
+    TRACE("OnUnload");
+
+    // Don't EVER forget to call CAdapterObject::Unload()
+    m_ReadAdapter.Unload();
+    m_WriteAdapter.Unload();
+    DisconnectInterrupt();
+    CPciDevice::OnUnload();
+}
+
+BOOLEAN CSampleDevice::OnInterrupt()
+{
+    TRACE("OnInterrupt");
+    NTSTATUS Status = STATUS_SUCCESS;
+
+//    if( !OurInterrupt )
+//        return FALSE;
+
+    // Has a write happened?        
+//    if( IsWriteInterrupt )
+//    {    
+        // Queue DPC for write ISR
+        if( !m_DpcForWriteIsr.InsertQueue( (PVOID)Status ) )
+        {
+            TRACE( "OnInterrupt - Failed to queue Write DPC!" );
+        }
+//    }
+
+    // Has a read happened?        
+//    if( IsReadInterrupt )
+//    {    
+        // Queue DPC for read ISR
+        if( !m_DpcForReadIsr.InsertQueue( (PVOID)Status ) )
+        {
+            TRACE( "OnInterrupt - Failed to queue Read DPC!" );
+        }
+//    }
+
+    TRACE("Leaving OnInterrupt");
+    return TRUE;
+}
+
+VOID CSampleDevice::GetDeviceDescription( OUT PDEVICE_DESCRIPTION DeviceDescription )
+{
+    DeviceDescription-&gt;Version              = DEVICE_DESCRIPTION_VERSION;
+    DeviceDescription-&gt;Master               = TRUE,          // Busmaster Device
+    DeviceDescription-&gt;ScatterGather        = FALSE,         // No scatter/
+                                                             // gather
+    DeviceDescription-&gt;DemandMode           = FALSE,         // Don't use system
+                                                             // DMA controller
+    DeviceDescription-&gt;AutoInitialize       = FALSE,         // Don't use system
+                                                             // DMA controller
+    DeviceDescription-&gt;Dma32BitAddresses    = TRUE,          // 32 bit addresses
+    DeviceDescription-&gt;IgnoreCount          = FALSE,         // IgnoreCount
+    DeviceDescription-&gt;Reserved1            = FALSE,         // Reserved1
+    DeviceDescription-&gt;Reserved2            = FALSE,         // Reserved2
+    DeviceDescription-&gt;BusNumber            = m_ulBusNumber, // BusNumber
+    DeviceDescription-&gt;DmaChannel           = 0,             // No system DMA
+                                                             // channel involved
+    DeviceDescription-&gt;InterfaceType        = PCIBus,        // BusType
+    DeviceDescription-&gt;DmaWidth             = Width32Bits,   // 32-bit wide Dma
+    DeviceDescription-&gt;DmaSpeed             = MaximumDmaSpeed,
+    DeviceDescription-&gt;MaximumLength        = 8196,          // MaximumLength
+    DeviceDescription-&gt;DmaPort              = 0;             // DmaPort
+}
+
+BOOLEAN CSampleDevice::OnSynchronizeExecutionForRead()
+{
+    // This is where you setup the device for a read from the device
+    return TRUE;
+}
+
+BOOLEAN CSampleDevice::OnSynchronizeExecutionForWrite()
+{
+    // This is where you setup the device for a write to the device
+    return TRUE;
+}
+
+VOID CSampleDevice::OnDpcForWriteIsr( IN NTSTATUS Status )
+{
+    TRACE("Entering OnDpcForWriteIsr");
+    ASSERT( NULL != m_WriteRequest.Irp );
+
+    // Get the next IRP in the queue
+    PIRP NextIrp = PIRP(m_WriteQueue.RemoveData());
+    PIRP CurrentIrp;
+    ULONG Information;
+
+    // Update the IO Request
+    m_WriteRequest.SpinLock.AcquireAtDpcLevel();
+    CurrentIrp = m_WriteRequest.Irp;
+    Information = STATUS_SUCCESS == Status ? m_WriteRequest.Length : 0;
+    m_WriteRequest.Irp = NextIrp;
+    m_WriteRequest.SpinLock.ReleaseFromDpcLevel();
+
+    // Complete the current WriteIrp
+    CompleteRequest(CurrentIrp, Status, Information );
+
+    if( NextIrp )
+    {
+        PIO_STACK_LOCATION request = IoGetCurrentIrpStackLocation( NextIrp );
+        m_WriteRequest.Buffer = MmGetSystemAddressForMdl( NextIrp-&gt;MdlAddress );
+        m_WriteRequest.Length = request-&gt;Parameters.Write.Length;
+
+        // This is where you'd perform the setup for the next write 
+        // to the device
+    }
+
+    TRACE("Leaving OnDpcForWriteIsr");
+}
+
+VOID CSampleDevice::OnDpcForReadIsr( IN NTSTATUS Status )
+{
+    TRACE("Entering OnDpcForReadIsr");
+    ASSERT( NULL != m_ReadRequest.Irp );
+    ASSERT( NULL != m_ReadRequest.Buffer );
+
+    if( STATUS_SUCCESS == Status )
+    {
+        // Copy the data from the device read buffer to the user
+        // buffer.
+        RtlMoveMemory( m_ReadRequest.Buffer, 
+                       m_ReadAdapter.GetCommonBuffer(), 
+                       m_ReadRequest.Length );
+    }
+
+    // Get the next IRP in the queue
+    PIRP NextIrp = PIRP(m_ReadQueue.RemoveData());
+    PIRP CurrentIrp;
+    ULONG Information;
+
+    // Update the IO Request
+    m_ReadRequest.SpinLock.AcquireAtDpcLevel();
+    CurrentIrp = m_ReadRequest.Irp;
+    Information = STATUS_SUCCESS == Status ? m_ReadRequest.Length : 0;
+    m_ReadRequest.Irp = NextIrp;
+    m_ReadRequest.SpinLock.ReleaseFromDpcLevel();
+
+    // Complete the request
+    CompleteRequest(CurrentIrp, Status, Information );
+
+    if( NextIrp )
+    {
+        PIO_STACK_LOCATION request = IoGetCurrentIrpStackLocation( NextIrp );
+        m_ReadRequest.Buffer = MmGetSystemAddressForMdl( NextIrp-&gt;MdlAddress );
+        m_ReadRequest.Length = request-&gt;Parameters.Read.Length;
+
+        // This is where you'd perform the setup for 
+        // the next read from the device
+    }
+
+    TRACE("Leaving OnDpcForReadIsr");
+}
+
+BOOLEAN CSampleDevice::OnErrorInterrupt()
+{
+    TRACE( "OnErrorInterrupt Entered" );
+
+    // Queue up DPCs to complete the outstanding Irps
+    if( NULL != m_WriteRequest.Irp )
+        m_DpcForWriteIsr.InsertQueue( (PVOID)STATUS_DEVICE_DATA_ERROR );
+    if( NULL != m_ReadRequest.Irp )
+        m_DpcForReadIsr.InsertQueue( (PVOID)STATUS_DEVICE_DATA_ERROR );
+
+    return TRUE;
+}
+
+///////////////////////////////////////
+//    Class statics
+///////////////////////////////////////
+/* static */
+VOID CSampleDevice::DpcForWriteIsr(
+    IN PKDPC /* Dpc */,
+    IN PVOID DeferredContext,
+    IN PVOID Status,
+    IN PVOID /* SystemArgument2 */ )
+{
+    ((CSampleDevice*)DeferredContext)-&gt;OnDpcForWriteIsr( (NTSTATUS)Status );
+}
+
+/* static */
+VOID CSampleDevice::DpcForReadIsr(
+    IN PKDPC /* Dpc */,
+    IN PVOID DeferredContext,
+    IN PVOID Status,
+    IN PVOID /* SystemArgument2 */)
+{
+    ((CSampleDevice*)DeferredContext)-&gt;OnDpcForReadIsr( (NTSTATUS)Status );
+}
+
+///////////////////////////////////////
+//    Utility functions
+///////////////////////////////////////
+VOID CompleteRequest( 
+            IN PIRP Irp,
+            IN NTSTATUS Status,
+            IN ULONG Information /* = 0 */,
+            IN CCHAR PriorityBoost /* = IO_NO_INCREMENT */ )
+{
+    TRACE( "CompletRequest Entered" );
+    Irp-&gt;IoStatus.Status = Status;
+    Irp-&gt;IoStatus.Information = Information;
+    IoCompleteRequest( Irp, PriorityBoost );
+}
+</PRE>
+<P>sampdev.h</P>
+<P><BR></P>
+<PRE> //    ******************************************************
+//    *  Module Name:    sampdev.h
+//    *  Abstract:    CSampleDevice Device object class declaration
+//    *  Environment:
+//    * 
+//    *  Notes:
+//    * &lt;Assumptions&gt;
+//    * &lt;Other of interest&gt;
+//    *
+//    ******************************************************
+#ifndef SAMPDEV_H
+#define SAMPDEV_H
+
+#include &lt;idrivrpp.h&gt;
+#include "pcidev.h"
+
+//    ****************************
+//    *    Predeclarations
+//    ****************************
+
+//    ****************************
+//    *    Types
+//    ****************************
+struct CIoRequest
+{
+    // ctor/dtor    
+    CIoRequest();
+
+    PIRP        Irp;
+    PVOID        Buffer;
+    ULONG        Length;
+    CSpinLock    SpinLock;
+};
+//*****************************************************************
+//*    class CIoRequest Inlines
+//*****************************************************************
+inline CIoRequest::CIoRequest():
+                              Irp( NULL ),
+                              Buffer( NULL ),
+                              Length( Length )
+{
+}
+
+#define PIO_REQUEST CIoRequest*
+
+//    ****************************
+//    *    Macros
+//    ****************************
+#define min( a, b ) (ULONG)a &lt; (ULONG)b ? a : b
+
+//    ****************************
+//    *    Class: CSampleDevice
+//    ****************************
+class CSampleDevice : public CPciDevice
+{
+    public:
+        CSampleDevice( IN CDriverObject *DriverObject );
+
+        virtual ~CSampleDevice();
+
+    protected:
+        CSampleDevice();
+        CSampleDevice( IN const CSampleDevice &amp;right );
+
+        //    Virtual from CDeviceObject
+        virtual NTSTATUS OnInitialize( IN PUNICODE_STRING RegistryPath );
+
+        //    Virtual from CDeviceObject
+        virtual NTSTATUS OnIrpMjDeviceControl( IN PIRP Irp );
+        virtual NTSTATUS OnIrpMjRead( IN PIRP Irp );
+        virtual NTSTATUS OnIrpMjWrite( IN PIRP Irp );
+        virtual VOID OnUnload(VOID);
+        virtual BOOLEAN OnInterrupt(VOID);
+        virtual VOID GetDeviceDescription
+                       (OUT PDEVICE_DESCRIPTION DeviceDescription );
+
+        // called by CInterruptObject::SynchronizeExecutionForXXX() to
+        // synchronize device I/O programming.
+        virtual BOOLEAN OnSynchronizeExecutionForRead( VOID );
+        virtual BOOLEAN OnSynchronizeExecutionForWrite( VOID );
+
+    #ifdef NOTDEF
+        virtual NTSTATUS OnIrpMjCreate( IN PIRP Irp );
+        virtual NTSTATUS OnIrpMjClose( IN PIRP Irp );
+        virtual NTSTATUS OnIrpMjCleanup( IN PIRP Irp );
+        virtual NTSTATUS OnIrpMjFlushBuffers( IN PIRP Irp );
+        virtual NTSTATUS OnIrpMjInternalDeviceControl( IN PIRP Irp );
+        virtual NTSTATUS OnIrpMjQueryInformation( IN PIRP Irp );
+        virtual NTSTATUS OnIrpMjSetInformation( IN PIRP Irp );
+        virtual VOID OnCancel( IN PIRP Irp );
+    #endif
+
+/ The Dpc handlers
+        VOID OnDpcForWriteIsr( IN NTSTATUS Status );
+        VOID OnDpcForReadIsr( IN NTSTATUS Status );
+
+        // The error interrupt handler
+        BOOLEAN OnErrorInterrupt(VOID);
+
+        ////////////////////////////
+        // The custom DPC routines
+        ////////////////////////////
+        static VOID DpcForWriteIsr(
+                        IN PKDPC Dpc,
+                        IN PVOID DeferredContext,
+                        IN PVOID Status,
+                        IN PVOID SystemArgument2 );
+
+        static VOID DpcForReadIsr(
+                        IN PKDPC Dpc,
+                        IN PVOID DeferredContext,
+                        IN PVOID Status,
+                        IN PVOID SystemArgument2 );
+
+    private:
+        CIoRequest          m_ReadRequest;
+        CIoRequest          m_WriteRequest;
+        CAdapterObject      m_ReadAdapter;
+        CAdapterObject      m_WriteAdapter;
+        CDeviceQueue        m_ReadQueue;
+        CDeviceQueue        m_WriteQueue;
+        ULONG               m_InputDmaSize;
+        ULONG               m_OutputDmaSize;
+
+        // The custom DPCs for setting up for device reads and writes
+        CCustomDpcObject    m_DpcForWriteIsr;
+        CCustomDpcObject    m_DpcForReadIsr;
+};
+
+//*****************************************************************
+//*    C routine prototypes
+//*****************************************************************
+VOID CompleteRequest( 
+            IN PIRP Irp,
+            IN NTSTATUS Status,
+            IN ULONG Information = 0,
+            IN CCHAR PriorityBoost = IO_NO_INCREMENT);
+
+#endif
+</PRE>
+<P>sampdvr.h</P>
+<P><BR></P>
+<PRE> //    ******************************************************
+//    *  Module Name:    sampdrv.h
+//    *  Abstract:    CSample DriverObject class declaration
+//    *  Environment:
+//    *
+//    *  Notes:
+//    * &lt;Assumptions&gt;
+//    * &lt;Other of interest&gt;
+//    *
+//    ******************************************************
+#ifndef SAMPDRV_H
+#define SAMPDRV_H
+
+#include &lt;idrivrpp.h&gt;
+
+class SampleDriver : public CDriverObject 
+{
+  public:
+      SampleDriver();
+
+      virtual ~SampleDriver();
+
+  protected:
+      SampleDriver(const SampleDriver &amp;right);
+
+      //    Virtual from CDriverObject
+      virtual NTSTATUS OnInitialize(PUNICODE_STRING RegistryPath);
+
+      //    Virtual from CDriverObject
+      virtual VOID OnUnload();
+
+      //    Pure virtual from CDriverObject to create a derived
+      //    CDeviceObject object.
+      virtual NTSTATUS CreateDevices(VOID);
+};
+
+#endif
+</PRE>
+<P>sampdvr.cpp</P>
+<P><BR></P>
+<PRE> //    ******************************************************
+//    *  Module Name:    sampdrv.cpp
+//    *  Abstract:    CSampleDriver class implementation
+//    *  Environment:
+//    *
+//    *  Notes:
+//    * &lt;Assumptions&gt;
+//    * &lt;Other of interest&gt;
+//    *
+//    ******************************************************
+#pragma warning (disable : 4201 )
+#pragma warning (disable : 4514 )
+#pragma warning (disable : 4699 )
+
+#include "sampdev.h"
+
+// driver
+#include "sampdrv.h"
+#include "debug.h"
+
+#define DEVICE_NAME L"\\Device\\SAMPLE"
+#define WIN32DEVICE_NAME L"\\DosDevices\\SAMPLE"
+#define DRIVER_CLASSNAME L"AudioAccelerator"
+
+SampleDriver g_Driver;
+#ifdef _DEBUG
+    char szDebugName[] = "SampleDevice";
+#endif
+
+// Class SampleDriver 
+SampleDriver::SampleDriver()
+    : CDriverObject( DRIVER_CLASSNAME )
+{
+}
+
+SampleDriver::~SampleDriver()
+{
+}
+
+NTSTATUS SampleDriver::OnInitialize(PUNICODE_STRING RegistryPath)
+{
+    TRACE("SampleDriver::OnInitialize");
+
+    return CDriverObject::OnInitialize( RegistryPath );
+}
+
+VOID SampleDriver::OnUnload()
+{
+    TRACE("SampleDriver::OnUnLoad");
+    CDriverObject::OnUnload();
+}
+
+NTSTATUS SampleDriver::CreateDevices()
+{
+    UNICODE_STRING    DeviceName,
+                    Win32DeviceName;
+    NTSTATUS        status;
+
+    TRACE("SampleDriver::CreateDevice entered");
+
+    RtlInitUnicodeString( &amp;DeviceName, DEVICE_NAME );
+    RtlInitUnicodeString( &amp;Win32DeviceName, WIN32DEVICE_NAME );
+
+    // Call new for each CDeviceObject that needs to be instantiated.
+    new( *this, 
+        &amp;DeviceName,
+        &amp;Win32DeviceName,
+        FILE_DEVICE_UNKNOWN,
+        0,
+        FALSE,
+        status ) CSampleDevice(this);
+
+    return status;
+}</PRE>
+<P></P>
+<P>The sample driver can not be used as is. It will build with the makefiles provided, but the PCI device ID and vendor ID for device configuration are dummies. The sample project is intended to provide you with a starting point. We wrote the framework. You need to supply your driver-specific code (and perhaps a piece of hardware).</P>
+<P>Driver initialization is performed during calls to component OnInitialize members. The first component to get a chance at initialization is the driver's CDriverObject object, CSampleDriver. The sampdrv.cpp file shows the implementation of CSampleDriver. CSampleDriver::OnInitialize is a typical implementation and just calls the base class CDriverObject::OnInitialize method. The real initialization work is performed by purevirtualmember CSampleDriver::CreateDevices. CreateDevices is called from the nonvirtual CDriverObject::Initialize member before calling the virtual OnInitialize member.</P>
+<P>The purpose of a CreateDevices implementation is to instantiate all CDeviceObject-type objects required by the driver implementation. The sample driver instantiates and uses a single CDeviceObject, CSampleDevice. However, multifunction adapters (such as a sound card with a game port) would, in most cases, instantiate a CDeviceObject object for each function supported by the adapter. Remember that the memory for the CDeviceObject object is actually the DeviceExtension space of the DEVICE_OBJECT object. Therefore, the pointer returned from using object new on a CDeviceObject object does not need to be cached because the DRIVER_OBJECT object contains a linked list of DEVICE_OBJECT pointers as the DeviceObject field. In most implementations, the DEVICE_OBJECT pointers are accessed only by base class CDriverObject for device deinitialization.</P>
+<P>After a successful call to CreateDevices, CDriverObject::Initialize iterates through the DRIVER_OBJECT list of device objects and initializes each via a call to the virtual CDeviceObject:: OnInitialize member. This is where each CDeviceObject object performs all device-specific driver initialization, such as PCI configuration.</P>
+<P>In our sample driver, class CPciDevice performs all PCI bus-specific initialization in its OnInitialize member, which is called by CSampleDevice::OnInitialize prior to performing its own initialization. In our example, the bus-specific initialization includes obtaining the device base memory address as well as the interrupt level and vector. The base memory address is mapped to system address space, which you can use to access device registers. The interrupt vector and level are used to initialize the CInterruptObject object and to connect or disconnect the interrupt.</P>
+<P>CSampleDevice initializes CAdapterObject objects and their associated common buffers—one CAdapterObject object for reading from the device and one CAdapterObject object for writing to the device. In addition, CSampleDevice initializes two separate custom DPC objects: one to be associated with write I/O interrupts and one to be associated with read I/O interrupts. CSampleDevice provides static methods DpcForWriteIsr and DpcForReadIsr as handlers for the write and read DPCs. Separate DPCs are provided because CSampleDevice supports overlapping read and write I/O operations. If a single DPC was implemented for concurrent read and write operations, we could not guarantee that both would be queued since a second DPC will not be queued if a DPC is already in the queue. Therefore, a request to queue the DPC as a result of a write interrupt would fail if the same DPC was already in the queue as a result of a read operation.</P>
+<P> </P>
+<H2><A NAME="sec5"></A>  Synchronizing Device Access</H2><P>To enforce exclusive device access for operations such as writing and reading device registers and sharing data between the device's ISR and other routines, a device must implement a DDK SynchCritSection callback routine. The framework provides this functionality via the CInterruptObject class. CSampleDevice makes use of CInterruptObject SynchronizeExecutionForRead and SynchronizeExecutionForWrite methods. It also provides virtual handlers OnSynchronizeExecutionForRead and OnSynchronizeExecutionForWrite for the associated SynchCritSection routines. Driver dispatch routines and other routines running below the device's interrupt IRQL—that must access the data and state shared with the device's ISR—must synchronize access in this manner. The DDK's KeSynchronizeExecution is invoked when CInterruptObject::SynchronizeExecutionFor<I>Yyy</I> is called, which results in the current IRQL being raised to the device's interrupt IRQL. This prevents the ISR from being entered until after the IRQL is lowered upon returning from the SynchCritSection routine.</P>
+<P>In the source for CSampleDevice::OnIrpMjRead and CSampleDevice::OnIrpMjWrite, device setup for the associated I/O operation is started by a call to the CInterruptObject object's SynchronizeExecutionForRead and SynchronizeExecutionForWrite members. As a result, CSampleDevice members OnSynchronizeExecutionForRead and OnSynchronizeExecutionForWrite are called at the raised IRQL. The shared device state can be accessed safely in these SynchCritSection routines.</P>
+<P> </P>
+<H2><A NAME="sec6"></A>  Driver Deinitialization</H2><P>Driver deinitialization is performed essentially in reverse order of driver initialization via the DriverUnload entry point call. When the DriverUnload entry point is called, the static CDriverObject::Unload member begins undoing the initialization performed in the CDriverObject::Initialize member.</P>
+<P>The first deinitialization performed is to call the virtual member CDriverObject::OnUnload, which invokes the base class CDriverObject::OnUnload member. The base class version simply returns. Next, CDriverObject::Unload calls CDriverObject::UnloadDevices. It iterates through the DRIVER_OBJECT DeviceObject list, gets the CDriverObject object pointer from each DEVICE_OBJECT object's DeviceExtension, and invokes the CDeviceObject object's nonvirtual Unload member.</P>
+<P>CDeviceObject::Unload calls its own virtual OnUnload member, then frees the memory associated with its registry path Unicode string. When CSampleDevice::OnUnload is entered, it deinitializes its CAdapterObject objects with a call to their CAdapterObject::Unload members, disconnects its CInterruptObject object by a call to CPciDevice::DisconnectInterrupt, and then calls the base class CPciDevice::OnUnload. CPciDevice::OnUnload unmaps the device memory address, which was mapped during device initialization, and frees all resources reported during the initialization process.</P>
+<P> </P>
+<H2><A NAME="sec7"></A>  Conclusion</H2><P>It is sometimes easy to look at an API that lends itself nicely to object-oriented programming and design.  In these cases, the benefits of OOP languages such as C++ don't always manifest themselves. In many cases you end up with a thin veneer of C++ over an object-oriented API. Code reuse is minimal and the value of the time spent developing the thin veneer is questionable.</P>
+<P>We've attempted to take a good object-oriented C API (the C-based Windows NT DDK) and connect across objects to obtain a significant amount of reusable code. Our goal was to provide a framework that allows you to worry only about specific driver requirements, not the implementation requirements for every other driver that is ever to be written.</P>
+<P>We understand that every implementation we've provided may not be optimal or entirely complete. We do hope that this is sufficient to provide a sound foundation to launch C++ into the Windows NT DDK realm. We found this framework to be a huge timesaver. Reusable, tested code is always a benefit. </P>
+<P><I>This article is reproduced from Microsoft Systems Journal. Copyright </I>©<I> 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P><I>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</I></P>
+<P></P></font></body></HTML>

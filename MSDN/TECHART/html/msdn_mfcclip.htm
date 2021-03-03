@@ -1,0 +1,761 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>MFC Tips for Copying, Pasting, Blting, and Creating Owner-Drawn List Boxes</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_mfcclip"></a></sup>MFC Tips for Copying, Pasting, Blting, and Creating Owner-Drawn List Boxes</h1>
+<p>
+Nigel Thompson<br>
+Microsoft Developer Network Technology Group</p>
+<p>
+Created: July 19, 1994</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="2937">
+</OBJECT><a href="javascript:sample1.Click()">Click here to open or copy the files in the MFCCLIP sample application for this technical article.</a></p>
+<h2>Abstract</h2>
+<p>
+This article shows a technique for transferring Microsoft® Foundation Class (MFC) C++ objects through the Windows™ Clipboard in 32-bit applications. The MFCCLIP sample application, which accompanies this article, implements an extended-selection, owner-drawn list box in its view. Multiple items in the list box may be selected and copied to the Clipboard in a private format. If the private format data is present in the Clipboard, the data may be pasted into the list box. The sample code shows how a list of objects, rather than simply a single object, can be copied and pasted. The owner-drawn list box includes a bitmap at the start of each line (for fun—really). The bitmaps are drawn using a new class, <b>CTransBmp</b>, which makes drawing a bitmap image with a transparent border trivial.</p>
+<p>
+The key tasks illustrated by the sample code are:
+<ul type=disc>
+<li>
+Copying a list of MFC objects to the Clipboard using the undocumented <b>CSharedFile</b> class.<br><br></li>
+<li>
+Handling an owner-drawn list box in the application's view.<br><br></li>
+<li>
+Drawing bitmaps with transparent borders.</li>
+</ul>
+<h2>Introduction</h2>
+<p>
+While writing a small application, I needed to create several list boxes to show some data. I wanted to be able to select items from one list and copy them to the Clipboard for later pasting into a different list. Each item in the list had several fields, and consequently, I used an owner-drawn list box so that I could format each line of the list box in the most suitable way. Part of the formatting included drawing a small bitmap with an irregular shape at the start of some of the lines to indicate a particular status.</p>
+<p>
+The design required two major tasks: (1) creating an owner-drawn list box in a Microsoft® Foundation Class (MFC) application's view class, and (2) copying MFC objects to the Windows™ Clipboard. Another minor task was drawing the bitmap for each line, which I had done before, although not in an MFC-based application.</p>
+<p>
+The MFCCLIP sample application shows all the code required to implement an owner-drawn list box with copy and paste support. The implementation of the paste function is a bit trivial, but it shows the technique. Figure 1 shows a screen shot of the MFCCLIP application. As you can see, each line of the list box has a bitmap at the beginning, followed by some text.</p>
+<p>
+<img src="mfcclip_1.gif" border=0></p>
+<p class=label>
+<b>Figure 1. A screen shot of the MFCCLIP application</b></p>
+<h2>Adding a List Box to the View Class</h2>
+<p>
+Before we look at manipulating any data, let's see what's involved in creating a list box in the application's view window. We want the list box to fill the entire view, and if an item is double-clicked, we want to show the edit dialog box for that item.</p>
+<h3>Creating the Child Window</h3>
+<p>
+Creating the list box as a child window is fairly simple. Use ClassWizard to add a WM_CREATE message handler to the view class, and in the handler, create the list box as a visible child window the same size as the client area of the view window.</p>
+<pre><code>int CClipView::OnCreate(LPCREATESTRUCT lpCreateStruct)
+{
+ &nbsp;&nbsp; if (CView::OnCreate(lpCreateStruct) == -1)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -1;
+ &nbsp;&nbsp; 
+ &nbsp;&nbsp; CRect rc;
+ &nbsp;&nbsp; GetClientRect(&amp;rc);
+ &nbsp;&nbsp; // Adjust the client area to make the list box look better.
+ &nbsp;&nbsp; rc.bottom -= 2;
+ &nbsp;&nbsp; m_wndList.Create(WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | LBS_DISABLENOSCROLL | LBS_OWNERDRAWFIXED
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | LBS_EXTENDEDSEL | LBS_NOINTEGRALHEIGHT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | LBS_NOTIFY,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rc,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; this,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; IDC_MYLIST);
+ &nbsp;&nbsp; return 0;
+}
+</code></pre>
+<p>
+Note that I used App Studio to create the IDC_MYLIST symbol (the value isn't important). The <b>LBS_NOTIFY </b>flag tells the list box to notify its parent of events such as mouse clicks.</p>
+<h3>Getting Notification from the List Box</h3>
+<p>
+Unfortunately, ClassWizard can't be used to add handlers to the view class for notification messages from the list box. We have to do this by hand. We want to add a handler for the <b>LBN_DBLCLK</b> event, which is sent to the parent window in a <b>WM_COMMAND</b> message. The first step is to declare the handler function in the view's header file:</p>
+<pre><code>class CClipView : public CView
+{
+ &nbsp; ...
+// Generated message map functions
+protected:
+ &nbsp;&nbsp; //{{AFX_MSG(CClipView)
+ &nbsp;&nbsp; ...
+ &nbsp;&nbsp; afx_msg void OnListboxDblClick();
+ &nbsp;&nbsp; ...
+ &nbsp;&nbsp; //}}AFX_MSG
+ &nbsp;&nbsp; DECLARE_MESSAGE_MAP()
+};
+</code></pre>
+<p>
+It doesn't matter what the function is called. I called mine <b>OnListBoxDblClick</b> just to be obscure &lt;grin&gt;.</p>
+<p>
+The next step is to add an entry in the message map in the CPP file for the view:</p>
+<pre><code>BEGIN_MESSAGE_MAP(CClipView, CView)
+ &nbsp;&nbsp; //{{AFX_MSG_MAP(CClipView)
+ &nbsp;&nbsp; ...
+ &nbsp;&nbsp; ON_CONTROL(LBN_DBLCLK, IDC_MYLIST, OnListBoxDblClick)
+ &nbsp;&nbsp; ...
+ &nbsp;&nbsp; //}}AFX_MSG_MAP
+END_MESSAGE_MAP()
+</code></pre>
+<p>
+The <b>ON_CONTROL</b> macro is used to manage control notification messages. The three parameters are the notification message, the ID of the control sending the message, and the function to be called to handle the event. Having made the entry in the message map, we can write the handler function itself:</p>
+<pre><code>void CClipView::OnListBoxDblClick()
+{
+ &nbsp;&nbsp; // Find what was clicked.
+ &nbsp;&nbsp; int i = m_wndList.GetSelCount();
+ &nbsp;&nbsp; // Get the first selected item.
+ &nbsp;&nbsp; int iSel = LB_ERR;
+ &nbsp;&nbsp; m_wndList.GetSelItems(1, &amp;iSel);
+ &nbsp;&nbsp; ASSERT(iSel != LB_ERR);
+ &nbsp;&nbsp; CMyObj* pObj = (CMyObj*) m_wndList.GetItemData(iSel);
+ &nbsp;&nbsp; ASSERT(pObj);
+ &nbsp;&nbsp; ASSERT(pObj-&gt;IsKindOf(RUNTIME_CLASS(CMyObj)));
+ &nbsp;&nbsp; if (pObj-&gt;DoEditDialog() == IDOK) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CClipDoc* pDoc = GetDocument();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDoc-&gt;SetModifiedFlag();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDoc-&gt;UpdateAllViews(NULL);
+ &nbsp;&nbsp; }
+}
+</code></pre>
+<p>
+Because this is an extended-selection list box, we can't use <b>GetCurSel </b>to find the selected item. Instead, we must assume that multiple items may be selected. I chose to implement the code such that, if more than one item is selected, we take the first one.</p>
+<p>
+<b>GetSelItems</b> is called to get the first item number of the currently selected set of items. The <b>GetItemData</b> function is used to retrieve the item pointer that was set when the item was originally added to the list box by calling the <b>AddString</b> function. (Remember, this is an owner-drawn list box, so the item data is any 32-bit quantity that we want to store there.) The item data is cast to be a pointer to a <b>CMyObj</b> object, and some ASSERT statements confirm that all is well. The object's edit dialog box is then called into being (my editor refuses to let me use the word <i>invoked</i>). If the user closes the edit dialog box by clicking the OK button, the document is marked as having been modified, and all views of the data are redrawn to reflect the change.</p>
+<h3>Handling Size and Focus Events</h3>
+<p>
+If the view changes size, we need to resize the list box, so ClassWizard is used to add a handler for WM_SIZE messages. The list box is resized accordingly.</p>
+<pre><code>void CClipView::OnSize(UINT nType, int cx, int cy)
+{
+ &nbsp;&nbsp; CView::OnSize(nType, cx, cy);
+ &nbsp;&nbsp; // Resize the list box to fit in the entire client area.
+ &nbsp;&nbsp; m_wndList.SetWindowPos(NULL, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0, 0,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cx, cy-2,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOZORDER);
+}
+</code></pre>
+<p>
+So that the list box can be controlled by keyboard commands, we need to ensure that the list box gets the focus if the user activates the view window. Use ClassWizard again to add a handler for WM_SETFOCUS messages, and simply set the focus to the list box window:</p>
+<pre><code>void CClipView::OnSetFocus(CWnd* pOldWnd)
+{
+ &nbsp;&nbsp; // Set focus to the list box.
+ &nbsp;&nbsp; m_wndList.SetFocus();
+}
+</code></pre>
+<h3>Being Tidy</h3>
+<p>
+When the view window is destroyed, it's important that we destroy any child window belonging to the view. The destructor for the view class will destroy only the MFC objects—not the actual Windows window objects. So again, use ClassWizard (what a handy thing it is!) to add a handler for WM_DESTROY messages:</p>
+<pre><code>void CClipView::OnDestroy()
+{
+ &nbsp;&nbsp; CView::OnDestroy();
+ &nbsp;&nbsp; // Be sure to destroy the window we created.
+ &nbsp;&nbsp; m_wndList.DestroyWindow();
+}
+</code></pre>
+<h2>Drawing Items in the List Box</h2>
+<p>
+Now that we have a list box, it would be nice if we could see the data it contains. All that is required to do that is for the view to handle WM_DRAWITEM and WM_MEASUREITEM messages. If the list box is to be sorted, you will also need to handle WM_COMPAREITEM messages. For each message, we add a handler. Let's look at the WM_MEASUREITEM handler first:</p>
+<pre><code>void CClipView::OnMeasureItem(int nIDCtl, LPMEASUREITEMSTRUCT 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lpMeasureItemStruct)
+{
+ &nbsp;&nbsp; // Return the height of the font or the bitmap, 
+ &nbsp;&nbsp; // whichever is greater.
+ &nbsp;&nbsp; lpMeasureItemStruct-&gt;itemHeight = max(m_iFontHeight,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_bmSmile.GetHeight());
+}
+</code></pre>
+<p>
+In order for you to understand this simple piece of code, I need to explain a couple of points: First, this list box has items that are all the same height (it was created with the LBS_OWNERDRAWFIXED flag), so the height of each line is a constant. Because I wanted each line to contain a bitmap and some text, I chose to report the line item height as the height of the bitmap or the text—whichever is greater. The height of the text is determined in the view class constructor when the font is created. The constructor also loads the bitmap.</p>
+<pre><code>CClipView::CClipView()
+{
+ &nbsp;&nbsp; // Load the font we want to use.
+ &nbsp;&nbsp; m_font.CreateStockObject(ANSI_FIXED_FONT);
+ &nbsp;&nbsp; // Get the metrics of the font.
+ &nbsp;&nbsp; CDC dc;
+ &nbsp;&nbsp; dc.CreateCompatibleDC(NULL);
+ &nbsp;&nbsp; CFont* pfntOld = (CFont*) dc.SelectObject(&amp;m_font);
+ &nbsp;&nbsp; TEXTMETRIC tm;
+ &nbsp;&nbsp; dc.GetTextMetrics(&amp;tm);
+ &nbsp;&nbsp; dc.SelectObject(pfntOld);
+ &nbsp;&nbsp; m_iFontHeight = tm.tmHeight;
+ &nbsp;&nbsp; m_iFontWidth = tm.tmMaxCharWidth;
+ &nbsp;&nbsp; // Load the bitmap we want.
+ &nbsp;&nbsp; m_bmSmile.LoadBitmap(IDB_SMILE);
+} 
+</code></pre>
+<p>
+Note that the bitmap used here is of the <b>CTransBmp</b> class, which we'll come to a little later on. The regular MFC <b>CBitmap</b> object doesn't have a <b>GetHeight</b> or <b>GetWidth</b> member.</p>
+<p>
+Now let's look at the code for drawing an item in the list box in response to a WM_DRAWITEM message:</p>
+<pre><code>void CClipView::OnDrawItem(int nIDCtl, LPDRAWITEMSTRUCT pDI)
+{
+ &nbsp;&nbsp; CMyObj* pObj;
+ &nbsp;&nbsp; HFONT hfntOld;
+ &nbsp;&nbsp; CRect rcText;
+switch (pDI-&gt;itemAction) {
+ &nbsp;&nbsp; case ODA_DRAWENTIRE:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Draw the whole line of information.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Get a pointer to the object.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pObj = (CMyObj*) pDI-&gt;itemData;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ASSERT(pObj);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ASSERT(pObj-&gt;IsKindOf(RUNTIME_CLASS(CMyObj)));
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Set up the font we want to use.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hfntOld = (HFONT) ::SelectObject(pDI-&gt;hDC, m_font.m_hObject);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rcText = pDI-&gt;rcItem;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Erase the entire area.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ::ExtTextOut(pDI-&gt;hDC, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rcText.left, rcText.top,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ETO_OPAQUE,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;rcText,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "", 0,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL);
+ 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Draw the bitmap in place.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_bmSmile.DrawTrans(pDI-&gt;hDC, rcText.left, rcText.top);
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Move the text over to just beyond the bitmap.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rcText.left = pDI-&gt;rcItem.left + m_bmSmile.GetWidth() + 2;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ::DrawText(pDI-&gt;hDC,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pObj-&gt;GetText(),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; -1,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;rcText,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DT_LEFT | DT_VCENTER);
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Check if we need to show selection state.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (pDI-&gt;itemState &amp; ODS_SELECTED) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ::InvertRect(pDI-&gt;hDC, &amp;(pDI-&gt;rcItem));
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Check if we need to show focus state.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (pDI-&gt;itemState &amp; ODS_FOCUS) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ::DrawFocusRect(pDI-&gt;hDC, &amp;(pDI-&gt;rcItem));
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ::SelectObject(pDI-&gt;hDC, hfntOld);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+
+ &nbsp;&nbsp; case ODA_FOCUS:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Toggle the focus state.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ::DrawFocusRect(pDI-&gt;hDC, &amp;(pDI-&gt;rcItem));
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+
+ &nbsp;&nbsp; case ODA_SELECT:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Toggle the selection state.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ::InvertRect(pDI-&gt;hDC, &amp;(pDI-&gt;rcItem));
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp; default:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp; }
+}
+</code></pre>
+<p>
+There is no way you can arrive at this piece of code by studying the Microsoft Win32® Software Development Kit (SDK) for Windows NT™ documentation of the WM_DRAWITEM message and <b>DRAWITEMSTRUCT</b> structure. This is right. Trust me! Let's go through it step by step.</p>
+<p>
+The WM_DRAWITEM message is sent for one of three possible tasks: to draw the entire line of data afresh, to change the selection state, or to change the state of the focus indicator. Let's start with drawing the entire line of data.</p>
+<p>
+A pointer to the <b>CMyObj</b> object is extracted from the <b>DRAWITEMSTRUCT </b>and validated. The font we want to use is then selected into the device context (DC). Before we draw anything, we must erase the entire area; the easiest way to do this is to call <b>ExtTextOut</b>. I know that seems bizarre, but it's easier than using <b>FillRect</b> because it doesn't require us to create a brush, and will by default use the correct text background color for the fill. <b>ExtTextOut</b> is also implemented very efficiently in device drivers, so it takes very little time to execute.</p>
+<p>
+Having erased the area, we can draw the bitmap. We'll look at how the <b>DrawTrans</b> function works later. For now, just accept that it draws the bitmap with a transparent border (so it can have an irregular shape as many icons do). The text rectangle is then adjusted so that its left edge is just past the area occupied by the bitmap, and the text from the object is drawn by calling <b>DrawText</b>. (I could have used <b>ExtTextOut</b> here instead.)</p>
+<p>
+Finally, we must check to see if the item is currently selected or has the input focus. If it's selected, we invert the entire area. If it has the focus, we call <b>DrawFocusRect</b> to show the dotted-line rectangle that indicates focus.</p>
+<p>
+The <b>WM_DRAWITEM</b> message is also sent to change the state of the focus or selection of an item, and we need to provide handlers for these cases, too. It turns out that these messages are always sent in such a way that you don't need to know if the focus (or selection) state is being set or reset; it's enough to just toggle the current state. So implementing these two tasks becomes trivial: We simply call <b>InvertRect</b> to change the selection state or <b>DrawFocusRect</b> to change the focus state.</p>
+<h2>Some Sample Objects</h2>
+<p>
+In order to show what is required to copy MFC objects to the Clipboard, I created two classes: <b>CMyObj</b> and <b>CMyObList</b>.</p>
+<h3>The CMyObj Class</h3>
+<p>
+The <b>CMyObj</b> class is derived from <b>CObject</b> and provides a simple object that contains a string of text. Here's the header file:</p>
+<pre><code>class CMyObj : public CObject
+{
+public:
+ &nbsp;&nbsp; DECLARE_SERIAL(CMyObj)
+ &nbsp;&nbsp; CMyObj();
+ &nbsp;&nbsp; CMyObj(CMyObj&amp; rOb);
+ &nbsp;&nbsp; ~CMyObj();
+ &nbsp;&nbsp; virtual void Serialize(CArchive&amp; ar); 
+
+ &nbsp;&nbsp; const CString&amp; GetText()
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {return m_strText;}
+ &nbsp;&nbsp; void SetText(CString&amp; str)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {m_strText = str;}
+ &nbsp;&nbsp; int DoEditDialog();
+
+private:
+ &nbsp;&nbsp; CString m_strText;
+};
+</code></pre>
+<p>
+The <b>SetText</b> and <b>GetText</b> member functions allow the text to be set or retrieved. The <b>DoEditDialog</b> function allows the user to edit the contents of the object, using the dialog box shown in Figure 2.</p>
+<p>
+<img src="mfcclip_2.gif" border=0></p>
+<p class=label>
+<b>Figure 2. The dialog box used to edit the contents of a CMyObj string</b></p>
+<p>
+The implementation of <b>CMyObj</b> is very simple. Here are the constructors and the destructor from MYOBJ.CPP:</p>
+<pre><code>CMyObj::CMyObj()
+{
+ &nbsp;&nbsp; m_strText = "Some text.";
+}
+
+CMyObj::~CMyObj()
+{
+}
+</code></pre>
+<p>
+Calling the <b>DoEditDialog</b> function opens the dialog box for editing the text string:</p>
+<pre><code>int CMyObj::DoEditDialog()
+{
+ &nbsp;&nbsp; CMyObjDlg dlg;
+ &nbsp;&nbsp; dlg.m_strText = m_strText;
+ &nbsp;&nbsp; int iRes;
+ &nbsp;&nbsp; if ((iRes = dlg.DoModal()) == IDOK) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_strText = dlg.m_strText;
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; return iRes;
+}
+</code></pre>
+<p>
+The dialog box code itself is trivial, so I won't reproduce it here. You can look at the source in MYOBJDLG.CPP if you want to see the details.</p>
+<h3>The CMyObList Class</h3>
+<p>
+The <b>CMyObList</b> class is derived from the MFC class <b>CObList</b>. <b>CMyObList</b> is simply a list of <b>CMyObj</b> objects. Here's the header file from MYOBLIST.H:</p>
+<pre><code>class CMyObList : public CObList
+{
+ &nbsp;&nbsp; DECLARE_SERIAL(CMyObList)
+public:
+ &nbsp;&nbsp; CMyObList(); 
+ &nbsp;&nbsp; ~CMyObList();
+ &nbsp;&nbsp; void DeleteAll();
+ &nbsp;&nbsp; CMyObj* RemoveHead()
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {return (CMyObj*) CObList::RemoveHead();}
+ &nbsp;&nbsp; CMyObj* GetNext(POSITION&amp; rPos)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {return (CMyObj*) CObList::GetNext(rPos);}
+ &nbsp;&nbsp; void Append(CMyObj* pMyObj);
+ &nbsp;&nbsp; BOOL Remove(CMyObj* pMyObj);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; virtual void Serialize(CArchive&amp; ar); 
+};
+</code></pre>
+<p>
+The <b>RemoveHead</b> and <b>GetNext</b> functions perform the same function as those in the base class. Let's look at the others, starting with the constructor and destructor:</p>
+<pre><code>CMyObList::CMyObList()
+{
+}
+
+CMyObList::~CMyObList()
+{
+ &nbsp;&nbsp; DeleteAll();
+}
+</code></pre>
+<p>
+Note that the destructor calls the <b>DeleteAll</b> function to destroy any objects still in the list.</p>
+<pre><code>void CMyObList::DeleteAll()
+{
+ &nbsp;&nbsp; while(!IsEmpty()) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CMyObj* ptr = RemoveHead();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ASSERT(ptr);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; delete ptr;
+ &nbsp;&nbsp; }
+}
+</code></pre>
+<p>
+The <b>DeleteAll</b> function walks the list, removing and destroying the top item each time. Items are added to the end of the list with the <b>Append</b> function.</p>
+<pre><code>void CMyObList::Append(CMyObj* pMyObj)
+{
+ &nbsp;&nbsp; ASSERT(pMyObj);
+ &nbsp;&nbsp; ASSERT(pMyObj-&gt;IsKindOf(RUNTIME_CLASS(CMyObj)));
+ &nbsp;&nbsp; CObList::AddTail(pMyObj);
+}
+</code></pre>
+<p>
+And finally, the <b>Remove</b> function is used to unlink an object from the list without destroying the object:</p>
+<pre><code>BOOL CMyObList::Remove(CMyObj* pMyObj)
+{
+ &nbsp;&nbsp; POSITION pos = Find(pMyObj);
+ &nbsp;&nbsp; if (!pos) return FALSE;
+ &nbsp;&nbsp; RemoveAt(pos);
+ &nbsp;&nbsp; return TRUE;
+}
+</code></pre>
+<p>
+That's all we need to look at for now. Let's move on to see how a <b>CMyObList</b> object containing a series of <b>CMyObj</b> items can be copied to the Clipboard. </p>
+<h2>Copying Data from the List Box to the Clipboard</h2>
+<p>
+The list box is an extended-selection list, which means an arbitrary number of discontiguous items can be selected. When the current set of selected items is copied to the Clipboard, we want to create a list object containing copies of all the selected objects and copy the list itself to the Clipboard.</p>
+<p>
+The Windows Clipboard uses global memory to share the data it's holding, so to copy something to the Clipboard, we need to create a piece of shared global memory and write the data to that. With MFC objects, the easiest way to save the state of the object is to use its <b>Serialize</b> function to write it to a file. If we can use a piece of global memory as a file, we can serialize the objects to the memory and the task is done. The MFC library provides the <b>CMemFile</b> class, which allows you to write to a memory-based file, but because it doesn't allow you direct access to the memory, the only way to use this class is to serialize the objects to a <b>CMemFile</b>, get the length of the file, create a global memory block, and read the <b>CMemFile</b> back into the global memory. This works, but is wasteful of memory.</p>
+<p>
+The MFC library includes an undocumented class called <b>CSharedFile</b> (documented in AFXPRIV.H), which allows you to essentially create a <b>CMemFile</b> object around a piece of memory you can access. The Clipboard copy and paste code below makes use of the <b>CSharedFile</b> class.</p>
+<p>
+I used App Studio to create an Edit menu with only Copy and Paste items initially. I used ClassWizard to add handlers for both of these and also to add handlers for their <b>OnUpdate. . .</b> functions. The <b>OnUpdate. . .</b> handlers control the enabling or disabling of the individual menu items, so that we can disable the Edit Copy command if nothing is selected and the Edit Paste command if there is nothing in the Clipboard we can paste.</p>
+<h3>A Private Clipboard Format</h3>
+<p>
+Because the data we want to copy to the Clipboard is of our own design, we need to register the name of the format with Windows and get a unique ID for the format. I like to do this when the application first starts up, so I added this to the initialization of my application:</p>
+<pre><code>BOOL CMfcClipApp::InitInstance()
+{
+ &nbsp;&nbsp; ...
+ &nbsp;&nbsp; // Register our Clipboard format names.
+ &nbsp;&nbsp; m_uiMyListClipFormat = ::RegisterClipboardFormat("My Object List");
+ &nbsp;&nbsp; ...
+}
+</code></pre>
+<p>
+The <i>m_uiMyListClipFormat</i> variable is defined in the application main header file as a UINT and the application object instance (theApp) is made global:</p>
+<pre><code>class CMfcClipApp : public CWinApp
+{
+public:
+ &nbsp;&nbsp; CMfcClipApp();
+
+ &nbsp;&nbsp; UINT m_uiMyListClipFormat;
+
+// Overrides
+ &nbsp;&nbsp; virtual BOOL InitInstance();
+
+// Implementation
+
+ &nbsp;&nbsp; //{{AFX_MSG(CMfcClipApp)
+ &nbsp;&nbsp; afx_msg void OnAppAbout();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // NOTE: ClassWizard will add and remove member functions here.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // DO NOT EDIT what you see in these blocks of generated code !
+ &nbsp;&nbsp; //}}AFX_MSG
+ &nbsp;&nbsp; DECLARE_MESSAGE_MAP()
+};
+
+extern CMfcClipApp theApp;
+</code></pre>
+<h3>Copying Data to the Clipboard</h3>
+<p>
+Having registered a Clipboard format, we can look at copying data to the Clipboard. Let's first look at the <b>OnUpdate. . .</b> handler for the Edit Copy command:</p>
+<pre><code>void CClipView::OnUpdateEditCopy(CCmdUI* pCmdUI)
+{
+ &nbsp;&nbsp; int i = m_wndList.GetSelCount();
+ &nbsp;&nbsp; pCmdUI-&gt;Enable(i &gt; 0 ? TRUE : FALSE);
+}
+</code></pre>
+<p>
+If no items are selected, the command is disabled. This does two things: It shows the user the command won't do anything (it's grayed out), and it prevents us from getting Copy commands when there is nothing to copy. Let's look at the code for doing the actual copy operation:</p>
+<pre><code>void CClipView::OnEditCopy()
+{
+ &nbsp;&nbsp; // Get the number of selected items.
+ &nbsp;&nbsp; int iCount = m_wndList.GetSelCount();
+ &nbsp;&nbsp; ASSERT(iCount &gt; 0);
+ &nbsp;&nbsp; // Get the list of selection IDs.
+ &nbsp;&nbsp; int* pItems = new int [iCount];
+ &nbsp;&nbsp; m_wndList.GetSelItems(iCount, pItems);
+ &nbsp;&nbsp; // Create a list.
+ &nbsp;&nbsp; CMyObList ObList;
+ &nbsp;&nbsp; // Add all the items to the list.
+ &nbsp;&nbsp; int i;
+ &nbsp;&nbsp; CMyObj* pObj;
+ &nbsp;&nbsp; for (i=0; i&lt;iCount; i++) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pObj = (CMyObj*) m_wndList.GetItemData(pItems[i]);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ObList.Append(pObj);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; // Done with the item list.
+ &nbsp;&nbsp; delete pItems;
+ &nbsp;&nbsp; // Create a memory-file-based archive.
+ &nbsp;&nbsp; CSharedFile mf (GMEM_MOVEABLE|GMEM_DDESHARE|GMEM_ZEROINIT);
+ &nbsp;&nbsp; CArchive ar(&amp;mf, CArchive::store);&nbsp; 
+ &nbsp;&nbsp; ObList.Serialize(ar);
+ &nbsp;&nbsp; ar.Close(); // Flush and close.
+ &nbsp;&nbsp; HGLOBAL hMem = mf.Detach();
+ &nbsp;&nbsp; if (!hMem) return;
+ &nbsp;&nbsp; // Nuke the list but not the objects.
+ &nbsp;&nbsp; ObList.RemoveAll();
+ &nbsp;&nbsp; // Send the Clipboard the data.
+ &nbsp;&nbsp; OpenClipboard();
+ &nbsp;&nbsp; EmptyClipboard();
+ &nbsp;&nbsp; SetClipboardData(theApp.m_uiMyListClipFormat, hMem);
+ &nbsp;&nbsp; CloseClipboard();
+} 
+</code></pre>
+<p>
+The number of selected items is used to create a temporary array of selection IDs. The IDs are set into the array by calling <b>GetSelItems</b>. A new <b>CMyObList</b> is created and the pointer to each object is added to the list. Note that we are adding a reference to an object that is in use elsewhere, so it's important that we don't delete these objects by mistake when we're done here.</p>
+<p>
+Once the new <b>CMyObList</b> object has been built, a <b>CSharedFile</b> is created and an archive is created on top of the shared file. We can now serialize the list to the archive and, hence, to the shared file in memory. Once that's done, the memory of the shared file is detached, ready for sending to the Clipboard. The temporary <b>CMyList</b> object has all its items removed, not destroyed. The list object itself is, of course, destroyed when the function exits. The Clipboard is opened, emptied, and set with the data from the shared file. The memory block now becomes the property of the Clipboard. Finally, the Clipboard is closed.</p>
+<p>
+If you use the Clipboard viewer after copying a list to the Clipboard, you'll see an item from your private format. You can't view the data, of course, because the Clipboard has no way of understanding it. You can add that capability for owner-drawn Clipboard items if you want the user to be able to see the data in the Clipboard viewer.</p>
+<h3>Pasting Data from the Clipboard</h3>
+<p>
+The first thing to take care of is enabling the EditPaste command if our data type is in the Clipboard:</p>
+<pre><code>void CClipView::OnUpdateEditPaste(CCmdUI* pCmdUI)
+{
+ &nbsp;&nbsp; // See if there is a list available.
+ &nbsp;&nbsp; OpenClipboard();
+ &nbsp;&nbsp; UINT uiFmt = 0;
+ &nbsp;&nbsp; while (uiFmt = EnumClipboardFormats(uiFmt)) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (uiFmt == theApp.m_uiMyListClipFormat) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CloseClipboard();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pCmdUI-&gt;Enable(TRUE);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; pCmdUI-&gt;Enable(FALSE);
+ &nbsp;&nbsp; CloseClipboard();&nbsp;&nbsp;&nbsp; 
+}
+</code></pre>
+<p>
+Having done that, we can go on to implement the actual paste code. This is very much the reverse of the process used to copy the data to the Clipboard earlier.</p>
+<pre><code>void CClipView::OnEditPaste()
+{
+ &nbsp;&nbsp; OpenClipboard();
+ &nbsp;&nbsp; HGLOBAL hMem = ::GetClipboardData(theApp.m_uiMyListClipFormat);
+ &nbsp;&nbsp; if (!hMem) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CloseClipboard();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; // Create a mem file.
+ &nbsp;&nbsp; CSharedFile mf;
+ &nbsp;&nbsp; mf.SetHandle(hMem);
+ &nbsp;&nbsp; // Create the archive and get the data.
+ &nbsp;&nbsp; CArchive ar(&amp;mf, CArchive::load);&nbsp; 
+ &nbsp;&nbsp; CMyObList PasteList;
+ &nbsp;&nbsp; PasteList.Serialize(ar);
+ &nbsp;&nbsp; ar.Close();
+ &nbsp;&nbsp; mf.Detach();
+ &nbsp;&nbsp; CloseClipboard();
+
+ &nbsp;&nbsp; // Add all the objects to the doc.
+ &nbsp;&nbsp; CClipDoc* pDoc = GetDocument();
+ &nbsp;&nbsp; ASSERT(pDoc);
+ &nbsp;&nbsp; CMyObList* pObList = pDoc-&gt;GetObList();
+ &nbsp;&nbsp; ASSERT(pObList);
+ &nbsp;&nbsp; ASSERT(pObList-&gt;IsKindOf(RUNTIME_CLASS(CMyObList)));
+ &nbsp;&nbsp; POSITION pos = NULL;
+ &nbsp;&nbsp; // Remove each of the CMyObj objects from the paste list
+ &nbsp;&nbsp; // and append them to the list.
+ &nbsp;&nbsp; while (! PasteList.IsEmpty()) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CMyObj* pObj =&nbsp; PasteList.RemoveHead();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ASSERT(pObj);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ASSERT(pObj-&gt;IsKindOf(RUNTIME_CLASS(CMyObj)));
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pObList-&gt;Append(pObj);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; pDoc-&gt;SetModifiedFlag();
+ &nbsp;&nbsp; pDoc-&gt;UpdateAllViews(NULL);
+}
+</code></pre>
+<p>
+The memory handle from the Clipboard is used to create a shared file that is, in turn, used to create an archive. An object list is created and its <b>Serialize </b>function is used to fill the list. Once that's done, the Clipboard can be closed. Each item in the list is then removed from the list and added to the document. Finally, the views of the document are repainted to reflect the change.</p>
+<h2>A New Bitmap Class for Lazy People</h2>
+<p>
+OK, so you're offended. Don't read any further. </p>
+<p>
+Ha! So you're still reading, eh? Well, I hope it's worth it. This is the gratuitous part of the article, which really hasn't got anything to do with Clipboards or owner-drawn list boxes at all. It's just an easy way to draw a bitmap both as a complete rectangle and as an irregular shape, rather like one might make an icon. The color shown in the top-left pixel of the bitmap is used to define which areas of the image will be transparent. Figure 3 shows the bitmap used for the smiley face used in the list box example above.</p>
+<p>
+<img src="mfcclip_3.gif" border=0></p>
+<p class=label>
+<b>Figure 3. The smiley face bitmap being edited in App Studio</b></p>
+<p>
+As you can see from Figure 1, the green areas are not drawn when the <b>DrawTrans</b> function is used to draw the bitmap. Therefore, you can create a bitmap of any irregular shape, so long as you reserve just one color for the transparent areas. The top-left pixel of the image must be painted with the transparent color.</p>
+<h3>The CTransBmp Class</h3>
+<p>
+Let's look at the <b>CTransBmp</b> class, which makes drawing bitmaps so simple. Here's the header from TRANSBMP.H:</p>
+<pre><code>class CTransBmp : public CBitmap
+{
+public:
+ &nbsp;&nbsp; CTransBmp();
+ &nbsp;&nbsp; ~CTransBmp();
+ &nbsp;&nbsp; void Draw(HDC hDC, int x, int y);
+ &nbsp;&nbsp; void Draw(CDC* pDC, int x, int y);
+ &nbsp;&nbsp; void DrawTrans(HDC hDC, int x, int y);
+ &nbsp;&nbsp; void DrawTrans(CDC* pDC, int x, int y);
+ &nbsp;&nbsp; int GetWidth();
+ &nbsp;&nbsp; int GetHeight();
+
+private:
+ &nbsp;&nbsp; int m_iWidth;
+ &nbsp;&nbsp; int m_iHeight;
+ &nbsp;&nbsp; HBITMAP m_hbmMask;&nbsp;&nbsp;&nbsp; // Handle to mask bitmap
+
+ &nbsp;&nbsp; void GetMetrics();
+ &nbsp;&nbsp; void CreateMask(HDC hDC);
+};
+</code></pre>
+<p>
+<b>CTransBmp</b> is derived from <b>CBitmap</b>, so it inherits all the properties of the <b>CBitmap</b> class. I added the <b>GetWidth</b> and <b>GetHeight</b> members because they are tremendously useful in dealing with bitmap objects. The <b>Draw</b> and <b>DrawTrans</b> functions draw the image to either a Windows DC handle (<b>HDC</b>) or an MFC <b>CDC</b> object for flexibility. <b>Draw</b> draws the bitmap as a solid image; <b>DrawTrans</b> draws it with transparent areas defined by the top-left pixel color.</p>
+<p>
+Let's start with the constructor and destructor and go through all the functions:</p>
+<pre><code>CTransBmp::CTransBmp()
+{
+ &nbsp;&nbsp; m_iWidth = 0;
+ &nbsp;&nbsp; m_iHeight = 0;
+ &nbsp;&nbsp; m_hbmMask = NULL;
+}
+
+CTransBmp::~CTransBmp()
+{
+}
+</code></pre>
+<p>
+The constructor sets the internal height and width variables to zero. It also sets the mask handle to NULL. (We'll see what the mask does later.) Note that when a <b>CBitmap</b> object is created, it does not contain a Windows graphics device interface (GDI) bitmap object. This is added later, so the width and height can't be determined when the <b>CTransBmp</b> object is constructed.</p>
+<p>
+Once a bitmap is loaded, the height and width can be determined by a helper function:</p>
+<pre><code>void CTransBmp::GetMetrics()
+{
+ &nbsp;&nbsp; // Get the width and height.
+ &nbsp;&nbsp; BITMAP bm;
+ &nbsp;&nbsp; GetObject(sizeof(bm), &amp;bm);
+ &nbsp;&nbsp; m_iWidth = bm.bmWidth;
+ &nbsp;&nbsp; m_iHeight = bm.bmHeight;
+}
+</code></pre>
+<p>
+Now we can see how the <b>GetWidth</b> and <b>GetHeight</b> functions work:</p>
+<pre><code>int CTransBmp::GetWidth()
+{
+ &nbsp;&nbsp; if ((m_iWidth == 0) || (m_iHeight == 0)){
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GetMetrics();
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; return m_iWidth;
+}
+
+int CTransBmp::GetHeight()
+{
+ &nbsp;&nbsp; if ((m_iWidth == 0) || (m_iHeight == 0)){
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GetMetrics();
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; return m_iHeight;
+}
+</code></pre>
+<p>
+If the width or height are currently zero, the internal <b>GetMetrics</b> function attempts to retrieve them and cache them.</p>
+<p>
+Now let's see how the bitmap is drawn as a solid block:</p>
+<pre><code>void CTransBmp::Draw(HDC hDC, int x, int y)
+{
+ &nbsp;&nbsp; ASSERT(hDC);
+ &nbsp;&nbsp; // Create a memory DC.
+ &nbsp;&nbsp; HDC hdcMem = ::CreateCompatibleDC(hDC);
+ &nbsp;&nbsp; // Select the bitmap into the mem DC.
+ &nbsp;&nbsp; HBITMAP hbmold = 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (HBITMAP)::SelectObject(hdcMem,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (HBITMAP)(m_hObject));
+ &nbsp;&nbsp; // Blt the bits.
+ &nbsp;&nbsp; ::BitBlt(hDC,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; x, y,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GetWidth(), GetHeight(),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hdcMem,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0, 0,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SRCCOPY);
+ &nbsp;&nbsp; ::SelectObject(hdcMem, hbmold);
+ &nbsp;&nbsp; ::DeleteDC(hdcMem); 
+}
+</code></pre>
+<p>
+A memory DC is created, and the bitmap selected into it. Note that <b>m_hObject</b> is a member of the <b>CBitmap</b> class and holds the handle to the GDI bitmap object. Once the bitmap is selected into the memory DC, we can copy the bitmap image by calling <b>BitBlt</b>. The memory DC is then tidied up and deleted.</p>
+<p>
+OK so far. Now for the interesting bit—drawing the bitmap with transparent areas. We do this by creating a mask that determines which bits to copy and which bits to leave out. The mask will be made from a monochrome bitmap, using another helper function.</p>
+<pre><code>void CTransBmp::CreateMask(HDC hDC)
+{
+ &nbsp;&nbsp; // Nuke any existing mask.
+ &nbsp;&nbsp; if (m_hbmMask) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ::DeleteObject(m_hbmMask);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; // Create memory DCs to work with.
+ &nbsp;&nbsp; HDC hdcMask = ::CreateCompatibleDC(hDC);
+ &nbsp;&nbsp; HDC hdcImage = ::CreateCompatibleDC(hDC);
+ &nbsp;&nbsp; // Create a monochrome bitmap for the mask.
+ &nbsp;&nbsp; m_hbmMask = ::CreateBitmap(GetWidth(),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GetHeight(),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 1,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 1,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL);
+ &nbsp;&nbsp; // Select the mono bitmap into its DC.
+ &nbsp;&nbsp; HBITMAP hbmOldMask = (HBITMAP)::SelectObject(hdcMask, m_hbmMask);
+ &nbsp;&nbsp; // Select the image bitmap into its DC.
+ &nbsp;&nbsp; HBITMAP hbmOldImage = (HBITMAP)::SelectObject(hdcImage, m_hObject);
+ &nbsp;&nbsp; // Set the transparency color to be the top-left pixel.
+ &nbsp;&nbsp; ::SetBkColor(hdcImage, ::GetPixel(hdcImage, 0, 0));
+ &nbsp;&nbsp; // Make the mask.
+ &nbsp;&nbsp; ::BitBlt(hdcMask,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0, 0,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GetWidth(), GetHeight(),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hdcImage,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0, 0,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SRCCOPY);
+ &nbsp;&nbsp; // Tidy up.
+ &nbsp;&nbsp; ::SelectObject(hdcMask, hbmOldMask);
+ &nbsp;&nbsp; ::SelectObject(hdcImage, hbmOldImage);
+ &nbsp;&nbsp; ::DeleteDC(hdcMask);
+ &nbsp;&nbsp; ::DeleteDC(hdcImage);
+}
+</code></pre>
+<p>
+Memory DCs are created for both the image and the mask. A monochrome bitmap for the mask is created the same size as the image bitmap. The image and mask bitmaps are selected into their respective DCs. Now comes the clever bit. The background color of the image DC is set to be the pixel color of the top-left pixel of the image, and <b>BitBlt</b> is called. The current background color controls what happens when a color DC is bltted to a monochrome DC. The bits from the color DC that match the background color are copied to the monochrome DC as white pixels (1). The color DC pixels that don't match the background color are copied to the monochrome DC as black pixels (0). So now we have a monochrome mask that defines the transparent areas of the image.</p>
+<p>
+Let's see now how the image is drawn transparently using the mask:</p>
+<pre><code>void CTransBmp::DrawTrans(HDC hDC, int x, int y)
+{
+ &nbsp;&nbsp; ASSERT(hDC);
+ &nbsp;&nbsp; if (!m_hbmMask) CreateMask(hDC);
+ &nbsp;&nbsp; ASSERT(m_hbmMask);
+ &nbsp;&nbsp; int dx = GetWidth();
+ &nbsp;&nbsp; int dy = GetHeight();
+
+ &nbsp;&nbsp; // Create a memory DC to which to draw.
+ &nbsp;&nbsp; HDC hdcOffScr = ::CreateCompatibleDC(hDC);
+ &nbsp;&nbsp; // Create a bitmap for the off-screen DC that is really
+ &nbsp;&nbsp; // color-compatible with the destination DC.
+ &nbsp;&nbsp; HBITMAP hbmOffScr = ::CreateBitmap(dx, dy, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (BYTE)GetDeviceCaps(hDC, PLANES),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (BYTE)GetDeviceCaps(hDC, BITSPIXEL),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL);
+ &nbsp;&nbsp; // Select the buffer bitmap into the off-screen DC.
+ &nbsp;&nbsp; HBITMAP hbmOldOffScr = (HBITMAP)::SelectObject(hdcOffScr, hbmOffScr);
+
+ &nbsp;&nbsp; // Copy the image of the destination rectangle to the
+ &nbsp;&nbsp; // off-screen buffer DC, so we can play with it.
+ &nbsp;&nbsp; ::BitBlt(hdcOffScr, 0, 0, dx, dy, hDC, x, y, SRCCOPY);
+
+ &nbsp;&nbsp; // Create a memory DC for the source image.
+ &nbsp;&nbsp; HDC hdcImage = ::CreateCompatibleDC(hDC); 
+ &nbsp;&nbsp; HBITMAP hbmOldImage = (HBITMAP)::SelectObject(hdcImage, m_hObject);
+
+ &nbsp;&nbsp; // Create a memory DC for the mask.
+ &nbsp;&nbsp; HDC hdcMask = ::CreateCompatibleDC(hDC);
+ &nbsp;&nbsp; HBITMAP hbmOldMask = (HBITMAP)::SelectObject(hdcMask, m_hbmMask);
+
+ &nbsp;&nbsp; // XOR the image with the destination.
+ &nbsp;&nbsp; ::SetBkColor(hdcOffScr,rgbWhite);
+ &nbsp;&nbsp; ::BitBlt(hdcOffScr, 0, 0, dx, dy ,hdcImage, 0, 0, DSx);
+ &nbsp;&nbsp; // AND the destination with the mask.
+ &nbsp;&nbsp; ::BitBlt(hdcOffScr, 0, 0, dx, dy, hdcMask, 0,0, DSa);
+ &nbsp;&nbsp; // XOR the destination with the image again.
+ &nbsp;&nbsp; ::BitBlt(hdcOffScr, 0, 0, dx, dy, hdcImage, 0, 0, DSx);
+
+ &nbsp;&nbsp; // Copy the resultant image back to the screen DC.
+ &nbsp;&nbsp; ::BitBlt(hDC, x, y, dx, dy, hdcOffScr, 0, 0, SRCCOPY);
+
+ &nbsp;&nbsp; // Tidy up.
+ &nbsp;&nbsp; ::SelectObject(hdcOffScr, hbmOldOffScr);
+ &nbsp;&nbsp; ::SelectObject(hdcImage, hbmOldImage);
+ &nbsp;&nbsp; ::SelectObject(hdcMask, hbmOldMask);
+ &nbsp;&nbsp; ::DeleteObject(hbmOffScr);
+ &nbsp;&nbsp; ::DeleteDC(hdcOffScr);
+ &nbsp;&nbsp; ::DeleteDC(hdcImage);
+ &nbsp;&nbsp; ::DeleteDC(hdcMask);
+}
+</code></pre>
+<p>
+There are lots of DCs and lots of bitmaps here. These are the essential steps:</p>
+<p>
+Create a memory DC with a bitmap the same size as the image. We can use construct the final image in this memory DC. (Without this buffer, the screen would flicker as we drew the bitmap.)</p>
+<p>
+Copy the current state of the screen DC to the buffer.</p>
+<p>
+XOR the image of the bitmap with the buffer.</p>
+<p>
+Use the mask to make a black area in the buffer where we want the nontransparent bits of the image to be by ANDing it with the buffer. </p>
+<p>
+XOR the image with the buffer again. Note that 2 XORs together do nothing, so the areas of the buffer that were unmodified by Step 4 are now set back to the way they were before Step 3. The areas altered to black by the masking operation in Step 4 are now converted to the colors of the image.</p>
+<p>
+Copy the final image from the buffer back to the screen DC to make it visible.</p>
+<p>
+The key point to this process is that the main drawing operations (Steps 3, 4, and 5) are done to an off-screen buffer, so the screen image doesn't flicker as the bitmap is drawn.</p>
+<h2>Summary</h2>
+<p>
+So now you've seen how to add an owner-drawn list box to your application's view, get mouse events from the list box, draw data in the list box, copy data to and from the Clipboard, and draw pretty bitmaps, too. How's that for a set of tips?</p>
+</BODY>
+</HTML>

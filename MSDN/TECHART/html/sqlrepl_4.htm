@@ -1,0 +1,186 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Managing Operations and the Impact of Replication</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+<h1>Managing Operations and the Impact of Replication</h1>
+<p>
+Whether deploying an application that uses data dissemination or roll-up, additional deployment considerations must be taken into account when distributing an application that uses replication. Replication requires unique considerations for recovery planning.</p>
+<h3>Backup and Restore Considerations</h3>
+<p>
+Distributed systems such as those that employ replication can create challenges for developing a backup plan. Several options exist for ensuring system-wide recoverability when using replication in your environment.</p>
+<p>
+The recommended backup and restore strategy is to minimize the amount of coordination between servers. All publishing and subscribing databases are backed up according to the normal backup plan. The distribution database can be backed up also, but distribution failure can be difficult to recover from and require re-subscription. If a subscription database fails, restore the subscription database and transaction logs as you normally would. This ensures that tables not involved in replication are recovered. Next, drop the subscription on the publisher for the subscriber and re-subscribe. This forces a new initial synchronization on the publication and synchronizes the subscription database with the published tables. Replication of transactions following the synchronization process continues.</p>
+<p>
+If a publishing database or the distribution database fails, all of the associated subscriptions should be dropped and recreated. This ensures that all subscriptions are synchronized before the uninterrupted flow of transactions begins again. This prevents the case where the subscribing databases could potentially be ahead of a restored publishing and distributing pair.</p>
+<p>
+While it is possible to schedule backups system-wide according to a normal backup and recovery plan, this approach is not recommended. To successfully deploy an application using a coordinated publishing and distributing database recovery plan requires that no transaction processing occurs during the entire backup cycle.&nbsp; It also requires a coordinated restoration of publishers and distributors if recovery is necessary. This is complex, impractical, and risky in a distributed enterprise with more than a few servers.</p>
+<h3>Database Log Maintenance and Performance</h3>
+<p>
+Transactions applied against published tables are marked for replication in the database log. These transactions remain in the log until a specified retention period is reached. During this time, transactions marked for replication cannot be purged from the log. As a result, transaction logs on replicated databases must be larger than most and experience more sustained growth than the comparable database and corresponding transaction and log dump rate without replication. The transaction log cannot be truncated until the specified retention period has elapsed.</p>
+<p>
+If a problem is preventing successful replication of transactions through the log reader, the log on the publishing database can become full. This makes the publishing database unusable until the log is dumped. However, the transaction log cannot be truncated, because there are commands pending replication. When production cannot be halted to isolate and correct the problem, and you cannot temporarily extend the size of the transaction log, you can force the marking of all transactions in the log as distributed:</p>
+<pre><code>EXEC sp_repl_done 0, 0. NULL, 0, 0, 1
+</code></pre>
+<p>
+The transaction log can then be truncated by executing the following command:</p>
+<pre><code>DUMP TRANSACTION database_name WITH NO_LOG
+</code></pre>
+<p>
+It is likely that nondistributed transactions were removed from the transaction log of the publication and all subscribers to the publications within the affected database must unsubscribe and resubscribe. This resynchronizes the publications and replication can continue normally.</p>
+<p>
+Horizontal partitioning affects whether transactions written to the log should be marked for replication. Each transaction that affects a row in a published table is evaluated against the horizontal partition criteria specified during the article definition. Further, the evaluation is performed for each row participating in the transaction and can potentially degrade overall application throughput rates. For this reason, your approach to partitioning a replicated data set should be carefully thought out.</p>
+<p>
+As a rule, the SQL Server 6.5 documentation recommends that your log is at least 25 percent the size of your database. Where replication is involved, and particularly where transaction volumes are high, it is recommended that you increase your log size to 50 percent or more of the size of your data segments. The space you require varies with the characteristics of your application and the replication scenario.</p>
+<h3>Troubleshooting</h3>
+<p>
+As with all complex deployments, replication processing can sometimes encounter difficulties. Most problems with replication involve security and connectivity. </p>
+<p>
+The first step in troubleshooting replication problems is to view the task history to determine the task that failed and the reason for failure. Message detail cannot always pinpoint the problem but often provides an indicator of the issues, for example, connectivity problems, permissions restrictions, log full errors, and so on.</p>
+<p>
+Tasks related to replication run under the user or process context of the SQL Executive scheduling engine. As a result, time security issues (permissions) are suspected to be a problem in replicating data. Troubleshooting and resolution must focus around the user account's access to each of the servers and to the databases involved in the replication scenario.</p>
+<p>
+First, verify the account has proper privileges—not only to the publishing database, but also to the replication working directory at the operating system level. Temporary files used to replicate data are written to this directory. By default, the replication working directory is located on the distributor in the REPLDATA subdirectory where SQL Server is installed. If the user account you have established does not have change rights on the directory you specified as the replication working directory, then synchronization jobs cannot write the necessary schema and data files to disk. You can use the replication user interface or <b>sp_helpdistributor</b> to obtain information about the working directory associated with your replication configuration.</p>
+<p>
+The various replication tasks rely on DB-Library and ODBC API calls for database access. ODBC calls predominate except in the case of synchronization where the DB-Library API handles bulk copy processing (the <b>bcp</b> utility). You can use the command-line utility ISQL<i> </i>to verify server connections through DB-Library. ODBCPing in the MSSQL\BINN directory can be used to verify ODBC connectivity. </p>
+<p>
+All replication tasks rely on trusted connections and require that named pipes or multiprotocol network support is installed as a default for client connections. Use the client configuration utility to view or change the selected default network protocol stack.</p>
+<p>
+To test DB-Library connections and integrated security, log on to the distributor under the user account that you set up for SQL Executive:</p>
+<pre><code>ISQL –E –S &lt;remoteserver&gt; 
+</code></pre>
+<p>
+If this fails, try using the makepipe/readpipe tests (detailed in the Microsoft Knowledge Base article Q110905, "INF: Readpipe Return Codes")<i> </i>between servers. If these fail, there is likely a Windows NT networking problem, which should be referred to your Windows NT administrator.</p>
+<p>
+In some instances, the task history in the SQL Enterprise Manager will report "No Message." This occurs if the executed task fails to report any detailed error information to the scheduler. In this event, check the Windows NT Event Log for application specific errors relating to SQL Server execution.</p>
+<h4>Synchronization</h4>
+<p>
+Synchronization problems can occur in one of two places: either creating the schema and copying data out of the publisher, or distributing the schema definition and the initial/synchronization copy of the data to the subscriber. </p>
+<p>
+If a synchronization task fails, you can locate the schema files (.sch) in the replication working directory for the publisher to verify that the schema definition is correct and complete. Next, you should see a data file associated with each article that contains the data set produced for the synchronization task. Where SQL Server-to-SQL Server replication is employed the schema file contains native mode <b>bcp</b> output.</p>
+<p>
+When synchronization completes a job reference for the initial synchronization task, it is placed in the distribution database. Select from the <b>MSjobs</b> table in the distribution database and you will see a transaction that represents the synchronization task. </p>
+<h4>Log Reader</h4>
+<p>
+If you suspect the log reader is failing to successfully read commands and place them in the distribution database, you can monitor the detail of the log reader task execution by turning on the <b>-o</b> (output) option for the log reader task. </p>
+<p>
+To do this, use SQL Enterprise Manager to edit the scheduled task for the log reader and add&nbsp;&nbsp; <b>-o</b> <i>filename</i> to the command-line argument list for the task execution. The log reader dumps execution details to the specified output file. This level of output monitoring takes up disk space and impedes the performance of replication. As a result, it should be used only when tracking down a problem.</p>
+<p>
+Because the job of the log reader is to collect commands marked for replication from the publishing database's transaction log and copy them to the distribution database, the next logical step in troubleshooting is to verify the delivery of the transactions you expect to see in the distribution database. Use ISQL/w or another utility to select from the <b>MSjobs</b> and <b>MSjob_commands</b> tables in the distribution database. All replication transactions written to the log have entries in the <b>MSjobs</b> table and each of the Transact-SQL commands to be replicated has a corresponding entry in <b>MSjob_commands</b>.</p>
+<p>
+Note that while your application may classify a transaction as a single command in some cases, the number of commands associated with any given replication transaction can vary up to the commit batch size (<b>-c</b>) specified on the log reader. That is, if the commit batch size associated with your log reader task is 100 there are from 1 to 100 <b>MSjob_commands</b> rows per <b>MSjobs</b> row.</p>
+<h4>Distributor</h4>
+<p>
+The distributor also supports an output option using <b>-o</b>. This can be changed in the same way the output option is added to the log reader. If commands are placed in the distribution database appropriately and you suspect problems applying commands at the subscriber, you may be encountering periodic deadlocks on the subscriber tables. This is most common where sequential data is added to the subscriber and transaction batch sizes are high during a roll-up scenario. If multiple publishers contend for tightly sequenced data rows that are likely to write to the same data or index page, you can encounter deadlocks. These can be minimized by adding greater variability to index keys and by reducing the commit batch size on the distribution task.</p>
+<p>
+Here again, commit batch size causes an outer transaction bracket to be added by the replication task to the batch of commands being applied to the subscriber. If there are fewer than the commit batch size number of commands in the batch to be committed to the subscriber, then a commit is issued when the last command is written. Otherwise, it is performed after every <b>–c</b><i>N</i> commands are applied to the subscriber. Where commit batch sizes are high and deadlocks are common, replication to subscribers quickly fails to keep up with the transaction rate at the publisher. Minimizing the batch size can help avoid deadlocks by minimizing the amount of time an exclusive lock is taken out on the data pages and the amount of data requiring rollback if a distribution process is ever chosen by SQL Server as a deadlock victim.</p>
+<p>
+To check for deadlocks on the server, use the server trace flags –t1204 –t1205 –t1206 on the subscriber and run SQL Server 6.5 in console mode:</p>
+<pre><code>sqlservr –c –t1204 –t1205 -t1206
+</code></pre>
+<p>
+You can also execute <b>sp_who</b> periodically against the subscriber to see if any of the connecting distribution tasks are blocking or are being blocked by one another. </p>
+<p>
+As a rule, set both read and commit batch sizes on the log reader and distributor to 1 during troubleshooting.</p>
+<h4>Tracing Replicated Transactions</h4>
+<p>
+Sometimes it is helpful to trace replication transactions on a server when troubleshooting problems. The SQL Server 6.5 extended stored procedure <b>xp_sqltrace</b> can be used to start and customize a trace. Tracing reduces performance and scaling capacity of the system and should be used only when tracking down the cause of a problem. A trace can be established using any existing connection attribute as a filter. Replication activity occurs under the application name of the task being executed. Therefore, you could limit a trace to only log reader and distributor activity. The following example copies replication transactions from the distribution task to a table for review:</p>
+<pre><code>USE sales
+GO
+IF EXISTS(SELECT * FROM sysobjects WHERE name = 'SQLTrace' AND type = 'U')
+BEGIN
+</code> &nbsp; <code>DROP TABLE SQLTrace</code>
+<code>END</code>
+<code>GO</code>
+<code>CREATE TABLE SQLTrace</code>
+<code>(</code>
+ &nbsp; <code>Event </code> &nbsp;&nbsp;&nbsp;&nbsp; <code>CHAR(12) NOT NULL,</code>
+ &nbsp; <code>UserName </code> &nbsp; <code>CHAR(30) NOT NULL,</code>
+ &nbsp; <code>ID int </code> &nbsp;&nbsp;&nbsp;&nbsp; <code>NOT NULL,</code>
+ &nbsp; <code>SPID int </code> &nbsp; <code>NOT NULL,</code>
+ &nbsp; <code>StartTime </code> &nbsp; <code>DATETIME NULL,</code>
+ &nbsp; <code>EndTime </code> &nbsp;&nbsp;&nbsp;&nbsp; <code>DATETIME NULL,</code>
+ &nbsp; <code>Application </code> &nbsp; <code>CHAR(30) NOT NULL,</code>
+ &nbsp; <code>Data </code> &nbsp;&nbsp;&nbsp;&nbsp; <code>VARCHAR(255) NULL,</code>
+ &nbsp; <code>Duration </code> &nbsp; <code>INT NULL,</code>
+ &nbsp; <code>CPU </code> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <code>INT NULL,</code>
+ &nbsp; <code>Reads </code> &nbsp;&nbsp;&nbsp;&nbsp; <code>INT NULL,</code>
+ &nbsp; <code>Writes </code> &nbsp;&nbsp;&nbsp;&nbsp; <code>INT NULL,</code>
+ &nbsp; <code>NT_Domain </code> &nbsp; <code>VARCHAR(30) NULL,</code>
+ &nbsp; <code>NT_User&nbsp;&nbsp; </code> &nbsp; <code>VARCHAR(30) NULL,</code>
+ &nbsp; <code>HostName&nbsp; </code> &nbsp; <code>VARCHAR(30) NULL,</code>
+ &nbsp; <code>HostProcess </code> &nbsp; <code>INT NULL </code>
+<code>)</code>
+<code>GO</code>
+<code>EXEC master..xp_sqltrace</code>
+<code>GO</code>
+<code>INSERT INTO SQLTrace EXECUTE master..xp_sqltrace TRACE, @eventfilter = 31, </code>
+<code>@A</code>ppFilter = 'distrib%'
+</pre>
+<p>
+From another connection, execute the following statement:</p>
+<pre><code>EXEC master..xp_sqltrace STOP, 1358560&nbsp;&nbsp; 
+/* where 1358560 is the trace session returned from xp_sqltrace */</code></pre>
+<h3>Performance and Scaling</h3>
+<p>
+Microsoft SQL Server 6.5 replication uses the power of the SQL Server engine in its architecture to provide a robust, flexible, and scalable replication solution. The store-and-forward queue used to manage distributed transactions is a series of specialized tables accessed by the replication tasks (running under SQL Executive) through Transact-SQL.</p>
+<p>
+When a server is enabled for replication, transactions are marked "for replication" as they are written to the database log. This process occurs quickly and does not result in deterioration of performance in log writes.</p>
+<p>
+All replication tasks rely on the SQL Executive scheduling engine to provide scheduling and execution facilities. During replication configuration, default schedules for replicating transactions to subscribers, performing administrative (cleanup) tasks, and renewing database snapshots used in synchronization are established. A variety of optional arguments apply to the execution of each task that can affect performance in your environment.</p>
+<p>
+The log reader and distribution tasks support batch sizes for reads and commits of transactions. Batch sizes default to 100 transactions for the log reader and distributor. Where there are many transactions written to a publishing database and only a small subset of those are marked for replication, you should increase the read batch size of the log reader. The log reader reads the specific number of transactions from the log including those marked for replication and those that are not. A large commit batch size on the log reader or distributor allows each to process more commands in a single transaction. Be aware that there is not a one-to-one correspondence between business transactions and replicated transactions committed against a subscriber. </p>
+<p>
+If your application uses insert operations, you can minimize blocking due to page locks by turning on insert row-level locking (IRL) for those tables involved in replication. In this way, multiple subscribers add data to the set already existing at the central subscriber.</p>
+<p>
+Also, to ease maintenance, the <b>trunc. log on chkpt</b> option set can be set for the distribution database. This can help reduce the size needed for the distribution database log.</p>
+<h3>Monitoring Performance</h3>
+<p>
+By periodically monitoring replication performance, you can verify smooth operation of your distributed environment and identify bottlenecks to data delivery. Replication monitoring takes two forms: replication performance monitoring (speed) and data delivery monitoring (verification). Verifying that data received at the subscriber matches data at the publisher is most often a custom task. Several helpful tools can aid in monitoring replication performance.</p>
+<p>
+<b>Using System Counters</b></p>
+<h3>sp_replcounters </h3>
+<p>
+This stored procedure can be used to view the current rate at which replicated transactions are copied from the publishing database log and applied to the distribution database. In addition to information about the transactions delivered per second and the number of commands transferred, a transactions per second value is reported to represent the latency incurred in the processing step.</p>
+<h3>sp_distcounters</h3>
+<p>
+This stored procedure provides an interactive mechanism for querying the distribution database for the number of commands delivered, undelivered, replication speed in transactions per second, and the latency incurred between the time the transactions arrived at the distributor and the time they are applied against the subscriber.</p>
+<p>
+<b>Using SQL Performance Monitor</b></p>
+<p>
+Several useful replication monitoring procedures have been added to the SQL Performance Monitor. Replication Subscriber counters that graphically display the output of <b>sp_distcounters</b> are useful when troubleshooting a distributor. This output includes figures for delivered transactions, undelivered transactions, and the rates of delivery, including latency.</p>
+<p>
+The Replication Published DB counters graphically display the replicated transactions count and replicated transaction rates for the log reader, including latency.</p>
+<p>
+Additionally, user-defined counters can help verify data delivery to the subscriber on a periodic basis. Some customers find it useful to add a user-defined counter that counts the rows currently in the subscriber table and in the publisher table. This is useful as a monitoring tool when the application is mostly insert oriented and simple row counts can help to show any problems with transaction delivery to subscribers. This is an example of adding a custom counter to monitor the number of rows in a customer table:</p>
+<pre><code>DROP PROCEDURE sp_user_counter1
+Go
+CREATE PROCEDURE sp_user_counter1
+as SELECT COUNT(*) FROM sales..customer
+Go
+GRANT EXECUTE ON sp_user_counter1 TO PROBE
+Go
+</code></pre>
+<p>
+You can monitor the result by using SQL User Counter1 in SQL Performance Monitor. A counter can be used to monitor any information in SQL statement form that returns a single integer value as a result set. There are 10 user counters available in SQL Server. When creating a user-defined counter, remember to grant execute permissions to the probe account on your stored procedure.</p>
+<h3>Improving SQL Server Replication Performance</h3>
+<p>
+In addition to performance monitoring facilities, SQL Server 6.5 replication employs a flexible architecture that provides several options for improving replication performance through tuning task run-time parameters. Design decisions, especially decisions to partition data, can also affect performance.</p>
+<p>
+<b>Avoiding Partitions</b></p>
+<p>
+The filter criteria set up with a horizontal partition is evaluated once for each row marked for replication in the publishing database log to determine whether it should be moved to the distribution database. For applications that require maximum data throughput, horizontal partitioning of articles may not be the best choice for minimizing the rows delivered to each subscriber. Instead, developing natural partitions through fragmentation of the table design along partitioned boundaries may be a better choice.</p>
+<p>
+<b>Limiting Transaction Sizes</b></p>
+<p>
+The log reader and distribution tasks should run continuously while the databases used for replication are active. With this set up, replication should be able to keep up (and incur an average latency of delivery to the subscriber of a few seconds) in most application processing environments. Setting the replication task read and commit batch sizes too small can result in inefficient use of query processing and client-to-server connection time. </p>
+<p>
+It doesn't make sense to set a commit batch size larger than the read batch size. While not necessarily inefficient, this means that the read batch size is in effect as the commit batch size because the threshold for the command buffer for commits is never reached. </p>
+<p>
+Replication tasks set up as auto start (the default for replication task scheduling) continue to run until there are no more commands to process. A run cycle consists of establishing a connection, processing replication until there are no more transactions to process, and then dropping the connection. Setting an enormous batch size for reads and commits can cause a single distribution task to maintain a lock on a target subscription table for an extended period. This can result in deadlocks and connection timeouts for other tasks trying to insert into the same subscribing data tables. Batch sizes should be maintained wherever possible so that all replicated commands will be delivered to subscribers throughout the enterprise within a few seconds if activity ceases on the publisher.</p>
+</BODY>
+</HTML>

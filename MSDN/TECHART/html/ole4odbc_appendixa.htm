@@ -1,0 +1,461 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Appendix A</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+<h1><a name="ole4odbc_appendixa"></a><sup></sup>Appendix A</h1>
+<p>
+The following is a complete source code listing for the example presented in "Basic OLE DB." The example selects the <b>CompanyName</b>, <b>City</b>, <b>Phone </b>and <b>FAX </b>columns from the <b>Customers </b>table of the <b>Access Northwind </b>sample database. The database is shipped with the OLE DB SDK and is installed as the ODBC data source <i>OLE_DB_NWind_Jet.</i></p>
+<p>
+To build the file using Microsoft Visual C++ ® 4.0 or later:
+<ol>
+<li>
+Create a new console application.<br><br></li>
+<li>
+Copy the following code to a new .cpp file.<br><br></li>
+<li>
+Ensure that your build directory settings reference the OLE DB SDK include directory.<br><br></li>
+<li>
+Alter the build link settings to include linking to Oledb.lib.</li>
+</ol>
+<pre><code>/********************************************************************
+* OLE DB
+********************************************************************/
+#define UNICODE
+#define _UNICODE
+#define DBINITCONSTANTS // Initialize OLE constants...
+#define INITGUID&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // ...once in each app
+
+#include &lt;windows.h&gt;
+#include &lt;stdio.h&gt;
+
+#include &lt;oledb.h&gt; &nbsp;&nbsp;&nbsp;&nbsp; // OLE DB include files
+#include &lt;oledberr.h&gt; 
+#include &lt;msdaguid.h&gt; &nbsp; // ODBC provider include files
+#include &lt;msdasql.h&gt;
+
+// Macros--number of row identifiers to retrieve
+#define NUMROWS_CHUNK&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 35
+
+// Prototypes
+HRESULT myInitDSO(IDBInitialize** ppIDBI);
+HRESULT mySetInitProps(IDBInitialize* pIDBInitialize);
+HRESULT myCommand(IDBInitialize* pIDBI, IRowset** ppIRowset);
+void&nbsp;&nbsp;&nbsp; myGetData(IRowset* pIRowset);
+void&nbsp;&nbsp;&nbsp; DumpError(LPSTR lpStr);
+HRESULT myGetColumnsInfo(IRowset* pIRowset, ULONG* pnCols,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DBCOLUMNINFO** ppColumnsInfo, OLECHAR** ppColumnStrings);
+void&nbsp;&nbsp;&nbsp; myCreateDBBindings(ULONG nCols, DBCOLUMNINFO* pColumnsInfo,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DBBINDING** ppDBBindings, char** ppRowValues);
+
+// Global task memory allocator
+IMalloc*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; g_pIMalloc = NULL;
+
+/********************************************************************
+* General OLE DB application main()
+********************************************************************/
+int main()
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; IDBInitialize*&nbsp; pIDBInitialize = NULL;
+ &nbsp;&nbsp; IRowset*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIRowset = NULL;
+
+ &nbsp;&nbsp; // Init OLE and set up the DLLs
+ &nbsp;&nbsp; CoInitialize(NULL);
+
+ &nbsp;&nbsp; // Get the task memory allocator.
+ &nbsp;&nbsp; if (FAILED(CoGetMalloc(MEMCTX_TASK, &amp;g_pIMalloc)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto EXIT;
+
+ &nbsp;&nbsp; // Connect to the data source.
+ &nbsp;&nbsp; if (FAILED(myInitDSO(&amp;pIDBInitialize)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto EXIT;
+
+ &nbsp;&nbsp; // Get a session, set and execute a command.
+ &nbsp;&nbsp; if (FAILED(myCommand(pIDBInitialize, &amp;pIRowset)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto EXIT;
+
+ &nbsp;&nbsp; // Retrieve data from rowset.
+ &nbsp;&nbsp; myGetData(pIRowset);
+
+EXIT:
+ &nbsp;&nbsp; // Clean up and disconnect.
+ &nbsp;&nbsp; if (pIRowset != NULL)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIRowset-&gt;Release();
+
+ &nbsp;&nbsp; if (pIDBInitialize != NULL)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (FAILED(pIDBInitialize-&gt;Uninitialize()))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Uninitialize is not required, but it will fail if an 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // interface has not been released; we can use it for
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // debugging.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("Someone forgot to release something!");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIDBInitialize-&gt;Release();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; if (g_pIMalloc != NULL)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; g_pIMalloc-&gt;Release();
+
+ &nbsp;&nbsp; CoUninitialize();
+ &nbsp;&nbsp; 
+ &nbsp;&nbsp; return (0);
+ &nbsp;&nbsp; }
+
+/********************************************************************
+* Initialize the data source.
+********************************************************************/
+HRESULT myInitDSO
+ &nbsp;&nbsp; (
+ &nbsp;&nbsp; IDBInitialize** ppIDBInitialize&nbsp; // [out]
+ &nbsp;&nbsp; )
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; // Create an instance of the MSDASQL (ODBC) provider.
+ &nbsp;&nbsp; CoCreateInstance(CLSID_MSDASQL, NULL, CLSCTX_INPROC_SERVER,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; IID_IDBInitialize, (void**)ppIDBInitialize);
+
+ &nbsp;&nbsp; if (*ppIDBInitialize == NULL)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return (E_FAIL);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; if (FAILED(mySetInitProps(*ppIDBInitialize)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return (E_FAIL);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; if (FAILED((*ppIDBInitialize)-&gt;Initialize()))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("IDBInitialze-&gt;Initialize failed.");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return (E_FAIL);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; return (NOERROR);
+ &nbsp;&nbsp; }
+
+/********************************************************************
+* Set initialization properties on a data source.
+********************************************************************/
+HRESULT mySetInitProps
+ &nbsp;&nbsp; (
+ &nbsp;&nbsp; IDBInitialize*&nbsp; pIDBInitialize&nbsp; // [in]
+ &nbsp;&nbsp; )
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; const ULONG&nbsp;&nbsp;&nbsp;&nbsp; nProps = 4;
+ &nbsp;&nbsp; IDBProperties*&nbsp; pIDBProperties;
+ &nbsp;&nbsp; DBPROP&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; InitProperties[nProps];
+ &nbsp;&nbsp; DBPROPSET&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rgInitPropSet;
+ &nbsp;&nbsp; HRESULT&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hr;
+
+ &nbsp;&nbsp; // Initialize common property options.
+ &nbsp;&nbsp; for (ULONG i = 0; i &lt; nProps; i++ )
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; VariantInit(&amp;InitProperties[i].vValue);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; InitProperties[i].dwOptions = DBPROPOPTIONS_REQUIRED;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; InitProperties[i].colid = DB_NULLID;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; // Level of prompting that will be done to complete the 
+ &nbsp;&nbsp; // connection process
+ &nbsp;&nbsp; InitProperties[0].dwPropertyID = DBPROP_INIT_PROMPT;
+ &nbsp;&nbsp; InitProperties[0].vValue.vt = VT_I2;
+ &nbsp;&nbsp; InitProperties[0].vValue.iVal = DBPROMPT_NOPROMPT;&nbsp;&nbsp;&nbsp;&nbsp; 
+
+ &nbsp;&nbsp; // Data source name--see the sample source included with the OLE
+ &nbsp;&nbsp; // DB SDK.
+ &nbsp;&nbsp; InitProperties[1].dwPropertyID = DBPROP_INIT_DATASOURCE;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; InitProperties[1].vValue.vt = VT_BSTR;
+ &nbsp;&nbsp; InitProperties[1].vValue.bstrVal = 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SysAllocString(OLESTR("OLE_DB_NWind_Jet"));
+
+ &nbsp;&nbsp; // User ID
+ &nbsp;&nbsp; InitProperties[2].dwPropertyID = DBPROP_AUTH_USERID;
+ &nbsp;&nbsp; InitProperties[2].vValue.vt = VT_BSTR;
+ &nbsp;&nbsp; InitProperties[2].vValue.bstrVal = SysAllocString(OLESTR(""));
+
+ &nbsp;&nbsp; // Password
+ &nbsp;&nbsp; InitProperties[3].dwPropertyID = DBPROP_AUTH_PASSWORD;
+ &nbsp;&nbsp; InitProperties[3].vValue.vt = VT_BSTR;
+ &nbsp;&nbsp; InitProperties[3].vValue.bstrVal = SysAllocString(OLESTR(""));
+
+ &nbsp;&nbsp; rgInitPropSet.guidPropertySet = DBPROPSET_DBINIT;
+ &nbsp;&nbsp; rgInitPropSet.cProperties = nProps;
+ &nbsp;&nbsp; rgInitPropSet.rgProperties = InitProperties;
+
+ &nbsp;&nbsp; // Set initialization properties.
+ &nbsp;&nbsp; pIDBInitialize-&gt;QueryInterface(IID_IDBProperties, (void**) 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;pIDBProperties);
+ &nbsp;&nbsp; hr = pIDBProperties-&gt;SetProperties(1, &amp;rgInitPropSet);
+
+ &nbsp;&nbsp; SysFreeString(InitProperties[1].vValue.bstrVal);
+ &nbsp;&nbsp; SysFreeString(InitProperties[2].vValue.bstrVal);
+ &nbsp;&nbsp; SysFreeString(InitProperties[3].vValue.bstrVal);
+
+ &nbsp;&nbsp; pIDBProperties-&gt;Release();
+
+ &nbsp;&nbsp; if (FAILED(hr))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("Set properties failed.");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; return (hr);
+ &nbsp;&nbsp; }
+
+/********************************************************************
+* Execute a command, retrieve a rowset interface pointer.
+********************************************************************/
+HRESULT myCommand
+ &nbsp;&nbsp; (
+ &nbsp;&nbsp; IDBInitialize*&nbsp; pIDBInitialize, // [in]
+ &nbsp;&nbsp; IRowset**&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ppIRowset&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // [out]
+ &nbsp;&nbsp; ) 
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; IDBCreateSession*&nbsp;&nbsp; pIDBCreateSession;
+ &nbsp;&nbsp; IDBCreateCommand*&nbsp;&nbsp; pIDBCreateCommand;
+ &nbsp;&nbsp; IRowset*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIRowset;
+ &nbsp;&nbsp; ICommandText*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pICommandText;
+ &nbsp;&nbsp; LPCTSTR&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; wSQLString = OLESTR("SELECT CompanyName, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; City, Phone, Fax")
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OLESTR(" FROM Customers")
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OLESTR(" ORDER BY CompanyName, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; City");
+ &nbsp;&nbsp; LONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cRowsAffected;
+ &nbsp;&nbsp; HRESULT&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hr;
+
+ &nbsp;&nbsp; // Get the DB session object.
+ &nbsp;&nbsp; if (FAILED(pIDBInitialize-&gt;QueryInterface(IID_IDBCreateSession,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (void**) &amp;pIDBCreateSession)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("Session initialization failed.");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return (E_FAIL);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; // Create the session, getting an interface for command creation.
+ &nbsp;&nbsp; hr = pIDBCreateSession-&gt;CreateSession(NULL, IID_IDBCreateCommand,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (IUnknown**) &amp;pIDBCreateCommand);
+ &nbsp;&nbsp; pIDBCreateSession-&gt;Release();
+ &nbsp;&nbsp; if (FAILED(hr))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("Create session failed.");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return (hr);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; // Create the command object.
+ &nbsp;&nbsp; hr = pIDBCreateCommand-&gt;CreateCommand(NULL, IID_ICommandText,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (IUnknown**) &amp;pICommandText);
+ &nbsp;&nbsp; if (FAILED(hr))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("Create command failed.");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return (hr);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; pIDBCreateCommand-&gt;Release();
+
+ &nbsp;&nbsp; // The command requires the actual text as well as an indicator
+ &nbsp;&nbsp; // of its language and dialect.
+ &nbsp;&nbsp; pICommandText-&gt;SetCommandText(DBGUID_DBSQL, wSQLString);
+
+ &nbsp;&nbsp; // Execute the command.
+ &nbsp;&nbsp; hr = pICommandText-&gt;Execute(NULL, IID_IRowset, NULL, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;cRowsAffected, (IUnknown**) &amp;pIRowset);
+ &nbsp;&nbsp; if (FAILED(hr))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("Command execution failed.");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; pICommandText-&gt;Release();
+
+ &nbsp;&nbsp; *ppIRowset = pIRowset;
+ &nbsp;&nbsp; return (hr);
+ &nbsp;&nbsp; }
+
+/********************************************************************
+* Get the characteristics of the rowset (the ColumnsInfo interface).
+********************************************************************/
+HRESULT myGetColumnsInfo
+ &nbsp;&nbsp; (
+ &nbsp;&nbsp; IRowset*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIRowset,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // [in]
+ &nbsp;&nbsp; ULONG*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pnCols,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // [out]
+ &nbsp;&nbsp; DBCOLUMNINFO**&nbsp; ppColumnsInfo,&nbsp;&nbsp; // [out]
+ &nbsp;&nbsp; OLECHAR**&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ppColumnStrings&nbsp; // [out]
+ &nbsp;&nbsp; )
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; IColumnsInfo*&nbsp;&nbsp; pIColumnsInfo;
+ &nbsp;&nbsp; HRESULT&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hr;
+
+ &nbsp;&nbsp; if (FAILED(pIRowset-&gt;QueryInterface(IID_IColumnsInfo, (void**) &amp;pIColumnsInfo)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("Query rowset interface for IColumnsInfo failed");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return (E_FAIL);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; hr = pIColumnsInfo-&gt;GetColumnInfo(pnCols, ppColumnsInfo, ppColumnStrings);
+ &nbsp;&nbsp; if (FAILED(hr))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("GetColumnInfo failed.");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *pnCols = 0;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; pIColumnsInfo-&gt;Release();
+ &nbsp;&nbsp; return (hr);
+ &nbsp;&nbsp; }
+
+/********************************************************************
+* Create binding structures from column information. Binding
+* structures will be used to create an accessor that allows row value 
+* retrieval.
+********************************************************************/
+void myCreateDBBindings
+ &nbsp;&nbsp; (
+ &nbsp;&nbsp; ULONG nCols,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // [in]
+ &nbsp;&nbsp; DBCOLUMNINFO* pColumnsInfo,&nbsp; // [in]
+ &nbsp;&nbsp; DBBINDING** ppDBBindings,&nbsp;&nbsp;&nbsp; // [out]
+ &nbsp;&nbsp; char** ppRowValues&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // [out]
+ &nbsp;&nbsp; )
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nCol;
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cbRow = 0;
+ &nbsp;&nbsp; DBBINDING*&nbsp; pDBBindings;
+ &nbsp;&nbsp; char*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pRowValues;
+
+ &nbsp;&nbsp; pDBBindings = new DBBINDING[nCols];
+
+ &nbsp;&nbsp; for (nCol = 0; nCol &lt; nCols; nCol++)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].iOrdinal = nCol+1;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].obValue = cbRow;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].obLength = 0;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].obStatus = 0;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].pTypeInfo = NULL;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].pObject = NULL;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].pBindExt = NULL;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].dwPart = DBPART_VALUE;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].dwMemOwner = DBMEMOWNER_CLIENTOWNED;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].eParamIO = DBPARAMIO_NOTPARAM;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].cbMaxLen = pColumnsInfo[nCol].ulColumnSize;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].dwFlags = 0;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].wType = pColumnsInfo[nCol].wType;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].bPrecision = pColumnsInfo[nCol].bPrecision;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings[nCol].bScale = pColumnsInfo[nCol].bScale;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cbRow += pDBBindings[nCol].cbMaxLen;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; pRowValues = new char[cbRow];
+
+ &nbsp;&nbsp; *ppDBBindings = pDBBindings;
+ &nbsp;&nbsp; *ppRowValues = pRowValues;
+
+ &nbsp;&nbsp; return;
+ &nbsp;&nbsp; }
+
+/********************************************************************
+* Retrieve data from a rowset.
+********************************************************************/
+void myGetData
+ &nbsp;&nbsp; (
+ &nbsp;&nbsp; IRowset*&nbsp;&nbsp;&nbsp; pIRowset&nbsp;&nbsp;&nbsp; // [in]
+ &nbsp;&nbsp; ) 
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nCols;
+ &nbsp;&nbsp; DBCOLUMNINFO*&nbsp;&nbsp; pColumnsInfo = NULL;
+ &nbsp;&nbsp; OLECHAR*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pColumnStrings = NULL;
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nCol;
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cRowsObtained;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Number of rows obtained
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iRow;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Row count
+ &nbsp;&nbsp; HROW&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rghRows[NUMROWS_CHUNK];// Row handles
+ &nbsp;&nbsp; HROW*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pRows = &amp;rghRows[0];&nbsp;&nbsp; // Pointer to the row 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // handles
+ &nbsp;&nbsp; IAccessor*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIAccessor;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Pointer to the accessor
+ &nbsp;&nbsp; HACCESSOR&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hAccessor;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Accessor handle
+ &nbsp;&nbsp; DBBINDSTATUS*&nbsp;&nbsp; pDBBindStatus = NULL;
+ &nbsp;&nbsp; DBBINDING*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings = NULL;
+ &nbsp;&nbsp; char*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pRowValues;
+
+ &nbsp;&nbsp; // Get the description of the rowset for use in binding structure
+ &nbsp;&nbsp; // creation.
+ &nbsp;&nbsp; if (FAILED(myGetColumnsInfo(pIRowset, &amp;nCols, &amp;pColumnsInfo,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;pColumnStrings)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; // Create the binding structures.
+ &nbsp;&nbsp; myCreateDBBindings(nCols, pColumnsInfo, &amp;pDBBindings, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;pRowValues);
+ &nbsp;&nbsp; pDBBindStatus = new DBBINDSTATUS[nCols];
+
+ &nbsp;&nbsp; // Create the accessor.
+ &nbsp;&nbsp; pIRowset-&gt;QueryInterface(IID_IAccessor, (void**) &amp;pIAccessor);
+ &nbsp;&nbsp; pIAccessor-&gt;CreateAccessor(
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DBACCESSOR_ROWDATA, // Accessor will be used to retrieve row 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // data.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nCols,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Number of columns being bound
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindings,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Structure containing bind info
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Not used for row accessors 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;hAccessor,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Returned accessor handle
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pDBBindStatus&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Information about binding validity
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; );
+
+ &nbsp;&nbsp; // Process all the rows, NUMROWS_CHUNK rows at a time
+ &nbsp;&nbsp; while (TRUE)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIRowset-&gt;GetNextRows(
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Reserved
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // cRowsToSkip
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NUMROWS_CHUNK,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // cRowsDesired
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;cRowsObtained,&nbsp;&nbsp;&nbsp;&nbsp; // cRowsObtained
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;pRows );&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Filled in w/ row handles.
+
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // All done; there is no more rows left to get.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (cRowsObtained == 0)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Loop over rows obtained, getting data for each.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; for (iRow=0; iRow &lt; cRowsObtained; iRow++)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIRowset-&gt;GetData(rghRows[iRow], hAccessor, pRowValues);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; for (nCol = 0; nCol &lt; nCols; nCol++)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; wprintf(OLESTR("%s%s:"), pColumnsInfo[nCol].pwszName,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; wcslen(pColumnsInfo[nCol].pwszName) &gt; 10 ? 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OLESTR("\t") :
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OLESTR("\t\t"));
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printf("\t%s\n", 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;pRowValues[pDBBindings[nCol].obValue]);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printf("\n");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Release row handles.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIRowset-&gt;ReleaseRows(cRowsObtained, rghRows, NULL, NULL, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }&nbsp; // End while
+
+ &nbsp;&nbsp; // Release the accessor.
+ &nbsp;&nbsp; pIAccessor-&gt;ReleaseAccessor(hAccessor, NULL);
+ &nbsp;&nbsp; pIAccessor-&gt;Release();
+
+ &nbsp;&nbsp; delete [] pDBBindings;
+ &nbsp;&nbsp; delete [] pDBBindStatus;
+
+ &nbsp;&nbsp; g_pIMalloc-&gt;Free( pColumnsInfo );
+ &nbsp;&nbsp; g_pIMalloc-&gt;Free( pColumnStrings );
+
+ &nbsp;&nbsp; return;
+ &nbsp;&nbsp; }
+
+/********************************************************************
+* Dump an error to the console.
+********************************************************************/
+void DumpError(LPSTR lpStr)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; printf(lpStr);
+ &nbsp;&nbsp; printf("\n");
+ &nbsp;&nbsp; }
+</code></pre>
+</BODY>
+</HTML>

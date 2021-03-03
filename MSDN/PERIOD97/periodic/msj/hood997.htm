@@ -1,0 +1,1266 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Under the Hood</title>
+
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF>
+
+<font face="verdana,arial,helvetica" size="2">
+<h1>
+Under the Hood</h1>
+<p>
+Matt Pietrek</p>
+<p>
+Matt Pietrek is the author of Windows 95 System Programming Secrets (IDG Books, 1995). He works at NuMega Technologies Inc., and can be reached at mpietrek@tiac.com or at <BR>http://www.tiac.com/users/mpietrek. </p>
+<p>
+It’s not every day that I end up working with <BR>&#09;assembly language, API interception, the Internet, <BR>&#09;and Visual Basic&reg; all in the same project. While API spying is up my alley, what the heck am I doing writing Visual Basic and Internet code? </p>
+<p>
+One night, while sitting in the spa, it occurred to me that I wanted to more actively monitor the mutual funds in my retirement&nbsp;plans.&nbsp;There&nbsp;are&nbsp;a&nbsp;lot&nbsp;of&nbsp;great&nbsp;Web&nbsp;sites&nbsp;out&nbsp;there that&nbsp;offer&nbsp;free&nbsp;stock&nbsp;and&nbsp;mutual&nbsp;fund&nbsp;analysis&nbsp;and&nbsp;chart&shy;ing. My favorite is the Microsoft&reg; Investor site (http://inves&shy;tor.msn.com), but since my personal T1 line hasn’t arrived yet, it’s painful waiting for my 28.8Kbps modem to grind through downloads. </p>
+<p>
+Also, being a programmer, I naturally wanted the raw data so I could do my own custom analysis and charting. While I can easily use my browser to find the prices of each fund I own, it would be a real pain to manually transcribe all the prices from the browser page. Even worse, the process would need to be repeated every day. No, I wanted a program that used the Web to retrieve stock or mutual fund prices without requiring me to do anything manually. No mouse clicks, no typing. Just run the program and my personal database of fund prices is updated.</p>
+<p>
+Drawing on the vast emptiness of my Internet programming knowledge, it occurred to me that, when using a browser to get an online quote, it’s really just an HTTP transaction between your browser and a server somewhere. By determining what data a browser sends and receives when you submit a quote request, it’s possible to create a program that mimics these interactions, thereby receiving the same data that a browser would. Luckily, my last remaining bit of Internet knowledge was that Microsoft Internet Explorer (IE) 3.0x uses WININET.DLL—a Win32&reg; system DLL that provides a high-level layer over the HTTP, FTP, and Gopher protocols, sparing you from the nastiness of Windows&reg; socket programming.</p>
+<p>
+By observing the calls made to WININET.DLL while retrieving a quote, it’s possible to create a program that makes similar calls to the WININET APIs, but without the overhead of an entire Internet browser. Of course, the ability to watch what IE is doing is useful for many things beyond mere stock quotes. For example, I found it extremely interesting to watch how IE did things like downloading Java classes, using cookies, and caching the most recently downloaded pages and image files.</p>
+<p>
+Longtime readers of <i>MSJ</i> may recall an article I wrote a while back that presented a generic API spying program called APISPY32. While theoretically I could have used APISPY32 to monitor calls made to WININET.DLL, there would have been a variety of technical hurdles that I won’t go into here. Instead, I opted to use a more classical method of API spying. I called the resulting code WininetSpy.</p>
+<p>
+The core of WininetSpy is a DLL that shares a common name&nbsp;with WININET.DLL and exports many of same func&shy;tions as the Microsoft-supplied WININET.DLL. Each exported function in my DLL performs whatever logging is needed in addition to calling its corresponding API in the Microsoft WININET.DLL. Theoretically, my version should export a stub API for every API in the Microsoft WIN&shy;INET.DLL. But not all of the functions in WININET.DLL are documented, so it would be difficult (but not impossible) to create stubs for these undocumented APIs. In addition, I couldn’t find any programs that used the Unicode version of the WININET APIs. Therefore, I was lazy and only provided logging stubs for the WININET APIs that are actually used by IE 3.0<i>x</i>.</p>
+<p>
+Two system-supplied DLLs are layered between IE and WININET.DLL: MSHTML.DLL and URLMON.DLL. By combining the list of WININET functions imported by these two DLLs, I came up with the list of functions that my WININET.DLL had to export. Important note: the Wininet&shy;Spy code was tested extensively on IE 3.02, using Windows NT&reg; 4.0. If future versions of IE import additional WININET functions,&nbsp;IE&nbsp;will&nbsp;likely&nbsp;stop&nbsp;functioning&nbsp;if&nbsp;my&nbsp;WININET.DLL is being used. The fix would be to add stub logging functions for the appropriate new WININET APIs. Alternatively, you could just remove my WININET.DLL from its installed location, and everything should work correctly afterwards. You’ll see why momentarily.</p>
+<p>
+At this point, you probably have two concerns about how my WININET.DLL fits into the picture. First, aren’t there restrictions about having two DLLs with the same name in a process? Second, how can I force the system to connect MSHTML.DLL and URLMON.DLL to my replacement WININET.DLL&nbsp;rather&nbsp;than&nbsp;the&nbsp;system-supplied&nbsp;WIN&shy;INET.DLL? The answer to both comes down to location, location, and location.</p>
+<p>
+Unlike 16-bit Windows, Win32 doesn’t care if you have multiple DLLs with the same name in a process address space. When keeping track of loaded DLLs, Win32 operating systems use the DLL’s complete path as its name. This is different than 16-bit Windows, which uses the base file name of the DLL (such as WININET) as the module name. So you can have two copies of WININET.DLL loaded as long as they’re in different directories. The tricky part is getting them both loaded and everything hooked up properly.</p>
+<p>
+By examining the documentation for the Win32 loader (essentially, the LoadModule API), you’ll see that the loader first searches for DLLs in the directory where the appli&shy;cation’s executable resides. This is perfect for what Wininet&shy;Spy&nbsp;needs&nbsp;to&nbsp;do.&nbsp;By&nbsp;dropping&nbsp;my&nbsp;replacement&nbsp;WININET.DLL into the same directory as IE (IEX&shy;PLORE.EXE), I can force my WININET.DLL to be loaded rather than the Microsoft WININET.DLL (which is in the system directory). Once my WININET.DLL is loaded, it’s a simple matter to call Load&shy;Library to load the real WININET.DLL. Let’s look at some code now to see what I’ve just described.</p>
+<p>
+Figure 1 shows the code for WININETSPY.CPP, which compiles into WININET.DLL using the supplied makefile. Most of the code is boilerplate API stub functions that perform the logging before calling the real WININET APIs in the system’s WININET.DLL. I’ll describe them later. For now, concentrate on the DllMain function near the top. The code executed when the DLL loads (inside the DLL_<BR>PROCESS_ATTACH if clause) first disables thread notifications by calling the DisableThreadLibraryCalls. My WININET.DLL doesn’t need to know about thread creation and termination, so this call tells the system not to bother calling my DllMain for thread-related activity. Next, Dll&shy;Main attempts to load the Microsoft-supplied WIN&shy;INET.DLL by calling LoadLibrary with a complete path for the DLL. My code assumes that the system WININET.DLL will be in the Win32 system directory, which it locates via the GetSystemDirectory API.</p>
+<dl>
+<dt>
+Figure 1  WININETSPY.CPP</dt>
+<dd>
+//==========================================<p>
+// Matt Pietrek</p>
+<p>
+// Microsoft Systems Journal, September 1997</p>
+<p>
+// FILE: WININETSPY.CPP</p>
+<p>
+//==========================================</p>
+<p>
+#include &lt;windows.h&gt;</p>
+<p>
+#include &lt;stdio.h&gt;</p>
+<p>
+#pragma warning( disable:4005 )         // Ignore macro redefinition</p>
+<p>
+#define SPYMACRO( x ) FARPROC g_pfn##x;</p>
+<p>
+#include &quot;wininet_functions.inc&quot;</p>
+<p>
+HANDLE g_hOutputFile = INVALID_HANDLE_VALUE;</p>
+<p>
+#define SPYCALL( pfn, cArgs )           \</p>
+<p>
+    __asm lea   edi, [esp - cArgs*4]    \</p>
+<p>
+    __asm lea   esi, [ebp+8]            \</p>
+<p>
+    __asm mov   ecx, cArgs              \</p>
+<p>
+    __asm rep   movsd                   \</p>
+<p>
+    __asm sub   esp, cArgs * 4          \</p>
+<p>
+    __asm call  dword ptr [pfn]         \</p>
+<p>
+    __asm mov   [retValue], EAX </p>
+<p>
+//=============================================================================</p>
+<p>
+// Start of custom code</p>
+<p>
+//=============================================================================</p>
+<p>
+BOOL WINAPI DllMain(</p>
+<p>
+    HINSTANCE hinstDLL,    // handle to DLL module </p>
+<p>
+    DWORD fdwReason,       // reason for calling function </p>
+<p>
+    LPVOID lpvReserved)    // reserved </p>
+<p>
+{</p>
+<p>
+    if ( fdwReason == DLL_PROCESS_ATTACH )  // When initializing....</p>
+<p>
+    {</p>
+<p>
+        // We don't need thread notifications for what we're doing.  Thus, get</p>
+<p>
+        // rid of them, thereby eliminating some of the overhead of this DLL,</p>
+<p>
+        // which will end up in nearly every GUI process anyhow.</p>
+<p>
+        DisableThreadLibraryCalls( hinstDLL );</p>
+<p>
+        char szRealWININET[ MAX_PATH ];</p>
+<p>
+        </p>
+<p>
+        GetSystemDirectory( szRealWININET, sizeof(szRealWININET) );</p>
+<p>
+        strcat( szRealWININET, &quot;\\WININET.DLL&quot; );</p>
+<p>
+        </p>
+<p>
+        HMODULE hModWininet = LoadLibrary( szRealWININET );</p>
+<p>
+        if ( 0 == hModWininet )</p>
+<p>
+        {</p>
+<p>
+            MessageBox( 0, &quot;Unable to load real WININET.DLL&quot;, 0, MB_OK );</p>
+<p>
+            return FALSE;</p>
+<p>
+        }</p>
+<p>
+        //</p>
+<p>
+        // Call GetProcAddress for each WININET function, and store the return</p>
+<p>
+        // value into the appropriately named g_pfnXXX pointer</p>
+<p>
+        //      </p>
+<p>
+        #define SPYMACRO( x )  \</p>
+<p>
+            g_pfn##x = GetProcAddress( hModWininet, #x );</p>
+<p>
+        #include &quot;wininet_functions.inc&quot;</p>
+<p>
+        // Open the output file.  Lines with &quot;//&quot; comments include replacement</p>
+<p>
+        // parameters that can be used if you want to write output to a file,</p>
+<p>
+        // rather than to a mailslot.</p>
+<p>
+        g_hOutputFile = CreateFile(</p>
+<p>
+                &quot;\\\\.\\mailslot\\wininetspymon_mailslot&quot;, // &quot;WININETSPY.TXT&quot;, </p>
+<p>
+                GENERIC_WRITE,</p>
+<p>
+                FILE_SHARE_READ, // 0,</p>
+<p>
+                0, </p>
+<p>
+                OPEN_EXISTING,  // CREATE_ALWAYS,</p>
+<p>
+                FILE_ATTRIBUTE_NORMAL,</p>
+<p>
+                0 );</p>
+<p>
+        if ( INVALID_HANDLE_VALUE == g_hOutputFile )</p>
+<p>
+        {</p>
+<p>
+            MessageBox( 0, &quot;Unable to open logging output file&quot;, 0, MB_OK );</p>
+<p>
+            return FALSE;</p>
+<p>
+        }</p>
+<p>
+    }</p>
+<p>
+    else if ( fdwReason == DLL_PROCESS_DETACH ) // When shutting down...</p>
+<p>
+    {</p>
+<p>
+        if ( INVALID_HANDLE_VALUE != g_hOutputFile )</p>
+<p>
+            CloseHandle( g_hOutputFile );</p>
+<p>
+    }   </p>
+<p>
+    return TRUE;</p>
+<p>
+}</p>
+<p>
+//</p>
+<p>
+// Our own, custom printf that writes to the file handle opened in DllMain</p>
+<p>
+//</p>
+<p>
+int __cdecl printf(const char * format, ...)</p>
+<p>
+{</p>
+<p>
+    char szBuff[1024];</p>
+<p>
+    int retValue;</p>
+<p>
+    DWORD cbWritten;</p>
+<p>
+    va_list argptr;</p>
+<p>
+          </p>
+<p>
+    if ( INVALID_HANDLE_VALUE == g_hOutputFile )</p>
+<p>
+        return 0;</p>
+<p>
+                </p>
+<p>
+    va_start( argptr, format );</p>
+<p>
+    retValue = wvsprintf( szBuff, format, argptr );</p>
+<p>
+    va_end( argptr );</p>
+<p>
+    WriteFile(  g_hOutputFile, szBuff, retValue, &amp;cbWritten, 0 );</p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+//=============================================================================</p>
+<p>
+// Start of WININET API stubs</p>
+<p>
+//=============================================================================</p>
+<p>
+#define _WINX32_        // Fake the compiler into thinking it's compiling the</p>
+<p>
+                        // real WININET.DLL</p>
+<p>
+#include &lt;wininet.h&gt;    // Include this to get all the definitions</p>
+<p>
+#define SAFESTR( x ) ( x ? x : &quot;&quot; ) // Macro that converts null pointers to &quot;&quot;</p>
+<p>
+extern &quot;C&quot;              // begin - extern &quot;C&quot;</p>
+<p>
+{</p>
+<p>
+INTERNETAPI BOOL WINAPI InternetCanonicalizeUrlA(</p>
+<p>
+    IN LPCSTR lpszUrl,</p>
+<p>
+    OUT LPSTR lpszBuffer,</p>
+<p>
+    IN OUT LPDWORD lpdwBufferLength,</p>
+<p>
+    IN DWORD dwFlags )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    </p>
+<p>
+    SPYCALL( g_pfnInternetCanonicalizeUrlA, 4 )</p>
+<p>
+    printf( &quot;InternetCanonicalizeUrlA( In:\&quot;%s\&quot;  Out:\&quot;%s\&quot; )&quot;,</p>
+<p>
+            lpszUrl, lpszBuffer );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+    </p>
+<p>
+INTERNETAPI BOOL WINAPI InternetCombineUrlA(</p>
+<p>
+    IN LPCSTR lpszBaseUrl,</p>
+<p>
+    IN LPCSTR lpszRelativeUrl,</p>
+<p>
+    OUT LPSTR lpszBuffer,</p>
+<p>
+    IN OUT LPDWORD lpdwBufferLength,</p>
+<p>
+    IN DWORD dwFlags )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetCombineUrlA, 5 )</p>
+<p>
+    printf( &quot;InternetCombineUrlA( Base:\&quot;%s\&quot;  Relative:\&quot;%s\&quot;  Out:\&quot;%s\&quot;&quot;,</p>
+<p>
+            SAFESTR(lpszBaseUrl), SAFESTR(lpszRelativeUrl),</p>
+<p>
+            SAFESTR(lpszBuffer) );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+    </p>
+<p>
+INTERNETAPI BOOL WINAPI InternetCrackUrlA(</p>
+<p>
+    IN LPCSTR lpszUrl,</p>
+<p>
+    IN DWORD dwUrlLength,</p>
+<p>
+    IN DWORD dwFlags,</p>
+<p>
+    IN OUT LPURL_COMPONENTSA lpUrlComponents )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetCrackUrlA, 4 )</p>
+<p>
+    printf( &quot;InternetCrackUrlA( Url:\&quot;%s\&quot; )&quot;, SAFESTR(lpszUrl) );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+    </p>
+<p>
+INTERNETAPI BOOL WINAPI InternetTimeFromSystemTime(</p>
+<p>
+    IN  CONST SYSTEMTIME *pst,  // input GMT time</p>
+<p>
+    IN  DWORD dwRFC,            // RFC format</p>
+<p>
+    OUT LPSTR lpszTime,         // output string buffer</p>
+<p>
+    IN  DWORD cbTime )          // output buffer size </p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetTimeFromSystemTime, 4 )</p>
+<p>
+    printf( &quot;InternetTimeFromSystemTime&quot; );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+    </p>
+<p>
+INTERNETAPI HINTERNET WINAPI InternetOpenUrlA(</p>
+<p>
+    IN HINTERNET hInternet,</p>
+<p>
+    IN LPCSTR lpszUrl,</p>
+<p>
+    IN LPCSTR lpszHeaders OPTIONAL,</p>
+<p>
+    IN DWORD dwHeadersLength,</p>
+<p>
+    IN DWORD dwFlags,</p>
+<p>
+    IN DWORD dwContext )</p>
+<p>
+{</p>
+<p>
+    HINTERNET retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetOpenUrlA, 6 )</p>
+<p>
+    printf( &quot;InternetOpenUrlA( Url:\&quot;%s\&quot; Headers:\&quot;%s\&quot;)&quot;,</p>
+<p>
+            SAFESTR(lpszUrl), SAFESTR(lpszHeaders) );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+    </p>
+<p>
+INTERNETAPI BOOL WINAPI HttpSendRequestA(</p>
+<p>
+    IN HINTERNET hRequest,</p>
+<p>
+    IN LPCSTR lpszHeaders OPTIONAL,</p>
+<p>
+    IN DWORD dwHeadersLength,</p>
+<p>
+    IN LPVOID lpOptional OPTIONAL,</p>
+<p>
+    IN DWORD dwOptionalLength )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnHttpSendRequestA,  5)</p>
+<p>
+    printf( &quot;HttpSendRequestA( header:\&quot;%s\&quot; )&quot;, SAFESTR(lpszHeaders) );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+    </p>
+<p>
+INTERNETAPI HINTERNET WINAPI HttpOpenRequestA(</p>
+<p>
+    IN HINTERNET hConnect,</p>
+<p>
+    IN LPCSTR lpszVerb,</p>
+<p>
+    IN LPCSTR lpszObjectName,</p>
+<p>
+    IN LPCSTR lpszVersion,</p>
+<p>
+    IN LPCSTR lpszReferrer OPTIONAL,</p>
+<p>
+    IN LPCSTR FAR * lplpszAcceptTypes OPTIONAL,</p>
+<p>
+    IN DWORD dwFlags,</p>
+<p>
+    IN DWORD dwContext )</p>
+<p>
+{</p>
+<p>
+    HINTERNET retValue;</p>
+<p>
+    SPYCALL( g_pfnHttpOpenRequestA, 8 )</p>
+<p>
+    printf( &quot;HttpOpenRequestA( verb:\&quot;%s\&quot;  object:\&quot;%s\&quot;  version:\&quot;%s\&quot;&quot;</p>
+<p>
+            &quot;  referrer:\&quot;%s\&quot;  flags:%X )&quot;,</p>
+<p>
+            SAFESTR(lpszVerb), SAFESTR(lpszObjectName), SAFESTR( lpszVersion),</p>
+<p>
+            SAFESTR(lpszReferrer), dwFlags  );</p>
+<p>
+    if ( lplpszAcceptTypes )</p>
+<p>
+    {</p>
+<p>
+        while ( *lplpszAcceptTypes )</p>
+<p>
+        {</p>
+<p>
+            printf( &quot;  AcceptType: %s&quot;, SAFESTR(*lplpszAcceptTypes) );</p>
+<p>
+            lplpszAcceptTypes++;</p>
+<p>
+        }</p>
+<p>
+    }</p>
+<p>
+    </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+    </p>
+<p>
+INTERNETAPI BOOL WINAPI HttpQueryInfoA(</p>
+<p>
+    IN HINTERNET hRequest,</p>
+<p>
+    IN DWORD dwInfoLevel,</p>
+<p>
+    IN OUT LPVOID lpBuffer OPTIONAL,</p>
+<p>
+    IN OUT LPDWORD lpdwBufferLength,</p>
+<p>
+    IN OUT LPDWORD lpdwIndex OPTIONAL )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnHttpQueryInfoA,  5)</p>
+<p>
+    printf( &quot;HttpQueryInfoA&quot; );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+    </p>
+<p>
+URLCACHEAPI BOOL WINAPI UnlockUrlCacheEntryFile(</p>
+<p>
+    IN LPCSTR lpszUrlName,</p>
+<p>
+    IN DWORD dwReserved )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnUnlockUrlCacheEntryFile, 2 )</p>
+<p>
+    printf( &quot;UnlockUrlCacheEntryFile&quot; );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+URLCACHEAPI BOOL WINAPI CreateUrlCacheEntryA(</p>
+<p>
+    IN LPCSTR lpszUrlName,</p>
+<p>
+    IN DWORD dwExpectedFileSize,</p>
+<p>
+    IN LPCSTR lpszFileExtension,</p>
+<p>
+    OUT LPSTR lpszFileName,</p>
+<p>
+    IN DWORD dwReserved )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnCreateUrlCacheEntryA, 5 )</p>
+<p>
+    printf( &quot;CreateUrlCacheEntryA( Url:\&quot;%s\&quot;  Filename:\&quot;%s\&quot;)&quot;,</p>
+<p>
+            SAFESTR(lpszUrlName), SAFESTR(lpszFileName) );</p>
+<p>
+            </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+INTERNETAPI BOOL WINAPI InternetUnlockRequestFile(</p>
+<p>
+    IN HINTERNET hFile )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetUnlockRequestFile, 1 )</p>
+<p>
+    printf( &quot;InternetUnlockRequestFile&quot; );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+URLCACHEAPI BOOL WINAPI RetrieveUrlCacheEntryFileA(</p>
+<p>
+    IN LPCSTR  lpszUrlName,</p>
+<p>
+    OUT LPINTERNET_CACHE_ENTRY_INFOA lpCacheEntryInfo,</p>
+<p>
+    IN OUT LPDWORD lpdwCacheEntryInfoBufferSize,</p>
+<p>
+    IN DWORD dwReserved )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnRetrieveUrlCacheEntryFileA, 4 )</p>
+<p>
+    printf( &quot;RetrieveUrlCacheEntryFileA( Url:\&quot;%s\&quot; )&quot;, SAFESTR(lpszUrlName) );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+INTERNETAPI BOOL WINAPI InternetLockRequestFile(</p>
+<p>
+    IN HINTERNET hFile,</p>
+<p>
+    IN DWORD unknown )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetLockRequestFile, 2 )</p>
+<p>
+    printf( &quot;InternetLockRequestFile&quot; );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+URLCACHEAPI BOOL WINAPI GetUrlCacheEntryInfoA(</p>
+<p>
+    IN LPCSTR lpszUrlName,</p>
+<p>
+    OUT LPINTERNET_CACHE_ENTRY_INFOA lpCacheEntryInfo,</p>
+<p>
+    IN OUT LPDWORD lpdwCacheEntryInfoBufferSize )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnGetUrlCacheEntryInfoA,  3)</p>
+<p>
+    printf( &quot;GetUrlCacheEntryInfoA( Url:\&quot;%s\&quot; ) &quot;, SAFESTR(lpszUrlName) );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+    </p>
+<p>
+INTERNETAPI DWORD WINAPI InternetErrorDlg(</p>
+<p>
+     IN HWND hWnd,</p>
+<p>
+     IN OUT HINTERNET hRequest,</p>
+<p>
+     IN DWORD dwError,</p>
+<p>
+     IN DWORD dwFlags,</p>
+<p>
+     IN OUT LPVOID * lppvData )</p>
+<p>
+{</p>
+<p>
+    DWORD retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetErrorDlg, 5 )</p>
+<p>
+    printf( &quot;InternetErrorDlg&quot; );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+     </p>
+<p>
+INTERNETAPI BOOL WINAPI InternetQueryDataAvailable(</p>
+<p>
+    IN HINTERNET hFile,</p>
+<p>
+    OUT LPDWORD lpdwNumberOfBytesAvailable,</p>
+<p>
+    IN DWORD dwFlags,</p>
+<p>
+    IN DWORD dwContext )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetQueryDataAvailable, 4 )</p>
+<p>
+    printf( &quot;InternetQueryDataAvailable&quot; );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+    </p>
+<p>
+INTERNETAPI BOOL WINAPI InternetCloseHandle(</p>
+<p>
+    IN HINTERNET hInternet )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetCloseHandle, 1 )</p>
+<p>
+    printf( &quot;InternetCloseHandle&quot; );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+    </p>
+<p>
+INTERNETAPI HINTERNET WINAPI InternetConnectA(</p>
+<p>
+    IN HINTERNET hInternet,</p>
+<p>
+    IN LPCSTR lpszServerName,</p>
+<p>
+    IN INTERNET_PORT nServerPort,</p>
+<p>
+    IN LPCSTR lpszUserName OPTIONAL,</p>
+<p>
+    IN LPCSTR lpszPassword OPTIONAL,</p>
+<p>
+    IN DWORD dwService,</p>
+<p>
+    IN DWORD dwFlags,</p>
+<p>
+    IN DWORD dwContext )</p>
+<p>
+{</p>
+<p>
+    HINTERNET retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetConnectA, 8 )</p>
+<p>
+    printf( &quot;InternetConnectA( Server:\&quot;%s\&quot;  Username:\&quot;%s\&quot;  Password:\&quot;%s\&quot;&quot;</p>
+<p>
+            &quot;nServerPort:%X  Service:%X  Flags:%X )&quot;,</p>
+<p>
+            SAFESTR( lpszServerName ),</p>
+<p>
+            SAFESTR( lpszUserName ),</p>
+<p>
+            SAFESTR( lpszPassword),</p>
+<p>
+            nServerPort,</p>
+<p>
+            dwService,</p>
+<p>
+            dwFlags );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+    </p>
+<p>
+INTERNETAPI HINTERNET WINAPI InternetOpenA(</p>
+<p>
+    IN LPCSTR lpszAgent,</p>
+<p>
+    IN DWORD  dwAccessType,</p>
+<p>
+    IN LPCSTR lpszProxy OPTIONAL,</p>
+<p>
+    IN LPCSTR lpszProxyBypass OPTIONAL,</p>
+<p>
+    IN DWORD dwFlags )</p>
+<p>
+{</p>
+<p>
+    HINTERNET retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetOpenA, 5 )</p>
+<p>
+    printf( &quot;InternetOpenA( Agent:\&quot;%s\&quot;  AccessType:%X  Proxy:\&quot;%s\&quot;&quot;</p>
+<p>
+            &quot;  Bypass:\&quot;%s\&quot;  Flags:%X)&quot;,</p>
+<p>
+            SAFESTR(lpszAgent),</p>
+<p>
+            dwAccessType,</p>
+<p>
+            SAFESTR(lpszProxy),</p>
+<p>
+            SAFESTR(lpszProxyBypass),</p>
+<p>
+            dwFlags );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+    </p>
+<p>
+INTERNETAPI INTERNET_STATUS_CALLBACK WINAPI InternetSetStatusCallback(</p>
+<p>
+    IN HINTERNET hInternet,</p>
+<p>
+    IN INTERNET_STATUS_CALLBACK lpfnInternetCallback )</p>
+<p>
+{</p>
+<p>
+    INTERNET_STATUS_CALLBACK retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetSetStatusCallback, 2 )</p>
+<p>
+    printf( &quot;InternetSetStatusCallback&quot; );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+    </p>
+<p>
+INTERNETAPI BOOL WINAPI InternetSetOptionA(</p>
+<p>
+    IN HINTERNET hInternet OPTIONAL,</p>
+<p>
+    IN DWORD dwOption,</p>
+<p>
+    IN LPVOID lpBuffer,</p>
+<p>
+    IN DWORD dwBufferLength )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetSetOptionA, 4 )</p>
+<p>
+    printf( &quot;InternetSetOptionA&quot; );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+    </p>
+<p>
+INTERNETAPI BOOL WINAPI InternetQueryOptionA(</p>
+<p>
+    IN HINTERNET hInternet OPTIONAL,</p>
+<p>
+    IN DWORD dwOption,</p>
+<p>
+    OUT LPVOID lpBuffer OPTIONAL,</p>
+<p>
+    IN OUT LPDWORD lpdwBufferLength )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetQueryOptionA, 4 )</p>
+<p>
+    printf( &quot;InternetQueryOptionA&quot; );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+    </p>
+<p>
+INTERNETAPI BOOL WINAPI InternetReadFile(</p>
+<p>
+    IN HINTERNET hFile,</p>
+<p>
+    IN LPVOID lpBuffer,</p>
+<p>
+    IN DWORD dwNumberOfBytesToRead,</p>
+<p>
+    OUT LPDWORD lpdwNumberOfBytesRead )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetReadFile, 4 )</p>
+<p>
+    printf( &quot;InternetReadFile( hFile:%X  dwNumberToRead:%u )&quot;,</p>
+<p>
+            hFile, dwNumberOfBytesToRead );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+    </p>
+<p>
+INTERNETAPI BOOL WINAPI HttpAddRequestHeadersA(</p>
+<p>
+    IN HINTERNET hRequest,</p>
+<p>
+    IN LPCSTR lpszHeaders,</p>
+<p>
+    IN DWORD dwHeadersLength,</p>
+<p>
+    IN DWORD dwModifiers )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnHttpAddRequestHeadersA, 4 )</p>
+<p>
+    printf( &quot;HttpAddRequestHeadersA( Headers:\&quot;%s\&quot; )&quot;, SAFESTR(lpszHeaders) );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+INTERNETAPI DWORD WINAPI InternetConfirmZoneCrossing(</p>
+<p>
+     IN HWND hWnd,</p>
+<p>
+     IN LPSTR szUrlPrev,</p>
+<p>
+     IN LPSTR szUrlNew,</p>
+<p>
+     IN BOOL bPost )</p>
+<p>
+{</p>
+<p>
+    DWORD retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetConfirmZoneCrossing, 4 )</p>
+<p>
+    printf( &quot;InternetConfirmZoneCrossing( Prev:\&quot;%s\&quot;  New:\&quot;%s\&quot;) &quot;,</p>
+<p>
+            SAFESTR(szUrlPrev), SAFESTR(szUrlNew) );</p>
+<p>
+    </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+URLCACHEAPI BOOL WINAPI SetUrlCacheEntryInfoA(</p>
+<p>
+    IN LPCSTR lpszUrlName,</p>
+<p>
+    IN LPINTERNET_CACHE_ENTRY_INFOA lpCacheEntryInfo,</p>
+<p>
+    IN DWORD dwFieldControl )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    </p>
+<p>
+    SPYCALL( g_pfnSetUrlCacheEntryInfoA, 3 );</p>
+<p>
+    printf( &quot;SetUrlCacheEntryInfoA&quot; );</p>
+<p>
+        </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+INTERNETAPI BOOL WINAPI InternetGetCookieA(</p>
+<p>
+    IN LPCSTR lpszUrl,</p>
+<p>
+    IN LPCSTR lpszCookieName,</p>
+<p>
+    OUT LPSTR lpCookieData,</p>
+<p>
+    IN OUT LPDWORD lpdwSize )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetGetCookieA, 4 )</p>
+<p>
+    printf( &quot;InternetGetCookieA( Url:\&quot;%s\&quot;  Cookie:\&quot;%s\&quot; )&quot;,</p>
+<p>
+            SAFESTR(lpszUrl), SAFESTR(lpszCookieName) );</p>
+<p>
+    </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+INTERNETAPI BOOL WINAPI InternetSetCookieA(</p>
+<p>
+    IN LPCSTR lpszUrl,</p>
+<p>
+    IN LPCSTR lpszCookieName,</p>
+<p>
+    IN LPCSTR lpszCookieData )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetSetCookieA, 3 )</p>
+<p>
+    printf( &quot;InternetSetCookieA( Url:\&quot;%s\&quot;  Cookie:\&quot;%s\&quot; )&quot;,</p>
+<p>
+            SAFESTR(lpszUrl), SAFESTR(lpszCookieName) );</p>
+<p>
+    </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+INTERNETAPI BOOL WINAPI InternetTimeToSystemTime(</p>
+<p>
+    IN  LPCSTR lpszTime,         // NULL terminated string</p>
+<p>
+    OUT SYSTEMTIME *pst,         // output in GMT time</p>
+<p>
+    IN  DWORD dwReserved )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetTimeToSystemTime, 3 )</p>
+<p>
+    printf( &quot;InternetTimeToSystemTime( Time:\&quot;%s\&quot; )&quot;, SAFESTR(lpszTime) );</p>
+<p>
+    </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+URLCACHEAPI BOOL WINAPI CommitUrlCacheEntryA(</p>
+<p>
+    IN LPCSTR lpszUrlName,</p>
+<p>
+    IN LPCSTR lpszLocalFileName,</p>
+<p>
+    IN FILETIME ExpireTime,</p>
+<p>
+    IN FILETIME LastModifiedTime,</p>
+<p>
+    IN DWORD CacheEntryType,</p>
+<p>
+    IN LPBYTE lpHeaderInfo,</p>
+<p>
+    IN DWORD dwHeaderSize,</p>
+<p>
+    IN LPCSTR lpszFileExtension,</p>
+<p>
+    IN DWORD dwReserved )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    // 11 = 7 DWORDS + 2 (8 byte) FILETIMES </p>
+<p>
+    SPYCALL( g_pfnCommitUrlCacheEntryA, 11 )</p>
+<p>
+    printf( &quot;CommitUrlCacheEntryA( Url:\&quot;%s\&quot; )&quot;, SAFESTR(lpszUrlName) );</p>
+<p>
+    </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+INTERNETAPI BOOL WINAPI InternetCreateUrlA(</p>
+<p>
+    IN LPURL_COMPONENTSA lpUrlComponents,</p>
+<p>
+    IN DWORD dwFlags,</p>
+<p>
+    OUT LPSTR lpszUrl,</p>
+<p>
+    IN OUT LPDWORD lpdwUrlLength )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetCreateUrlA, 4 )</p>
+<p>
+    printf( &quot;InternetCreateUrlA( Url:\&quot;%s\&quot; )&quot;, SAFESTR(lpszUrl) );</p>
+<p>
+    </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+INTERNETAPI BOOL WINAPI GetUrlCacheConfigInfoA(</p>
+<p>
+    IN DWORD unknown1,</p>
+<p>
+    IN DWORD unknown2,</p>
+<p>
+    IN DWORD unknown3 )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnGetUrlCacheConfigInfoA    , 3 )</p>
+<p>
+    printf( &quot;GetUrlCacheConfigInfoA &quot; );</p>
+<p>
+    </p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+    </p>
+<p>
+INTERNETAPI BOOL WINAPI InternetGetCertByURL(</p>
+<p>
+    IN DWORD unknown1,</p>
+<p>
+    IN DWORD unknown2,</p>
+<p>
+    IN DWORD unknown3 )</p>
+<p>
+{</p>
+<p>
+    BOOL retValue;</p>
+<p>
+    SPYCALL( g_pfnInternetGetCertByURL , 3 )</p>
+<p>
+    printf( &quot;InternetGetCertByURL&quot; );</p>
+<p>
+    return retValue;</p>
+<p>
+}</p>
+<p>
+}   // end - extern &quot;C&quot; </p>
+<p>
+        </p>
+</dd>
+</dl>
+<p>
+If everything goes as planned, after the LoadLibrary call returns the system WININET.DLL is loaded and ready to go. The next major task is to look up the address of each of the APIs exported by the system WININET.DLL. As you might expect, I do this by calling GetProcAddress on each exported API. Since WININET.DLL exports well over 100 functions, you might expect to see a whole bunch of GetProc&shy;Address calls somewhere in WININETSPY.CPP. You won’t find them, though. The closest thing you’ll find is this: </p>
+<p>
+#define SPYMACRO( x )  \</p>
+<p>
+    g_pfn##x = GetProcAddress( hModWininet, #x );</p>
+<p>
+#include &quot;wininet_functions.inc&quot;</p>
+<p>
+This code fragment makes extensive use of the C++ preprocessor to automate the generation of boilerplate code. The SPYMACRO macro uses the token pasting operator (##) and the stringizing operator (#) to create a macro that takes a function name as input and expands to something like:</p>
+<p>
+g_pfnInternetOpenA =</p>
+<p>
+    GetProcAddress(hModWininet, &quot;InternetOpenA&quot; );</p>
+<p>
+The line that reads #include “wininet_functions.inc” is just a list of the functions exported from WININET.DLL. The contents of this file begin like this:</p>
+<p>
+SPYMACRO( AuthenticateUser )</p>
+<p>
+SPYMACRO( CommitUrlCacheEntryA )</p>
+<p>
+The final result of this preprocessor funny business is: for each function listed in WININET_FUNCTIONS.INC, DllMain calls GetProcAddress on that function and assigns the return address to an appropriately named function pointer declared at the global scope. Why go through all the hassle of listing the WININET APIs in a separate file? Why not just include the API list directly in DllMain? Think about all those function pointers that need to be declared at global scope, and therefore outside of the DllMain code. With over 100 WININET APIs, I’d be looking at adding 100 or so additional lines of code to declare these variables.</p>
+<p>
+By putting the API list in a separate file, I can use a different definition for the SPYMACRO macro and #include the “wininet_functions.inc” file a second time. This time, SPYMACRO looks like:</p>
+<p>
+#define SPYMACRO( x ) FARPROC g_pfn##x;</p>
+<p>
+This expands to something like:</p>
+<p>
+FARPROC g_pfnInternetOpenA;</p>
+<p>
+Localizing all of the API functions in a separate file has two advantages. First, if I wanted to change the variable names, the call to GetProcAddress, or whatever, I’d make the change in exactly one spot. That is, where the SPY&shy;MACRO is declared. Second, if I were to add new WININET API functions to the file, both the function pointer declaration and its corresponding GetProcAddress would automatically appear upon recompiling. (I’ve read that Bjarne Stroustrup isn’t enamored of preprocessors and macros, but I think that they’re pretty slick when you can do things like this.)</p>
+<p>
+The remaining code in DllMain is simple code for opening the logging output file and closing it when the process terminates. I’ll get to the somewhat unusual output file later. For now let’s focus on the code that makes up the majority of WININETSPY.CPP: the API logging stubs.</p>
+<p>
+Take a glance at code for InternetCanonicalizeUrlA (it’s the first API stub). As you’d expect, the return value, calling convention, and parameters are exactly the same as the API’s prototype in WININET.H. In fact, I simply copied the relevant WININET.H prototypes into WININETSPY.CPP and made functions out of them. The meat of each API logging stub is fairly standard and goes like this:
+<ul>
+<li>
+Declare a local variable to store the return value.<br><br></li>
+<li>
+Call the real WININET API function with the SPYCALL macro.<br><br></li>
+<li>
+Log the API’s name and relevant parameters.<br><br></li>
+<li>
+Return the value that the real WININET API returned.</li>
+</ul>
+<p>
+The most interesting part of the sequence is the SPYCALL macro. If you’ve ever used a function pointer returned by GetProcAddress, you know what a pain it can be. In C++, you need to make a typedef corresponding to the function definition, and typecast the return value from GetProc&shy;Address to this typedef:</p>
+<p>
+typedef INTERNETAPI</p>
+<p>
+    (BOOL WINAPI *PFNINTERNETCLOSEHANDLE)</p>
+<p>
+    (HINTERNET hInternet);</p>
+<p>
+g_pfnInternetCloseHandle = </p>
+<p>
+    (PFNINTERNETCLOSEHANDLE)GetProcAddress(</p>
+<p>
+        hModWininet, &quot;InternetCloseHandle&quot;);</p>
+<p>
+Yuck! What a mess! Now multiply this hassle by over 100 WININET APIs. Alas, it has to be like this so that the compiler can verify parameters and return values for their proper type. The SPYMACRO macro trades off this type safety for a much easier way to invoke the real WININET APIs. Check out the SPYMACRO code near the beginning of WININET.CPP.</p>
+<p>
+The SPYMACRO macro is a sequence of inline assembler instructions that use the two macro parameters: a function pointer to be called and the number of DWORDs passed as arguments to the API. Luckily, the number of DWORDs is usually the same as the number of arguments. The assembler code makes a copy of the API’s parameters to a lower location on the stack, and then calls through the function pointer. The function pointer is what transfers control to the real API code in the system-supplied WININET.DLL. Looking through the code, you’ll see that the function pointer parameter to SPYMACRO is always one of the g_pfn<i>XXX</i> global variables that I described earlier.</p>
+<p>
+After the real API code returns, the SPYCALL macro cleans the copied parameters off the stack and copies the return value (in EAX) to a local variable. The SPYMACRO code assumes that you’ve declared a local variable named retValue, a small price to pay for ridding yourself of the compiler’s obsessive type checking. All in all, this dancing on the fringe isn’t recommended programming practice, but if you’re experienced enough to understand the risks and rewards, I say go for it!</p>
+<p>
+After the SPYCALL macro code executes, the logging code in each API stub comes next. To be honest, I didn’t bother&nbsp;to&nbsp;log every parameter of every API. Rather, I selec&shy;ted the parameters that were most likely to be informative, strings in particular. Feel free to add to the list of parameters that it&nbsp;logs.&nbsp;To handle the cases where a string para&shy;meter might be zero, I wrote the SAFESTR macro. For a given input string, it returns either the same pointer, or a pointer to an empty string (“”) if the input string pointer is zero. This let me avoid cluttering up the code with hundreds of checks for valid string pointers.</p>
+<p>
+The last piece of the WININETSPY.CPP to look at is the actual logging code. While the logging occurs via a function called printf, this printf isn’t the standard C++ runtime library version of the function. I wrote a replacement printf function (near the top of WININETSPY.CPP) that formats the output like printf would and writes the results to a file. My replacement printf assumes that a global variable named g_hOutputFile has been initialized with a valid file handle. DllMain is where this initialization occurs.</p>
+<p>
+When I first wrote WININETSPY.CPP, my output file was an ordinary disk-based text file. Plain, simple, and easy to work with in an editor.&nbsp;Eventually, I became dis&shy;satisfied with disk files. I wanted to see the logging trace as it occurred, and I didn’t want to hassle with opening up the output file in an editor. I also wanted to be able to easily throw away all prior logging output and start with a fresh, clean buffer. For example, in figuring out the operations needed to get a fund quote, there are hundreds of uninteresting output lines emitted before getting to the point where you’d click on the Get Quote button. In short, I wanted the logging output to be collected and presented in a different program.</p>
+<p>
+After pondering possible implementations, I hit upon the idea of using the Win32 mailslot facility. Instead of opening a disk file in DllMain, I instead open an existing mailslot and write to its file handle. Nothing else needs to change. I don’t have space here to describe mailslots in any detail. The important thing is that I could treat each line of logging output as a message and lob it into the mailslot. The logging display program simply needs to read from the mailslot in a timely manner and display each message.</p>
+<p>
+At this point, Visual Basic entered the picture. In a manner of minutes, I whipped together a Visual Basic program consisting of a form and an edit control where I appended each line of output read from the mailslot. Later, I got fancy and changed the edit control to a rich text control to get cool features like searching and buffers greater than 64KB. I called the finished program WININETSPYMon (see Figure 2).</p>
+<p>
+<img src="hood2.gif" border=0></p>
+<p>
+Figure 2  WININETSPYMon</p>
+<p>
+While I won’t go into all the details of WININETSPYMon here, two important procedures merit further commentary. In the Form_Load procedure, the code first creates the mailslot, which it names wininetspymon_mailslot. In the Timer1_Timer procedure, the code calls the GetMailslotInfo and ReadFile APIs in a loop until there are no more remaining messages. Each message (that is, line of output) is appended to the end of the edit control. The Timer1_Timer procedure is called every 50 milliseconds via the standard Visual Basic timer control.</p>
+<p>
+The features of WININETSPYMon are mostly self-evident. To clear the edit control, click the Clear output button. To search for a string in the output, type the search text into the bottom edit control, then click the Find button. You can click Find again to continue the search. The output edit control has the read-only attribute, but you can select and copy text out of it, allowing you to save some or all of the output to a disk-based file. I could have spent more time adding a lot more features, but WININETSPYMon is good enough for its intended purpose. If I’m going to spend time writing Visual Basic code, I want it to focus on more interesting things, like my investment analysis program.</p>
+<p>
+To wrap up, here’s a short list of things to keep in mind when setting up and using WininetSpy.
+<ul>
+<li>
+Remember to run the WININETSPYMon installation program. This will make sure that you have the required Visual Basic 5.0 runtime library DLL and RICHTX&shy;32.OCX installed on your system.<br><br></li>
+<li>
+Copy&nbsp;the&nbsp;WininetSpy&nbsp;version&nbsp;of&nbsp;WININET.DLL&nbsp;to <BR>the&nbsp;same&nbsp;directory&nbsp;as&nbsp;IE.&nbsp;On&nbsp;my&nbsp;system&nbsp;running <BR>Windows&nbsp;NT&nbsp;4.0&nbsp;this&nbsp;is&nbsp;C:\Program&nbsp;Files\Plus!\<BR>Microsoft Internet.<br><br></li>
+<li>
+Start up WININETSPYMon before starting up IE. This is necessary because WININETSPYMon creates the mailslot that my WININET.DLL looks for in its DllMain.<br><br></li>
+<li>
+If IE doesn’t work correctly (for example, it’s unable to connect to the Web or display pages), the problem may be newer versions of the system DLLs such as URLMON.DLL or MSHTML.DLL. These DLLs may be importing additional functions from WININET.DLL that the logging version doesn’t provide. The solution would be to add stubs for the missing functions. Unfortunately, I’m not aware of any reliable and easy-to-use method of determining which API stubs the system DLLs are looking for, but not finding.<br><br></li>
+<li>
+Don’t forget to delete or move the logging WININET.DLL from the IE directory when you’re finished spying. There’s no sense in slowing down your system or risking funky behavior when you don’t need to. For example, I wasted over an hour trying to figure out why I couldn’t access a page that needed 128-bit encryption. It turned out an encryption DLL (SCHANNEL.DLL) determined that my WININET.DLL was not the same as the Microsoft version. It therefore refused to do 128-bit encryption because, at the time of this writing, 128-bit encryption is still legally classified as a munition by the U.S. government. Happy spying!                                      u</li>
+</ul>
+<p>
+To obtain complete source code listings, see page 5.</p>
+<p>
+Have a question about programming in Windows? Send it to Matt at mpietrek@tiac.com or http://www.tiac.com/users/mpietrek</p>
+</font></font></body>
+</HTML>

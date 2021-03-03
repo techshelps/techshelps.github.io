@@ -1,0 +1,4202 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Multiple Threads in Visual Basic 5.0, Part II:  Writing a Win32 Debugger</title>
+
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF>
+
+<font face="verdana,arial,helvetica" size="2">
+<h1>Multiple Threads in Visual Basic 5.0, Part II:  Writing a Win32 Debugger</h1>
+<p>Jack Robbins</p>
+<p>
+John Robbins is a software engineer at NuMega Technologies, Inc., who specializes in debuggers. He can be reached at john@jprobbins.com.</p>
+<h1><img src="thread2_1.gif" border=0></h1>
+<h1>This article assumes you're familiar with Win32, Visual Basic</h1>
+<p>I realize that most developers don’t write debug&shy;gers for a living, so I’ll begin by presenting an overview of debuggers in Win32&reg;. My overview will concentrate on the basics in VBDebug, but <BR>if you’re really curious, the DEB sample and the article, “The Win32 Debugging Application Programming Interface,” on the MSDN CD go into more detail on Win32 debuggers. If you want to go hog wild and write a real debugger, I suggest starting with MSDN and the CPU architecture books. Nothing out there fully describes all the gyrations needed to write a debugger, but there are enough hints in these materials to take you a long way. </p>
+<p>There are three concepts to keep in mind about Win32 debuggers. First, a debugger consists of two components: the debugger and the debuggee. Simply put, a debugger is a process that can control another process in a debugging relationship, and a debuggee is a process that is started under a debugger. Some operating systems refer to the debugger as the parent process and the debuggee as the child process. Second, the debugger and the debuggee are completely separate processes. This makes the Win32 &shy;operating systems much more robust when debugging. If the debuggee has wild memory writes, it will not crash the debugger. The 16-bit Windows&reg; and Macintosh operating systems have the debugger and the debuggee running in the same process context. Third, like debuggers in all operating systems, Win32 debuggers generally sit in <BR>some sort of loop waiting for the operating system to report that the debuggee did something. This is commonly referred to as the debug loop.</p>
+<p>From a distance, a Win32 debugger is a pretty simple thing, with only a couple of code requirements. The first is that the debugger must pass a special flag in dwCre&shy;ation&shy;Flags to CreateProcess: DEBUG_ONLY_THIS_PROCESS. This tells the operating system that the calling process is to be treated as a debugger. After the debuggee is started, the debugger must sit in a loop calling the WaitFor&shy;Debug&shy;Event API to receive debugging notifications. When it’s finished processing them, it calls Continue&shy;DebugEvent. The pseudo code below shows just how little is required to create a Win32 debugger.</p>
+<p>
+Sub Main()</p>
+<p>
+    CreateProcess(...,DEBUG_ONLY_THIS_PROCESS,...)</p>
+<p>
+    Do While (1 = WaitForDebugEvent(...))</p>
+<p>
+        If EXIT_PROCESS Then</p>
+<p>
+            Exit Do</p>
+<p>
+        End If</p>
+<p>
+        ContinueDebugEvent(...)</p>
+<p>
+    Loop</p>
+<p>
+End Sub</p>
+<p>Notice that a Win32 debugger does not require multi&shy;threading, a user interface, or much of anything else. But <BR>as with most things in Windows, the difference between minimal and reasonable is pretty big. In reality, the Win32 Debug API almost dictates that the actual debug loop needs to sit in a separate thread. As the name implies, Wait&shy;For&shy;DebugEvent blocks on an internal operating system event until the debuggee does something to make the operating system stop the debuggee so it can tell the debugger about the event. If your debugger had a single thread, then your user interface would be totally hung until a debug event was triggered. </p>
+<p>While a debugger sits in the debug loop, it receives various notifications that certain events took place in the debuggee. Unfortunately, the DEBUG_EVENT used by Wait&shy;ForDebugEvent is a C structure that uses a union and cannot be expressed in straight Visual Basic&reg; terms. In C, a union is a collection of other data types that are lumped together, with the total size of the union being the size of the largest structure. It is a convenient way to pack a great deal of data into a small space. To get around the union issue, I defined the DEBUG_EVENT structure in VBDebug using the largest of the unioned structures, EXCEPTION_DE&shy;BUG_INFO, to pad DEBUG_EVENT to the correct size:</p>
+<p>
+Type DEBUG_EVENT</p>
+<p>
+   dwDebugEventCode As Long</p>
+<p>
+   dwProcessID As Long</p>
+<p>
+   dwThreadID As Long</p>
+<p>
+   dwUnionData As EXCEPTION_DEBUG_INFO</p>
+<p>
+End Type</p>
+<p>To get the appropriate data out of DEBUG_EVENT, use the Visual Basic LSet statement to copy the data out of the dwUnionData into the appropriate user-defined type. </p>
+<p>
+Dim stEvtDbg As DEBUG_EVENT</p>
+<p>
+Dim stCreateProcess AS CREATE_PROCESS_DEBUG_INFO</p>
+<p>
+WaitForDebugEvent ( stEvtDbg , INFINITE )</p>
+<p>
+If ( CREATE_PROCESS_DEBUG_EVENT = stEvtDbg.dwDebugEventCode ) then</p>
+<p>
+   ' Here's the magic LSet.</p>
+<p>
+   LSet stCreateProcess = stEvtDbg.dwUnionData</p>
+<p>
+End If</p>
+<p>The dwDebugEventCode field indicates which type of event has been returned. Figure 1 describes all the different events returned by the Win32 Debug API.</p>
+<p>Figure 1  Win32 Debug API Events</p>
+<h5>Event ID&#09;Explanation</h5>
+<p>
+EXCEPTION_DEBUG_EVENT&#09;An exception of some sort occurred. Convert the DEBUG_EVENT.dwUnionData into an EXCEPTION_DEBUG_INFO to find out the type of exception and where it occurred.</p>
+<p>
+CREATE_THREAD_DEBUG_EVENT&#09;The debuggee created a thread. Convert the DEBUG_EVENT.dwUnionData into a CREATE_THREAD_DEBUG_INFO to get the thread handle and start address.</p>
+<p>
+CREATE_PROCESS_DEBUG_EVENT&#09;The debuggee was created. Convert the DEBUG_EVENT.dwUnionData into a CREATE_ PROCESS_DEBUG_INFO to get the information about the debuggee. The process handle is something you will need to save off so that you can read OutputDebugStrings.</p>
+<p>
+EXIT_THREAD_DEBUG_EVENT&#09;The debuggee had a thread terminate. Convert the DEBUG_EVENT.dwUnionData to an EXIT_THREAD_DEBUG_INFO. This is only for threads created after the main thread. The main thread is terminated with EXIT_PROCESS_DEBUG_EVENT.</p>
+<p>
+EXIT_PROCESS_DEBUG_EVENT&#09;The debuggee process exited. Convert the DEBUG_EVENT.dwUnionData to an EXIT_ PROCESS_DEBUG_INFO.</p>
+<p>
+LOAD_DLL_DEBUG_EVENT&#09;The debuggee loaded a DLL. Convert the DEBUG_EVENT.dwUnionData to a LOAD_DLL_ DEBUG_INFO. Unfortunately, the debug API does not report the name of the DLL; you must pound through the image to find it. The LOAD_DLL_DEBUG_INFO.lp&shy;ImageName is always empty.</p>
+<p>
+UNLOAD_DLL_DEBUG_EVENT&#09;The debuggee unloaded a DLL. Convert the DEBUG_EVENT.dwUnionData to an UNLOAD_DLL_DEBUG_INFO.</p>
+<p>
+OUTPUT_DEBUG_STRING_EVENT&#09;The debuggee made a call to OutputDebugString. The debugger will need to read the string out of the debuggee's address space with ReadProcessMemory using the process handle saved from the CREATE_PROCESS_DEBUG_EVENT notification.</p>
+<p>
+RIP_EVENT&#09;The debuggee has a RIP-debugging event (system debugging error). Convert DEBUG_ EVENT.dwUnionData to a RIP_INFO.</p>
+<p>When the debugger is processing the debug events returned by WaitForDebugEvent, it can do anything that it wants to the debuggee because all the threads in the debuggee are completely stopped. If the debugger needs to read or write to the debuggee’s address space, it can use ReadProcessMemory and WriteProcessMemory. Of course, if the debugger patches the debuggee’s code with a call to WriteProcessMemory, it should call FlushInstructionCache to clear out the instruction cache. If the debugger needs to get or set the debuggee’s current context or CPU registers, it can call GetThreadContext or SetThreadContext.</p>
+<p>The only Win32 debug event that needs special handling is the loader breakpoint. Right after the CREATE_PRO&shy;CESS_DEBUG_EVENT is received, the debugger will receive an EXCEPTION_DEBUG_EVENT. This is the loader breakpoint, the result of the first assembler instruction executed&nbsp;by&nbsp;the&nbsp;debuggee.&nbsp;The&nbsp;debuggee&nbsp;executes&nbsp;this&nbsp;break&shy;point because the CREATE_PROCESS_DEBUG_EVENT indicates only that the process was loaded, not executed. The loader breakpoint, which the operating system forces each debuggee to execute, is the first time the debugger actually knows when the debuggee is truly running. In real-world debuggers, all of the main data structures, such as symbol tables, are initialized in process creation, and the debugger starts showing code disassembly or doing necessary debuggee patching in the loader breakpoint.</p>
+<p>When the loader break&shy;point is hit, the debugger should record that it saw the breakpoint so that subsequent breakpoints can be handled accordingly. The only other processing needed for the first breakpoint (and for all breakpoints in general) depends on the CPU. On the Intel platform, the debugger has to continue processing by calling ContinueDebugEvent and passing it the DBG_CONTINUE flag so that the debuggee resumes execution. On an Alpha CPU, the de&shy;bugger must get the CONTEXT structure that represents the current CPU state with GetThreadContext, then increment the Fir (Fault Instruction) field by the size of an instruction, which is four bytes. After incrementing the Fir, the debugger must call SetThreadContext to change the debuggee’s registers. This operation manually skips the breakpoint. Unlike the Intel CPU, which automatically increments the EIP (Instruction Pointer) register after executing a breakpoint, the Alpha CPU does not.</p>
+<p>When handling the various debug events, there are a number of handles that are passed around, including process handles, thread handles, and file handles. While it’s usually good practice to close any open handles an application is given, the Win32 Debug API automatically closes all process and thread handles that are passed to the debugger. If you close them yourself, you might end up closing a random handle in your application because Windows NT&reg; will recycle handle values. This will lead to bugs that are almost impossible to find. I learned this the hard way— always check the return values of CloseHandle.</p>
+<h2>VBDebug: The Big Picture</h2>
+<p>When I first started thinking about VBDebug (see Figure 2), my goal was to design it to use as a prototyping vehicle for some of my debugger ideas. To achieve this, I needed a way to get the interesting parts—the actual Win32 debug event handlers—isolated so that I could experiment with different things without having to rewrite the application. There are three main objects at the highest level in VBDebug: the User Interface (UI), the Executive, and the Core Debug&shy;ger. The UI is the main way the user controls the application, and it runs completely in its own thread. The Executive is the portion that handles the actual debug events (the real meat of a debugger), and it runs in the same thread as the Core Debugger. The Core Debugger is where the actual debug loop resides.</p>
+<p>Figure 2  VBDebug</p>
+<h5>frmVBDebug.frm</h5>
+<p>
+VERSION 5.00</p>
+<p>
+Object = &quot;{F9043C88-F6F2-101A-A3C9-08002B2F49FB}#1.1#0&quot;; &quot;COMDLG32.OCX&quot;</p>
+<p>
+Begin VB.Form frmVBDebug </p>
+<p>
+   Caption         =   &quot;VBDebug&quot;</p>
+<p>
+   ClientHeight    =   4935</p>
+<p>
+   ClientLeft      =   165</p>
+<p>
+   ClientTop       =   735</p>
+<p>
+   ClientWidth     =   5985</p>
+<p>
+   Icon            =   &quot;frmVBDebug.frx&quot;:0000</p>
+<p>
+   LinkTopic       =   &quot;Form1&quot;</p>
+<p>
+   ScaleHeight     =   4935</p>
+<p>
+   ScaleWidth      =   5985</p>
+<p>
+   StartUpPosition =   3  'Windows Default</p>
+<p>
+   Begin MSComDlg.CommonDialog dlgFileOpen </p>
+<p>
+      Left            =   3120</p>
+<p>
+      Top             =   840</p>
+<p>
+      _ExtentX        =   847</p>
+<p>
+      _ExtentY        =   847</p>
+<p>
+      _Version        =   327680</p>
+<p>
+      CancelError     =   -1  'True</p>
+<p>
+      DefaultExt      =   &quot;.exe&quot;</p>
+<p>
+      Filter          =   &quot;Executables (*.exe) | *.exe&quot;</p>
+<p>
+   End</p>
+<p>
+   Begin VB.TextBox txtOutput </p>
+<p>
+      Height          =   2055</p>
+<p>
+      Left            =   120</p>
+<p>
+      Locked          =   -1  'True</p>
+<p>
+      MultiLine       =   -1  'True</p>
+<p>
+      ScrollBars      =   3  'Both</p>
+<p>
+      TabIndex        =   0</p>
+<p>
+      Top             =   360</p>
+<p>
+      Width           =   2055</p>
+<p>
+   End</p>
+<p>
+   Begin VB.Menu mnuFile </p>
+<p>
+      Caption         =   &quot;&amp;File&quot;</p>
+<p>
+      Begin VB.Menu mnuFileOpen </p>
+<p>
+         Caption         =   &quot;&amp;Open&quot;</p>
+<p>
+         Shortcut        =   ^O</p>
+<p>
+      End</p>
+<p>
+      Begin VB.Menu mnuFileExit </p>
+<p>
+         Caption         =   &quot;&amp;Exit&quot;</p>
+<p>
+         Shortcut        =   ^Q</p>
+<p>
+      End</p>
+<p>
+   End</p>
+<p>
+   Begin VB.Menu mnuDebug </p>
+<p>
+      Caption         =   &quot;&amp;Debug&quot;</p>
+<p>
+      Begin VB.Menu mnuDebugStart </p>
+<p>
+         Caption         =   &quot;&amp;Start&quot;</p>
+<p>
+         Enabled         =   0   'False</p>
+<p>
+         Shortcut        =   {F5}</p>
+<p>
+      End</p>
+<p>
+      Begin VB.Menu mnuDebugPause </p>
+<p>
+         Caption         =   &quot;&amp;Pause&quot;</p>
+<p>
+         Enabled         =   0   'False</p>
+<p>
+      End</p>
+<p>
+      Begin VB.Menu mnuDebugEnd </p>
+<p>
+         Caption         =   &quot;&amp;End&quot;</p>
+<p>
+         Enabled         =   0   'False</p>
+<p>
+      End</p>
+<p>
+      Begin VB.Menu mnuDebugRestart </p>
+<p>
+         Caption         =   &quot;&amp;Restart&quot;</p>
+<p>
+         Enabled         =   0   'False</p>
+<p>
+         Shortcut        =   +{F5}</p>
+<p>
+      End</p>
+<p>
+      Begin VB.Menu mnuSep1 </p>
+<p>
+         Caption         =   &quot;-&quot;</p>
+<p>
+      End</p>
+<p>
+      Begin VB.Menu mnuDebugShowActiveThreads </p>
+<p>
+         Caption         =   &quot;S&amp;how Active Threads&quot;</p>
+<p>
+         Enabled         =   0   'False</p>
+<p>
+      End</p>
+<p>
+      Begin VB.Menu mnuDebugShowActiveDLLs </p>
+<p>
+         Caption         =   &quot;Sh&amp;ow Active DLLs&quot;</p>
+<p>
+         Enabled         =   0   'False</p>
+<p>
+      End</p>
+<p>
+   End</p>
+<p>
+   Begin VB.Menu mnuHelp </p>
+<p>
+      Caption         =   &quot;&amp;Help&quot;</p>
+<p>
+      Begin VB.Menu mnuHelpAbout </p>
+<p>
+         Caption         =   &quot;&amp;About VBDebug&quot;</p>
+<p>
+      End</p>
+<p>
+   End</p>
+<p>
+End</p>
+<p>
+Attribute VB_Name = &quot;frmVBDebug&quot;</p>
+<p>
+Attribute VB_GlobalNameSpace = False</p>
+<p>
+Attribute VB_Creatable = False</p>
+<p>
+Attribute VB_PredeclaredId = True</p>
+<p>
+Attribute VB_Exposed = False</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' John Robbins</p>
+<p>
+' Microsoft Systems Journal - August 1997</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FILE         :  frmVBDebug.frm</p>
+<p>
+' DISCUSSION   :</p>
+<p>
+'  The main UI form for the whole VBDebug project.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Option Explicit</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' Enumeration types that indicate the state of the UI widgits.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Private Enum eUIState</p>
+<p>
+   ' The UI is uninitialized.  The only time in this state is when I</p>
+<p>
+   '  first start and before I have loaded an executable.</p>
+<p>
+   eUIUninitialized = 0</p>
+<p>
+   ' The user has opened a file but has not started debugging or the</p>
+<p>
+   '  current debuggee has finished and is ready to run again.</p>
+<p>
+   eUILoaded = 1</p>
+<p>
+   ' There is an application running under the debug loop.</p>
+<p>
+   eUIDebugging = 2</p>
+<p>
+   ' The debuggee is running but it is paused.</p>
+<p>
+   eUIDebuggingPaused = 3</p>
+<p>
+End Enum</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' Form private variables.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' The full name of the executable that I have open for debugging.</p>
+<p>
+Private g_szFullDebuggeeName As String</p>
+<p>
+' The name portion of the debuggee.  This is what I use for setting the</p>
+<p>
+'  application title.</p>
+<p>
+Private g_szJustDebuggeeName As String</p>
+<p>
+' The debugger class that is passed to the debug thread.</p>
+<p>
+Private g_clsDebug As DebuggerClass</p>
+<p>
+' The executive class for the debugger.</p>
+<p>
+Private g_clsExecutive As SimpleExecutive</p>
+<p>
+' The synchronization class.</p>
+<p>
+Private g_clsSynch As DebugSynchClass</p>
+<p>
+' The handle to the debug thread.</p>
+<p>
+Private g_hDebugThread As Long</p>
+<p>
+' The handle to the thread that waits for the debug thread to end.</p>
+<p>
+Private g_hWaitThread As Long</p>
+<p>
+' The structure that I pass to the wait thread.</p>
+<p>
+Private g_stWaitType As SPECIALWAIT_TYPE</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' Form Event Handling</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Private Sub Form_Load()</p>
+<p>
+   ' Force the output text box to cover the client area.</p>
+<p>
+   Form_Resize</p>
+<p>
+End Sub</p>
+<p>
+Private Sub Form_Resize()</p>
+<p>
+   ' Resize the output text box to fill the entire client area.</p>
+<p>
+   txtOutput.Top = 0</p>
+<p>
+   txtOutput.Left = 0</p>
+<p>
+   txtOutput.Height = ScaleHeight</p>
+<p>
+   txtOutput.Width = ScaleWidth</p>
+<p>
+End Sub</p>
+<p>
+Private Sub Form_QueryUnload(Cancel As Integer, UnloadMode As Integer)</p>
+<p>
+   ' Tell the debugger thread to die if it is active.</p>
+<p>
+   If (Not (g_clsDebug Is Nothing)) Then</p>
+<p>
+      g_clsSynch.QuitDebugThread</p>
+<p>
+      ' Hang out until the wait thread is done to ensure complete and</p>
+<p>
+      '  proper cleanup.</p>
+<p>
+      Dim bRes As Long</p>
+<p>
+      bRes = WaitForSingleObject(g_hWaitThread, INFINITE)</p>
+<p>
+   End If</p>
+<p>
+   ' Clear up any outstanding references.</p>
+<p>
+   Set g_clsDebug = Nothing</p>
+<p>
+   Set g_clsExecutive = Nothing</p>
+<p>
+   Set g_clsSynch = Nothing</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' File Menu Handling</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Private Sub mnuFileOpen_Click()</p>
+<p>
+   ' Bring up the file open dialog and get the user's choice.</p>
+<p>
+   On Error GoTo mnuFileOpen_Click_Error</p>
+<p>
+   dlgFileOpen.ShowOpen</p>
+<p>
+   ' Get the full name of the executable.</p>
+<p>
+   g_szFullDebuggeeName = dlgFileOpen.filename</p>
+<p>
+   ' Get just the partial name.</p>
+<p>
+   g_szJustDebuggeeName = dlgFileOpen.FileTitle</p>
+<p>
+   ' Set the UI state to not running.</p>
+<p>
+   SetUIState (eUILoaded)</p>
+<p>
+   ' Put the text in the output so the user can see what is going on.</p>
+<p>
+   '  I am allowed to touch the output edit control here because no</p>
+<p>
+   '  debugger thread is running so there are no synchronization</p>
+<p>
+   '  problems</p>
+<p>
+   txtOutput.Text = &quot;UI:  &quot; + g_szFullDebuggeeName + _</p>
+<p>
+                    &quot; opened and ready to run.&quot; + vbNewLine</p>
+<p>
+   Exit Sub</p>
+<p>
+mnuFileOpen_Click_Error:</p>
+<p>
+   ' If the error was anything other than cancel, throw it on.</p>
+<p>
+   If (cdlCancel &lt;&gt; Err.Number) Then</p>
+<p>
+      Err.Raise (Err.Number)</p>
+<p>
+   End If</p>
+<p>
+End Sub</p>
+<p>
+Private Sub mnuFileExit_Click()</p>
+<p>
+   ' If there is an active executive class, then I must use the</p>
+<p>
+   '  AppendText method to access the output edit control.</p>
+<p>
+   If (Not g_clsExecutive Is Nothing) Then</p>
+<p>
+      g_clsExecutive.AppendText &quot;UI:  File Exit selected&quot;</p>
+<p>
+   Else</p>
+<p>
+      txtOutput.Text = txtOutput.Text + vbNewLine + _</p>
+<p>
+                       &quot;UI:  File Exit selected&quot; + vbNewLine</p>
+<p>
+   End If</p>
+<p>
+   ' Call this to get the Form_QueryUnload function called.</p>
+<p>
+   Unload Me</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' Debug Menu Handling</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Private Sub mnuDebugStart_Click()</p>
+<p>
+   On Error GoTo mnuDebugStart_Click_Error</p>
+<p>
+   Dim bRet As Long</p>
+<p>
+   Dim boolDidStart As Boolean</p>
+<p>
+   ' To keep everything straight, I do a complete new debugger,</p>
+<p>
+   '  synchronization, and executive classes on each start.</p>
+<p>
+   ' Clear out any existing debugger, executive, and synch classes.</p>
+<p>
+   Set g_clsDebug = Nothing</p>
+<p>
+   Set g_clsExecutive = Nothing</p>
+<p>
+   Set g_clsSynch = Nothing</p>
+<p>
+   ' Clear the text box and indicate that the UI menu was picked.</p>
+<p>
+   txtOutput.Text = &quot;&quot;</p>
+<p>
+   txtOutput.Text = &quot;UI:  Debug Start selected&quot; + vbNewLine</p>
+<p>
+   ' Instantiate the debugger class.</p>
+<p>
+   Set g_clsDebug = New DebuggerClass</p>
+<p>
+   ' Instantiate the executive.</p>
+<p>
+   Set g_clsExecutive = New SimpleExecutive</p>
+<p>
+   ' Instantiate the synchronization class.</p>
+<p>
+   Set g_clsSynch = New DebugSynchClass</p>
+<p>
+   ' Initialize the executive class text output.  After this, the UI</p>
+<p>
+   '  thread is no longer allowed to touch the text box.</p>
+<p>
+   Let g_clsExecutive.txtOutput = txtOutput</p>
+<p>
+   ' Initialize the debugger class with the program name.</p>
+<p>
+   g_clsDebug.SetDebuggeeInfo (g_szFullDebuggeeName)</p>
+<p>
+   ' Initialize the debugger class with the executive that does all</p>
+<p>
+   '  the work.</p>
+<p>
+   Set g_clsDebug.clsBaseExecutive = g_clsExecutive</p>
+<p>
+   ' Now that I have all of the required classes set up, I can start</p>
+<p>
+   '  the debug thread.</p>
+<p>
+   SetUIState (eUIDebugging)</p>
+<p>
+   ' I have to do the synch in two stages: create it before, then</p>
+<p>
+   '  check it after.  If you don't do this, then you can run into cases</p>
+<p>
+   '  where the debug thread cranks, sets the event and dies before this</p>
+<p>
+   '  thread can get it created.  Granted those cases only happen on</p>
+<p>
+   '  those super fast Alphas (400Mhz is REALLY great!) but they do</p>
+<p>
+   '  happen.</p>
+<p>
+   g_clsSynch.PrepareWaitForStartup</p>
+<p>
+   ' Crank the debug thread passing it debugger class.</p>
+<p>
+   g_hDebugThread = StartDebugThread(g_clsDebug)</p>
+<p>
+   ' Wait until the debug thread at least gets through the</p>
+<p>
+   '  CreateProcess on the debuggee and see how it did.</p>
+<p>
+   boolDidStart = g_clsSynch.WaitForStartup</p>
+<p>
+   ' If WaitForStartup returned False, then the debuggee was not</p>
+<p>
+   '  started.</p>
+<p>
+   If (False = boolDidStart) Then</p>
+<p>
+      ' There was a problem starting up so clean up.</p>
+<p>
+      Set g_clsDebug = Nothing</p>
+<p>
+      Set g_clsExecutive = Nothing</p>
+<p>
+      Set g_clsSynch = Nothing</p>
+<p>
+      ' Let the user know.</p>
+<p>
+      MsgBox (&quot;Unable to start &quot; + g_szFullDebuggeeName)</p>
+<p>
+      txtOutput.Text = &quot;UI:  Unable to start &quot; + g_szFullDebuggeeName</p>
+<p>
+      ' Make sure to set the UI state back.</p>
+<p>
+      SetUIState (eUILoaded)</p>
+<p>
+      Exit Sub</p>
+<p>
+   End If</p>
+<p>
+   ' Get the debuggee process ID into the synch class.</p>
+<p>
+   g_clsSynch.dwUniqueID = g_clsDebug.dwDebuggeePID</p>
+<p>
+   ' Create the synchronization objects for THIS thread.</p>
+<p>
+   g_clsSynch.CreateSynchObjects</p>
+<p>
+   ' Create the thread that waits on the debug thread to end.</p>
+<p>
+   Set g_stWaitType.frmDTE = Me</p>
+<p>
+   g_stWaitType.hThread = g_hDebugThread</p>
+<p>
+   ' Crank up the wait thread that will watch for the debug thread to</p>
+<p>
+   '  end.</p>
+<p>
+   g_hWaitThread = StartWaitThread(g_stWaitType)</p>
+<p>
+   g_clsExecutive.AppendText &quot;UI:  Debuggee started&quot;</p>
+<p>
+   Exit Sub</p>
+<p>
+mnuDebugStart_Click_Error:</p>
+<p>
+   MsgBox (&quot;Error in mnuDebugStart_Click: &quot; + Err.Description)</p>
+<p>
+End Sub</p>
+<p>
+Private Sub mnuDebugEnd_Click()</p>
+<p>
+   g_clsExecutive.AppendText &quot;UI:  Debug End selected&quot;</p>
+<p>
+   ' Tell the debugger thread to die.</p>
+<p>
+   g_clsSynch.QuitDebugThread</p>
+<p>
+   ' NOTE:  I don't set the UI state here.  I need to make sure the</p>
+<p>
+   '  debug thread is really done before I set it.  It is set in the</p>
+<p>
+   '  btnPostMsgButton_MouseDown handler.</p>
+<p>
+End Sub</p>
+<p>
+Private Sub mnuDebugPause_Click()</p>
+<p>
+   g_clsExecutive.AppendText &quot;UI:  Debug Pause selected&quot;</p>
+<p>
+   ' Tell the debugger thread to pause.</p>
+<p>
+   g_clsSynch.PauseDebugThread</p>
+<p>
+   SetUIState (eUIDebuggingPaused)</p>
+<p>
+End Sub</p>
+<p>
+Private Sub mnuDebugRestart_Click()</p>
+<p>
+   g_clsExecutive.AppendText &quot;UI:  Debug Restart selected&quot;</p>
+<p>
+   ' Tell the debugger thread to resume.</p>
+<p>
+   g_clsSynch.ResumeDebugThread</p>
+<p>
+   SetUIState (eUIDebugging)</p>
+<p>
+End Sub</p>
+<p>
+Private Sub mnuDebugShowActiveThreads_Click()</p>
+<p>
+   g_clsExecutive.DumpActiveThreads</p>
+<p>
+End Sub</p>
+<p>
+Private Sub mnuDebugShowActiveDlls_Click()</p>
+<p>
+   g_clsExecutive.DumpLoadedDLLs</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' Help Menu Handling</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Private Sub mnuHelpAbout_Click()</p>
+<p>
+   If (Not g_clsExecutive Is Nothing) Then</p>
+<p>
+      g_clsExecutive.AppendText &quot;UI:  Help About selected&quot;</p>
+<p>
+   Else</p>
+<p>
+      txtOutput.Text = txtOutput.Text + vbNewLine + _</p>
+<p>
+                       &quot;UI:  Help About  selected&quot; + vbNewLine</p>
+<p>
+   End If</p>
+<p>
+   frmAbout.Show vbModal, Me</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' The special function that is called from the thread that waits for the</p>
+<p>
+' debug thread to end.  This is how I get the UI resynched to know what</p>
+<p>
+' the current state is.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub DebugThreadEnded()</p>
+<p>
+   SetUIState (eUILoaded)</p>
+<p>
+   Dim bRet As Long</p>
+<p>
+   ' This is very ugly.  This function is called in another thread's</p>
+<p>
+   '  context and it seems that while the caption is set correctly, it</p>
+<p>
+   '  does not get updated correctly. To force the update, I simply make</p>
+<p>
+   '  a direct call to SetWindowText to get everything updated.</p>
+<p>
+   bRet = SetWindowText(Me.hWnd, Me.Caption)</p>
+<p>
+   g_clsExecutive.AppendText &quot;UI:  DebugThreadEnded called!&quot;</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' Form specific helper functions</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : SetUIState</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  A helper function to set the state of all UI widgits.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  eUIToSet - The enum to set the user interface to.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Private Sub SetUIState(eUIToSet As eUIState)</p>
+<p>
+   Select Case (eUIToSet)</p>
+<p>
+      ' I have an executable open, but I am not debugging yet.</p>
+<p>
+      Case eUILoaded</p>
+<p>
+         ' If the user wants to open another file, they can.</p>
+<p>
+         mnuFileOpen.Enabled = True</p>
+<p>
+         ' Debugging can start.</p>
+<p>
+         mnuDebugStart.Enabled = True</p>
+<p>
+         ' Since I am not debugging, I cannot end, pause or restart</p>
+<p>
+         '  debugging.</p>
+<p>
+         mnuDebugEnd.Enabled = False</p>
+<p>
+         mnuDebugPause.Enabled = False</p>
+<p>
+         mnuDebugRestart.Enabled = False</p>
+<p>
+         ' Set the info commands off.</p>
+<p>
+         mnuDebugShowActiveThreads.Enabled = False</p>
+<p>
+         mnuDebugShowActiveDLLs.Enabled = False</p>
+<p>
+         ' Set the title.</p>
+<p>
+         Me.Caption = k_APPNAME + &quot; - &quot; + _</p>
+<p>
+                      g_szJustDebuggeeName + _</p>
+<p>
+                      k_NOTRUNNINGSTATE</p>
+<p>
+      ' I am debugging!</p>
+<p>
+      Case eUIDebugging</p>
+<p>
+         ' Nope, cannot open files.</p>
+<p>
+         mnuFileOpen.Enabled = False</p>
+<p>
+         ' Cannot start debugging again.</p>
+<p>
+         mnuDebugStart.Enabled = False</p>
+<p>
+         ' I am debugging so I can end and pause but not restart.</p>
+<p>
+         mnuDebugEnd.Enabled = True</p>
+<p>
+         mnuDebugPause.Enabled = True</p>
+<p>
+         mnuDebugRestart.Enabled = False</p>
+<p>
+         ' Turn the info commands on.</p>
+<p>
+         mnuDebugShowActiveThreads.Enabled = True</p>
+<p>
+         mnuDebugShowActiveDLLs.Enabled = True</p>
+<p>
+         ' Set the title.</p>
+<p>
+         Me.Caption = k_APPNAME + &quot; - &quot; + _</p>
+<p>
+                      g_szJustDebuggeeName + _</p>
+<p>
+                      k_DEBUGGINGSTATE</p>
+<p>
+      ' The debuggee is paused.</p>
+<p>
+      Case eUIDebuggingPaused</p>
+<p>
+         ' Since this state is only allowed from eUIDebugging, all</p>
+<p>
+         '  that is done here is to set restart to true and pause</p>
+<p>
+         '  to false.</p>
+<p>
+         mnuDebugPause.Enabled = False</p>
+<p>
+         mnuDebugRestart.Enabled = True</p>
+<p>
+         Me.Caption = k_APPNAME + &quot; - &quot; + _</p>
+<p>
+                      g_szJustDebuggeeName + _</p>
+<p>
+                      k_PAUSEDSTATE</p>
+<p>
+      ' The uninitialized state.</p>
+<p>
+      Case eUIUninitialized</p>
+<p>
+         mnuFileOpen.Enabled = True</p>
+<p>
+         mnuDebugStart.Enabled = False</p>
+<p>
+         mnuDebugEnd.Enabled = False</p>
+<p>
+         mnuDebugPause.Enabled = False</p>
+<p>
+         mnuDebugRestart.Enabled = False</p>
+<p>
+         mnuDebugShowActiveThreads.Enabled = False</p>
+<p>
+         mnuDebugShowActiveDLLs.Enabled = False</p>
+<p>
+         Me.Caption = k_APPNAME</p>
+<p>
+   End Select</p>
+<p>
+End Sub</p>
+<h5>SimpleExecutive.cls</h5>
+<p>
+VERSION 1.0 CLASS</p>
+<p>
+BEGIN</p>
+<p>
+  MultiUse = -1  'True</p>
+<p>
+END</p>
+<p>
+Attribute VB_Name = &quot;SimpleExecutive&quot;</p>
+<p>
+Attribute VB_GlobalNameSpace = False</p>
+<p>
+Attribute VB_Creatable = True</p>
+<p>
+Attribute VB_PredeclaredId = False</p>
+<p>
+Attribute VB_Exposed = False</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' John Robbins</p>
+<p>
+' Microsoft Systems Journal - August 1997</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FILE          :   SimpleExecutive.cls</p>
+<p>
+' DESCRIPTION   :</p>
+<p>
+'  Implements a simple debugger executive that conforms to the</p>
+<p>
+'  BaseExecutive abstract base class.  If you want to extend VBDebug to</p>
+<p>
+'  handle more advanced things, derive your own class from</p>
+<p>
+'  BaseExecutive.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Option Explicit</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' Polymorphic Bliss</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Implements BaseExecutive</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+'Class Specific Private Variables</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' The handle to the main thread.</p>
+<p>
+Private g_hMainThread As Long</p>
+<p>
+' The handle to the process.</p>
+<p>
+Private g_hProcess As Long</p>
+<p>
+' Has the initial breakpoint already been seen?</p>
+<p>
+Private g_bSeenFirstBP As Boolean</p>
+<p>
+' The synchronization object that keeps us from having trouble in this</p>
+<p>
+'  class.</p>
+<p>
+Private g_clsCritSec As CriticalSection</p>
+<p>
+' The text box where all output is placed.</p>
+<p>
+Private g_txtOutput As TextBox</p>
+<p>
+' The internal list of threads.</p>
+<p>
+Private g_colThreads As Collection</p>
+<p>
+' The internal list of DLLs.</p>
+<p>
+Private g_colDlls As Collection</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+'Property Setting Functions</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Friend Property Let txtOutput(txtBox As TextBox)</p>
+<p>
+   Set g_txtOutput = txtBox</p>
+<p>
+End Property</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : Class_Initialize</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  The initialization for the class.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Private Sub Class_Initialize()</p>
+<p>
+   Set g_clsCritSec = New CriticalSection</p>
+<p>
+   Set g_colThreads = New Collection</p>
+<p>
+   Set g_colDlls = New Collection</p>
+<p>
+   g_bSeenFirstBP = False</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : Class_Terminate</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  The termination for the class.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Private Sub Class_Terminate()</p>
+<p>
+   Set g_clsCritSec = Nothing</p>
+<p>
+   Set g_colThreads = Nothing</p>
+<p>
+   Set g_colDlls = Nothing</p>
+<p>
+End Sub</p>
+<p>
+Private Sub BaseExecutive_DebugCreateProcess _</p>
+<p>
+                                        (clsDebugger As DebuggerClass, _</p>
+<p>
+                                         dwProcessID As Long, _</p>
+<p>
+                                         dwThreadID As Long)</p>
+<p>
+   g_clsCritSec.Enter</p>
+<p>
+   On Error GoTo DebugCreateProcess_Error</p>
+<p>
+   g_hMainThread = clsDebugger.CreateProcessDbgEvt.hThread</p>
+<p>
+   g_hProcess = clsDebugger.CreateProcessDbgEvt.hProcess</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   OutputDebugString (&quot;Created Process ID: &quot; + _</p>
+<p>
+                      Hex$(dwProcessID) + _</p>
+<p>
+                      &quot; Thread Handle : &quot; + _</p>
+<p>
+                      Hex$(g_hProcess) + _</p>
+<p>
+                      &quot; With Thread &quot; + _</p>
+<p>
+                      Hex$(g_hMainThread) + _</p>
+<p>
+                      vbNewLine)</p>
+<p>
+#End If</p>
+<p>
+   AppendText &quot;Process &amp;H&quot; + Hex$(g_hProcess) + &quot; created&quot;</p>
+<p>
+   AppendText &quot;Thread &amp;H&quot; + Hex$(g_hMainThread) + &quot; created&quot;</p>
+<p>
+   ' Add the main thread to the collection.</p>
+<p>
+   g_colThreads.Add CStr(g_hMainThread), CStr(dwThreadID)</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   OutputDebugString (&quot;Adding thread &amp;H&quot; + _</p>
+<p>
+                        Hex$(g_hMainThread) + _</p>
+<p>
+                        &quot; to thread collection&quot; + _</p>
+<p>
+                        vbNewLine)</p>
+<p>
+   OutputDebugString (&quot;Total of &quot; + _</p>
+<p>
+                      CStr(g_colThreads.Count) + _</p>
+<p>
+                      &quot; in the collection&quot; + vbNewLine)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+   Exit Sub</p>
+<p>
+DebugCreateProcess_Error:</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   MsgBox (&quot;DebugCreateProcess Error: &quot; + Err.Description)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+End Sub</p>
+<p>
+Private Sub BaseExecutive_DebugCreateThread _</p>
+<p>
+                                        (clsDebugger As DebuggerClass, _</p>
+<p>
+                                         dwProcessID As Long, _</p>
+<p>
+                                         dwThreadID As Long)</p>
+<p>
+   g_clsCritSec.Enter</p>
+<p>
+   On Error GoTo DebugCreateThread_Error</p>
+<p>
+   Dim stCTDI As CREATE_THREAD_DEBUG_INFO</p>
+<p>
+   stCTDI = clsDebugger.CreateThreadDbgEvt</p>
+<p>
+   g_colThreads.Add CStr(stCTDI.hThread), CStr(dwThreadID)</p>
+<p>
+   AppendText &quot;Thread &amp;H&quot; + Hex$(stCTDI.hThread) + &quot; created&quot;</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   OutputDebugString (&quot;Adding thread &amp;H&quot; + _</p>
+<p>
+                      Hex$(stCTDI.hThread) + _</p>
+<p>
+                      &quot; to thread collection&quot; + vbNewLine)</p>
+<p>
+   OutputDebugString (&quot;Total of &quot; + _</p>
+<p>
+                      CStr(g_colThreads.Count) + _</p>
+<p>
+                      &quot; in the collection&quot; + vbNewLine)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+   Exit Sub</p>
+<p>
+DebugCreateThread_Error:</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   MsgBox (&quot;DebugCreateThread Error: &quot; + Err.Description)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+End Sub</p>
+<p>
+Private Sub BaseExecutive_DebugDllLoad(clsDebugger As DebuggerClass, _</p>
+<p>
+                                       dwProcessID As Long, _</p>
+<p>
+                                       dwThreadID As Long)</p>
+<p>
+   g_clsCritSec.Enter</p>
+<p>
+   On Error GoTo DebugDllLoad_Error</p>
+<p>
+   Dim stLDDI As LOAD_DLL_DEBUG_INFO</p>
+<p>
+   stLDDI = clsDebugger.LoadDllDbgEvt</p>
+<p>
+   g_colDlls.Add Hex$(stLDDI.lpBaseOfDll), Hex$(stLDDI.lpBaseOfDll)</p>
+<p>
+   AppendText &quot;DLL Loaded at &amp;H&quot; + Hex$(stLDDI.lpBaseOfDll)</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   OutputDebugString (&quot;Adding DLL &amp;H&quot; + _</p>
+<p>
+                        Hex$(stLDDI.lpBaseOfDll) + _</p>
+<p>
+                        &quot; to DLL collection&quot; + _</p>
+<p>
+                        vbNewLine)</p>
+<p>
+   OutputDebugString (&quot;Total of &quot; + _</p>
+<p>
+                      CStr(g_colDlls.Count) + _</p>
+<p>
+                      &quot; in the collection&quot; + vbNewLine)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+   Exit Sub</p>
+<p>
+DebugDllLoad_Error:</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   MsgBox (&quot;DebugDllLoad Error: &quot; + Err.Description)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+End Sub</p>
+<p>
+Private Sub BaseExecutive_DebugDllUnload(clsDebugger As DebuggerClass, _</p>
+<p>
+                                         dwProcessID As Long, _</p>
+<p>
+                                         dwThreadID As Long)</p>
+<p>
+   g_clsCritSec.Enter</p>
+<p>
+   On Error GoTo DebugDllUnload_Error</p>
+<p>
+   Dim stULDDI As UNLOAD_DLL_DEBUG_INFO</p>
+<p>
+   stULDDI = clsDebugger.UnloadDllDbgEvt</p>
+<p>
+   g_colDlls.Remove Hex$(stULDDI.lpBaseOfDll)</p>
+<p>
+   AppendText &quot;DLL Unloaded at &amp;H&quot; + Hex$(stULDDI.lpBaseOfDll)</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   OutputDebugString (&quot;Removing DLL &amp;H&quot; + _</p>
+<p>
+                        Hex$(stULDDI.lpBaseOfDll) + _</p>
+<p>
+                        &quot; from the DLL collection&quot; + _</p>
+<p>
+                        vbNewLine)</p>
+<p>
+   OutputDebugString (&quot;Total of &quot; + _</p>
+<p>
+                      CStr(g_colDlls.Count) + _</p>
+<p>
+                      &quot; in the collection&quot; + vbNewLine)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+   Exit Sub</p>
+<p>
+DebugDllUnload_Error:</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   MsgBox (&quot;DebugDllUnload Error: &quot; + Err.Description)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+End Sub</p>
+<p>
+Private Sub BaseExecutive_DebugException(clsDebugger As DebuggerClass, _</p>
+<p>
+                                         dwContType As Long, _</p>
+<p>
+                                         dwProcessID As Long, _</p>
+<p>
+                                         dwThreadID As Long)</p>
+<p>
+   g_clsCritSec.Enter</p>
+<p>
+   On Error GoTo DebugException_Error</p>
+<p>
+   Dim stER As EXCEPTION_RECORD</p>
+<p>
+   stER = clsDebugger.ExceptionDbgEvt.ExceptionRecord</p>
+<p>
+   ' If this is a breakpoint exception and if the loader breakpoint has</p>
+<p>
+   '  not been seen yet, then it is OK.</p>
+<p>
+   If ((False = g_bSeenFirstBP) And _</p>
+<p>
+       (EXCEPTION_BREAKPOINT = stER.ExceptionCode)) Then</p>
+<p>
+      g_bSeenFirstBP = True</p>
+<p>
+#If Alpha Then</p>
+<p>
+      SkipBreakPoint g_hMainThread</p>
+<p>
+#End If</p>
+<p>
+      dwContType = DBG_CONTINUE</p>
+<p>
+   Else</p>
+<p>
+      ' The program has a problem.  Here is where stack dumps and other</p>
+<p>
+      '  helpful things could occur.</p>
+<p>
+      ' If this is a first chance exception, pass it on to the debuggee</p>
+<p>
+      '  to let them handle it first.  The second time that it is seen,</p>
+<p>
+      '  show the warning.</p>
+<p>
+      If (0 = clsDebugger.ExceptionDbgEvt.dwFirstChance) Then</p>
+<p>
+         AppendText GetExceptionString(stER.ExceptionCode) + _</p>
+<p>
+                    &quot; occurred at &amp;H&quot; + _</p>
+<p>
+                    Hex$(stER.ExceptionAddress)</p>
+<p>
+      End If</p>
+<p>
+      dwContType = DBG_EXCEPTION_NOT_HANDLED</p>
+<p>
+   End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+   Exit Sub</p>
+<p>
+DebugException_Error:</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   MsgBox (&quot;DebugException Error: &quot; + Err.Description)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+End Sub</p>
+<p>
+Private Sub BaseExecutive_DebugExitProcess _</p>
+<p>
+                                       (clsDebugger As DebuggerClass, _</p>
+<p>
+                                        dwProcessID As Long, _</p>
+<p>
+                                        dwThreadID As Long)</p>
+<p>
+   g_clsCritSec.Enter</p>
+<p>
+   On Error GoTo DebugExitProcess_Error</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   Dim hThread As Long</p>
+<p>
+   hThread = g_colThreads.Item(CStr(dwThreadID))</p>
+<p>
+#End If</p>
+<p>
+   g_colThreads.Remove CStr(dwThreadID)</p>
+<p>
+   AppendText &quot;Process &amp;H&quot; + _</p>
+<p>
+               Hex$(g_hProcess) + _</p>
+<p>
+               &quot; ended and returned &amp;H&quot; + _</p>
+<p>
+               Hex$(clsDebugger.ExitProcessDbgEvt.dwExitCode)</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   OutputDebugString (&quot;Removing thread &amp;H&quot; + _</p>
+<p>
+                        Hex$(hThread) + _</p>
+<p>
+                        &quot; from the thread collection&quot; + _</p>
+<p>
+                        vbNewLine)</p>
+<p>
+   OutputDebugString (&quot;Total of &quot; + _</p>
+<p>
+                      CStr(g_colThreads.Count) + _</p>
+<p>
+                      &quot; in the collection&quot; + vbNewLine)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+   Exit Sub</p>
+<p>
+DebugExitProcess_Error:</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   MsgBox (&quot;DebugExitProcess Error: &quot; + Err.Description)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+End Sub</p>
+<p>
+Private Sub BaseExecutive_DebugExitThread _</p>
+<p>
+                                       (clsDebugger As DebuggerClass, _</p>
+<p>
+                                        dwProcessID As Long, _</p>
+<p>
+                                        dwThreadID As Long)</p>
+<p>
+   g_clsCritSec.Enter</p>
+<p>
+   On Error GoTo DebugExitThread_Error</p>
+<p>
+   Dim hThread As Long</p>
+<p>
+   hThread = g_colThreads.Item(CStr(dwThreadID))</p>
+<p>
+   g_colThreads.Remove CStr(dwThreadID)</p>
+<p>
+   AppendText &quot;Thread &amp;H&quot; + _</p>
+<p>
+              Hex$(hThread) + _</p>
+<p>
+              &quot; ended and returned &amp;H&quot; + _</p>
+<p>
+              Hex$(clsDebugger.ExitThreadDbgEvt.dwExitCode)</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   OutputDebugString (&quot;Removing thread &amp;H&quot; + _</p>
+<p>
+                        Hex$(hThread) + _</p>
+<p>
+                        &quot; from the thread collection&quot; + _</p>
+<p>
+                        vbNewLine)</p>
+<p>
+   OutputDebugString (&quot;Total of &quot; + _</p>
+<p>
+                      CStr(g_colThreads.Count) + _</p>
+<p>
+                      &quot; in the collection&quot; + vbNewLine)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+   Exit Sub</p>
+<p>
+DebugExitThread_Error:</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   MsgBox (&quot;DebugExitThread Error: &quot; + Err.Description)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+End Sub</p>
+<p>
+Private Sub BaseExecutive_DebugODS(clsDebugger As DebuggerClass, _</p>
+<p>
+                                   dwProcessID As Long, _</p>
+<p>
+                                   dwThreadID As Long)</p>
+<p>
+   g_clsCritSec.Enter</p>
+<p>
+   On Error GoTo DebugODS_Error</p>
+<p>
+   Dim stODS As OUTPUT_DEBUG_STRING_INFO</p>
+<p>
+   Dim szOutBuff As String * 1024</p>
+<p>
+   Dim bRet As Long</p>
+<p>
+   Dim dwBytes As Long</p>
+<p>
+   stODS = clsDebugger.ODSDbgEvt</p>
+<p>
+   bRet = ReadProcessMemory(g_hProcess, _</p>
+<p>
+                            stODS.lpDebugStringData, _</p>
+<p>
+                            szOutBuff, _</p>
+<p>
+                            stODS.nDebugStringLength, _</p>
+<p>
+                            dwBytes)</p>
+<p>
+   AppendText &quot;ODS:  &quot; + Left$(szOutBuff, stODS.nDebugStringLength)</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+   Exit Sub</p>
+<p>
+DebugODS_Error:</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   MsgBox (&quot;DebugODS Error: &quot; + Err.Description)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+End Sub</p>
+<p>
+Private Sub BaseExecutive_DebugRipInfo(clsDebugger As DebuggerClass, _</p>
+<p>
+                                       dwProcessID As Long, _</p>
+<p>
+                                       dwThreadID As Long)</p>
+<p>
+   g_clsCritSec.Enter</p>
+<p>
+   On Error GoTo DebugRipInfo_Error</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+   Exit Sub</p>
+<p>
+DebugRipInfo_Error:</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   MsgBox (&quot;DebugRipInfo Error: &quot; + Err.Description)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+End Sub</p>
+<p>
+Private Sub BaseExecutive_PauseProcess()</p>
+<p>
+   g_clsCritSec.Enter</p>
+<p>
+   On Error GoTo PauseProcess_Error</p>
+<p>
+   Dim lData As Variant</p>
+<p>
+   Dim bRet As Long</p>
+<p>
+   For Each lData In g_colThreads</p>
+<p>
+      bRet = SuspendThread(CLng(lData))</p>
+<p>
+   Next lData</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+   Exit Sub</p>
+<p>
+PauseProcess_Error:</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   MsgBox (&quot;PauseProcess Error: &quot; + Err.Description)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+End Sub</p>
+<p>
+Private Sub BaseExecutive_ResumeProcess()</p>
+<p>
+   g_clsCritSec.Enter</p>
+<p>
+   On Error GoTo ResumeProcess_Error</p>
+<p>
+   Dim lData As Variant</p>
+<p>
+   Dim bRet As Long</p>
+<p>
+   For Each lData In g_colThreads</p>
+<p>
+      bRet = ResumeThread(CLng(lData))</p>
+<p>
+   Next lData</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+   Exit Sub</p>
+<p>
+ResumeProcess_Error:</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   MsgBox (&quot;ResumeProcess Error: &quot; + Err.Description)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : AppendText</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  This is a public interface off the SimpleExecutive class.  Both the</p>
+<p>
+'  UI and this class will only call through it to do their output.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  szStr - The string to append.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub AppendText(szStr As String)</p>
+<p>
+   ' Hey!  Shouldn't there be a critical section in here?  Technically,</p>
+<p>
+   '  there should be, but since the edit control we are protecting is</p>
+<p>
+   '  protected internally, it doesn't really need it.</p>
+<p>
+   On Error GoTo AppendText_Error</p>
+<p>
+   Dim lLen As Long</p>
+<p>
+   lLen = Len(szStr)</p>
+<p>
+   If (0 = lLen) Then</p>
+<p>
+      Exit Sub</p>
+<p>
+   End If</p>
+<p>
+   Dim szTemp As String</p>
+<p>
+   szTemp = g_txtOutput.Text</p>
+<p>
+   If (Chr$(13) &lt;&gt; Right$(szStr, lLen - 2)) Or _</p>
+<p>
+      (Chr$(10) &lt;&gt; Right$(szStr, lLen - 1)) Then</p>
+<p>
+      g_txtOutput.Text = szTemp + szStr + vbNewLine</p>
+<p>
+   Else</p>
+<p>
+      g_txtOutput.Text = szTemp + szStr</p>
+<p>
+   End If</p>
+<p>
+   ' Now scroll the text into view.</p>
+<p>
+   g_txtOutput.SelStart = Len(g_txtOutput.Text)</p>
+<p>
+   Exit Sub</p>
+<p>
+AppendText_Error:</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   MsgBox (&quot;AppendText Error: &quot; + Err.Description)</p>
+<p>
+#End If</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : DumpActiveThreads</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  To demonstrate some of the cross-thread coordination, this function</p>
+<p>
+'  dumps the active threads for the debuggee.  This is to give you an</p>
+<p>
+'  idea how to access information from the UI.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub DumpActiveThreads()</p>
+<p>
+   g_clsCritSec.Enter</p>
+<p>
+   On Error GoTo PauseProcess_Error</p>
+<p>
+   Dim lData As Variant</p>
+<p>
+   Dim i As Long</p>
+<p>
+   For Each lData In g_colThreads</p>
+<p>
+      AppendText &quot;Info:  Active thread #&quot; +  CStr(i) +  &quot; Handle : &amp;H&quot; + _</p>
+<p>
+                  Hex$(CLng(lData))</p>
+<p>
+      i = i + 1</p>
+<p>
+   Next lData</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+   Exit Sub</p>
+<p>
+PauseProcess_Error:</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   MsgBox (&quot;DumpActiveThreads Error: &quot; + Err.Description)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : DumpLoadedDLLs</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  Like DumpActiveThreads, dumps the loaded DLLs that are currently in</p>
+<p>
+'  the debuggee's address space.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub DumpLoadedDLLs()</p>
+<p>
+   g_clsCritSec.Enter</p>
+<p>
+   On Error GoTo PauseProcess_Error</p>
+<p>
+   Dim szData As Variant</p>
+<p>
+   Dim i As Long</p>
+<p>
+   For Each szData In g_colDlls</p>
+<p>
+      AppendText &quot;Info:  DLL #&quot; + CStr(i) + &quot; Loaded at &amp;H&quot; + _</p>
+<p>
+                  szData</p>
+<p>
+      i = i + 1</p>
+<p>
+   Next szData</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+   Exit Sub</p>
+<p>
+PauseProcess_Error:</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   MsgBox (&quot;DumpActiveThreads Error: &quot; + Err.Description)</p>
+<p>
+#End If</p>
+<p>
+   g_clsCritSec.Leave</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  SkipBreakPoint</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  The function that skips over Alpha breakpoints.  Where Intel</p>
+<p>
+'  breakpoints automatically increment EIP when hit, on the Alpha, Fir</p>
+<p>
+'  is not.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  hThread - The thread where the skip is to take place.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+#If Alpha Then</p>
+<p>
+Private Sub SkipBreakPoint(hThread As Long)</p>
+<p>
+   Dim ctx As CONTEXT</p>
+<p>
+   Dim bRet As Long</p>
+<p>
+   ctx.ContextFlags = CONTEXT_CONTROL</p>
+<p>
+   bRet = GetThreadContext(hThread, ctx)</p>
+<p>
+   If (1 &lt;&gt; bRet) Then</p>
+<p>
+      MsgBox (&quot;GetThreadContext failed!&quot;)</p>
+<p>
+   End If</p>
+<p>
+   ' Alpha instructions are all four bytes long.</p>
+<p>
+   ctx.Fir.lowpart = ctx.Fir.lowpart + 4</p>
+<p>
+   bRet = SetThreadContext(hThread, ctx)</p>
+<p>
+   If (1 &lt;&gt; bRet) Then</p>
+<p>
+      MsgBox (&quot;SetThreadContext failed!&quot;)</p>
+<p>
+   End If</p>
+<p>
+End Sub</p>
+<p>
+#End If</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  GetExceptionString</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  Given an exception code, returns the human readable string that</p>
+<p>
+'  describes it.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  dwCode - The exception code.</p>
+<p>
+' RETURN          :</p>
+<p>
+'  The string.  If the exception is unknown then &quot;Unknown exception&quot;</p>
+<p>
+'  is returned.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Private Function GetExceptionString(dwCode As Long) As String</p>
+<p>
+   Select Case (dwCode)</p>
+<p>
+      Case EXCEPTION_ACCESS_VIOLATION</p>
+<p>
+         GetExceptionString = &quot;Access Violation Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case EXCEPTION_DATATYPE_MISALIGNMENT</p>
+<p>
+         GetExceptionString = &quot;Datatype Misalignment Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case EXCEPTION_BREAKPOINT</p>
+<p>
+         GetExceptionString = &quot;Breakpoint Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case EXCEPTION_SINGLE_STEP</p>
+<p>
+         GetExceptionString = &quot;Single Step Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case EXCEPTION_ARRAY_BOUNDS_EXCEEDED</p>
+<p>
+         GetExceptionString = &quot;Array Bounds Exceeded Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case EXCEPTION_FLT_DENORMAL_OPERAND</p>
+<p>
+         GetExceptionString = &quot;Floating Point Denormal Operand Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case EXCEPTION_FLT_DIVIDE_BY_ZERO</p>
+<p>
+         GetExceptionString = &quot;Floating Point Divide By Zero Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case EXCEPTION_FLT_INEXACT_RESULT</p>
+<p>
+         GetExceptionString = &quot;Floating Point Inexact Result Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case EXCEPTION_FLT_INVALID_OPERATION</p>
+<p>
+         GetExceptionString = &quot;Floating Point Invalid Operation Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case EXCEPTION_FLT_OVERFLOW</p>
+<p>
+         GetExceptionString = &quot;Floating Point Overflow Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case EXCEPTION_INT_DIVIDE_BY_ZERO</p>
+<p>
+         GetExceptionString = &quot;Integer Divide By Zero Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case EXCEPTION_INT_OVERFLOW</p>
+<p>
+         GetExceptionString = &quot;Integer Overflow Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case EXCEPTION_PRIV_INSTRUCTION</p>
+<p>
+         GetExceptionString = &quot;Privileged Instruction Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case EXCEPTION_IN_PAGE_ERROR</p>
+<p>
+         GetExceptionString = &quot;In Page Error Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case EXCEPTION_ILLEGAL_INSTRUCTION</p>
+<p>
+         GetExceptionString = &quot;Illegal Instruction Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case EXCEPTION_NONCONTINUABLE_EXCEPTION</p>
+<p>
+         GetExceptionString = &quot;Noncontinuable Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case EXCEPTION_STACK_OVERFLOW</p>
+<p>
+         GetExceptionString = &quot;Stack Overflow Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case EXCEPTION_INVALID_DISPOSITION</p>
+<p>
+         GetExceptionString = &quot;Invalid Disposition Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case EXCEPTION_GUARD_PAGE</p>
+<p>
+         GetExceptionString = &quot;Guard Page Exception&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+      Case Else</p>
+<p>
+         GetExceptionString = &quot;Unknown Exception (&amp;H&quot; + _</p>
+<p>
+                              Hex$(dwCode) + &quot;)&quot;</p>
+<p>
+         Exit Function</p>
+<p>
+   End Select</p>
+<p>
+End Function</p>
+<h5>VBD_Constants.bas</h5>
+<p>
+Attribute VB_Name = &quot;VBD_Constants&quot;</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' John Robbins</p>
+<p>
+' Microsoft Systems Journal - August 1997</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Option Explicit</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' Helpful constants that really should be in a .RES file.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' The name of the application.</p>
+<p>
+Global Const k_APPNAME As String = &quot;VBDebug&quot;</p>
+<p>
+' The names for the different states that we show in the main window</p>
+<p>
+'  title.</p>
+<p>
+Global Const k_NOTRUNNINGSTATE As String = &quot; [Loaded]&quot;</p>
+<p>
+Global Const k_PAUSEDSTATE As String = &quot; [Paused]&quot;</p>
+<p>
+Global Const k_DEBUGGINGSTATE As String = &quot; [Running]&quot;</p>
+<h5>EndDbgThread.bas</h5>
+<p>
+Attribute VB_Name = &quot;EndDbgThread&quot;</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' John Robbins</p>
+<p>
+' Microsoft Systems Journal - August 1997</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FILE         :     EndDbgThread.bas</p>
+<p>
+' DESCRIPTION  :</p>
+<p>
+'  The thread that tells the UI that the debug thread has ended.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Option Explicit</p>
+<p>
+' The type that is passed to the wait thread.</p>
+<p>
+Public Type SPECIALWAIT_TYPE</p>
+<p>
+   ' The thread to wait on.</p>
+<p>
+   hThread As Long</p>
+<p>
+   ' The form to call the DebugThreadEnded method on.  As long as your</p>
+<p>
+   '  form has the DebugThreadEnded method, the type is the only thing</p>
+<p>
+   '  that should be changed in this file.</p>
+<p>
+   frmDTE As frmVBDebug</p>
+<p>
+End Type</p>
+<p>
+' The function that starts the debug thread.</p>
+<p>
+Public Function StartWaitThread(stWaitType As SPECIALWAIT_TYPE) As Long</p>
+<p>
+   Dim hThread As Long</p>
+<p>
+   Dim lThreadID As Long</p>
+<p>
+   ' Create the thread.</p>
+<p>
+   hThread = CreateThread(0, _</p>
+<p>
+                          0, _</p>
+<p>
+                          AddressOf WaitForEndOfDebugThread, _</p>
+<p>
+                          stWaitType, _</p>
+<p>
+                          0, _</p>
+<p>
+                          lThreadID)</p>
+<p>
+   StartWaitThread = hThread</p>
+<p>
+End Function</p>
+<p>
+Public Function WaitForEndOfDebugThread _</p>
+<p>
+                                (stWaitType As SPECIALWAIT_TYPE) As Long</p>
+<p>
+   On Error GoTo WaitForEndOfDebugThread_Error</p>
+<p>
+   Dim bRet As Long</p>
+<p>
+   ' Wait for the debug thread to become signaled, which means it is</p>
+<p>
+   '  done.</p>
+<p>
+   bRet = WaitForSingleObject(stWaitType.hThread, INFINITE)</p>
+<p>
+   ' Instead of calling directly into the form, I would have preferred to</p>
+<p>
+   '  do a PostMessage here, but when this program is run on a</p>
+<p>
+   '  multiprocessor machine, the message never makes it through the</p>
+<p>
+   '  runtime.  Therefore, we have to call into the form.</p>
+<p>
+   stWaitType.frmDTE.DebugThreadEnded</p>
+<p>
+   WaitForEndOfDebugThread = 1</p>
+<p>
+   Exit Function</p>
+<p>
+WaitForEndOfDebugThread_Error:</p>
+<p>
+   MsgBox (&quot;Got an error in DebugThread: &quot; + Err.Description)</p>
+<p>
+   WaitForEndOfDebugThread = 0</p>
+<p>
+End Function</p>
+<p>These three objects are pretty much equally important and they do have to interact with one another. The UI object is responsible for creating the Executive and Core Debugger objects, getting them running in the background thread, and stopping the background thread to release the objects. Since the Executive object is responsible for handling the debugging events, it needs to get the information it controls up to the UI object so the user knows what’s going on. This means that the UI and Executive objects need to coordinate some sort of interface that the Executive can use to display the information the user requested.</p>
+<p>The Core Debugger object is simple and just encapsulates the debugger loop. It has a reference to the Executive object, so it calls into the Executive object for processing when it receives a debug event. If you set everything correctly, the Core Debugger object should only have to be written once.</p>
+<p>From a multithreading standpoint, the only object that will be accessed from both the UI thread and the debug thread is the Executive object. This means the Executive must use one of the Win32 data protection synchronization types, like a critical section, on each of its interfaces.</p>
+<p>Once I decided on my design goals for VBDebug, I had to wrestle with some implementation issues. Since I needed a way to plug in various Executives and wanted as much flexibility as possible, I implemented the Executive and Core Debugger portions as Visual Basic classes. By using classes and taking advantage of the late binding offered by COM, the Executive can be easily replaced.</p>
+<p>The source files frmVBDebug.frm, SimpleExecutive.cls, and DebuggerClass.cls implement the UI, Executive, and Core Debugger objects, respectively. As you look through the code for SimpleExecutive.cls, you might notice that the application implements the interface from a class called BaseExecutive. This is the abstract class that DebuggerClass uses to access the Executive. This means that DebuggerClass only needs to be implemented once, and it can have any number of different Executive objects passed to it.</p>
+<p>As you peruse the source code, pay careful attention to the interactions between the three main objects. Probably the best way to see everything in action is to start with the user interface, frmVBDebug.frm, and carefully track how the other classes are created and accessed. There is a good deal of code in VBDebug, so I will only cover some of the more interesting highlights in this article. I will start with the debugger portions and move into the multithreaded sections.&nbsp;As&nbsp;with&nbsp;all&nbsp;new code, you might want to load VBDe&shy;bug in a debugger, set breakpoints everywhere, and start it. When a breakpoint is hit, note what thread it came from.</p>
+<p>Another interesting feature of the VBDebug code is just how much of it can be reused by another debugger UI and Executive implementation. The source code tree is set up so that all the specific VBDebug code resides in the VBDebug directory, and all the generic code that can be used for other debuggers using my architecture is in the VBDebug\Reuse directory. I hope this will help you when you sit down and play with your own debugger implementations.</p>
+<h2>More On Win32 Debuggers </h2>
+<p>VBDebug does not pretend to be a full-fledged debugger by any means, but it does enough work to be useful. And it provides&nbsp;a&nbsp;good&nbsp;starting point for developing more advanced support. All of the good debugging support in VBDebug can be found in the SimpleExecutive class. As you look through the class, you will notice that the functions that are derived from BaseExecutive are the usual debug event handlers. For the most part, these are pretty straightforward.</p>
+<p>The only thing the event handlers do is keep two lists: one for dealing with threads and one for dealing with DLLs. The methods that deal with thread creation, BaseExecutive_<BR>DebugCreateProcess and BaseExecutive_Debug&shy;Create&shy;Thread, put the thread handle into a collection class, g_colThreads. The methods that deal with thread destruction, BaseExecutive_DebugExitProcess and BaseExecutive_<BR>DebugExitThread, remove the thread handle from g_col&shy;Threads. While VBDebug only uses these thread handles to show which ones started and stopped, a full-fledged debugger needs to have these handles so that it can set breakpoints in a thread, query the thread’s registers, walk the thread’s stack, and let the user see the priority of threads.</p>
+<p>The methods that deal with DLL loading and unloading, BaseExecutive_DebugDllLoad and BaseExecutive_Debug&shy;DllUnload, place the load address into a g_colDlls collection, much like the thread handler methods. Likewise, the DLL handler methods don’t do a whole lot. They simply report that a DLL loaded or unloaded at a particular address. If you looked at the information returned in a LOAD_DLL_DEBUG_INFO structure, you would notice a field called lpImageName, which the documentation says is the name of the file. In reality, the name of the DLL is never filled in. This means that you must wind through the actual PE image in memory to get the export section and then find the name. I’ll leave this as an exercise for the reader.</p>
+<p>A slightly more interesting method is BaseExecutive_<BR>DebugODS, where the debuggee calls to OutputDebugString are handled. When a debuggee calls OutputDebugString, the operating system notifies the debugger and it actually reads the string from the debuggee’s address space. While this may sound difficult to initiate, there is a simple API call that handles it for you pretty easily—ReadProcessMemory.</p>
+<p>Another interesting method in the SimpleExecutive class is BaseExecutive_DebugException, which offers plenty of room for more advanced development. The special handling in this method is needed only if the first breakpoint has not been seen and the exception is a breakpoint, as mentioned. If those conditions are true and VBDebug is compiled for an Alpha CPU, the SkipBreakPoint private method is called. Looking at SkipBreakPoint, you will see the GetThread&shy;Context and SetThreadContext APIs are used to skip over the fault instruction. After skipping the breakpoint on the Alpha, which is done automatically by Intel CPUs, Base&shy;Executive_DebugException tells the DebuggerClass to pass DBG_CONTINUE onto ContinueDebugEvent. If the exception passed to BaseExecutive_DebugException is not the first breakpoint or is something other than a breakpoint, it passes the exception to the debuggee for it to handle the exception. If the exception is a second-chance exception, then I output the formal name of the exception and where it occurred. Here is where some of the advanced debugger operations need to be added, such as stack walking and variable dumping.</p>
+<p>Since there is more to debuggers than just responding to the basic events from the Debug API, there are a couple of methods that do things outside the event architecture. In VBDebug, these are BaseExecutive_PauseProcess and Base&shy;Executive_ResumeProcess. As the names suggest, they are used to pause and restart the debuggee. What makes pausing and restarting the debuggee interesting is that the debugger must actually call the SuspendThread and ResumeThread APIs on all the debuggee’s threads individually. There isn’t a single API call to instantly suspend or resume a debuggee. While this might seem odd, the idea makes sense. When I first looked at the Win32 Debug API, I thought that the entire debuggee was stopped when I did not call WaitForDebugEvent. But when you think about the Debug API, it makes sense that it is not.</p>
+<p>The debuggee is running full tilt until it does something that the operating system notices will cause an event to trigger, at which point the debuggee is stopped dead in its tracks. This means that, even though I could tell the debug thread to block and not call WaitForDebugEvent (because I wanted to pause the debuggee), it is still running until the debuggee does something that causes a debug event. The way to properly pause the debuggee is to call SuspendThread on each of the active threads in the debuggee, then block on the debug thread. Keep in mind that suspending a thread is not the same as halting a thread. To halt a thread, you would need to suspend it, write a breakpoint instruction to the current program counter, and then resume the thread to cause the breakpoint to be hit.</p>
+<h2>Senior Project Time!</h2>
+<p>Since the title of this article concerns multithreading, it’s high time that I talk about the hardcore multithreading in VBDebug. While some interesting pieces of the actual debugger were left as exercises for the reader, the multi&shy;threaded portions are complete and good enough for you to consider for your applications. When you read over this section, you should look at the code very carefully, because it sometimes gets difficult to imagine exactly what happens in a multithreaded system. There are three major areas that need to be covered here: getting the debug thread started,&nbsp;protecting&nbsp;items&nbsp;that&nbsp;can&nbsp;be&nbsp;accessed from multiple threads, and handling the coordination between the UI thread and the debugger thread.</p>
+<p>Of the items that I will discuss in this section, getting the debugger thread cranked up is the easiest to explain. After opening an executable and selecting Start from the Debug menu, the mnuDebugStart_Click method in frmVB&shy;Debug.frm does all the work (see Figure 2). As described earlier, the UI is responsible for creating the Core Debugger and the Executive class, so this is where the DebuggerClass from DebuggerClass.cls (see Figure 3) and the Simple&shy;Exe&shy;cutive class are instantiated. After instantiating the classes, mnuDebugStart_Click tells the DebuggerClass which Executive to use, then calls the StartDebugThread function from DebugThread.bas. There are some other things that go on before the call to StartDebugThread, but I’ll discuss them later as part of the thread synchronization. Start&shy;DebugThread calls CreateThread with the DebugThread function (also in DebugThread.bas) as the thread function, then passes the DebuggerClass as the thread parameter. Since I only want to write the actual DebugThread function once, I have it take the DebugClass passed in and start calling methods on it. The first is StartDebuggee. If the debuggee starts correctly, it lets the DebuggerClass spin in the ProcessDebugEvents method until it returns.</p>
+<p>Figure 3  Reusable VBDebug Code</p>
+<h5>BaseExecutive.cls</h5>
+<p>
+VERSION 1.0 CLASS</p>
+<p>
+BEGIN</p>
+<p>
+  MultiUse = -1  'True</p>
+<p>
+END</p>
+<p>
+Attribute VB_Name = &quot;BaseExecutive&quot;</p>
+<p>
+Attribute VB_GlobalNameSpace = False</p>
+<p>
+Attribute VB_Creatable = True</p>
+<p>
+Attribute VB_PredeclaredId = False</p>
+<p>
+Attribute VB_Exposed = False</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' John Robbins, Microsoft Systems Journal - August 1997</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FILE          :   BaseExecutive.cls</p>
+<p>
+' DESCRIPTION   :</p>
+<p>
+'  The abstract base class for all debugger executives.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Option Explicit</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  DebugCreateProcess</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  Called when the debugger thread gets a process create notification.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  clsDebugger - The debugger class to query for additional information.</p>
+<p>
+'  dwProcessID - The process ID for the process.</p>
+<p>
+'  dwThreadID  - The thread ID for the thread.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub DebugCreateProcess(clsDebugger As DebuggerClass, </p>
+<p>
+                              dwProcessID As Long, dwThreadID As Long)</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  DebugExitProcess</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  Called when the debugger thread gets a process exit notification.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  clsDebugger - The debugger class to query for additional information.</p>
+<p>
+'  dwProcessID - The process ID for the process.</p>
+<p>
+'  dwThreadID  - The thread ID for the thread.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub DebugExitProcess(clsDebugger As DebuggerClass, _</p>
+<p>
+                            dwProcessID As Long, dwThreadID As Long)</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  DebugCreateThread</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  Called when the debugger thread gets a thread create notification.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  clsDebugger - The debugger class to query for additional information.</p>
+<p>
+'  dwProcessID - The process ID for the process.</p>
+<p>
+'  dwThreadID  - The thread ID for the thread.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub DebugCreateThread(clsDebugger As DebuggerClass, _</p>
+<p>
+                             dwProcessID As Long, dwThreadID As Long)</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  DebugExitThread</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  Called when the debugger thread gets a thread exit notification.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  clsDebugger - The debugger class to query for additional information.</p>
+<p>
+'  dwProcessID - The process ID for the process.</p>
+<p>
+'  dwThreadID  - The thread ID for the thread.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub DebugExitThread(clsDebugger As DebuggerClass, _</p>
+<p>
+                           dwProcessID As Long,  dwThreadID As Long)</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  DebugDllLoad</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  Called when the debugger thread gets a DLL load notification.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  clsDebugger - The debugger class to query for additional information.</p>
+<p>
+'  dwProcessID - The process ID for the process.</p>
+<p>
+'  dwThreadID  - The thread ID for the thread.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub DebugDllLoad(clsDebugger As DebuggerClass, _</p>
+<p>
+                        dwProcessID As Long, dwThreadID As Long)</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  DebugDllUnload</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  Called when the debugger thread gets a DLL unload notification.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  clsDebugger - The debugger class to query for additional information.</p>
+<p>
+'  dwProcessID - The process ID for the process.</p>
+<p>
+'  dwThreadID  - The thread ID for the thread.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub DebugDllUnload(clsDebugger As DebuggerClass, _</p>
+<p>
+                          dwProcessID As Long, dwThreadID As Long)</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  DebugODS</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  Called when the debugger thread gets an OutputDebugString</p>
+<p>
+'  notification</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  clsDebugger - The debugger class to query for additional information.</p>
+<p>
+'  dwProcessID - The process ID for the process.</p>
+<p>
+'  dwThreadID  - The thread ID for the thread.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub DebugODS(clsDebugger As DebuggerClass, _</p>
+<p>
+                    dwProcessID As Long, dwThreadID As Long)</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  DebugException</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  Called when the debugger thread gets an exception notification.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  clsDebugger - The debugger class to query for additional information.</p>
+<p>
+'  dwContType  - The way to continue debugging.</p>
+<p>
+'  dwProcessID - The process ID for the process.</p>
+<p>
+'  dwThreadID  - The thread ID for the thread.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub DebugException(clsDebugger As DebuggerClass, _</p>
+<p>
+                          dwContType As Long, dwProcessID As Long, _</p>
+<p>
+                          dwThreadID As Long)</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  DebugRipInfo</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  Called when the debugger thread gets an RIP notification.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  clsDebugger - The debugger class to query for additional information.</p>
+<p>
+'  dwProcessID - The process ID for the process.</p>
+<p>
+'  dwThreadID  - The thread ID for the thread.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub DebugRipInfo(clsDebugger As DebuggerClass, _</p>
+<p>
+                        dwProcessID As Long, dwThreadID As Long)</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  PauseProcess</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  When the debug process has been told to pause, this function is</p>
+<p>
+'  called because it is up to the executive to do the SuspendThreads.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub PauseProcess()</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  ResumeProcess</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  When the debug process has been told to resume, this function is</p>
+<p>
+'  called because it is up to the executive to do the ResumeThreads.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub ResumeProcess()</p>
+<p>
+End Sub</p>
+<h5>CriticalSection.cls</h5>
+<p>
+VERSION 1.0 CLASS</p>
+<p>
+BEGIN</p>
+<p>
+  MultiUse = -1  'True</p>
+<p>
+END</p>
+<p>
+Attribute VB_Name = &quot;CriticalSection&quot;</p>
+<p>
+Attribute VB_GlobalNameSpace = False</p>
+<p>
+Attribute VB_Creatable = True</p>
+<p>
+Attribute VB_PredeclaredId = False</p>
+<p>
+Attribute VB_Exposed = False</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' John Robbins, Microsoft Systems Journal - August 1997</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FILE          :   CriticalSection.cls</p>
+<p>
+' DESCRIPTION   :</p>
+<p>
+'  A nice helper class that encapsulates critical section handling.</p>
+<p>
+'  If you use this class to control access to data, make sure you set</p>
+<p>
+'  up all the functions that use it with error handlers to make sure</p>
+<p>
+'  that the Leave method is called after the enter.  In the following</p>
+<p>
+'  example, g_CritSec is the critical section class.</p>
+<p>
+'</p>
+<p>
+'Public Sub DoSomething ( )</p>
+<p>
+'  g_CritSec.Enter</p>
+<p>
+'  On Error GoTo DoSomething_Error</p>
+<p>
+'  ' Do some work here!</p>
+<p>
+'  g_CritSec.Leave</p>
+<p>
+'  Exit Sub</p>
+<p>
+'</p>
+<p>
+'DoSomething_Error:</p>
+<p>
+'  g_CritSec.Leave</p>
+<p>
+'End Sub</p>
+<p>
+'</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Option Explicit</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' Class private variables</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Private m_CritSec As CRITICAL_SECTION</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : Class_Initialize</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  The initialization for the class.  This just initializes the private</p>
+<p>
+'  CRITICAL_SECTION structure.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Private Sub Class_Initialize()</p>
+<p>
+   InitializeCriticalSection m_CritSec</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : Class_Terminate</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  The termination for the class.  This just frees up the private</p>
+<p>
+'  CRITICAL_SECTION structure.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Private Sub Class_Terminate()</p>
+<p>
+   DeleteCriticalSection m_CritSec</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : Enter</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  Locks on the critical section by calling EnterCriticalSection.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub Enter()</p>
+<p>
+   EnterCriticalSection m_CritSec</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : Leave</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  Unlocks the critical section by calling LeaveCriticalSection.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub Leave()</p>
+<p>
+   LeaveCriticalSection m_CritSec</p>
+<p>
+End Sub</p>
+<h5>DebuggerClass.cls</h5>
+<p>
+VERSION 1.0 CLASS</p>
+<p>
+BEGIN</p>
+<p>
+  MultiUse = -1  'True</p>
+<p>
+END</p>
+<p>
+Attribute VB_Name = &quot;DebuggerClass&quot;</p>
+<p>
+Attribute VB_GlobalNameSpace = False</p>
+<p>
+Attribute VB_Creatable = True</p>
+<p>
+Attribute VB_PredeclaredId = False</p>
+<p>
+Attribute VB_Exposed = False</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' John Robbins, Microsoft Systems Journal - August 1997</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FILE          :   DebuggerClass.cls</p>
+<p>
+' DESCRIPTION   :</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Option Explicit</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' Class private variables</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' The required full filename of the debuggee.</p>
+<p>
+Private m_szDebuggee As String</p>
+<p>
+' The optional command line to use.</p>
+<p>
+Private m_szCmdLine As String</p>
+<p>
+' The optional startup directory.</p>
+<p>
+Private m_szWorkDir As String</p>
+<p>
+' The executive class that the debugger will use.</p>
+<p>
+Private m_clsExecutive As BaseExecutive</p>
+<p>
+' The synchronization class that the debugger will use.  This is its own</p>
+<p>
+'  instance.</p>
+<p>
+Private m_clsSynch As DebugSynchClass</p>
+<p>
+' The process ID for the debuggee.</p>
+<p>
+Private m_dwDebuggeePID As Long</p>
+<p>
+' The error code returned when I tried to create the debuggee.</p>
+<p>
+Private m_dwCreateError As Long</p>
+<p>
+' The individual debug events.  These are declared as private members</p>
+<p>
+'  and all have specific friend property get functions that will return</p>
+<p>
+'  them.  If the debugger class is supposed to move into an ActiveX</p>
+<p>
+'  control, then this decision will have to be rethought.</p>
+<p>
+Private m_CreateProcessDbgEvt As CREATE_PROCESS_DEBUG_INFO</p>
+<p>
+Private m_CreateThreadDbgEvt As CREATE_THREAD_DEBUG_INFO</p>
+<p>
+Private m_ExceptionDbgEvt As EXCEPTION_DEBUG_INFO</p>
+<p>
+Private m_ExitProcessDbgEvt As EXIT_PROCESS_DEBUG_INFO</p>
+<p>
+Private m_ExitThreadDbgEvt As EXIT_THREAD_DEBUG_INFO</p>
+<p>
+Private m_ODSDbgEvt As OUTPUT_DEBUG_STRING_INFO</p>
+<p>
+Private m_LoadDllDbgEvt As LOAD_DLL_DEBUG_INFO</p>
+<p>
+Private m_UnloadDllDbgEvt As UNLOAD_DLL_DEBUG_INFO</p>
+<p>
+Private m_RipInfo As RIP_INFO</p>
+<p>
+Friend Property Set clsBaseExecutive(clsBase As BaseExecutive)</p>
+<p>
+   Set m_clsExecutive = clsBase</p>
+<p>
+End Property</p>
+<p>
+Friend Property Get CreateProcessDbgEvt() As CREATE_PROCESS_DEBUG_INFO</p>
+<p>
+   CreateProcessDbgEvt = m_CreateProcessDbgEvt</p>
+<p>
+End Property</p>
+<p>
+Friend Property Get CreateThreadDbgEvt() As CREATE_THREAD_DEBUG_INFO</p>
+<p>
+   CreateThreadDbgEvt = m_CreateThreadDbgEvt</p>
+<p>
+End Property</p>
+<p>
+Friend Property Get ExceptionDbgEvt() As EXCEPTION_DEBUG_INFO</p>
+<p>
+   ExceptionDbgEvt = m_ExceptionDbgEvt</p>
+<p>
+End Property</p>
+<p>
+Friend Property Get ExitProcessDbgEvt() As EXIT_PROCESS_DEBUG_INFO</p>
+<p>
+   ExitProcessDbgEvt = m_ExitProcessDbgEvt</p>
+<p>
+End Property</p>
+<p>
+Friend Property Get ExitThreadDbgEvt() As EXIT_THREAD_DEBUG_INFO</p>
+<p>
+   ExitThreadDbgEvt = m_ExitThreadDbgEvt</p>
+<p>
+End Property</p>
+<p>
+Friend Property Get ODSDbgEvt() As OUTPUT_DEBUG_STRING_INFO</p>
+<p>
+   ODSDbgEvt = m_ODSDbgEvt</p>
+<p>
+End Property</p>
+<p>
+Friend Property Get LoadDllDbgEvt() As LOAD_DLL_DEBUG_INFO</p>
+<p>
+   LoadDllDbgEvt = m_LoadDllDbgEvt</p>
+<p>
+End Property</p>
+<p>
+Friend Property Get UnloadDllDbgEvt() As UNLOAD_DLL_DEBUG_INFO</p>
+<p>
+   UnloadDllDbgEvt = m_UnloadDllDbgEvt</p>
+<p>
+End Property</p>
+<p>
+Friend Property Get RipInfo() As RIP_INFO</p>
+<p>
+   RipInfo = m_RipInfo</p>
+<p>
+End Property</p>
+<p>
+Friend Property Get dwDebuggeePID() As Long</p>
+<p>
+   dwDebuggeePID = m_dwDebuggeePID</p>
+<p>
+End Property</p>
+<p>
+Friend Property Get dwCreateError() As Long</p>
+<p>
+   dwCreateError = m_dwCreateError</p>
+<p>
+End Property</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : Class_Initialize</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  The initialization for the class.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Private Sub Class_Initialize()</p>
+<p>
+   Set m_clsExecutive = Nothing</p>
+<p>
+   Set m_clsSynch = New DebugSynchClass</p>
+<p>
+   m_dwDebuggeePID = 0</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : Class_Terminate</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  The termination for the class.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Private Sub Class_Terminate()</p>
+<p>
+   Set m_clsExecutive = Nothing</p>
+<p>
+   Set m_clsSynch = Nothing</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : SetDebuggeeInfo</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  Sets the information that MUST be set before the class can be used.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  szDebuggee  - The full path and name of the program to debug.</p>
+<p>
+'  szCmdLine   - The command line for the debuggee.  This can be</p>
+<p>
+'                vbNullString.</p>
+<p>
+'  szWorkDir   - The working directory for the debuggee.  This can be</p>
+<p>
+'                vbNullString.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub SetDebuggeeInfo(szDebuggee As String, _</p>
+<p>
+                          Optional szCmdLine As String = vbNullString, _</p>
+<p>
+                          Optional szWorkDir As String = vbNullString)</p>
+<p>
+   ' Set the variables.</p>
+<p>
+   m_szDebuggee = szDebuggee</p>
+<p>
+   m_szCmdLine = szCmdLine</p>
+<p>
+   m_szWorkDir = szWorkDir</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : StartDebuggee</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  Starts up the debuggee.  This can only be called from the debug</p>
+<p>
+'  thread.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Function StartDebuggee() As Boolean</p>
+<p>
+   On Error GoTo StartDebuggee_Error</p>
+<p>
+   Dim bRet As Long</p>
+<p>
+   Dim si As STARTUPINFO</p>
+<p>
+   Dim pi As PROCESS_INFORMATION</p>
+<p>
+   ' Initialize si and pi to known values.</p>
+<p>
+   si.cb = &amp;H44</p>
+<p>
+   si.cbReserved2 = 0</p>
+<p>
+   si.dwFillAttribute = 0</p>
+<p>
+   si.dwFlags = 0</p>
+<p>
+   si.dwX = 0</p>
+<p>
+   si.dwX = 0</p>
+<p>
+   si.dwY = 0</p>
+<p>
+   si.dwXSize = 0</p>
+<p>
+   si.dwYSize = 0</p>
+<p>
+   si.dwXCountChars = 0</p>
+<p>
+   si.dwYCountChars = 0</p>
+<p>
+   si.dwFillAttribute = 0</p>
+<p>
+   si.dwFlags = 0</p>
+<p>
+   si.wShowWindow = 0</p>
+<p>
+   si.cbReserved2 = 0</p>
+<p>
+   si.lpReserved2 = 0</p>
+<p>
+   si.hStdInput = 0</p>
+<p>
+   si.hStdOutput = 0</p>
+<p>
+   si.hStdError = 0</p>
+<p>
+   pi.hProcess = 0</p>
+<p>
+   pi.hThread = 0</p>
+<p>
+   pi.dwProcessID = 0</p>
+<p>
+   pi.dwThreadID = 0</p>
+<p>
+   ' Try and start up the application to debug.</p>
+<p>
+   bRet = CreateProcess(m_szDebuggee, m_szCmdLine, 0, 0,0, _</p>
+<p>
+                        DEBUG_ONLY_THIS_PROCESS, _</p>
+<p>
+                        vbNullString, m_szWorkDir, si, pi)</p>
+<p>
+   ' Set the create error.</p>
+<p>
+   m_dwCreateError = GetLastError</p>
+<p>
+   ' If the CreateProcesses failed, signal the event that the debuggee</p>
+<p>
+   '  failed to start, and then leave.</p>
+<p>
+   If (0 = bRet) Then</p>
+<p>
+      m_clsSynch.SignalBadStartup</p>
+<p>
+      StartDebuggee = False</p>
+<p>
+      Exit Function</p>
+<p>
+   End If</p>
+<p>
+   ' Close some handles I don't need.</p>
+<p>
+   bRet = CloseHandle(pi.hProcess)</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = bRet) Then</p>
+<p>
+      MsgBox (&quot;StartDebuggee CloseHandle failed!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   bRet = CloseHandle(pi.hThread)</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = bRet) Then</p>
+<p>
+      MsgBox (&quot;StartDebuggee CloseHandle failed!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   ' Set the unique PID for the debuggee.</p>
+<p>
+   m_dwDebuggeePID = pi.dwProcessID</p>
+<p>
+   m_clsSynch.dwUniqueID = m_dwDebuggeePID</p>
+<p>
+   ' Create the synchronization objects for the synch class for just</p>
+<p>
+   '  this thread.</p>
+<p>
+   m_clsSynch.CreateSynchObjects</p>
+<p>
+   ' At least the debuggee was able to start so signal that event.</p>
+<p>
+   m_clsSynch.SignalGoodStartup</p>
+<p>
+   StartDebuggee = True</p>
+<p>
+   Exit Function</p>
+<p>
+StartDebuggee_Error:</p>
+<p>
+   MsgBox (&quot;Got an error in StartDebuggee: &quot; + Err.Description)</p>
+<p>
+End Function</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : ProcessDebugEvents</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  Does the looping and processing of debug events.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub ProcessDebugEvents()</p>
+<p>
+   Dim DbgEvt As DEBUG_EVENT</p>
+<p>
+   Dim dwContType As Long</p>
+<p>
+   Dim bRet As Long</p>
+<p>
+   Dim bDebugRunning</p>
+<p>
+   Dim iObject As Long</p>
+<p>
+   ' The debugger loop is always running.</p>
+<p>
+   bDebugRunning = True</p>
+<p>
+   While (True = bDebugRunning)</p>
+<p>
+      ' Which thing am I supposed to be doing?</p>
+<p>
+      iObject = m_clsSynch.WaitForSynchObject(INFINITE)</p>
+<p>
+      Select Case iObject</p>
+<p>
+         ' Quitting.</p>
+<p>
+         Case 0</p>
+<p>
+            bDebugRunning = False</p>
+<p>
+         ' Pausing.</p>
+<p>
+         Case 1</p>
+<p>
+            m_clsExecutive.PauseProcess</p>
+<p>
+         ' Resuming.</p>
+<p>
+         Case 2</p>
+<p>
+            m_clsExecutive.ResumeProcess</p>
+<p>
+         ' Regular debugging.</p>
+<p>
+         Case 3</p>
+<p>
+            ' Wait a bit for the debug event.</p>
+<p>
+            If (1 = WaitForDebugEvent(DbgEvt, 100)) Then</p>
+<p>
+               ' Default to continuing.</p>
+<p>
+               dwContType = DBG_CONTINUE</p>
+<p>
+               ' Process all the debug events by calling the executive</p>
+<p>
+               '  class that I was passed at startup.</p>
+<p>
+               Select Case DbgEvt.dwDebugEventCode</p>
+<p>
+                  Case CREATE_PROCESS_DEBUG_EVENT</p>
+<p>
+                     LSet m_CreateProcessDbgEvt = DbgEvt.dwUnionData</p>
+<p>
+                     m_clsExecutive.DebugCreateProcess Me, _</p>
+<p>
+                                                       DbgEvt.dwProcessID, _</p>
+<p>
+                                                       DbgEvt.dwThreadID</p>
+<p>
+                  Case CREATE_THREAD_DEBUG_EVENT</p>
+<p>
+                     LSet m_CreateThreadDbgEvt = DbgEvt.dwUnionData</p>
+<p>
+                     m_clsExecutive.DebugCreateThread Me, DbgEvt.dwProcessID, _</p>
+<p>
+                                                      DbgEvt.dwThreadID</p>
+<p>
+                  Case EXIT_PROCESS_DEBUG_EVENT</p>
+<p>
+                     LSet m_ExitProcessDbgEvt = DbgEvt.dwUnionData</p>
+<p>
+                     m_clsExecutive.DebugExitProcess Me, DbgEvt.dwProcessID, _</p>
+<p>
+                                                     DbgEvt.dwThreadID</p>
+<p>
+                     ' EXIT_PROCESS_DEBUG_EVENT is handled special in</p>
+<p>
+                     '  that I will just go ahead and exit the</p>
+<p>
+                     '  processing subroutine.</p>
+<p>
+                     Exit Sub</p>
+<p>
+                  Case EXIT_THREAD_DEBUG_EVENT</p>
+<p>
+                     LSet m_ExitThreadDbgEvt = DbgEvt.dwUnionData</p>
+<p>
+                     m_clsExecutive.DebugExitThread Me, DbgEvt.dwProcessID, _</p>
+<p>
+                                                    DbgEvt.dwThreadID</p>
+<p>
+                  Case EXCEPTION_DEBUG_EVENT</p>
+<p>
+                     LSet m_ExceptionDbgEvt = DbgEvt.dwUnionData</p>
+<p>
+                     m_clsExecutive.DebugException Me, dwContType, _</p>
+<p>
+                                                   DbgEvt.dwProcessID, _</p>
+<p>
+                                                   DbgEvt.dwThreadID</p>
+<p>
+                  Case OUTPUT_DEBUG_STRING_EVENT</p>
+<p>
+                     LSet m_ODSDbgEvt = DbgEvt.dwUnionData</p>
+<p>
+                     m_clsExecutive.DebugODS Me,  DbgEvt.dwProcessID, _</p>
+<p>
+                                             DbgEvt.dwThreadID</p>
+<p>
+                  Case LOAD_DLL_DEBUG_EVENT</p>
+<p>
+                     LSet m_LoadDllDbgEvt = DbgEvt.dwUnionData</p>
+<p>
+                     m_clsExecutive.DebugDllLoad Me, DbgEvt.dwProcessID, _</p>
+<p>
+                                                 DbgEvt.dwThreadID</p>
+<p>
+                  Case UNLOAD_DLL_DEBUG_EVENT</p>
+<p>
+                     LSet m_UnloadDllDbgEvt = DbgEvt.dwUnionData</p>
+<p>
+                     m_clsExecutive.DebugDllUnload Me,DbgEvt.dwProcessID, _</p>
+<p>
+                                                   DbgEvt.dwThreadID</p>
+<p>
+                  Case RIP_EVENT</p>
+<p>
+                     LSet m_RipInfo = DbgEvt.dwUnionData</p>
+<p>
+                     m_clsExecutive.DebugRipInfo Me, DbgEvt.dwProcessID, _</p>
+<p>
+                                                 DbgEvt.dwThreadID</p>
+<p>
+               End Select</p>
+<p>
+               bRet = ContinueDebugEvent(DbgEvt.dwProcessID, DbgEvt.dwThreadID, _</p>
+<p>
+                                         dwContType)</p>
+<p>
+            End If</p>
+<p>
+         Case Else</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+            MsgBox (&quot;WaitForSynchObject returned something other &quot; &amp; _</p>
+<p>
+                    &quot;than 0 - 3!!&quot;)</p>
+<p>
+#End If</p>
+<p>
+      End Select</p>
+<p>
+   Wend</p>
+<p>
+End Sub</p>
+<h5>DebugSynchClass.cls</h5>
+<p>
+VERSION 1.0 CLASS</p>
+<p>
+BEGIN</p>
+<p>
+  MultiUse = -1  'True</p>
+<p>
+END</p>
+<p>
+Attribute VB_Name = &quot;DebugSynchClass&quot;</p>
+<p>
+Attribute VB_GlobalNameSpace = False</p>
+<p>
+Attribute VB_Creatable = True</p>
+<p>
+Attribute VB_PredeclaredId = False</p>
+<p>
+Attribute VB_Exposed = False</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' John Robbins, Microsoft Systems Journal - August 1997</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FILE          :   DebugSynchClass.cls</p>
+<p>
+' DESCRIPTION   :</p>
+<p>
+'  The class that handles the chores of encapsulating all of the</p>
+<p>
+'  synchronization objects that are used to coordinate the debugger</p>
+<p>
+'  thread and the user interface.</p>
+<p>
+'  When looking this over, you might wonder why there is no</p>
+<p>
+'  synchronization handling to indicate that the debug thread is fully</p>
+<p>
+'  shut down.  While it could be done, it would be redundant because</p>
+<p>
+'  the UI should be triggered off of the debug thread handle.  That's</p>
+<p>
+'  the only way to ensure that a thread is really done processing.</p>
+<p>
+'  Each thread MUST create their own instances of this class.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Option Explicit</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' Class private constants</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' The event that signals when I had a good debuggee process startup.</p>
+<p>
+'  The PID is appended to it.</p>
+<p>
+Private Const k_GOODSTARTUPSTRING As String = &quot;VBDEBUG_GOODSTARTUP&quot;</p>
+<p>
+' The event that signals when I had a failure of the debuggee process</p>
+<p>
+'  startup.  The PID is appended to it.</p>
+<p>
+Private Const k_BADSTARTUPSTRING As String = &quot;VBDEBUG_BADSTARTUP&quot;</p>
+<p>
+' The array indexes for the startup events.</p>
+<p>
+Private Const k_GOODSTARTID As Long = 0</p>
+<p>
+Private Const k_BADSTARTID As Long = 1</p>
+<p>
+' The core synchronization objects:  the debugging event, quit, pause,</p>
+<p>
+'  and resume events.  These have the DEBUGGEE process ID appended to</p>
+<p>
+'  them to make sure that they are unique.</p>
+<p>
+Private Const k_QUITSTRING As String = &quot;VBDEBUG_QUIT&quot;</p>
+<p>
+Private Const k_PAUSESTRING As String = &quot;VBDEBUG_PAUSE&quot;</p>
+<p>
+Private Const k_RESUMESTRING As String = &quot;VBDEBUG_RESUME&quot;</p>
+<p>
+Private Const k_DEBUGSTRING As String = &quot;VBDEBUG_DEBUG&quot;</p>
+<p>
+' The IDs for which elements in the event array belong to which.  Too</p>
+<p>
+'  bad VB won't let you expose constants.</p>
+<p>
+' The quit event is first because the WaitForMultipleObjects function</p>
+<p>
+'  will return on it first when it is signaled before looking at the</p>
+<p>
+'  regular debug events.</p>
+<p>
+Private Const k_QUITEVENT As Long = 0</p>
+<p>
+Private Const k_PAUSEEVENT As Long = 1</p>
+<p>
+Private Const k_RESUMEEVENT As Long = 2</p>
+<p>
+Private Const k_DEBUGACTIVEEVENT As Long = 3</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' Class private variables</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' The process ID of the debugger.</p>
+<p>
+Private m_hControlPID As Long</p>
+<p>
+' The process ID for the debuggee.</p>
+<p>
+Private m_hDebuggeePID As Long</p>
+<p>
+' The core events I wait on, the quit, pause, resume, and debug.</p>
+<p>
+Private m_hDebugEvents(4) As Long</p>
+<p>
+' The startup events that can be signaled.</p>
+<p>
+Private m_hStartupEvents(2) As Long</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : Class_Initialize</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  The initialization for the class.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Private Sub Class_Initialize()</p>
+<p>
+   m_hDebugEvents(0) = 0</p>
+<p>
+   m_hDebugEvents(1) = 0</p>
+<p>
+   m_hDebugEvents(2) = 0</p>
+<p>
+   m_hDebugEvents(3) = 0</p>
+<p>
+   m_hDebuggeePID = 0</p>
+<p>
+   m_hStartupEvents(0) = 0</p>
+<p>
+   m_hStartupEvents(1) = 0</p>
+<p>
+   m_hControlPID = GetCurrentProcessId()</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : Class_Terminate</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  The termination for the class.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Private Sub Class_Terminate()</p>
+<p>
+   ' If the handles have not been destroyed, do it now.</p>
+<p>
+   If ((0 &lt;&gt; m_hDebugEvents(k_QUITEVENT)) And _</p>
+<p>
+      (0 &lt;&gt; m_hDebugEvents(k_DEBUGACTIVEEVENT))) Then</p>
+<p>
+      DeleteSynchObjects</p>
+<p>
+   End If</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+'           Properties and methods only for the debug thread!</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  dwUniqueID</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  The property set for the unique ID for the core synch events.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  dwID - The value.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Property Let dwUniqueID(dwID As Variant)</p>
+<p>
+   m_hDebuggeePID = dwID</p>
+<p>
+End Property</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  SignalGoodStartup</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  Signals that the debuggee started up correctly.  This is only called</p>
+<p>
+'  from the debug thread.  The UI is supposed to be waiting in the</p>
+<p>
+'  WaitForStartup method.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub SignalGoodStartup()</p>
+<p>
+   SignalManualResetEvent (k_GOODSTARTUPSTRING + Hex$(m_hControlPID))</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  SignalBadStartup</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  Signals that the debuggee failed to start correctly.  This is only</p>
+<p>
+'  called from the debug thread.  The UI is supposed to be waiting in</p>
+<p>
+'  the WaitForStartup method.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub SignalBadStartup()</p>
+<p>
+   SignalManualResetEvent (k_BADSTARTUPSTRING + Hex$(m_hControlPID))</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  CreateSynchObjects</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  The function that creates the synchronization objects that are used</p>
+<p>
+'  to coordinate everything between the debug thread and the UI.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  None.</p>
+<p>
+' RETURNS         :</p>
+<p>
+'  True  - Everything was created correctly.</p>
+<p>
+'  False - There was a problem.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Function CreateSynchObjects() As Boolean</p>
+<p>
+   Dim bRet As Long</p>
+<p>
+   ' I assume that the return value will be good.</p>
+<p>
+   CreateSynchObjects = True</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = m_hDebuggeePID) Then</p>
+<p>
+      MsgBox (&quot;CreateSynchObjects called before the unique id set!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   If (0 = m_hDebuggeePID) Then</p>
+<p>
+      CreateSynchObjects = False</p>
+<p>
+      Exit Function</p>
+<p>
+   End If</p>
+<p>
+   ' Create the quit event.  It is a manual reset event that is not signaled</p>
+<p>
+   m_hDebugEvents(k_QUITEVENT) = CreateEvent(0, 1, 0, k_QUITSTRING + _</p>
+<p>
+                                                   Hex$(m_hDebuggeePID))</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = m_hDebugEvents(k_QUITEVENT)) Then</p>
+<p>
+      MsgBox (&quot;CreateSynchObjects unable to create Quit event!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   If (0 = m_hDebugEvents(k_QUITEVENT)) Then</p>
+<p>
+      CreateSynchObjects = False</p>
+<p>
+      Exit Function</p>
+<p>
+   End If</p>
+<p>
+   ' Create the pause event.  It is a manual reset event that is not signaled</p>
+<p>
+   m_hDebugEvents(k_PAUSEEVENT) = CreateEvent(0, 1, 0, k_PAUSESTRING + _</p>
+<p>
+                                                   Hex$(m_hDebuggeePID))</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = m_hDebugEvents(k_PAUSEEVENT)) Then</p>
+<p>
+      MsgBox (&quot;CreateSynchObjects unable to create Pause event!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   If (0 = m_hDebugEvents(k_PAUSEEVENT)) Then</p>
+<p>
+      bRet = CloseHandle(m_hDebugEvents(k_QUITEVENT))</p>
+<p>
+      CreateSynchObjects = False</p>
+<p>
+      Exit Function</p>
+<p>
+   End If</p>
+<p>
+   ' Create the resume event.  It is a manual reset event that is not signaled</p>
+<p>
+   m_hDebugEvents(k_RESUMEEVENT) = CreateEvent(0, 1, 0, k_RESUMESTRING + _</p>
+<p>
+                                                   Hex$(m_hDebuggeePID))</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = m_hDebugEvents(k_RESUMEEVENT)) Then</p>
+<p>
+      MsgBox (&quot;CreateSynchObjects unable to create Resume event!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   If (0 = m_hDebugEvents(k_RESUMEEVENT)) Then</p>
+<p>
+      bRet = CloseHandle(m_hDebugEvents(k_QUITEVENT))</p>
+<p>
+      bRet = CloseHandle(m_hDebugEvents(k_PAUSEEVENT))</p>
+<p>
+      CreateSynchObjects = False</p>
+<p>
+      Exit Function</p>
+<p>
+   End If</p>
+<p>
+   ' Create the debug event.  It is a manual reset event that is</p>
+<p>
+   '  signaled.</p>
+<p>
+   m_hDebugEvents(k_DEBUGACTIVEEVENT) = CreateEvent(0, 1, 1, k_DEBUGSTRING + _</p>
+<p>
+                                                   Hex$(m_hDebuggeePID))</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = m_hDebugEvents(k_DEBUGACTIVEEVENT)) Then</p>
+<p>
+      MsgBox (&quot;CreateSynchObjects unable to create Debug event!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   If (0 = m_hDebugEvents(k_DEBUGACTIVEEVENT)) Then</p>
+<p>
+      bRet = CloseHandle(m_hDebugEvents(k_QUITEVENT))</p>
+<p>
+      bRet = CloseHandle(m_hDebugEvents(k_PAUSEEVENT))</p>
+<p>
+      bRet = CloseHandle(m_hDebugEvents(k_RESUMEEVENT))</p>
+<p>
+      CreateSynchObjects = False</p>
+<p>
+      Exit Function</p>
+<p>
+   End If</p>
+<p>
+End Function</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  DeleteSynchObjects</p>
+<p>
+' DISCUSSION      : Deletes the synchronization objects created with </p>
+<p>
+'                   CreateSynchObjects.</p>
+<p>
+' PARAMETERS      :  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub DeleteSynchObjects()</p>
+<p>
+   Dim bRet As Long</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If ((0 = m_hDebugEvents(k_DEBUGACTIVEEVENT)) Or _</p>
+<p>
+      ((0 = m_hDebugEvents(k_QUITEVENT)))) Then</p>
+<p>
+      MsgBox (&quot;DeleteSynchObjects called before CreateSynchObjects!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   bRet = CloseHandle(m_hDebugEvents(k_DEBUGACTIVEEVENT))</p>
+<p>
+   m_hDebugEvents(k_DEBUGACTIVEEVENT) = 0</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = bRet) Then</p>
+<p>
+      MsgBox (&quot;DeleteSynchObjects failed closing debug event handle&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   bRet = CloseHandle(m_hDebugEvents(k_QUITEVENT))</p>
+<p>
+   m_hDebugEvents(k_QUITEVENT) = 0</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = bRet) Then</p>
+<p>
+      MsgBox (&quot;DeleteSynchObjects failed closing quit event handle&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   bRet = CloseHandle(m_hDebugEvents(k_PAUSEEVENT))</p>
+<p>
+   m_hDebugEvents(k_PAUSEEVENT) = 0</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = bRet) Then</p>
+<p>
+      MsgBox (&quot;DeleteSynchObjects failed closing pause event handle&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   bRet = CloseHandle(m_hDebugEvents(k_RESUMEEVENT))</p>
+<p>
+   m_hDebugEvents(k_RESUMEEVENT) = 0</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = bRet) Then</p>
+<p>
+      MsgBox (&quot;DeleteSynchObjects failed closing resume event handle&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  WaitForSynchObject</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  This is the function that the debug thread will call to figure out</p>
+<p>
+'  what it should be doing.</p>
+<p>
+' PARAMETERS      :</p>
+<p>
+'  The maximum time, in milliseconds to wait.  The SDK define INFINITE</p>
+<p>
+'  is permitted.</p>
+<p>
+' RETURNS         :</p>
+<p>
+'  0         - The quit event was signaled.</p>
+<p>
+'  1         - The pause event was signaled.</p>
+<p>
+'  2         - The resume event was signaled.</p>
+<p>
+'  3         - The debug event was signaled.</p>
+<p>
+'  Otherwise - See the return values for WaitForMultipleObjects</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Function WaitForSynchObject(dwWaitTime As Long) As Long</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If ((0 = m_hDebugEvents(k_DEBUGACTIVEEVENT)) Or _</p>
+<p>
+      ((0 = m_hDebugEvents(k_QUITEVENT)))) Then</p>
+<p>
+      MsgBox (&quot;DeleteSynchObjects called before CreateSynchObjects!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   Dim dwRet As Long</p>
+<p>
+   dwRet = WaitForMultipleObjects(4, m_hDebugEvents(0), 0, dwWaitTime)</p>
+<p>
+   ' Handle the resets on Pause and Resume.</p>
+<p>
+   Dim bTemp As Long</p>
+<p>
+   If (k_PAUSEEVENT = dwRet) Then</p>
+<p>
+      bTemp = ResetEvent(m_hDebugEvents(k_DEBUGACTIVEEVENT))</p>
+<p>
+      ' Put the pause back into its normal state.</p>
+<p>
+      bTemp = ResetEvent(m_hDebugEvents(k_PAUSEEVENT))</p>
+<p>
+   ElseIf (k_RESUMEEVENT = dwRet) Then</p>
+<p>
+      bTemp = SetEvent(m_hDebugEvents(k_DEBUGACTIVEEVENT))</p>
+<p>
+      bTemp = ResetEvent(m_hDebugEvents(k_RESUMEEVENT))</p>
+<p>
+   End If</p>
+<p>
+   WaitForSynchObject = dwRet</p>
+<p>
+End Function</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+'           Properties and methods only for the UI thread!</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  PrepareWaitForStartup</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  The UI MUST call this function before it can call WaitForStartup.</p>
+<p>
+'  It must also be called before spawning the debug thread as well.</p>
+<p>
+'  As I found out on those really, really fast DEC Alphas, the debugger</p>
+<p>
+'  thread can fail the CreateProcess and call SignalBadStartup</p>
+<p>
+'  before the UI can call WaitForStartup, which, you guessed it, causes</p>
+<p>
+'  massive deadlock.  By requiring the UI to call this function first,</p>
+<p>
+'  I make sure that the event is ready.  400Mhz really helps show</p>
+<p>
+'  synchronization problems!</p>
+<p>
+' PARAMETERS      : None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub PrepareWaitForStartup()</p>
+<p>
+   ' Create the events</p>
+<p>
+   m_hStartupEvents(k_GOODSTARTID) = CreateEvent(0, 1, 0, k_GOODSTARTUPSTRING + _</p>
+<p>
+                                                    Hex$(m_hControlPID))</p>
+<p>
+   m_hStartupEvents(k_BADSTARTID) = CreateEvent(0, 1, 0, k_BADSTARTUPSTRING + _</p>
+<p>
+                                                    Hex$(m_hControlPID))</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If ((0 = m_hStartupEvents(k_BADSTARTID)) Or _</p>
+<p>
+       (0 = m_hStartupEvents(k_GOODSTARTID))) Then</p>
+<p>
+      MsgBox (&quot;PrepareWaitForStartup failed to create events&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  WaitForStartup</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  The UI thread calls this after it has created the thread so that it</p>
+<p>
+'  can then check if life got cranked up.  The UI must call</p>
+<p>
+'  PrepareWaitForStartup FIRST!</p>
+<p>
+' PARAMETERS      :  None.</p>
+<p>
+' RETURNS         :</p>
+<p>
+'  TRUE  - The debuggee was started correctly.</p>
+<p>
+'  FALSE - The debuggee was not started correctly.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Function WaitForStartup() As Boolean</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If ((0 = m_hStartupEvents(k_BADSTARTID)) Or _</p>
+<p>
+       (0 = m_hStartupEvents(k_GOODSTARTID))) Then</p>
+<p>
+      MsgBox (&quot;WaitForStartup can only be called after &quot; + _</p>
+<p>
+               &quot;PrepareWaitForStartup!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   Dim dwRet As Long</p>
+<p>
+   Dim bRet As Long</p>
+<p>
+   ' Wait for one of the startup events.</p>
+<p>
+   dwRet = WaitForMultipleObjects(2, m_hStartupEvents(0), 0, INFINITE)</p>
+<p>
+   ' Close the handles.</p>
+<p>
+   bRet = CloseHandle(m_hStartupEvents(k_BADSTARTID))</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = bRet) Then</p>
+<p>
+      MsgBox (&quot;WaitForStartup CloseHandle(k_BADSTARTID) failed!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   bRet = CloseHandle(m_hStartupEvents(k_GOODSTARTID))</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = bRet) Then</p>
+<p>
+      MsgBox (&quot;WaitForStartup CloseHandle(k_GOODSTARTID) failed!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   If (k_GOODSTARTID = dwRet) Then</p>
+<p>
+      WaitForStartup = True</p>
+<p>
+   Else</p>
+<p>
+      WaitForStartup = False</p>
+<p>
+   End If</p>
+<p>
+End Function</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : PauseDebugThread</p>
+<p>
+' DISCUSSION      : Pauses&nbsp;the&nbsp;debug&nbsp;thread.&nbsp;Only&nbsp;the&nbsp;UI&nbsp;thread&nbsp;should&nbsp;call&nbsp;this! </p>
+<p>
+' PARAMETERS      : None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub PauseDebugThread()</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If ((0 = m_hDebugEvents(k_DEBUGACTIVEEVENT)) Or _</p>
+<p>
+      ((0 = m_hDebugEvents(k_QUITEVENT)))) Then</p>
+<p>
+      MsgBox (&quot;PauseDebugThread called before CreateSynchObjects!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   Dim bRet As Long</p>
+<p>
+   bRet = SetEvent(m_hDebugEvents(k_PAUSEEVENT))</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = bRet) Then</p>
+<p>
+      MsgBox (&quot;PauseDebugThread ResetEvent failed!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION      :  ResumeDebugThread</p>
+<p>
+' DISCUSSION    : Resumes the debug thread.  Only the UI thread should call this!</p>
+<p>
+' PARAMETERS    : None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub ResumeDebugThread()</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If ((0 = m_hDebugEvents(k_DEBUGACTIVEEVENT)) Or _</p>
+<p>
+      ((0 = m_hDebugEvents(k_QUITEVENT)))) Then</p>
+<p>
+      MsgBox (&quot;ResumeDebugThread called before CreateSynchObjects!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   Dim bRet As Long</p>
+<p>
+   bRet = SetEvent(m_hDebugEvents(k_RESUMEEVENT))</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = bRet) Then</p>
+<p>
+      MsgBox (&quot;ResumeDebugThread SetEvent failed!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        : QuitDebugThread</p>
+<p>
+' DISCUSSION      : Quits the debug thread.  Only the UI thread should call this!</p>
+<p>
+' PARAMETERS      : None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Public Sub QuitDebugThread()</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If ((0 = m_hDebugEvents(k_DEBUGACTIVEEVENT)) Or _</p>
+<p>
+      ((0 = m_hDebugEvents(k_QUITEVENT)))) Then</p>
+<p>
+      MsgBox (&quot;QuitDebugThread called before CreateSynchObjects!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   ' All I have to do is set the debug event to the signaled state.</p>
+<p>
+   Dim bRet As Long</p>
+<p>
+   bRet = SetEvent(m_hDebugEvents(k_QUITEVENT))</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = bRet) Then</p>
+<p>
+      MsgBox (&quot;QuitDebugThread SetEvent failed!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+End Sub</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+'                     Class Private Helper Routines</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FUNCTION        :  SignalManualResetEvent</p>
+<p>
+' DISCUSSION      :</p>
+<p>
+'  A helper function for SignalGoodStartup and SignalBadStartup.  Simply</p>
+<p>
+'  creates and signals the event with the passed in string.</p>
+<p>
+' PARAMETERS      :  None.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Private Sub SignalManualResetEvent(szStr As String)</p>
+<p>
+   Dim hEvent As Long</p>
+<p>
+   Dim bRet As Long</p>
+<p>
+   ' Create the event.</p>
+<p>
+   hEvent = CreateEvent(0, 1, 1, szStr)</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = hEvent) Then</p>
+<p>
+      MsgBox (&quot;SignalManualResetEvent failed to create event&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   If (0 = hEvent) Then</p>
+<p>
+      Exit Sub</p>
+<p>
+   End If</p>
+<p>
+   ' Signal the event.</p>
+<p>
+   bRet = SetEvent(hEvent)</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = bRet) Then</p>
+<p>
+      MsgBox (&quot;SignalManualResetEvent failed to set event&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+   ' Close the handle.</p>
+<p>
+   bRet = CloseHandle(hEvent)</p>
+<p>
+#If DEBUGBUILD Then</p>
+<p>
+   If (0 = bRet) Then</p>
+<p>
+      MsgBox (&quot;SignalManualResetEvent CloseHandle failed!&quot;)</p>
+<p>
+   End If</p>
+<p>
+#End If</p>
+<p>
+End Sub</p>
+<h5>DebugThread.bas</h5>
+<p>
+Attribute VB_Name = &quot;DebugThread&quot;</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' John Robbins, Microsoft Systems Journal - August 1997</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+' FILE         :     DebugThread.bas</p>
+<p>
+' DESCRIPTION  :</p>
+<p>
+'  Since the AddressOf operator can only take things out of .BAS</p>
+<p>
+'  modules, this is the actual debug thread and the thread function.</p>
+<p>
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''</p>
+<p>
+Option Explicit</p>
+<p>
+' The function that starts the debug thread.</p>
+<p>
+Public Function StartDebugThread(clsDebug As DebuggerClass) As Long</p>
+<p>
+   Dim hThread As Long</p>
+<p>
+   Dim lThreadID As Long</p>
+<p>
+   ' Create the thread.</p>
+<p>
+   hThread = CreateThread(0, 0, AddressOf DebugThread, clsDebug, 0, lThreadID)</p>
+<p>
+   StartDebugThread = hThread</p>
+<p>
+End Function</p>
+<p>
+' The actual debug thread.</p>
+<p>
+Public Function DebugThread(clsDebug As DebuggerClass) As Long</p>
+<p>
+   On Error GoTo DebugThread_Error</p>
+<p>
+   Dim boolRet As Boolean</p>
+<p>
+   boolRet = clsDebug.StartDebuggee</p>
+<p>
+   If (False = boolRet) Then</p>
+<p>
+      DebugThread = 0</p>
+<p>
+      Exit Function</p>
+<p>
+   End If</p>
+<p>
+   ' Process debug events until done.</p>
+<p>
+   clsDebug.ProcessDebugEvents</p>
+<p>
+   DebugThread = 1</p>
+<p>
+   Exit Function</p>
+<p>
+DebugThread_Error:</p>
+<p>
+   MsgBox (&quot;Got an error in DebugThread: &quot; + Err.Description)</p>
+<p>
+End Function</p>
+<p>Once the debug thread is up and running, you need to protect the data accessed by both threads. Fortunately, the SimpleExecutive class is the only class accessed by multiple threads. Since VBDebug is designed so that it will never have multiple processes accessing the debugger data, the critical section—the simplest of synchronization objects—can protect everything. I wanted to make the critical section as easy to use as possible, so I created a class, CriticalSection, that encapsulates the critical section operations. In CriticalSection.cls, you can see that I use the Initialize and Terminate methods to call InitializeCritical&shy;Section and DeleteCriticalSection, respectively. This is good object-oriented design because it hides the grunge work&nbsp;from&nbsp;the&nbsp;user.&nbsp;When&nbsp;you&nbsp;need&nbsp;to&nbsp;enter&nbsp;a&nbsp;critical&nbsp;section to block access to some data, you simply call the Enter method. When you are finished accessing the data, you simply call the Leave method. Whatever you do, make sure that you match up the calls to Enter and Leave. If you don’t, you’ll have an instant deadlock because the critical section will be owned by one thread permanently. Using the Critical&shy;Section class requires that you have an error handler in each function that calls the Enter method so that you guarantee a matching Leave method is called, even if something bad happens. This will take a lot of planning to get it right.</p>
+<p>There is only one Critical&shy;Sec&shy;tion instantiation in VB&shy;Debug,&nbsp;the&nbsp;g_clsCritSec&nbsp;private variable in the SimpleExe&shy;cutive class. The best places to see it used are in the DumpActiveThreads and DumpLoadedDLLs methods. As their names suggest, they dump the current active threads and the loaded DLLs to the UI. When either of these methods is called, the first thing it does is grab the class critical section g_clsCritSec by calling the Enter method. Every class event in SimpleExecutive that can be accessed from multiple threads must grab the class critical section before it does anything. If DumpActiveThreads is in the middle of listing the current threads to the screen and a new thread event notification is sent to the debug loop, then the BaseExecutive_DebugCreateThread method will block until DumpActiveThreads releases the class critical section. All of these gyrations make sure the data is safe and accessed by only one thread at a time. If the new thread was added by BaseExecutive_DebugCreateThread before DumpActive&shy;Threads was finished, there is no telling what output you would get from DumpActiveThreads. It could be wrong, or it might even crash.</p>
+<p>After the debug thread is running and the data in SimpleExecutive is protected, you have to do the really hard part: synchronize the UI thread and the debugger thread. To me, getting multiple threads properly synchronized is one of the most difficult aspects of multithreading. One of the main reasons that I did VBDebug as the big sample program for this article is that the thread synchronization for a debugger is pretty difficult; I wanted to show you how it could be done in a real-world instance.</p>
+<p>In VBDebug, the debugger thread really does not tell the UI thread much, but the UI thread needs to tell the debug thread a lot. Specifically, the debugger thread needs to tell the UI thread when the debuggee started—or failed to start—and when the debug thread ended. The UI thread needs to tell the debugger thread when to start debugging, when to stop debugging, when to pause debugging, and when to restart debugging.</p>
+<p>As I demonstrated in Part I of this article (<i>MSJ</i>, August 1997), Win32 event objects are an excellent way for one thread to signal a state change to another thread. Here, I put all of the events that are needed, and the times that you would want to wait on an event, in a single Visual Basic class, DebugSynchClass.cls, which is designed so the debug and UI threads can each create their own instances and use them appropriately. Looking at DebugSynchClass, you will see that the concept of getting threads to communicate is simple, but the implementation is a little more involved.</p>
+<p>If you take a look in the VBDebug\ReUse&nbsp;sub&shy;direc&shy;tory,&nbsp;you’ll&nbsp;see&nbsp;another &shy;inter&shy;esting item: Debug&shy;&shy;&shy;Synch&shy;&shy;&shy;Class.cls is the largest of the reusable files by a good bit. A lot of work goes on in there to hide the nasty implementation details so that each thread just has to call a single method when appropriate. Although I placed all the synchronization code for the UI and debug threads into DebugSynchClass, you might consider splitting them into separate classes. Since the key to using Win32 event objects is to keep the names straight and unique, I thought it was better to have everything lumped together and just document which thread is allowed to call what method.</p>
+<p>Before getting the debug thread started, the UI thread is responsible for calling the DebugSynchClass Prepare&shy;WaitForStartup method to prepare for startup. After creating the debug thread, the UI thread must call the DebugSynchClass WaitForStartup method to block and wait for the debug thread to start. The debug thread, after attempting to start the debuggee, must call the Debug&shy;SynchClass SignalGoodStartup or SignalBadStartup methods to indicate how the CreateProcess call worked. The code for the UI-required methods is rather simple: Prepare&shy;WaitForStartup creates two manual reset events, Wait&shy;For&shy;Startup tells WaitForMultipleObjects to wait until one of the events is signaled, and WaitForStartup returns True if the startup was successful. The debug thread-required methods, SignalGoodStartup or SignalBadStartup, create and signal the appropriate event.</p>
+<p>The startup synchronization code itself is also very simple and looks like just about every other piece of sample code that demonstrates event object synchronization. There are two things that make the code interesting. If you look at the parameters passed to CreateEvent in the code, there is a value appended to the end of the constant string which is initialized to the current process ID in the Class_Initialize method. The reason for appending this value is logical when you think about it. First, remember that in Win32 events themselves can be accessed across processes, so it’s possible that two instances of VBDebug could be running at the same time. If there is some twist of the scheduler, both UIs could be waiting to see if the debuggee started. If the event doesn’t have a unique name, the instant that one of the debug threads signals how the CreateProcess worked, <i>both</i> process’s UI threads would continue when only one should. In VBDebug, you might be able to play around with autoreset events, but I want to prepare you for worst-case scenarios. By adding the unique process ID to the event name, you avoid any problems with multiple processes.</p>
+<p>The other interesting part of the startup synchronization is that the UI thread has to prepare the startup events before it can create the debug thread. I originally developed the code so that the DebugSynchClass WaitForStartup method created the events to wait on and then did the WaitForMultipleObjects. This worked fine when I tested VBDebug on Intel machines. However, when I tested it on a 400MHz DEC Alpha, I ran into a small problem: if the CreateProcess failed on the debuggee, then the UI thread would block and hang in the DebugSynchClass WaitFor&shy;Startup method. Obviously, I had a synchronization problem, but I didn’t see how it could have happened. </p>
+<p>After setting breakpoints with WinDBG everywhere and running VBDebug many times in the debugger, I found that it sometimes runs correctly under the debugger. After placing calls to OutputDebugString in strategic places, I was surprised to find that after the CreateProcess failed in the debug thread, the call to the DebugSynchClass Signal&shy;BadStartup method created the event, signaled it, and destroyed it before the UI thread could get the two events created in the DebugSynchClass WaitForStartup method! I suspect that either the DEC Alpha’s excellent speed got in the way, or there are some subtle differences in the Windows NT thread handling between Intel and Alpha CPUs. When I created the DebugSynchClass PrepareWait&shy;For&shy;Startup and called it before creating the debug thread, everything worked out fine.</p>
+<p>After the UI and debug threads are running, the synchronization gets a little easier. As both threads are purring along, the only time something happens is when the UI needs to tell the debug thread how to behave. Essentially, the UI thread needs to create the appropriate event and signal it so the debug thread can respond. Obviously, the debug thread needs to be waiting on some events, and these correspond to the pause, restart, and quit events discussed earlier. Again, like the startup, this arrangement is nothing unusual.</p>
+<p>The debug thread in VBDebug needs to continue running so that it can process debug events but still be responsive to the events signaled by the UI thread. In the debug loop, I wait to see what UI-debug synchronization events are signaled. If the UI thread does not signal anything, I take a quick peek to see if there are any debug events to process and loop back to the UI-debug synchronization. All of the UI-debug synchronization is wrapped in the DebugSynch&shy;Class WaitForSynchObject method and it is called in the DebuggerClass ProcessDebugEvents method.</p>
+<p>The DebugSynchClass WaitForSynchObject method returns one of four values, zero through 3, which correspond to what the UI thread tells the debug thread to do. The only time something does not match up to the synchronization conditions described earlier is when the DebugSynchClass WaitForSynchObject method returns 3, which means that the UI thread did not signal anything so it is safe to call Wait&shy;ForDebugEvent. Each of the return values for the Debug&shy;SynchClass WaitFor&shy;SynchObject method indicates which event was signaled.</p>
+<p>Inside the DebugSynchClass is an array of events created by calling the CreateSynchObjects method. The first three handles in the array are quit, pause, and resume events. These three events are manual-reset events that are created in the nonsignaled state. The final event is the debug active event, which is a manual-reset event created in the signaled state. Since the debug and UI threads need unique events for a particular instance of VBDebug, I append the debuggee process ID to the event names to keep them unique. While I could have appended the VBDebug process ID, this would have limited me to a single debug loop per process, which might be fine for now but would limit future growth.</p>
+<p>The&nbsp;DebugSynchClass&nbsp;Wait&shy;ForSynchObject method calls WaitForMultipleObjects on the array of event handles. Since the debug active event is always signaled, Wait&shy;For&shy;MultipleObjects returns immediately every time. If the UI does signal a synchronization event, WaitForSynchObject takes care of getting all the event object states set in the debug thread since all the events are manual-reset events. For example, if the UI thread signals that it wants to pause, the debug active event is set to nonsignaled and the pause event is set to nonsignaled. The reset event is similar except that it sets the debug active event back to signaled and clears the reset event. I probably could have made pause and reset autoreset events instead of manual-reset events, but I wanted to make sure I kept everything consistent. Remember the motto of multithreading: Trust Nothing—Verify Everything!</p>
+<h2>Handling Thread Demise</h2>
+<p>So far, I have discussed handling the synchronization for startup and when the UI thread needs to tell the debug thread to do something, but I have not discussed what happens when the debug thread terminates normally. Specifically, I am now going to cover how the UI thread knows that the debug thread ended without polling some global variable. This turned out to be a much nastier problem than I thought because I had to work around the Visual Basic UI portions—which do not all appear to be thread-safe—to solve it.</p>
+<p>If I were writing a C++ debugger, I would have simply passed an HWND (the main UI window) into the Debugger&shy;Class, specifying that it uses PostMessage to send a private message to that window. Once that message was received in the UI, I could reset the state of the UI so the debugger was ready to debug again. Instead of passing the HWND all the way down into the Core Debugger portions, the idea is to create a secondary background thread whose sole purpose is to wait on the debug thread handle with WaitFor&shy;SingleObject. Waiting on the actual debug thread handle is the only way to guarantee that the debug thread truly ended. After the debug thread handle is signaled, the secondary thread calls PostMessage to notify the main window. This is a fairly tried-and-true method of handling this situation.</p>
+<p>Since Visual Basic does not, without subclassing, allow you to handle private messages, I set a protocol where the HWND for the form that would receive the message also handles the MouseDown event, indicating that the debug thread was finished. I chose the MouseDown event because I only had to do a PostMessage with the WM_<BR>MBUTTONDOWN message. To ensure that I was not handling a legitimate message, I required that the X and Y parameters to the Mouse&shy;Down event both be –15 (remember, these are client coordinates, so a multiple monitor system as David Campbell described in the June 1997 <i>MSJ</i> won’t break my code). When I posted the message as the last thing in the debug thread before it ended, it worked perfectly and made it quite easy to know when the debug thread ended. Then I ran VBDebug on a multiprocessor machine and, unfortunately, the UI never received the WM_MBUTTONDOWN message so the UI would never get notified that the debug thread ended. Little problems like these are why it is absolutely vital that you test your multithreaded applications on as many different machines as possible.</p>
+<p>I should have expected this because the Visual Basic Books Online specifically say that the apartment threading model support is only for non-UI components. On the single-processor machines, I was getting lucky that it worked. When I tried tracking the lost message down, all I could tell was that the PostMessage went off and the message was lost deep down in the bowels of MSVB&shy;VM50.DLL. I must point out here that this is not a bug in Visual Basic. Multithreading Visual Basic-based programs is undocumented hacking, and Microsoft never said that they support full multithreading.</p>
+<p>Unfortunately, VBDebug was one of those applications that needed to do something with the UI in response to another thread ending. This meant that even if I called a form method directly from the debug thread, I could still cause some problems with the Visual Basic runtime.</p>
+<p>Since I had no other choice, I decided that I would force the UI update myself by calling one of the methods directly on the form. Since I did not want to lose all the benefits of the reusable code I had developed, I did not want to be passing a specific form type all the way through the Executive and DebuggerClass. I decided to create a secondary background thread that waits for the debug thread to end, making it easier to isolate the pieces that have to change in future versions. This secondary thread, the Wait&shy;For&shy;End&shy;OfDebugThread function in EndDbg&shy;Thread.bas, will call the DebugThreadEnded method from the main VBDebug form to help the UI change its state.</p>
+<p>The code in the frmVBDebug DebugThreadEnded method simply calls the private SetUIState where the work of setting the menus and the new caption takes place. While this code might look simple, it brushes up against one of the areas where the runtime is not thread-safe. Even though the menu and the caption are all set correctly, the fact that the form Caption property is set from another thread ends up not quite getting the titlebar text set. After the call to SetUIState in the DebugThreadEnded method, I have to call the SetWindowText API with the same settings to get the title text updated.</p>
+<p>Like GDI objects, it looks like Visual Basic UI objects should not be passed for use by different threads. There might be a few other ways that you could get an indication that a thread has ended. In a commercial multithreaded application, the best way to overcome the small problem on the nonthread-safe UI would be to create a couple of small ActiveX™ controls that handle the synchronization. The control would signal an event that would indicate to the UI that a thread has ended. Whatever mechanism that you finally decide on, I cannot stress enough: test, test, test, and test some more!</p>
+<h2>Independent Study</h2>
+<p>Now that you have the groundwork for a debugger, here are some additional ideas to try on your own:</p>
+<ul>
+<li>Add some PE-reading code so that you can retrieve the names of the DLLs that are being loaded and unloaded. Looking at the executable format structures and trying to do them in straight Visual Basic might be a pretty formidable&nbsp;challenge.&nbsp;Since&nbsp;Visual Basic is not designed for the structure manipulation that is needed to deal with PE files, it might not be possible without writing an&nbsp;ActiveX&nbsp;control.&nbsp;However,&nbsp;at&nbsp;one&nbsp;time&nbsp;I&nbsp;thought&nbsp;multi&shy;threading in Visual Basic would be impossible, too.</li>
+<li>Incorporate the generic stack-walking code found in the Windows&nbsp;NT&nbsp;4.0&nbsp;IMAGEHLP.DLL&nbsp;into&nbsp;VBDebug&nbsp;so&nbsp;that the call stack is displayed when an exception occurs. The stack-walking code is generic, so just by setting it up, you would handle both Intel and Alpha CPUs.</li>
+<li>Add the IMAGEHLP.DLL symbol engine support to VBDebug. Unfortunately, the symbol engine in IMAGEHLP.DLL is rather rudimentary and does nothing more than return the addresses of public items. If you wanted source and line information, for example, you would have to write your own symbol engine. If you do end up writing your own full-featured symbol engine, I will be sure to grant you a Ph.D in debuggers; symbol engines are extremely difficult to develop.</li>
+<li>Put a better user interface on VBDebug. Even though Visual&nbsp;Basic makes it a complete snap to do user inter&shy;face work, I think you can tell from the existing VBDebug UI that I am not a UI kind of guy. One nice enhancement would be to set up the UI so that different output could go to different windows. For example, you could have a CPU registers window, a stack window, an OutputDebugString window, and a command window. On a crash, you could fill out the CPU window and the stack window with the state of the debuggee. Setting up additional UI would also mean that you would have to extend the Executive so it knows where to put things.</li>
+<li>Do some normal debugger things like adding single step and breakpoints.</li>
+</ul>
+<p>The whole point is to experiment a little and see what you can come up with. By the time you get done writing a moderately featured debugger, you will have an excellent understanding of the entire operating system.</p>
+<h2>Conclusion</h2>
+<p>The new Visual Basic 5.0 AddressOf operator is a pretty magical thing. Now you can do things in Visual Basic that I never expected. By utilizing some of the Win32 APIs, you are able to support multithreading in Visual Basic. Be sure to check your code carefully, since some portions of Visual Basic do not support multithreading completely. However, if you use multithreading carefully and you test well, you will be able to make your applications more responsive and useful to the user. The extra functionality you gain might get you more cash in your pocket, or at least happier users.</p>
+<p>
+To obtain complete source code listings, see page 5.</p>
+</font></font></body>
+</HTML>

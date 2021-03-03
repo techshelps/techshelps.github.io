@@ -1,0 +1,1323 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>OLE Q &amp; A</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  OLE Q &amp; A</H1><P>Don Box</P>
+<P>Don Box has been working in networking and distributed object systems since 1989. He is currently chronicling the COM lifestyle in book form for Addison Wesley, and gives seminars on OLE and COM across the globe. Don can be reached at dbox@braintrust.com.</P>
+<P><font size="6" face="verdana,arial,helvetica">Q</font>I have finally convinced my manager to abandon 16-bit Windows® as a target platform, but now he wants me to write a Windows® 95 logo-compliant, multithreaded application. I am having a difficult time getting a handle on how threads interact with OLE. What gives?</P>
+<P><font size="6" face="verdana,arial,helvetica">A</font>The first release of 32-bit OLE shipped with Windows NT<FONT FACE="Symbol">Ô</FONT> 3.5 and did not allow multiple threads in a single process to use OLE. In this initial release, only one thread per process was allowed to call CoInitialize, upon which it would become the only thread within its process that was allowed to make OLE API calls or make method calls through interface pointers. This made it impossible to create multithreaded servers or clients.</P>
+<P>With the release of Windows NT 3.51 and Windows 95, it is now possible to write multithreaded OLE servers and clients. In these releases of OLE, there are no fixed limitations on the number of threads per process that can make OLE API calls. Once a thread calls CoInitialize, you can make as many OLE API calls as you want. There are some interesting limitations on the number of threads that can make method calls on an interface pointer, and this is where confusion often occurs. To better understand the threading model of OLE, it is useful to examine the techniques commonly used to write thread-safe objects in C++.</P>
+<P><B>Figure 1</B> illustrates a simple helper class (MTObject) that can be used to make an object thread safe. It has a single mutex data member that acts as the lock for the object. Acquire, a nested helper class, allows exception-safe locking of the object for some fixed scope (the constructor acquires the lock using WaitForSingleObject, and the destructor releases the lock using ReleaseMutex). The correct usage of this class is as follows:</P>
+<P> </P>
+<P><BR></P>
+<PRE> class Accumulator : protected MTObject {
+  double m_val;
+public:
+  double GetValue() const {
+    Acquire lock(this); // get the lock in ctor    
+    return m_val;
+  }                     //release lock in dtor
+
+  void Add(double val) {
+    Acquire lock(this); // get the lock in ctor
+    m_val += val;
+  }
+                        // release lock in dtor
+};</PRE>
+<P><B> Figure 1  MTObject.h</B></P>
+<P><BR></P>
+<PRE> //////////////////////////////////////////////////////
+// 
+// MTObject.h - 1995-1996, Don Box 
+//
+// Helper base class for serializing access to an object
+//
+
+#ifndef _MTOBJECT_H
+#define _MTOBJECT_H
+
+class MTObject 
+{
+public:
+    MTObject();
+    ~MTObject(); // note: destructor is non-virtual, so don't inherit publicly
+
+// helper class to lock object in an exception-safe manner
+    class Acquire {
+    public:
+        Acquire(const MTObject* pThis, DWORD dwTimeOut = INFINITE);
+        ~Acquire();
+        BOOL IsLocked() const;
+    private:
+        const MTObject*     m_object;       // pointer to locked object
+        BOOL                m_bLocked;      // lock acquired?
+    };
+    friend class Acquire;
+private:
+    HANDLE                  m_hmutexLock;   // MT-safety for this object
+};
+
+// create the mutex
+inline MTObject::MTObject()
+:   m_hmutexLock(CreateMutex(0, FALSE, 0))
+{
+}
+
+// destroy the mutex
+inline MTObject::~MTObject()
+{
+    CloseHandle(m_hmutexLock);
+}
+
+// acquire the mutex for pThis
+inline MTObject::Acquire::Acquire(const MTObject* pThis, DWORD dwTimeOut)
+: m_object(pThis), m_bLocked(FALSE)
+{
+    if (WaitForSingleObject(m_object-&gt;m_hmutexLock,dwTimeOut)==WAIT_OBJECT_0)
+        m_bLocked = TRUE;
+}
+
+// release the mutex for pThis
+inline MTObject::Acquire::~Acquire()
+{
+    if (m_bLocked)
+        ReleaseMutex(m_object-&gt;m_hmutexLock);
+}
+
+// test the mutex acquisition
+inline BOOL MTObject::Acquire::IsLocked() const
+{
+    return m_bLocked;
+}
+
+#endif
+</PRE>
+<P> </P>
+<P>Acquiring the lock at the beginning of each member function ensures that no more than one thread will be performing an operation on the object at any instant in time. Many threads may be blocked at the initial locking statement, but only one thread at a time will be manipulating the actual data members of the object.</P>
+<P>The current threading model of OLE is inspired by the simple example shown previously. To allow multiple threads to access an object safely, OLE assumes that all interprocess and interthread access to the object will occur through proxy/stub pairs. As shown in <B>Figure 2</B>, any number of threads can have outstanding proxies on an object. However, the stub always belongs to the thread that initially marshals the first interface from the object. This thread is called the "owning apartment" of the object, as it is the thread where the object resides. The term "apartment" is used to indicate that a single piece of real estate (a process) can support multiple dwellings (threads). All method calls on a proxy result in messages being queued on the apartment that owns the corresponding stub. These messages are serviced sequentially as a byproduct of running a standard GetMessage/DispatchMessage loop, and the result is that only one physical thread is ever in direct contact with the object. This single-threaded access policy is logically equivalent to using the MTObject class shown earlier, and has the positive side effect of not requiring the object implementation to perform the serialization explicitly.</P>
+<P><img src="ole2.gif"></P>
+<P><B> Figure 2  Apartment Model Threading</B></P>
+<P>Armed with the information presented so far, you could easily write a multithreaded OLE server that creates one apartment per COM class allowing your server to take advantage of multiple CPUs or make blocking system calls without hanging the entire server. For each class, we can simply create a thread that registers the class factory and runs a message pump to dispatch incoming calls for objects created within that apartment. Assuming the generic thread proc below,</P>
+<P> </P>
+<P><BR></P>
+<PRE> struct APT_INIT {
+  REFCLSID rclsid;
+  IClassFactory *pcf;
+};
+DWORD WINAPI AptProc(void* tparam) {
+  APT_INIT *pai = ((APT_INIT*)tparam);
+  DWORD dwReg;
+  CoInitialize(0);
+  CoRegisterClassObject(pai-&gt;rclsid, 
+                        pai-&gt;pcf,
+                        CLSCTX_LOCAL_SERVER, 
+                        REGCLS_MULTIPLEUSE,
+                        &amp;dwReg);
+  MSG msg;
+  while (GetMessage(&amp;msg, 0, 0, 0))
+      DispatchMessage(&amp;msg);
+  CoRevokeClassObject(dwReg);
+  CoUninitialize();
+  return msg.wParam;
+}</PRE>
+<P> </P>
+<P>you could easily write a multithreaded server as follows:</P>
+<P> </P>
+<P><BR></P>
+<PRE> int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR,int)
+{
+  CoClassFactory&lt;CoRectangle&gt; factory1;
+  CoClassFactory&lt;CoEllipse&gt;   factory2;
+  CoClassFactory&lt;CoPolygon&gt;   factory3;
+
+  APT_INIT ai[3]={{CLSID_Rectangle,&amp;factory1},
+                    {CLSID_Ellipse,&amp;factory2},
+                    {CLSID_Polygon,&amp;factory3}};
+  HANDLE h[3];
+  DWORD dw;
+  for (size_t i = 0; i &lt; 3; i++)
+    h[i] = CreateThread(0,0,AptProc,&amp;ai[i],0,&amp;dw);
+  WaitForMultipleObjects(3, h, TRUE, INFINITE);
+  return 0;
+}</PRE>
+<P> </P>
+<P>The resulting concurrency model of this server is shown in <B>Figure 3.</B></P>
+<P><img src="ole3.gif"></P>
+<P><B> Figure 3  Multithreaded Shape Server</B></P>
+<P>The code shown above sidesteps one very sticky problem that all multithreaded servers need to deal with: server lifetime control. If you assume the normal ObjectDestroyed routine as it is implied in the COM specification,</P>
+<P> </P>
+<P><BR></P>
+<PRE> DWORD g_cLocks = 0;
+void ObjectDestroyed() {
+  if (--g_cLocks == 0)
+    PostQuitMessage(0);
+}</PRE>
+<P> </P>
+<P>the last object to be destroyed will only terminate the currently executing thread. In the previous example, this means that the last shape to be destroyed is a rectangle, only the rectangle apartment will be shut down, leaving the polygon and ellipse apartments running. Since LocalServers are started on a process level, there is no way to restart our rectangle apartment within the current process. To ensure the correct behavior, we need to track the total number of object instances in our server, and shut down all apartments when there are no instances of any class left to be serviced. One approach for shutting down our apartments would be to simply call ExitProcess. This approach is extremely heavy-handed and doesn't guarantee that each thread will be able to perform an orderly termination sequence (for example, executing destructors for objects defined at thread scope). Ideally, we would like to call PostQuitMessage for each apartment in our server. Calling PostQuitMessage on an arbitrary thread can be simulated by using the PostThreadMessage API function.</P>
+<P> </P>
+<P><BR></P>
+<PRE> BOOL PostQuitMessageToThread(DWORD id, WPARAM wp){
+  return PostThreadMessage(id, WM_QUIT, wp, 0);
+}</PRE>
+<P> </P>
+<P>To correctly shutdown a multi-apartment server, a list of thread IDs for all apartments must be maintained, and the ID list can be used to multicast the WM_QUIT message upon the final object destruction.</P>
+<P>CoModuleLifetime is an implementation of this technique (see below <B>Figure 4</B>). CoModuleLifetime is a C++ class that maintains the lock count for a server and shuts down a set of managed apartments. It is assumed that a single instance of this class will be used by all objects (which will call its LockServer method in their constructors and destructors) and by all apartments (which will register themselves to receive WM_QUIT messages upon server shutdown). To register itself as a managed apartment, our generic thread proc needs only slight modification.</P>
+<P> </P>
+<P><BR></P>
+<PRE> CoModuleLifetime g_module; // single instance
+DWORD WINAPI AptProc(void* tparam) {
+  APT_INIT *pai = ((APT_INIT*)tparam);
+  DWORD dwApt, dwReg;
+  CoInitialize(0);
+  //register to receive WM_QUIT message
+  g_module.RegisterManagedApartment(&amp;dwApt);
+  CoRegisterClassObject(pai-&gt;rclsid, pai-&gt;pcf,
+                        CLSCTX_LOCAL_SERVER, 
+                        REGCLS_MULTIPLEUSE, &amp;dwReg);
+  MSG msg;
+  while (GetMessage(&amp;msg, 0, 0, 0))
+      DispatchMessage(&amp;msg);
+  g_module.RevokeManagedApartment(dwApt);
+  CoRevokeClassObject(dwReg);
+  CoUninitialize();
+  return msg.wParam;
+}</PRE>
+<P><B> Figure 4  Multithreaded Lifetime Control</B></P>
+<P></P>
+<P>CoModuleLifetime.h</P>
+<P><BR></P>
+<PRE> //////////////////////////////////////////////////////
+// 
+// CoModuleLifetime.h - 1995-1996, Don Box 
+//
+// Multithreaded implementation of LockServer
+//
+
+#ifndef _MODLIFE_H
+#define _MODLIFE_H
+
+#include "MTObject.h"
+
+// an abstract interface for controlling server lifetime from within
+interface IModuleLifetime : public IUnknown
+{
+    STDMETHOD(RegisterManagedApartment)(DWORD *pdwAptID) PURE;
+    STDMETHOD(RevokeManagedApartment)(DWORD dwAptID) PURE;
+    STDMETHOD(TerminateAllApartments)(WPARAM wParam) PURE;
+    STDMETHOD(IsTerminating)() PURE;
+
+    STDMETHOD(LockServer)(BOOL bLock, BOOL bLastReleaseTerminates) PURE;
+    STDMETHOD(CanUnloadNow)(void) PURE;
+    STDMETHOD(ApartmentListen)(void) PURE;
+};
+
+// {261A26C0-2452-11cf-93E8-00C04FDE43AE}
+DEFINE_GUID(IID_IModuleLifetime, 
+0x261a26c0, 0x2452, 0x11cf, 0x93, 0xe8, 0x0, 0xc0, 0x4f, 0xde, 0x43, 0xae);
+
+// an implementation for controlling server lifetime from within
+class CoModuleLifetime: protected MTObject,       // free threaded instance
+                        public    IModuleLifetime // of one interface
+{
+public:
+    CoModuleLifetime();
+    virtual ~CoModuleLifetime();
+
+// IUnknown methods
+    STDMETHODIMP QueryInterface(REFIID riid, void**ppv);
+    STDMETHODIMP_(ULONG) AddRef();
+    STDMETHODIMP_(ULONG) Release();
+
+// IModuleLifetme methods
+    STDMETHODIMP RegisterManagedApartment(DWORD *pdwAptID);
+    STDMETHODIMP RevokeManagedApartment(DWORD dwAptID);
+    STDMETHODIMP TerminateAllApartments(WPARAM wParam);
+    STDMETHODIMP IsTerminating();
+
+    STDMETHODIMP LockServer(BOOL bLock, BOOL bLastReleaseTerminates);
+    STDMETHODIMP CanUnloadNow(void);
+    STDMETHODIMP ApartmentListen(void);
+
+protected:
+// helper to find or create an empty slot
+    size_t GetEmptySlot();
+private:
+// apartment manager members
+    LONG            m_cLocks;           // the standard module lock count
+    BOOL            m_bTerminating;     // WM_QUIT message has been posted
+    size_t          m_nApartments;      // apartment capacity
+    DWORD          *m_rgdwThreadIDs;    // array of thread IDs
+};
+
+#endif</PRE>
+<P></P>
+<P>CoModuleLifetime.cpp</P>
+<P><BR></P>
+<PRE> //////////////////////////////////////////////////////
+// 
+// CoModuleLifetime.cpp - 1995-1996, Don Box 
+//
+// Multithreaded implementation of LockServer
+//
+
+#include &lt;windows.h&gt;
+#include "CoModuleLifetime.h"
+
+CoModuleLifetime::CoModuleLifetime()
+:   m_cLocks(0),
+    m_bTerminating(FALSE),
+    m_nApartments(16),
+    m_rgdwThreadIDs(new DWORD[m_nApartments])
+{
+    memset(m_rgdwThreadIDs, 0, m_nApartments * sizeof(DWORD));
+}
+
+CoModuleLifetime::~CoModuleLifetime()
+{
+    delete[] m_rgdwThreadIDs;
+}
+
+// IModuleLifetme methods
+
+// register the current thread to be terminated when all module locks go away
+STDMETHODIMP 
+CoModuleLifetime::RegisterManagedApartment(DWORD *pdwAptID)
+{
+    Acquire lock(this);
+    if (!lock.IsLocked())
+        return E_FAIL;
+    size_t i = GetEmptySlot();
+    if (i = = size_t(-1))
+        return E_FAIL;
+    m_rgdwThreadIDs[i] = GetCurrentThreadId();
+    *pdwAptID = i;
+    return S_OK;
+}
+
+
+// remove the desired thread from the array
+STDMETHODIMP 
+CoModuleLifetime::RevokeManagedApartment(DWORD dwAptID)
+{
+    Acquire lock(this);
+    if (!lock.IsLocked() || dwAptID &gt;= m_nApartments)
+        return E_FAIL;
+    m_rgdwThreadIDs[dwAptID] = 0;
+    return S_OK;
+}
+
+// post a WM_QUIT message to all managed threads using PostThreadMessage
+STDMETHODIMP 
+CoModuleLifetime::TerminateAllApartments(WPARAM wParam)
+{
+    Acquire lock(this);
+    if (!lock.IsLocked())
+        return E_FAIL;
+    m_bTerminating = TRUE;
+    for (size_t i = 0; i &lt; m_nApartments; i++)
+        if (m_rgdwThreadIDs[i] != 0)
+            PostThreadMessage(m_rgdwThreadIDs[i], WM_QUIT, wParam, 0);
+    return S_OK;
+}
+
+// indicate the fact that the WM_QUIT message is pending to prevent
+// any last minute activity
+STDMETHODIMP 
+CoModuleLifetime::IsTerminating()
+{
+    Acquire lock(this);
+    if (!lock.IsLocked())
+        return E_FAIL;
+    return m_bTerminating ? S_OK : S_FALSE;
+}
+
+// increment or decrement module lock count, potentially calling
+// TerminateAllThreads.  All implementations of IClassFactory::LockServer
+// should forward to this function, in addition to the constructor and 
+// destructor of all tracked objects
+STDMETHODIMP 
+CoModuleLifetime::LockServer(BOOL bLock, BOOL bLastReleaseTerminates)
+{
+    Acquire lock(this);
+    if (!lock.IsLocked())
+        return E_FAIL;
+    m_cLocks += bLock ? 1 : -1;
+    if (m_cLocks == 0 &amp;&amp; bLastReleaseTerminates &amp;&amp; !bLock)
+        TerminateAllApartments(0);
+    return S_OK;
+}
+
+// indicate the viability of this server
+STDMETHODIMP 
+CoModuleLifetime::CanUnloadNow(void)
+{
+    Acquire lock(this);
+    if (!lock.IsLocked())
+        return E_FAIL;
+    return (m_cLocks == 0) ? S_OK : S_FALSE;    
+}
+
+// run a simple message pump for the calling thread (note no lock is acquired)
+STDMETHODIMP 
+CoModuleLifetime::ApartmentListen(void)
+{
+    MSG msg;
+    while (GetMessage(&amp;msg, 0, 0, 0))
+        DispatchMessage(&amp;msg);
+    return S_OK;
+}
+
+// find an empty slot, potentially growing the array (assumes already locked)
+size_t
+CoModuleLifetime::GetEmptySlot()
+{
+// search for empty slot
+    for (size_t i = 0; i &lt; m_nApartments; i++)
+        if (m_rgdwThreadIDs[i] == 0)
+            return i;
+    
+// if no empty slot is found, then grow array
+    size_t result = size_t(-1);
+    enum { GROWBY = 16 };
+    DWORD* rgNew = new DWORD[m_nApartments + GROWBY];
+    if (rgNew)
+    {
+        memcpy(rgNew, m_rgdwThreadIDs, m_nApartments * sizeof(DWORD));
+        memset(rgNew + m_nApartments, 0, GROWBY * sizeof(DWORD));
+        delete[] m_rgdwThreadIDs;
+        result = m_nApartments;
+        m_rgdwThreadIDs = rgNew;
+        m_nApartments += GROWBY;
+    }
+    return result;
+}
+
+// IUnknown methods
+STDMETHODIMP 
+CoModuleLifetime::QueryInterface(REFIID riid, void**ppv)
+{
+    if (riid == IID_IUnknown || riid == IID_IModuleLifetime)
+        *ppv = (IModuleLifetime *)this;
+    else
+        *ppv = 0;
+    if (*ppv)
+        ((IUnknown*)*ppv)-&gt;AddRef();
+    return *ppv ? S_OK : E_NOINTERFACE;
+}
+
+STDMETHODIMP_(ULONG) 
+CoModuleLifetime::AddRef()
+{
+    return 2;
+}
+
+STDMETHODIMP_(ULONG) 
+CoModuleLifetime::Release()
+{
+    return 1;
+}</PRE>
+<P> </P>
+<P>Assuming that the corresponding WinMain uses the class factory shown in <B>Figure 5</B>, we have a functioning multithreaded server. While a method call on a rectangle is blocked, calls to ellipses and polygons are also allowed to be serviced. However, the rectangle thread can service only one method call on a rectangle at a time.</P>
+<P><B> Figure 5  CoClassFactory</B></P>
+<P></P>
+<P>CoClassFactory.h</P>
+<P><BR></P>
+<PRE> //////////////////////////////////////////////////////
+// 
+// CoClassFactory.h - 1995-1996, Don Box 
+//
+// Generic Class Factory template using IModuleLifetime
+//
+
+#ifndef _COCF_H
+#define _COCF_H
+
+#include "MTObject.h"
+#include "CoModuleLifetime.h"
+
+// common implementation of a generic class factory
+class CoClassFactoryBase : public IClassFactory
+{
+public:
+    CoClassFactoryBase(IModuleLifetime *pml);
+    virtual ~CoClassFactoryBase();
+
+// IUnknown methods
+    STDMETHODIMP QueryInterface(REFIID riid, void**ppv);
+    STDMETHODIMP_(ULONG) AddRef();
+    STDMETHODIMP_(ULONG) Release();
+
+// IClassFactory methods (CreateInstance left for derived implementations)
+    STDMETHODIMP LockServer(BOOL bLock);
+
+protected:
+    IModuleLifetime*    m_pml;                  // Lifetime ctl for LockServer
+};
+
+// a parameterized implementation of IClassFactory with no aggregation support
+template &lt;class CoClass&gt;
+class CoClassFactory : public CoClassFactoryBase 
+{
+public:
+    CoClassFactory(IModuleLifetime *pml)
+    : CoClassFactoryBase(pml)
+    {
+    }
+
+    STDMETHODIMP CreateInstance(IUnknown* pUnkOuter, REFIID riid, void** ppv)
+    {
+        *ppv = 0;
+        if (pUnkOuter) return CLASS_E_NOAGGREGATION;
+        CoClass *p = new CoClass;
+        if (!p) return E_OUTOFMEMORY;
+        HRESULT hr = p-&gt;QueryInterface(riid, ppv);
+        if (FAILED(hr)) delete p;
+        return hr;
+    }
+};
+
+#endif</PRE>
+<P></P>
+<P>CoClassFactory.cpp</P>
+<P><BR></P>
+<PRE> //////////////////////////////////////////////////////
+// 
+// CoClassFactory.cpp - 1995-1996, Don Box 
+//
+// Generic Class Factory template using IModuleLifetime
+//
+
+#include &lt;windows.h&gt;
+#include "CoClassFactory.h"
+
+CoClassFactoryBase::CoClassFactoryBase(IModuleLifetime *pml)
+: m_pml(pml)
+{
+}
+
+CoClassFactoryBase::~CoClassFactoryBase()
+{
+}
+
+// simply forward to module lifetime
+STDMETHODIMP CoClassFactoryBase::LockServer(BOOL bLock) 
+{
+    if (m_pml)
+        return m_pml-&gt;LockServer(bLock, TRUE);
+    return E_NOTIMPL;
+}
+
+STDMETHODIMP CoClassFactoryBase::QueryInterface(REFIID riid, void**ppv)
+{
+    if (riid == IID_IUnknown || riid == IID_IClassFactory)
+        *ppv = (IClassFactory*)this;
+    else 
+        *ppv = 0;
+    if (*ppv)
+        ((IUnknown*)(*ppv))-&gt;AddRef();
+    return *ppv ? S_OK : E_NOINTERFACE;
+}
+
+STDMETHODIMP_(ULONG) CoClassFactoryBase::AddRef() 
+{
+    return 2;
+}
+
+STDMETHODIMP_(ULONG) CoClassFactoryBase::Release() 
+{
+    return 1;
+}</PRE>
+<P></P>
+<P>This concurrency model is reasonable for scenarios where multiple independent classes need to exist in a single process. On a multiprocessor computer running Windows NT, it is conceivable that your server could utilize up to three processors at a time (one processor per apartment). Of course, this utilization assumes that the demand on your server is spread evenly across rectangle, ellipse, and polygon method calls. If this is not the case, you would probably prefer allocating more than one apartment to service concurrent method calls for a single COM class. </P>
+<P>Under the current COM threading model, the thread that services method calls for an object is fixed at the initial marshaling (normally via the CreateInstance method on the class factory). To allow more than one apartment to own objects of a given class, you would ideally like to have several worker apartments register a class factory for the same CLSID and have the system select the appropriate worker thread (based on CPU utilization or some other scheduling mechanism). Unfortunately, you cannot do this, as only one call to CoRegisterClassObject will succeed. Instead, you must register a master class factory with the system once, and have its implementation of CreateInstance multiplex to one of the worker apartments that will create the instance and perform the initial marshaling.</P>
+<P>The OLE SDK sample (OLEAPT) uses a somewhat arcane technique to signal the worker apartment to create and marshal the object. Here, I'm going to illustrate a more general technique that can be used outside of the context of this article. <B>Figure 6</B> illustrates a generic multiplexing class factory that uses round-robin scheduling to select 1 of n class factories to perform the CreateInstance call. The presence of the proxy/stub connections between the multiplexor and the actual class factories is required for two reasons. First, because COM requires all interthread communications to take place using COM marshaling. Second, because you need the initial marshaling to originate from the worker thread, not the multiplexing thread. The advantages of using this technique are that the message pump of the worker apartments does not need any special case coding to accommodate interthread communications and standard COM techniques for instantiation are used.</P>
+<P><img src="ole6.gif"></P>
+<P><B> Figure 6  Multiplexing Class Factory</B></P>
+<P>It may not be obvious from looking at <B>Figure 6</B> how you pass an interface pointer across thread boundaries to create the proxy/stub connection. To understand how this is done, it is useful to review how COM marshaling takes place: when an interface pointer is to be passed across a marshaling boundary, the remoting code for the sender uses the CoMarshalInterface API function to marshal the interface into the marshaling packet via the packet's IStream interface.</P>
+<P> </P>
+<P><BR></P>
+<PRE> HRESULT CoMarshalInterface(IStream *pStmPacket,
+                           REFIID riid, 
+                           IUnknown *pUnkObject,
+                           DWORD dwDestContext,
+                           void *pvDestContext,
+                           DWORD mshlflags);</PRE>
+<P> </P>
+<P>The dwDestContext parameter describes the type of boundary that the interface is being marshaled across, and currently must be one of the four values shown in <B>Figure 7.</B> Using CoMarshalInterface and CoUnmarshalInterface, you can pass interfaces across thread boundaries.</P>
+<P> </P>
+<P><BR></P>
+<PRE> HGLOBAL MarshalFromServerThread(IUnknown *punk) {
+  //allocate memory for packet  
+  HGLOBAL result = GlobalAlloc(0, GPTR);
+  IStream *pstrm;
+  //create an IStream interface to packet memory
+  CreateStreamOnHGlobal(result, FALSE, &amp;pstrm);
+  //write the marshaling info into the packet  
+  CoMarshalInterface(pstrm, IID_IUnknown, punk,
+                     MSHCTX_INPROC, 0, MSHLFLAGS_NORMAL);
+  pstrm-&gt;Release();
+  return result;
+}
+IUnknown* UnmarshalIntoClientThread(HGLOBAL hg){
+  IUnknown *punkResult;
+  IStream *pstrm;
+  //create an IStream interface to packet memory
+  CreateStreamOnHGlobal(hg, TRUE, &amp;pstrm);
+  //read the marshaling info from the
+  //packet and create the handler/proxy to the object    CoUnmarshalInterface(pstrm, IID_IUnknown, 
+                       (void**)&amp;punkResult);
+  pstrm-&gt;Release();
+  return punkResult;
+}</PRE>
+<P> </P>
+<P>To automate the task of interthread marshaling, COM provides two helper functions that perform the operations just shown.</P>
+<P><BR></P>
+<PRE> HRESULT 
+CoMarshalInterThreadInterfaceInStream(REFIID riid,
+                                      IUnknown* punk,
+                                      IStream** ppstm);
+HRESULT 
+CoGetInterfaceAndReleaseStream(IStream *pstm,REFIID riid,
+                               void** ppvObj);</PRE>
+<P><B> Figure 7  dwDestContext Parameters</B></P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="123pt" VALIGN="TOP"><COL WIDTH="305pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P> MSHCTX_LOCAL</P></TD><TD VALIGN="TOP"><P>The client and object are in different address spaces on the same host machine, and some mechanism for using shared memory is available from the OS.</P></TD></TR><TR><TD VALIGN="TOP"><P> MSHCTX_NOSHAREDMEM</P></TD><TD VALIGN="TOP"><P>The client and object are in different address spaces on the same host machine, and no mechanism for using shared memory is available from the OS.</P></TD></TR><TR><TD VALIGN="TOP"><P> MSHCTX_DIFFERENTMACHINE</P></TD><TD VALIGN="TOP"><P>The client and object are in different address spaces on different host machines.</P></TD></TR><TR><TD VALIGN="TOP"><P> MSHCTX_INPROC</P></TD><TD VALIGN="TOP"><P>The client and object are in the same address space on the same host machine, but are different apartments (threads).</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P><BR></P>
+<PRE> </PRE>
+<P>The multiplexing class factory shown in <B>Figure 8</B> uses these API functions to create the proxy/stub connection between the class factories in the worker threads (that call CoMarshalInterThreadInterfaceInStream) and the class factory in the multiplexing apartment (that calls CoGetInterfaceAndRelease-Stream). Once these connections are established, the forwarding of CreateInstance from the multiplexor crosses the thread boundary to one of the workers, causing the initial marshal to originate in the worker thread, not the multiplexing thread.</P>
+<P><B> Figure 8  CoMultiplexingCF</B></P>
+<P></P>
+<P>CoMultiplexingCF.h</P>
+<P><BR></P>
+<PRE> //////////////////////////////////////////////////////
+// 
+// CoMultiplexingCF.h - 1995-1996, Don Box 
+//
+// Multiplexing Class Factory for Multi-Apartment COM Classes
+//
+
+#ifndef _COMUXCF_H
+#define _COMUXCF_H
+
+#include "CoClassFactory.h"
+
+// an implementation of IClassFactory that multiplexes its CreateInstance
+// to one of N class factories marshalled in from other apartments
+class CoMultiplexingCF : protected MTObject,    
+                         public    CoClassFactoryBase 
+{
+public:
+    CoMultiplexingCF(long nApartments, IModuleLifetime* pml);
+    virtual ~CoMultiplexingCF();
+
+// the multiplexing CreateInstance that forwards to the "next" apartment
+    STDMETHODIMP CreateInstance(IUnknown *pUnkOuter,REFIID riid,void** ppvObj);
+
+// marshal in a ClassFactory to receive 1 out of N CreateInstance calls
+    STDMETHODIMP RegisterInternalApartment(IClassFactory *pcf);
+
+// wait until N apartments have been internally unmarshaled
+    STDMETHODIMP WaitForInternalApartmentsToRegister(long nHowMany = -1,
+                                                     DWORD dwTimeOut=INFINITE);
+
+// release the proxys for all marshalled class factories
+    STDMETHODIMP RevokeInternalApartments();
+    
+// register this object with the SCM
+    STDMETHODIMP RegisterExternalApartment(REFCLSID rclsid,
+                                           DWORD dwClsCtx=CLSCTX_LOCAL_SERVER,
+                                           DWORD dwFlags = REGCLS_MULTIPLEUSE);
+
+// revoke this object from the SCM
+    STDMETHODIMP RevokeExternalApartment();
+
+protected:
+// virtual upcall to allow for arbitrary scheduling
+    virtual size_t GetNextApartment();
+    size_t GetApartmentCount() const;
+private:
+// helper function to marshal the interface into the correct stream
+    HRESULT MarshalClassObject(IClassFactory *pcf, DWORD dwAptIndex);
+
+// helper function to unmarshal the interface from the stream 
+    HRESULT UnmarshalClassObject(DWORD dwAptIndex);
+
+// helper function that asserts that the calling thread is the "main" apartment
+    BOOL    IsExternalApartment();
+
+// multithreading data members
+    HANDLE              m_hsemMarshaled;        // Count of pending marshals
+    DWORD               m_dwExternalThreadID;   // ID of externalized apartment
+// multiplexor data members
+    size_t              m_nFactories;           // Capacity of arrays
+    IClassFactory**     m_rgpFactories;         // class factory array
+    IStream**           m_rgpStreams;           // stream array for marshaling
+    size_t              m_nNextIndex;           // round-robin multiplexor
+
+// normal class object data members
+    DWORD               m_dwReg;                // key for CoRevokeClassObject
+};
+
+#endif</PRE>
+<P></P>
+<P>CoMultiplexingCF.cpp</P>
+<P><BR></P>
+<PRE> //////////////////////////////////////////////////////
+// 
+// CoMultiplexingCF.cpp - 1995-1996, Don Box 
+//
+// Multiplexing Class Factory for Multi-Apartment COM Classes
+//
+
+#include &lt;windows.h&gt;
+#include "CoMultiplexingCF.h"
+
+CoMultiplexingCF::CoMultiplexingCF(long nApartments,   
+                                   IModuleLifetime *pml)
+:   CoClassFactoryBase(pml),
+    m_hsemMarshaled(CreateSemaphore(0, 0, nApartments, 0)),
+    m_dwExternalThreadID(0),
+    m_nFactories(nApartments),
+    m_rgpFactories(new IClassFactory *[nApartments]),
+    m_rgpStreams(new IStream *[nApartments]),
+    m_nNextIndex(0)
+{
+    memset(m_rgpFactories, 0, sizeof(*m_rgpFactories) * nApartments);
+    memset(m_rgpStreams, 0, sizeof(*m_rgpStreams) * nApartments);
+}
+
+CoMultiplexingCF::~CoMultiplexingCF()
+{
+    CloseHandle(m_hsemMarshaled);
+    delete [] m_rgpFactories;
+    delete [] m_rgpStreams;
+}
+
+inline size_t 
+CoMultiplexingCF::GetApartmentCount() const
+{
+    return m_nFactories;
+}
+
+// scheduler for multiplexor (this implementation uses round-robin scheduling)
+size_t 
+CoMultiplexingCF::GetNextApartment()
+{
+    size_t result = m_nNextIndex++;
+    m_nNextIndex %= GetApartmentCount();
+    return result;
+}
+
+// helper to thread-marshal the interface into the appropriate stream
+inline HRESULT 
+CoMultiplexingCF::MarshalClassObject(IClassFactory *pcf, DWORD dwAptIndex)
+{
+    return CoMarshalInterThreadInterfaceInStream(IID_IClassFactory,
+                                                 pcf,
+                                                 &amp;m_rgpStreams[dwAptIndex]);
+}
+
+// helper to thread-unmarshal the interface from the appropriate stream
+inline HRESULT 
+CoMultiplexingCF::UnmarshalClassObject(DWORD dwAptIndex)
+{
+    HRESULT hr;
+    hr = CoGetInterfaceAndReleaseStream(m_rgpStreams[dwAptIndex],    
+                                        IID_IClassFactory,    
+                                (void**)&amp;m_rgpFactories[dwAptIndex]);
+    m_rgpStreams[dwAptIndex] = 0;
+    return hr;
+}
+
+inline BOOL   
+CoMultiplexingCF::IsExternalApartment()
+{
+    if (m_dwExternalThreadID == 0) // first time through
+        m_dwExternalThreadID = GetCurrentThreadId();
+    else if (m_dwExternalThreadID != GetCurrentThreadId())
+        return FALSE;
+    return TRUE;
+}
+
+// multiplex to one of N class factories
+STDMETHODIMP 
+CoMultiplexingCF::CreateInstance(IUnknown*pUnkOuter, REFIID riid,void** ppvObj)
+{
+    HRESULT result = E_FAIL;
+// artificially lock this module to prevent early termination
+    LockServer(TRUE);
+// ensure that this module isn't about to die
+    if (m_pml == 0 || m_pml-&gt;IsTerminating() == S_FALSE)
+    {
+        Acquire lock(this);
+        if (lock.IsLocked())
+        {    
+// select the next apartment and go for it!
+            IClassFactory *pcf = m_rgpFactories[GetNextApartment()];
+            if (pcf)
+                result = pcf-&gt;CreateInstance(pUnkOuter, riid, ppvObj);
+        }
+    }
+// release artificial module lock
+    LockServer(FALSE);
+    return result;
+}
+
+// marshal in a class factory from one of the multiplexed apartments
+STDMETHODIMP 
+CoMultiplexingCF::RegisterInternalApartment(IClassFactory *pcf)
+{
+    SCODE result = E_FAIL;
+    Acquire lock(this);
+    if (lock.IsLocked())
+    {
+        const DWORD BAD_INDEX = 0xFFFFFFFF; // rogue value
+        DWORD dwThisApartment = BAD_INDEX; 
+
+// try to find an empty slot
+        for (DWORD i = 0; 
+             i &lt; m_nFactories &amp;&amp; dwThisApartment == BAD_INDEX; 
+             i++)
+            if (m_rgpStreams[i] == 0 &amp;&amp; m_rgpFactories[i] == 0)
+                dwThisApartment = i;
+    
+// marshal in the interface and indicate that it is there 
+// by releasing a semaphore
+        if (dwThisApartment != BAD_INDEX)
+        {
+            result = MarshalClassObject(pcf, dwThisApartment);
+            if (SUCCEEDED(result))
+                ReleaseSemaphore(m_hsemMarshaled, 1, 0);
+        }
+    }
+    return result;
+}
+
+// allow the main apartment to wait for N apartments to register by
+// waiting for N semaphores to be released.  As each semaphore is released,
+// unmarshal the interface (note: this must be called by the same thread
+// that calls RegisterExternalApartment)
+STDMETHODIMP 
+CoMultiplexingCF::WaitForInternalApartmentsToRegister(long nHowMany,
+                                                      DWORD dwTimeOut)
+{
+    if (!IsExternalApartment())  return E_FAIL;
+// default to array capacity
+    if (nHowMany == -1) 
+        nHowMany = m_nFactories;
+// unmarshal nHowMany interfaces
+    for (long i = 0; i &lt; nHowMany; i++)
+    {
+// wait for a semaphore to be released by another apartment
+        DWORD dwResult = WaitForSingleObject(m_hsemMarshaled, dwTimeOut);
+        if (dwResult != WAIT_OBJECT_0)
+            return E_FAIL;
+// grab the instance lock
+        Acquire lock(this);
+        if (!lock.IsLocked())
+            return E_FAIL;
+// find the first interface that needs to be unmarshalled
+        for (size_t index = 0; index &lt; m_nFactories; index++)
+        {
+            if (m_rgpStreams[index] != 0)         // found one!
+            {
+                UnmarshalClassObject(index);  // unmarshal it
+                break;
+            }
+        }
+    }
+    return S_OK;
+}
+    
+// release the proxys for all marshalled class objects
+STDMETHODIMP 
+CoMultiplexingCF::RevokeInternalApartments()
+{
+    if (!IsExternalApartment())  
+        return E_FAIL;
+    Acquire lock(this);
+    if (!lock.IsLocked()) 
+        return E_FAIL;
+    for (size_t i = 0; i &lt; m_nFactories; i++)
+        if (m_rgpFactories[i] != 0)
+            m_rgpFactories[i]-&gt;Release();
+    memset(m_rgpFactories, 0, sizeof(*m_rgpFactories) * m_nFactories);
+    return S_OK;
+}
+
+// register this object with the SCM using CoRegisterClassObject
+STDMETHODIMP 
+CoMultiplexingCF::RegisterExternalApartment(REFCLSID rclsid,
+                                            DWORD dwClsCtx,
+                                            DWORD dwFlags)
+{
+    if (!IsExternalApartment())  return E_FAIL;
+    return CoRegisterClassObject(rclsid, (IClassFactory*)this,
+                                 dwClsCtx, dwFlags, &amp;m_dwReg);
+}
+
+// revoke this object from the SCM using CoRevokeClassObject
+STDMETHODIMP 
+CoMultiplexingCF::RevokeExternalApartment()
+{
+    if (!IsExternalApartment())  return E_FAIL;
+    return CoRevokeClassObject(m_dwReg);
+}</PRE>
+<P></P>
+<P>Given the nonmultiplexing and multiplexing class factories shown in <B>Figures 5</B> and <B>8,</B> you can build a multithreaded server that creates a pool of worker apartments and spreads the object instantiations across each worker thread. <B>Figure 9</B> shows a COM class that performs a blocking operation in its Sleep method, and <B>Figure 10</B> shows the implementation of the worker and multiplexing apartments that are used to implement the server.</P>
+<P><B> Figure 9  CoSleeper</B></P>
+<P></P>
+<P>Sleep.odl</P>
+<P><BR></P>
+<PRE> [
+    uuid(227AE720-0E31-11cf-93E8-00C04FDE43AE),
+    lcid(9),
+    version(1.0),
+    helpstring("Sleepy COM Objects")
+]
+library Sleepy
+{
+    importlib("stdole32.tlb");
+    [
+        uuid(227AE721-0E31-11cf-93E8-00C04FDE43AE),
+        odl,
+        dual,
+        helpstring("A simple interface that implements sleep")
+    ]
+    interface ISleep : IDispatch
+    {
+        [ 
+            id(10),
+            helpstring("Sleep for msecs and return the actual msecs slept")
+        ] 
+        HRESULT Sleep([in] long msecs, [out, retval] long *presult);
+
+        [ 
+            id(11), 
+            propget,
+            helpstring("Returns the logical apartment of the object")
+        ] 
+        HRESULT ApartmentNumber([out, retval] long *presult);
+
+        [ 
+            id(12), 
+            propget,
+            helpstring("Returns the physical thread ID of the object")
+        ] 
+        HRESULT ThreadID([out, retval] long *presult);
+    }
+
+    [
+        uuid(227AE722-0E31-11cf-93E8-00C04FDE43AE),
+        helpstring("A simple implementation of the ISleep interface")
+    ]
+    coclass CoSleeper 
+    {
+        [default] interface ISleep;
+    }
+
+}</PRE>
+<P></P>
+<P>CoSleeper.h</P>
+<P><BR></P>
+<PRE> //////////////////////////////////////////////////////
+// 
+// CoSleeper.h - 1995-1996, Don Box 
+//
+// A Sleep Object exposed through a dual interface
+//
+
+#ifndef _COSLEEPER_H
+#define _COSLEEPER_H
+
+#include "Sleep.h"
+
+class CoSleeper : public ISleep 
+{
+public:
+    CoSleeper();
+    virtual ~CoSleeper();
+
+// IUnknown methods
+    STDMETHODIMP QueryInterface(REFIID, void**);
+    STDMETHODIMP_(ULONG) AddRef();
+    STDMETHODIMP_(ULONG) Release();
+
+// IDispatch methods
+    STDMETHODIMP GetTypeInfoCount(UINT*);
+    STDMETHODIMP GetTypeInfo(UINT, LCID, ITypeInfo**);
+    STDMETHODIMP GetIDsOfNames(REFIID, OLECHAR**, UINT, LCID, DISPID *);
+    STDMETHODIMP Invoke(DISPID, REFIID, LCID, WORD, DISPPARAMS*, VARIANT*, 
+                        EXCEPINFO*, UINT*);
+
+// ISleep methods
+    STDMETHODIMP Sleep(long msecs, long * presult);
+    STDMETHODIMP get_ApartmentNumber(long * presult);
+    STDMETHODIMP get_ThreadID(long * presult);
+private:
+    ULONG       m_cRef;
+    ITypeInfo*  m_pTypeInfo;
+};
+
+#endif</PRE>
+<P></P>
+<P>CoSleeper.cpp</P>
+<P><BR></P>
+<PRE> //////////////////////////////////////////////////////
+// 
+// CoSleeper.cpp - 1995-1996, Don Box 
+//
+// A Sleep Object exposed through a dual interface
+//
+
+#include &lt;windows.h&gt;
+#include "CoSleeper.h"
+
+extern void SvcLock();
+extern void SvcUnlock();
+extern DWORD GetCurrentApartmentNo();
+
+// load our type information to implement IDispatch
+CoSleeper::CoSleeper()
+: m_cRef(0),
+  m_pTypeInfo(0)
+{
+    SvcLock();
+    ITypeLib *ptl = 0;
+    if (FAILED(LoadRegTypeLib(LIBID_Sleepy, 1, 0, 9, &amp;ptl)))
+        LoadTypeLib(OLESTR("Sleep.tlb"), &amp;ptl);
+    if (ptl)
+    {
+        ptl-&gt;GetTypeInfoOfGuid(IID_ISleep, &amp;m_pTypeInfo);
+        ptl-&gt;Release();
+    }
+}
+
+// unload our type information
+CoSleeper::~CoSleeper()
+{
+    if (m_pTypeInfo)
+        m_pTypeInfo-&gt;Release();
+    SvcUnlock();
+}
+
+// ISleep methods ////////////////////////////////////
+
+// sleep for msecs using the API function Sleep
+STDMETHODIMP 
+CoSleeper::Sleep(long msecs, long * presult)
+{
+    DWORD dwTicksStart = GetTickCount();
+    ::Sleep(msecs);
+    *presult = GetTickCount() - dwTicksStart;
+    return S_OK;
+}
+
+// return the logical apartment number that this object lives in
+STDMETHODIMP 
+CoSleeper::get_ApartmentNumber(long * presult)
+{
+    *presult = GetCurrentApartmentNo();
+    return S_OK;
+}
+
+// return the physical thread that this object lives on
+STDMETHODIMP 
+CoSleeper::get_ThreadID(long * presult)
+{
+    *presult = GetCurrentThreadId();
+    return S_OK;
+}
+
+// IDispatch methods /////////////////////////////////
+STDMETHODIMP 
+CoSleeper::GetTypeInfoCount(UINT *pctinfo)
+{
+    if (pctinfo == 0) return E_POINTER;
+    *pctinfo = 1;
+    return S_OK;
+}
+
+STDMETHODIMP 
+CoSleeper::GetTypeInfo(UINT index, LCID, ITypeInfo**ppti)
+{
+    if (ppti == 0) return E_POINTER;
+    if (index != 0 || m_pTypeInfo == 0) return DISP_E_BADINDEX;
+    (*ppti = m_pTypeInfo)-&gt;AddRef();
+    return S_OK;
+}
+
+STDMETHODIMP 
+CoSleeper::GetIDsOfNames(REFIID, OLECHAR** rgsz, UINT n, LCID, DISPID* rgdid)
+{
+    if (m_pTypeInfo == 0) return E_FAIL;
+    return m_pTypeInfo-&gt;GetIDsOfNames(rgsz, n, rgdid);
+}
+
+STDMETHODIMP 
+CoSleeper::Invoke(DISPID dispid, REFIID,LCID lcid, WORD wFlag, DISPPARAMS *pdp,
+                  VARIANT *pVarResult, EXCEPINFO *pei, UINT *puArgErr)
+{
+    if (m_pTypeInfo == 0) return E_FAIL;
+    return m_pTypeInfo-&gt;Invoke((ISleep*)this, dispid, wFlag, pdp,
+                                pVarResult, pei, puArgErr);
+}
+
+// IUnknown methods //////////////////////////////////
+STDMETHODIMP 
+CoSleeper::QueryInterface(REFIID riid, void**ppv)
+{
+    if (riid == IID_IUnknown || riid == IID_IDispatch || riid == IID_ISleep)
+        *ppv = (ISleep*)this;
+    else
+        *ppv = 0;
+
+    if (*ppv)
+        ((IUnknown*)*ppv)-&gt;AddRef();
+    return *ppv ? S_OK : E_NOINTERFACE;
+}
+
+STDMETHODIMP_(ULONG) 
+CoSleeper::AddRef()
+{
+    return ++m_cRef;
+}
+
+STDMETHODIMP_(ULONG) 
+CoSleeper::Release()
+{
+    if (--m_cRef == 0)
+    {
+        delete this;
+        return 0;
+    }
+    return m_cRef;
+}</PRE>
+<P><B> Figure 10  AptSvc.cpp</B></P>
+<P><BR></P>
+<PRE> //////////////////////////////////////////////////////
+// 
+// AptSvc.cpp - 1995-1996, Don Box 
+//
+// Multithreaded OLE Server
+//
+
+#define INITGUID
+#include &lt;windows.h&gt;
+#include "CoMultiplexingCF.h"
+#include "CoSleeper.h"
+
+// change this constant to get more concurrency
+enum { NAPARTMENTS = 3 };
+
+// define a single instance of server lifetime control
+CoModuleLifetime  g_module;
+
+// define a multiplexing CF for each COM class
+CoMultiplexingCF  g_multiplexor(NAPARTMENTS, &amp;g_module);
+
+// map extern calls to our module lifetime
+void SvcLock()
+{   g_module.LockServer(TRUE, TRUE);
+}
+
+// map extern calls to our module lifetime
+void SvcUnlock()
+{   g_module.LockServer(FALSE, TRUE);
+}
+
+// declare the apartment ID as a TLS variable
+__declspec(thread) DWORD gt_dwApartmentNumber = 0xFFFFFFFF;
+
+// simply return the TLS variable
+DWORD GetCurrentApartmentNo()
+{   return gt_dwApartmentNumber;
+}
+
+// AptThreadProc is a simple function that registers a class factory
+// with a multiplexor and wait around for things to happen
+DWORD WINAPI AptThreadProc(void*)
+{
+// initialize this thread as an OLE apartment
+    CoInitialize(0);
+
+// register this thread to receive WM_QUIT messages and init apartment ID
+    g_module.RegisterManagedApartment(&amp;gt_dwApartmentNumber);
+
+// register a class object with the multiplexor
+    CoClassFactory&lt;CoSleeper&gt; classObject(&amp;g_module);
+    g_multiplexor.RegisterInternalApartment(&amp;classObject);
+
+// run a message pump
+    MSG msg;
+    while (GetMessage(&amp;msg, 0, 0, 0))
+        DispatchMessage(&amp;msg);
+
+// cleanup
+    g_module.RevokeManagedApartment(gt_dwApartmentNumber);
+    CoUninitialize();
+    return msg.wParam;
+}
+
+// MainThreadProc is a function that creates several worker threads
+// and registers a multiplexor as a class factory with the SCM, All 
+// incoming instantiation requests come in through this thread and
+// are dispatched via the multiplexor to the appropriate worker thread
+DWORD WINAPI MainThreadProc(void*)
+{
+// initialize this thread as an OLE apartment
+    CoInitialize(0);
+// register this thread to receive WM_QUIT messages and init apartment ID
+    g_module.RegisterManagedApartment(&amp;gt_dwApartmentNumber);
+
+// create the worker threads
+    DWORD dw;
+    HANDLE hthreads[NAPARTMENTS];
+    for (size_t i = 0; i &lt; NAPARTMENTS; i++)
+        hthreads[i] = CreateThread(0, 0, AptThreadProc, 0, 0, &amp;dw);
+
+//  register the multiplexor with the SCM once the subapartments
+//  have gotten around to registering
+    g_multiplexor.WaitForInternalApartmentsToRegister();
+    g_multiplexor.RegisterExternalApartment(CLSID_CoSleeper);
+
+// run a message pump
+    MSG msg;
+    while (GetMessage(&amp;msg, 0, 0, 0))
+        DispatchMessage(&amp;msg);
+// cleanup
+    g_multiplexor.RevokeExternalApartment();
+    g_multiplexor.RevokeInternalApartments();
+
+    g_module.RevokeManagedApartment(gt_dwApartmentNumber);
+    CoUninitialize();
+// wait around for worker threads to fade away...
+    WaitForMultipleObjects(NAPARTMENTS, hthreads, TRUE, INFINITE);
+    for (size_t ii = 0; ii &lt; NAPARTMENTS; ii++)
+        CloseHandle(hthreads[ii]);
+    
+    return msg.wParam;
+}
+
+int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpszCmdParam, int)
+{// register our implementation
+    TCHAR szModuleName[MAX_PATH];
+    GetModuleFileName(0, szModuleName, sizeof(szModuleName));
+    RegSetValue(HKEY_CLASSES_ROOT, 
+                __TEXT("CLSID")
+                __TEXT("\\{227AE722-0E31-11cf-93E8-00C04FDE43AE}")
+                __TEXT("\\LocalServer32"), 
+                REG_SZ, 
+                szModuleName, 
+                lstrlen(szModuleName));
+
+// register our type lib
+    ITypeLib *ptl = 0;
+    if (SUCCEEDED(LoadTypeLib(OLESTR("Sleep.tlb"), &amp;ptl)))
+        ptl-&gt;Release();
+
+// exit if only registration is required
+    if (strstr(lpszCmdParam, "/REGSERVER"))
+        return -1;
+
+// Do the work of the main OLE thread
+    DWORD dwResult = MainThreadProc(0);
+
+    return int(dwResult);
+}
+</PRE>
+<P> To test the server, one simply needs to instantiate a small number of objects and invoke the Sleep method on each object. Note that when an object is blocked in its Sleep method, objects that exist in other apartments can execute freely, but objects in the same apartment are blocked. <B>Figures 11</B> and <B>12</B> show a Visual Basic® client program that instantiates an object and makes a blocking call.</P>
+<P><B> Figure 11  Form1.frm</B></P>
+<P><BR></P>
+<PRE> VERSION 4.00
+Begin VB.Form Form1 
+   BorderStyle     =   4  'Fixed ToolWindow
+   Caption         =   "Form1"
+   ClientHeight    =   645
+   ClientLeft      =   2685
+   ClientTop       =   2760
+   ClientWidth     =   4080
+   ControlBox      =   0   'False
+   Height          =   1050
+   Left            =   2625
+   LinkTopic       =   "Form1"
+   MaxButton       =   0   'False
+   MinButton       =   0   'False
+   ScaleHeight     =   645
+   ScaleWidth      =   4080
+   ShowInTaskbar   =   0   'False
+   Top             =   2415
+   Width           =   4200
+   Begin VB.CommandButton ExitButton 
+      Caption         =   "E&amp;xit"
+      Height          =   375
+      Left            =   2760
+      TabIndex        =   2
+      Top             =   120
+      Width           =   1215
+   End
+   Begin VB.CommandButton Sleep 
+      Caption         =   "Sleep"
+      Height          =   375
+      Left            =   1440
+      TabIndex        =   1
+      Top             =   120
+      Width           =   1215
+   End
+   Begin VB.TextBox Delay 
+      Height          =   375
+      Left            =   120
+      TabIndex        =   0
+      Text            =   "1000"
+      Top             =   120
+      Width           =   1215
+   End
+End
+Attribute VB_Name = "Form1"
+Attribute VB_Creatable = False
+Attribute VB_Exposed = False
+Option Explicit
+' this form assumes you have added the Sleep
+' type library to the references for the project
+Dim sleeper As ISleep
+
+Private Sub ExitButton_Click()
+' release the sleeper object
+  Set sleeper = Nothing
+  Unload Form1
+End Sub
+
+Private Sub Form_Load()
+' this is VB for CoCreateInstance
+  Set sleeper = New CoSleeper
+  Form1.Caption = "SleepClient - Apartment " &amp; sleeper.ApartmentNumber &amp; "   (tid = " &amp; sleeper.ThreadID &amp; ")"
+End Sub
+
+Private Sub Sleep_Click()
+  Dim dactual As Long
+  Sleep.Enabled = False
+  Delay.Enabled = False
+  dactual = sleeper.Sleep(Delay)
+  MsgBox "I actually slept for " &amp; dactual &amp; " msecs."
+  Sleep.Enabled = True
+  Delay.Enabled = True
+End Sub</PRE>
+<P><B> Figure 12  SleepClient in action.</B></P>
+<P><img src="ole12a.gif"></P>
+<P><B> Figure 12a  This client puts apartment 1 to sleep for one minute</B></P>
+<P><img src="ole12b.gif"></P>
+<P><B> Figure 12b  This client will not block (apartment 2 is free)</B></P>
+<P><img src="ole12c.gif"></P>
+<P><B> Figure 12c  This client will not block (apartment 3 is free)</B></P>
+<P><img src="ole12d.gif"></P>
+<P><B> Figure 12d  This client will block (apartment 1 is busy)</B></P>
+<P></P>
+<P>Is this the perfect scenario for a concurrent server? Probably not. As is often the case, compromises are made to balance efficiency, ease of programming, and functionality. Apartment-model threading favors ease of programming in the general case (as thread safety is not required at the object instance level), but makes it difficult to implement certain concurrent designs. While OLE provides hooks to allow free-threaded access to an object within the same address space, all interprocess method calls are sent to the originating apartment. One could extrapolate from the design of the multiplexing class factory to have a new apartment spawned for each new instance, but this would result in a larger than necessary number of threads and still not allow multiple clients to access a single object concurrently.</P>
+<P>Future versions of OLE are likely to support a free-threading model similar to that used by Microsoft RPC, where a pool of anonymous worker threads is dispatched on a method-by-method basis with no regard to thread/object relationships. While this approach would yield the greatest flexibility, it also places a greater burden on the object implementor to guarantee the thread safety of the server.</P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="221pt" VALIGN="TOP"><COL WIDTH="221pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD COLSPAN="2" VALIGN="TOP"><P> Have a question about programming in OLE? You can mail it directly to Q&amp;A, Microsoft Systems Journal, 825 Eighth Avenue, 18th Floor, New York, New York 10019, or send it to MSJ (re: OLE Q&amp;A) via:</P></TD></TR><TR><TD VALIGN="TOP"><P> <BR>Internet:</P>
+<P><BR>Internet:</P></TD><TD VALIGN="TOP"><P>Don Box<BR>dbox@braintrust.com</P>
+<P>Eric Maffei<BR>ericm@microsoft.com</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P><I>This article is reproduced from Microsoft Systems Journal. Copyright © 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</P></font></body></HTML>

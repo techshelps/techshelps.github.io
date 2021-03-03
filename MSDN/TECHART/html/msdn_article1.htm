@@ -1,0 +1,722 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Article 1. Stealing Code with Type Libraries</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+<h1><a name="msdn_article1"></a>Article 1. Stealing Code with Type Libraries</h1>
+<p>
+Bruce McKinney</p>
+<p>
+April 18, 1996</p>
+<p>
+Just because you didn't write it doesn't mean you can't use it. This series of articles is about how to how to write OLE dynamic-link libraries (DLLs) for Visual Basic® programs, but this particular article is about how to fake it. You can take system DLLs that know nothing about OLE, add a simple type library, and there you have it. Your system DLLs look and work as if they were filled with OLE-aware Visual Basic functions. </p>
+<p>
+Even if you don't need to steal other peoples' DLLs with type libraries, you may want to at least skim this article. It introduces some tools and a definition language that are used in all aspects of OLE programming. You'll also need this information in later articles when we talk about creating DLLs, and you'll need to understand type libraries to effectively create OLE objects or ActiveX™ controls (subjects not covered in this series). </p>
+<h2>The Win32 Type Library</h2>
+<p>
+We'll be using the Windows® API Functions type library (WIN32.TLB) to illustrate the Object Description Language (ODL). If you have my book <i>Hardcore Visual Basic</i>, you're already familiar with this type library. Both 32- and 16-bit versions were included on the book's CD-ROM. The source file, WIN.ODL, was also provided on disc, but not discussed in the book. An updated version is supplied in the sample code files associated with this article.</p>
+<p>
+The source files for this article and a sample Visual Basic program that uses some Windows API calls are included. When you download the sample files, you'll get a directory called \Cpp4VB. In it you'll find a Visual Basic project called Cpp4VB.Vbp and two subdirectories. The \WinTlb subdirectory contains the type library source; the \VBUtil subdirectory contains the DLL source described in Articles 2 through 5. The sample project is primarily designed to test the DLL rather than the type library, although it does use a few API functions. </p>
+<p>
+If you have <i>Hardcore Visual Basic</i>, the version of the type library created by the sample project completely replaces the version supplied with the book. This new version contains numerous fixes and improvements. You can use it with any of the Visual Basic samples in the book. If you don't have <i>Hardcore Visual Basic</i>, you can use the Windows API type library to replace most <b>Declare</b> statements in your current Visual Basic programs. Load the type library in the References dialog (you can put it in AUTO32LD.VBP). After it is loaded, you can look at the contents in the Object Browser. </p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;As noted in the introduction, this series is 32-bit only. I hate to start off with an exception, but the original WIN.ODL was designed to be compiled for either 16- or 32-bit. It didn't make sense to spend a lot of time and effort crippling that part of the file just to make it fit into this article. Therefore, you'll still see conditional compilation for 16- and 32-bit code in the source file. I won't be talking about or updating the 16-bit branch. If you find bugs in that code, you'll have to fix them yourself. </p>
+<p>
+To summarize briefly for those completely unfamiliar with the concept, a type library can eliminate about 80 percent of the <b>Declare</b> and <b>Const</b> statements you would normally use to access Windows API functions and other DLL functions from Visual Basic. Loading WIN32.TLB into your project is equivalent to loading the WIN32API.TXT file supplied with Visual Basic, except that with the type library you pay the memory penalty only for the functions you use. </p>
+<p>
+For example, WIN32API.TXT contains about 1500 <b>Declare</b> statements, most of which you would never use from Visual Basic even in your wildest dreams. The hardest of hardcore Visual Basic programmers would be lucky to use 100 in a single project. If you were foolish enough to load WIN32API.TXT into a project, you would pay a memory penalty of about 20 bytes minimum for each <b>Declare</b> in the file—and that's not even counting the constants. So nobody actually loads the more-than-30,000 bytes of WIN32API.TXT data directly into their programs. Instead, they cut and paste the parts they need for each project.</p>
+<p>
+WIN32.TLB isn't nearly as comprehensive as WIN32API.TXT. It contains about 475 function entries focused specifically on those that Visual Basic programmers are most likely to need. You'll pay about the same memory price for the functions you use from a type library, but if you only use three, you only pay for three. If this sounds too good to be true, well, it is. Type libraries have some significant limitations that make it impossible to provide some of the most useful API functions. We'll get to those limitations later. </p>
+<h2>The Object Description Language</h2>
+<p>
+The Object Description Language (ODL) is one of two languages you can use to describe OLE interfaces. The other is the Interface Definition Language (IDL), based on the Open Software Foundation's (OSF) Distributed Computing Environment (DCE). IDL is a general language for specifying remote procedure call (RPC) interfaces (which includes OLE interfaces). ODL is a specific language for OLE. ODL and IDL intersect in their ability to define OLE interfaces, but IDL doesn't support the features we'll be talking about in this article—those that allow you to define type libraries for system DLLs. </p>
+<p>
+Microsoft is in the process of merging IDL and ODL. Soon you'll be able to compile your current ODL source with an IDL compiler called MIDL. MKTYPLIB, the ODL compiler described in this article, will go the way of the dodo, and none too soon for me. We'll be talking a lot about the limitations of MKTYPLIB. I'll also give a preview of the MIDL compiler where appropriate. </p>
+<p>
+Although ODL (like IDL) is called a language, it's not a computer language in the normal sense. Real computer languages allow you to both declare and implement features. ODL only lets you declare features that are implemented elsewhere—except that there are exceptions to the rule. You can, for example, implement constants in ODL. An ODL source file looks a lot like a C++ include file with a lot of extraneous square brackets. Square brackets are used to enclose lists of attributes that apply to the C-like code blocks following the final bracket. It works something like this: </p>
+<pre><code>// Attributes
+[
+blue, 
+long, 
+weight("heavy")
+]
+// Code block
+keyword BlockName {
+ &nbsp;&nbsp; // Contents of block (can include nested blocks)
+}
+</code></pre>
+<p>
+Of course that's not legal ODL, but it gives you a feel for the attribute-block sequence. </p>
+<h3>A GUID Strategy</h3>
+<p>
+Another thing you'll see a lot in ODL source is Globally Unique Identifiers—GUIDs. Let me indulge readers from my part of the world by describing the pronunciation of GUID as geoduck without the "uck". Those of you who don't know a geoduck from a mallard can just say "Goo-Id." A GUID is a 128-bit number uniquely distinguishing some OLE element from all other OLE elements that ever have or ever will be defined. If you want to master OLE, you'll have to get used to GUIDs. When defining type libraries for system DLLs, GUIDs are more a hoop to be jumped through than a useful feature. But if jump we must, let's do it right. </p>
+<p>
+Every block of related definitions in an ODL file must have its own GUID. The groups we'll be talking about in this article are the one for the entire library (called a LIBID) and ones for each module (associated with a single DLL). Visual C++® comes with two GUID generation tools: a Windows program called GUIDGEN and a command-line program called UUIDGEN. You can also generate GUIDs programmatically by calling the OLE <b>CoCreateGuid</b> function. The strategy I recommend for a type library is to generate only one GUID with GUIDGEN or UUIDGEN, and then use increments of its first number group for nested elements. For example, the GUID for the Windows API type library is:</p>
+<pre><code>54674040-3A82-101B-8181-00AA003743D4&nbsp; // Library LIBID
+</code></pre>
+<p>
+For the modules in the library, I use an incremented sequence:</p>
+<pre><code>54674042-3A82-101B-8181-00AA003743D3 // Windows Kernel Functions
+54674043-3A82-101B-8181-00AA003743D3 // Windows Kernel Constants
+54674044-3A82-101B-8181-00AA003743D3 // Windows GDI Functions
+54674045-3A82-101B-8181-00AA003743D3 // Windows GDI Constants
+54674046-3A82-101B-8181-00AA003743D3 // Windows User Functions
+. . . 
+</code></pre>
+<p>
+Each module starts on an even number. Some have separate odd-numbered sections for constants; some don't. During development of the library, I reorganized modules and changed the GUID numbers several times. But once I published them, something very important happened to them that you need to understand right up front. </p>
+<p>
+GUIDs are eternal. A published GUID is carved in stone. The original GUID was generated on a machine that I don't use anymore, and part of the number came from the network adapter on that machine. I could never generate that GUID on my current development machine no matter how many billions of times I ran GUIDGEN. Yet I'm bound by the immutable laws of OLE to keep using that GUID for every version of the Windows API type library until the mountains tumble to the sea. </p>
+<p>
+As a practical matter, this principle doesn't matter much for type libraries that expose DLL functions. The OLE world wouldn't come to an end if I changed a few digits in one of the type library GUIDs just to prove I could get away with it. The OLE world (or at least my part of it) <i>would</i> come to an end if I changed the GUID of an OLE interface or coclass. We won't get around to talking about those elements in this article, but keep in mind that in most parts of OLE, GUIDs never change. </p>
+<h3>ODL File Organization</h3>
+<p>
+Every type library starts off with a library block, which can in turn contain other blocks. Let's check out the whole file, and then look at specific parts. </p>
+<pre><code>// WIN.ODL
+
+[
+uuid(54674040-3A82-101B-8181-00AA003743D3),
+helpstring("Windows API Functions"),
+lcid (0x00000000),
+version(1.1)
+]
+
+library Win
+{
+ &nbsp;&nbsp; #ifdef WIN32
+ &nbsp;&nbsp; importlib("stdole.tlb");
+ &nbsp;&nbsp; #endif
+
+ &nbsp;&nbsp; // Include standard windows types.
+ &nbsp;&nbsp; #include "wintype.odl"
+
+ &nbsp;&nbsp; #ifdef WIN32
+ &nbsp;&nbsp; #define H8000&nbsp;&nbsp; 0x8000&nbsp;&nbsp; // Hack to get around sign bug in MKTYPLIB.
+ &nbsp;&nbsp; #else
+ &nbsp;&nbsp; #define H8000&nbsp;&nbsp; -32768
+ &nbsp;&nbsp; #endif
+ &nbsp;&nbsp; // NOTE: All messages below 0x0400 are RESERVED by Windows.
+ &nbsp;&nbsp; #define WM_USER&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x0400
+
+ &nbsp;&nbsp; #include "intrface.odl"
+ &nbsp;&nbsp; #include "kernel.odl"
+ &nbsp;&nbsp; #include "gdi.odl"
+ &nbsp;&nbsp; #include "user.odl"
+ &nbsp;&nbsp; #include "winbase.odl"
+ &nbsp;&nbsp; #include "oleauto.odl"
+ &nbsp;&nbsp; #include "winmsg.odl"
+ &nbsp;&nbsp; #include "winmm.odl"
+ &nbsp;&nbsp; #include "network.odl"
+ &nbsp;&nbsp; #include "shell.odl"
+ &nbsp;&nbsp; #include "registry.odl"
+ &nbsp;&nbsp; #include "comctl.odl"
+ &nbsp;&nbsp; #include "winerr.odl"
+ &nbsp;&nbsp; #include "comconst.odl"
+}
+</code></pre>
+<p>
+This is a good illustration of how all type library blocks work. First, let's look at similarities between C++ and ODL. As in C++, blocks are enclosed in curly braces. For the most part, ODL handles numeric and string expressions the same as C++, but the H8000 macro gives a hint that some things aren't going to be exactly the same. In C++, hexadecimal constants are compatible with either signed or unsigned numbers, but in ODL the hexadecimal constants are unsigned, leading to unexpected results. This won't be the last ODL "gotcha" you'll encounter. (This problem seems to be fixed in pre-release versions of the MIDL compiler.)</p>
+<p>
+You can use C++ comments in either the single-line or enclosed block format. MKTYPLIB uses the C++ preprocessor and therefore the syntax of the <b>#define</b>, <b>#include</b>, and conditional compilation statements is exactly the same. You can confirm this by renaming C1.EXE (the Visual C++ preprocessor program) and then trying to compile an ODL file. It won't happen—because MKTYPLIB needs that program. </p>
+<p>
+WIN.ODL uses the <b>#include</b> statement to fake separate modules. This technique makes the source easier to manage, but it doesn't do anything to speed compilation. You still recompile every module whenever any module changes. There's no way to compile files as separate compilation modules. The WINTYPE.ODL file defines Windows types such as HWND, DWORD, and so on. It is a real include file (rather than a fake module) in the C++ tradition, and should be placed in your include directory so that you can use the shared definitions from different projects—such as the VBUTIL type library discussed in the next article in this series. </p>
+<p>
+Each ODL block starts with a list of attributes enclosed in square brackets. Some attributes (<b>uuid</b>, <b>helpfile</b>, <b>helpcontext</b>, <b>helpstring</b>) are standard and apply to many different kinds of blocks. Others (<b>lcid</b> and <b>version</b>) are specific to a particular block type. The block itself starts with a keyword (<b>library</b>, in this case) followed by the block name. Curly braces enclose the contents of each block. </p>
+<p>
+Let's look at each element of the library block: </p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=16%><b>Keyword</b></td>
+<td class=label width=84%><b>Description</b></td>
+</tr>
+<tr valign=top>
+<td width=16%><b>uuid</b></td>
+<td width=84%>The name comes from Universally Unique Identifier (UUID), which is apparently a synonym for GUID. If there's a difference between a UUID and a GUID, it doesn't matter to us. </td>
+</tr>
+<tr valign=top>
+<td width=16%><b>helpfile </b></td>
+<td width=84%>A help file containing a help topic about the block. </td>
+</tr>
+<tr valign=top>
+<td width=16%><b>helpcontext</b></td>
+<td width=84%>The context number of the help topic. Object browsers can provide a button to reach this context.</td>
+</tr>
+<tr valign=top>
+<td width=16%><b>helpstring</b></td>
+<td width=84%>A one-line description that appears in object browsers that open the type library. </td>
+</tr>
+<tr valign=top>
+<td width=16%><b>lcid</b></td>
+<td width=84%>The locale ID indicates the national language of the type library. Zero indicates language-neutral. I'm not going to address internationalization of type libraries here. If you need to translate, you're on your own. </td>
+</tr>
+<tr valign=top>
+<td width=16%><b>version</b></td>
+<td width=84%>You should increment the version number for updates, although Visual Basic and its object browser won't know the difference. </td>
+</tr>
+<tr valign=top>
+<td width=16%><b>library</b></td>
+<td width=84%>This statement defines the type library block, names it, and encloses all the other blocks. </td>
+</tr>
+<tr valign=top>
+<td width=16%><b>importlib</b></td>
+<td width=84%>This statement includes (imports) one type library into another. STDOLE.TLB contains standard OLE definitions. </td>
+</tr>
+</table><br>
+<h3>Module Statements</h3>
+<p>
+The library statement is just a formality. You use the <b>Module</b> statement to set up groups of functions associated with a particular DLL. This strategy is the opposite of the Visual Basic <b>Declare</b> syntax. In Visual Basic, you specify for each function what DLL it comes from. In ODL, you specify for each DLL what functions will be mapped. A module block looks like this: </p>
+<pre><code>[
+uuid(54674042-3A82-101B-8181-00AA003743D3),
+helpstring("Windows Kernel Functions"),
+#ifdef WIN32
+dllname("KERNEL32.DLL")
+#else
+dllname("KRNL386.EXE")
+#endif
+]
+module Kernel {
+ &nbsp;&nbsp; . 
+ &nbsp;&nbsp; . // Module contents
+ &nbsp;&nbsp; .
+}
+</code></pre>
+<p>
+The key element here is the <b>dllname</b>. You must supply one even if the module only contains constants and has no relation to any DLL. If the DLL name is never used, it doesn't have to make sense. The Visual Basic object browser won't care if you provide the following: </p>
+<pre><code>dllname("YOUDUMMY.NODLL"),
+</code></pre>
+<p>
+The module name must be one word (no spaces). It will show up as the title for the module entries in object browsers. </p>
+<h3>Procedure Entries</h3>
+<p>
+The hard work of defining type libraries is in creating the procedure declarations, which are called <i>entries</i> in ODL. You define the attributes of the procedure, and of each of its parameters. Most of what this section has to say about procedures and parameters applies equally well to the method and property definitions in OLE interfaces. You can apply the knowledge you gain here when creating OLE objects such as ActiveX controls. </p>
+<p>
+To become an expert in creating type libraries for Visual Basic, you need to understand two things: Visual Basic <b>Declare</b> statements and C function prototypes. ODL entries look a lot like C prototypes, but if your target is Visual Basic, you have to think of them more like <b>Declare</b> statements. </p>
+<p>
+For this discussion, I'm going to assume that you understand Basic <b>Declare</b> statements, C prototypes, and how Windows API functions are matched in each. If you feel a little rusty on <b>Declare</b> statements, the Visual Basic documents explain them superficially and many other Visual Basic books give more detail. Chapter 2 of my book <i>Hardcore Visual Basic</i> contains an exhaustive explanation. </p>
+<p>
+So let's take a few API functions and look at them as <b>Declare</b> statements, C prototypes, and ODL entries. We'll start with the humble <b>GetParent</b> function, not because a Visual Basic programmer would use it every day, but because it's simple. <b>GetParent</b> looks like this in the Win32® API include file WINUSER.H:</p>
+<pre><code>WINUSERAPI HWND WINAPI GetParent(HWND hWnd);
+</code></pre>
+<p>
+We'll ignore WINUSERAPI because it is usually just a <b>#define</b> to nothing. An HWND is a <b>typedef</b> to <i>void * </i>and WINAPI is a <b>#define</b> to the <i>__stdcall </i>keyword. So essentially we have: </p>
+<pre><code>void * __stdcall GetParent(void * hWnd);
+</code></pre>
+<p>
+As far as Basic is concerned, all pointers, void or otherwise, are just 32-bit integers—Longs—passed by value. This makes sense in the case of handles. Windows may treat them as pointers internally, but as far as users are concerned, they're just handles. It actually makes more sense to think of the prototype like this:</p>
+<pre><code>long __stdcall GetParent(long hWnd);
+</code></pre>
+<p>
+So what we come up with for a 32-bit <b>Declare</b> statement is:</p>
+<pre><code>Declare Function GetParent Lib "USER32" (ByVal hWnd As Long) As Long
+</code></pre>
+<p>
+An ODL entry looks like a C++ prototype. It makes sense to emulate some language, and why not C++? The ODL syntax can also provide a hint to a host compiler or interpreter about how the parameter should be handled. </p>
+<pre><code>long __stdcall GetParent([in] long hWnd);
+</code></pre>
+<p>
+The <i>[in] </i>attribute indicates that a value is passed into the function, but nothing will ever be read out of the parameter. All <i>ByVal</i> parameters are passed on the stack, and you can never get a changed value back, so <i>[in] </i>is always appropriate for <i>ByVal</i> numeric types. If you actually look in WIN.ODL, however, the <b>GetParent</b> entry doesn't look like quite like the one shown above. Instead it looks like this: </p>
+<p class=indent>
+</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;[
+ &nbsp;&nbsp; usesgetlasterror,
+ &nbsp;&nbsp; entry("GetParent"),
+ &nbsp;&nbsp; helpstring("Gets the parent window handle of the given window")
+ &nbsp;&nbsp; ]
+ &nbsp;&nbsp; HWND&nbsp;&nbsp;&nbsp; WINAPI GetParent([in] HWND hWnd);
+</code></pre>
+<p class=indent>
+</p>
+<p>
+Let's skip over the optional <i>usesgetlasterror </i>for now and talk about the required <i>entry</i>. It indicates the exact name of the function as it appears in the DLL. If the DLL specified in this entry's module statement doesn't contain this name, you'll get rude errors when you try to call the function. As we'll see in detail later, aliases are created by giving the entry name the official DLL name and giving the prototype name as the name you want the user to see in the object browser and use in code. In other words, <i>entry </i>is equivalent to the Alias attribute in a <b>Declare</b> statement, except that in ODL, <i>entry </i>is always required even if it has the same value as the prototype name. </p>
+<p>
+We've already talked about <i>helpstring </i>so I won't say anything more here except that users of object browsers will consider you the lowest scum of the earth if you (like the Visual C++ class wizard) refuse to provide at least a <i>helpstring </i>for each entry. </p>
+<p>
+The actual entry definition comes at the end, after the parameter list, and it gives the information needed for the host environment to actually call the function. ODL doesn't know a thing about HWND or WINAPI, but it does know about the C <b>#define</b> and <b>typedef</b> statements. This particular definition works because I defined HWND and WINAPI in my standard definition include file, WINTYPE.ODL. I'll talk more about standard definitions later. </p>
+<h3>A Type Library Strategy</h3>
+<p>
+At this point, you know enough about type libraries to start thinking about strategies for creating and maintaining them. We'll get back to more entry specifics soon. </p>
+<p>
+The Windows API type library was a huge undertaking that involved translating most of the C include files for the Windows API. If I were starting over, I might do it differently. For example, I would reconsider writing a program that translates include files to type libraries. This would have been a difficult undertaking, and I didn't attempt it because, although most of the work was mechanical, there seemed to be an awful lot of exceptions and special cases. </p>
+<p>
+Instead, I use the following method for enhancing the Windows type library. Let's say, for example, that I decided to add ZAPI to the many APIs supported by WIN.TLB. 
+<ol>
+<li>
+Copy ZAPI.H to ZAPI.ODL.<br><br></li>
+<li>
+Include ZAPI.ODL in WIN.ODL.<br><br></li>
+<li>
+Comment out all the ZAPI definitions and constants. Windows include files are often messy, with lots of conditional compilation, so this isn't always as easy as it sounds.<br><br></li>
+<li>
+Make sure the whole blank mess compiles with MKTYPLIB.<br><br></li>
+<li>
+Start commenting in the most important ZAPI functions. For each one, add the entry attribute list and attributes for each parameter. Compile often to make sure everything is OK.<br><br></li>
+<li>
+Modify <b>#define</b> and <b>enum</b> statements to create ODL constants. </li>
+</ol>
+<p>
+I do many of the common editing tasks of converting from C++ to ODL with word processor macros or complex search and replace commands. Perhaps if I did this more frequently a tool would be worth the trouble. Don't let my limitations stop you from writing one.</p>
+<h3>The Very Last Error</h3>
+<p>
+The <b>GetLastError</b> function is the recommended way to determine what went wrong with a Win32 API call, but you can't use it in Visual Basic. That's because you don't really call API functions when you think you're calling them. The Visual Basic for Applications language engine intercepts your API calls and sends them on to the appropriate DLL. Sending them on involves making other API calls, such as <b>GetProcAddress</b> and possibly <b>LoadLibrary</b>. If you call <b>GetLastError</b>, the value it returns will usually be the one set by the last API call made by Visual Basic for Applications, not the one set by the API function you called. This problem isn't unique to Visual Basic for Applications. Any other OLE host that uses a type library is bound to have the same problem. </p>
+<p>
+The <i>usesgetlasterror </i>attribute tells Visual Basic for Applications to call <b>GetLastError</b> and save the result immediately after the internal call to the requested API. You can then access this value through the <b>LastDllError</b> property of the Visual Basic for Applications Err object. Visual Basic for Applications does this automatically any time you make a call through a <b>Declare</b> statement, but the attribute is required to make it happen with type libraries. Other type library hosts can implement their own system of returning the last error. The attribute is ignored in 16-bit mode because there is no 16-bit <b>GetLastError</b> function. </p>
+<p>
+Unfortunately, the <i>usesgetlasterror </i>attribute is required on every API call. It would be nice if you could just give it as an attribute for each module or for the entire library. I can't imagine where you would find a type library host that wouldn't require all entries to store the last error for system DLLs. Of course, when you write your own DLLs, you may wish to use some other system of error reporting rather than using <b>SetLastError</b> and <b>GetLastError</b>. </p>
+<h3>Compiling with MKTYPLIB</h3>
+<p>
+The MKTYPLIB command-line isn't difficult, but it can be long and tedious to retype repeatedly. My MKWIN batch file builds the 16- and 32-bit versions of the Windows API type library: </p>
+<pre><code>@echo off
+if "%1"=="32" Goto Win32
+mktyplib /nologo /win16 /DWIN16 /tlb win16.tlb win.odl
+:Win32
+if "%1"=="16" Goto Exit
+mktyplib /nologo /win32 /DWIN32 /tlb win32.tlb win.odl
+:Exit
+copy win*.tlb %windir%
+</code></pre>
+<p>
+Although the current version of MKTYPLIB is a 32-bit program, it can build 16-bit type libraries when given the /win16 option. The /D option passes macro names, just as in the C++ compiler. There are other options—you can see them if you type <i>MKTYPLIB ? </i>at a command line. We'll deal with them as they come up. </p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;The code in this article requires MKTYPLIB version 2.03. Early versions won't recognize the <i>usesgetlasterror </i>attribute. Although 16-bit versions of MKTYPLIB exist, they aren't compatible with the current version and can't be used on WIN.ODL. I've also been able to build the type library with a pre-release version of the MIDL compiler.</p>
+<p>
+The batch file works, and in fact it's how I developed the original type library. But the Microsoft Developer Studio makes development much easier. If you use a different compiler, you can probably set up a similar configuration. Essentially, you specify the same MKTYPLIB options for the IDE settings as you give with command-line options in MKWIN.BAT. 
+<ol>
+<li>
+Select New from the File menu and create a new Project Workspace named WINTLB. Select Dynamic-Link Library as the project type. You're not going to build a DLL, but you have to select some project type, and this one won't do any harm. <br><br></li>
+<li>
+Add WIN.ODL as the only project source file. It will automatically add the included ODL files as dependencies. Although the project type is DLL, no DLL will be created because there are no DLL source files. <br><br></li>
+<li>
+Make sure WINTYPE.ODL exists in the INCLUDE path known to the developer studio. I copy it to \MSDEV\INCLUDE. <br><br></li>
+<li>
+Create two configurations—Win32 Release and Win32 Release 16—in the Configurations dialog ("Configurations..." on the Build menu). What you really want is a Win16 Release, but I couldn't figure out a way to get the Developer Studio to recognize this name. In theory, you could have separate Debug configurations, but I can't think of any options that I would set differently for debugging. <br><br></li>
+<li>
+From the Project Settings dialog, select the OLE Types tab. You can think of OLE Types as a pseudonym for MKTYPLIB Options. <br><br></li>
+<li>
+Add WIN32 to the Preprocessor Definitions field of the Win32 Release configuration. Leave this field unchanged for the Win16 Release configuration. <br><br></li>
+<li>
+By default, you'll see the /win32 option in the Project Options field. Change this to /win16 for the Win32 Release 16 configuration. <br><br></li>
+<li>
+Select the WIN.ODL files for Win32 Release in the Settings For list and set the Output file name field to the target TLB file. I usually build the Windows API type library in the Windows directory: C:\WINDOWS\WIN.TLB. If your Windows directory is different or if you want a different target directory, adjust accordingly. I wanted to use <i>%windir%</i> here, but unfortunately the Developer Studio doesn't recognize environment variables in dialog box fields. <br><br></li>
+<li>
+Select the WIN.ODL files for Win32 Release 16 in the Settings For list, and set the Output filename field to an appropriate file such as C:\WINDOWS\WIN16.TLB. <br><br></li>
+<li>
+Switch from the OLE Types pane to the Debug pane. In the General category, enter VB32.EXE as the executable for the debug session. Fill in the working directory and add /R and the Basic project name in the program arguments field. For example, enter <i>/R TestWin</i>. </li>
+</ol>
+<p>
+That's it. Click the build button, and your type library will be built. If you hit a compile-time error, you'll see it in the Build pane of the Output window. </p>
+<p>
+If you build successfully, you can press the Go button to load Visual Basic and run your test program. You'll get a message telling you that VB32.EXE does not contain debugging information. No kidding! There's no way to turn off this obnoxious message in Visual C++ 4.0 (or in earlier IDEs going all the way back to QuickC® for Windows), but fortunately you won't see it in version 4.1 or higher. </p>
+<h3>Debugging Type Libraries</h3>
+<p>
+In most languages, bugs can occur at compile time or run time. With MKTYPLIB, however, you also frequently get bugs at preprocess time. The story isn't good on any of these. In fact, there's no way to put it nicely: MKTYPLIB can be the compiler from hell. It's not a very forgiving tool when you need to be forgiven, and it's too forgiving when you want immediate feedback. Furthermore, Visual Basic 4.0 can be the interpreter from hell when reporting errors in type libraries. </p>
+<p>
+Compile-time errors are easy to deal with. Like any reasonable compiler, MKTYPLIB puts out error messages with the line number of the offending line. If you compile from within the Microsoft Developer Studio (or most other IDE environments), an error message will be displayed in the output window after an unsuccessful compile. You can give the Next Error command (toolbar button, hot key, or Goto menu item) to put the cursor on the error line. </p>
+<p>
+Unfortunately, MKTYPLIB reports only one error at a time. The MIDL compiler reports multiple errors, but until it's released, you'll have to rebuild frequently. During early stages of development, you can speed compiles by commenting out all of the <b>#include</b> statements in WIN.ODL other than the one you're working on. Compile-time errors are frequently based on differences between the C++ way of evaluating expressions and the MKTYPLIB way. We'll see some specifics later.</p>
+<p>
+Preprocessor errors are more of a problem. MKTYPLIB calls the C++ preprocessor (C1.EXE) to process<b> #include</b>, <b>#define</b>, and other statements. If the preprocessor fails, it will report an error, but MKTYPLIB will throw this information directly into the ozone. You'll see nothing but the following error message:</p>
+<pre><code>fatal error M0006: unable to pre-process input file
+</code></pre>
+<p>
+Which file couldn't be preprocessed? Which line caused the failure? Debugging such errors can require tedious experimenting by commenting out various parts of the type library until you narrow down the problem. I did it the hard way for many months, but I've finally found a way to find errors with a little less pain. Use the C++ command-line compiler to preprocess the file directly. </p>
+<pre><code>Cl /DWIN32 /E /c win.odl &gt; win.out
+</code></pre>
+<p>
+By examining the resulting WIN.OUT file, you can tell where the preprocessor stopped working. It's not a foolproof shortcut, but better than nothing. </p>
+<p>
+Finally, you may have to deal with run-time errors. You might build your type library successfully; Visual Basic might load it successfully. But your Basic program might still fail when it uses type library function entries or constants. Worse yet, it will probably fail rudely. Suddenly a Visual Basic project that used to work fine will start giving an error message that says something like this: "You screwed up something in your type library and I know what it is, but I'm not going to tell you." Well, maybe that won't be the exact wording, but that's what Visual Basic means when it says, "Invalid ordinal entry" or "Error in loading DLL". You'll get no hint of which ordinal entry or DLL is invalid. </p>
+<p>
+You'll be back to commenting out big chunks of code in the type library and in your Basic source file until the error goes away. Then you comment things back in until the error returns and you can figure out what caused it. To avoid getting caught in this cycle, it pays to change your type library in small increments, making backups frequently. This in itself won't always save you, however, because a type library might work with one Basic module but fail with another that calls different functions. Here are some of the errors I've encountered:
+<ul type=disc>
+<li>
+Putting a type library function entry in the wrong module causes the message "Specified DLL function not found." This is an easy mistake to make. It's hard to guess whether some functions go in KERNEL32, USER32, or GDI32. Once you get this error, removing the offending Basic statement won't get rid of the message because the wrong DLL is already loaded in Visual Basic at run time. You must quit Visual Basic to unload it. <br><br></li>
+<li>
+If you misspell the name of a DLL in a module statement, Visual Basic gives you the helpful message "File not found." Which file? Guess. <br><br></li>
+<li>
+Giving a function an unsigned argument causes the error "Function marked as restricted or uses an OLE type not supported in Visual Basic." Visual Basic thinks all numbers are signed (except Bytes, which are always unsigned). You would also get this error if you defined a type library function entry with a structure argument and then tried to pass a Basic UDT to the function. There are several other kinds of definitions that Basic doesn't like. MKTYPLIB is supposed to work for any language client, so it won't stop you from doing things Visual Basic doesn't like. </li>
+</ul>
+<h3>Standard Definitions</h3>
+<p>
+The WINTYPE.ODL file contains standard definitions for common Windows types that you might need from any type library. Let's take a look:</p>
+<pre><code>#ifdef SIGNAWARE
+// For host languages that recognize unsigned numbers
+typedef unsigned short&nbsp; WORD;
+typedef unsigned short&nbsp; USHORT;
+typedef unsigned long&nbsp;&nbsp; DWORD;
+typedef unsigned long&nbsp;&nbsp; ULONG;
+typedef unsigned int&nbsp;&nbsp;&nbsp; UINT;
+#else
+// For host languages (such as VB) that only recognize signed numbers
+typedef short&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WORD;
+typedef short&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; USHORT;
+typedef long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DWORD;
+typedef long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ULONG;
+typedef int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; UINT;
+#endif
+typedef unsigned char&nbsp;&nbsp; BYTE;&nbsp;&nbsp; // BYTE is unsigned under VB
+typedef int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BOOL;
+typedef long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; LONG;
+typedef int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; HANDLE;
+typedef int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; HWND;
+.
+.
+.
+typedef DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; COLORREF;
+typedef UINT&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WPARAM;
+typedef LONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; LPARAM;
+typedef LONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; LRESULT;
+
+#define VOID void
+#define FAR far
+#define LPCSTR LPSTR
+#ifdef WIN32
+#define WINAPI __stdcall
+#else
+#define WINAPI __pascal
+#endif
+</code></pre>
+<p>
+Notice that the definitions for some of the integer types are lies. In Windows, a DWORD is an unsigned long, but Visual Basic doesn't recognize unsigned numbers. The object definition language has no problem with unsigned numbers, but if you declare any unsigned parameters, return values, or constants in your type library, Visual Basic will fail. Signed and unsigned are just two different ways of looking at the same number. The bits are the same, and there's no harm done in receiving Windows unsigned numbers as Basic signed numbers. </p>
+<p>
+Generally, you should write type libraries to be language-independent, and you'd be pretty rude to lie about the sign if your container supported unsigned numbers. It's a sad fact that you can't make a single type library that politely serves both kinds of containers, but at least you can use the SIGNAWARE macro to create signed and unsigned versions of the type library from the same source file. </p>
+<p>
+The macros at the end of the file define some common Windows modifiers. FAR maps to <i>far, </i>which is ignored because there hasn't been any such concept since the 32-bit revolution. Unlike C++, ODL doesn't understand <i>const </i>as a modifier. The LPCSTR type (const char *) can't be defined, so you have to lie again to claim that LPCSTR is the same as LPSTR. The concept of <i>const </i>can be indicated by the <i>[in] </i>attribute in ODL, but there's no way to enforce this through a macro. </p>
+<h2>Parameter Types</h2>
+<p>
+When you're writing type libraries, every procedure parameter is an adventure. Just when you think you've seen them all, Windows throws out something new. Still, you'll encounter some familiar patterns. Let's look first at parameter attributes, and then at some common Windows types. </p>
+<h3>Parameter Attributes</h3>
+<p>
+When defining type library functions, you use attributes on each parameter to indicate how you want the parameter to be treated. The attribute is a hint to the client (caller) about how the parameter will be used. It can be <i>[in]</i>, <i>[out]</i>, or <i>[in, out]</i>. (I've never programmed in Ada, but I'm told this language has a similar feature.) MKTYPLIB compiles the attribute into a bitfield that can be read by the caller. (For those OLE experts who care, it's the wIDLFlags field of the IDLDESC type, which is part of the ELEMDESC type, which is part of . . . never mind. This isn't a book about how to write OLE containers.) In short, Visual Basic can read the attribute, and act accordingly. </p>
+<p>
+But before you get too excited about this cool feature, let me warn you. Visual Basic only cares about attributes for the three OLE-specific types: BSTR, VARIANT, and SAFEARRAY. We won't be using those types in this article. They are rarely of any interest in type libraries that map existing DLLs. You'll use them when you create your own DLLs in later articles of this series. I'll have more to say about them then. </p>
+<p>
+In this article, attributes are used primarily as documentation. They help you understand the purpose of the parameter. Values passed on the stack (<b>ByVal</b> in Basic) are always <i>[in] </i>parameters. You can't get anything back from the stack. Values can be passed through pointers (<b>ByRef</b> in Basic) for two reasons—because the value is too big to be efficiently passed by value, or because you want to get something back. In ODL you use the <i>[in] </i>attribute to indicate that a reference parameter is for input only. If you're passing by reference in order to get something back, you use the <i>[out] </i>or <i>[in,out] </i>attributes. </p>
+<p>
+For example, the <b>SetWindowPlacement</b> function passes a WINDOWPLACEMENT structure. If it were possible to define this function for Basic in a type library (more on why you can't later), it would have an <i>[in] </i>parameter. The <b>GetWindowPlacement</b> function expects a blank WINDOWPLACEMENT structure, which it will fill. Therefore, it would be defined with an <i>[out] </i>parameter, if it could be defined. If there were a <b>ChangeWindowPlacement</b> function that expected a structure on input, but modified that structure on output, it would take an <i>[in, out] </i>parameter. </p>
+<h3>String Parameters</h3>
+<p>
+Here's the <b>Declare</b> statement for a typical API string function, <b>GetWindowsDirectory</b>. </p>
+<pre><code>#If Win32
+Declare Function GetWindowsDirectory Lib "KERNEL32" _
+ &nbsp;&nbsp; Alias "GetWindowsDirectoryA" (ByVal lpBuffer As String, _
+ &nbsp;&nbsp; ByVal nSize As Long) As Long
+#Else
+Declare Function GetWindowsDirectory Lib "KERNEL" ( _
+ &nbsp;&nbsp; ByVal lpBuffer As String, ByVal nSize As Integer) As Integer
+#EndIf
+</code></pre>
+<p>
+Like most API functions that return information in strings, you pass in a buffer to receive the string and an integer with the maximum length of the string. The actual length of the string comes back in the return value. Here's the type library entry:</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;[
+ &nbsp;&nbsp; #ifdef WIN32
+ &nbsp;&nbsp; usesgetlasterror,
+ &nbsp;&nbsp; entry("GetWindowsDirectoryA"),
+ &nbsp;&nbsp; #else
+ &nbsp;&nbsp; entry("GetWindowsDirectory"),
+ &nbsp;&nbsp; #endif
+ &nbsp;&nbsp; helpstring("Gets Windows directory"),
+ &nbsp;&nbsp; ]
+ &nbsp;&nbsp; UINT WINAPI GetWindowsDirectory([in, out] LPSTR lpszSysPath,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [in] UINT cbSysPath);
+</code></pre>
+<p>
+For most string functions, the <i>entry </i>name must use the ANSI or Unicode™ name that actually appears in the DLL. In other words, <i>entry </i>is equivalent to the Alias attribute in a <b>Declare</b> statement. The name in the prototype is the one that you use in your Basic source code. </p>
+<p>
+The LPSTR type and its Unicode cousin, LPWSTR, are specifically recognized by ODL, although they are essentially equivalent to char * and wchar_t * in C++. Visual Basic (version 4.0, anyway) doesn't know how to handle Unicode API functions, so you'll always use LPSTR rather than LPWSTR. The LPCSTR type represents a constant string in C++, but inasmuch as ODL doesn't recognize the <i>const</i> modifier, LPCSTR is just a preprocessor <b>#define</b> for LPSTR. ODL also recognizes the BSTR type, but we won't use it in this article.</p>
+<h3>Pointer and Array Parameters</h3>
+<p>
+Functions use pointers when they need to return more than one parameter or to return data in structures or arrays. Normally you pass in an empty variable and the function fills it with a value. <b>GetScrollRange</b> is a classic example. Its <b>Declare</b> statement looks like this: </p>
+<pre><code>Declare Function GetScrollRange Lib "USER32" ( _
+ &nbsp;&nbsp; ByVal hWnd As Long, ByVal nBar As Long,
+ &nbsp;&nbsp; lpMin As Long, lpMax As Long) As Long
+</code></pre>
+<p>
+The <i>lpMin </i>and <i>lpMax </i>parameters are passed by reference so that they can receive the results. The ODL version looks like this: </p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;[
+ &nbsp;&nbsp; usesgetlasterror,
+ &nbsp;&nbsp; entry("GetScrollRange"),
+ &nbsp;&nbsp; helpstring("Gets the minimum and maximum positions of a scroll bar"),
+ &nbsp;&nbsp; ]
+ &nbsp;&nbsp; void&nbsp;&nbsp;&nbsp; WINAPI GetScrollRange([in] HWND hwnd, [in] int fnBar,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [out] int FAR * lpnMinPos,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [out] int FAR * lpnMaxPos);
+</code></pre>
+<p>
+The FAR statement is a leftover from the bad old days. In 32-bit code it's simply a blank <b>define</b> that will be ignored. The <i>[out]</i> attribute indicates that the input value (if any) will be ignored and an output value will be written to the parameter. </p>
+<p>
+To an API function, an array parameter is simply a pointer to a variable that happens to have several more variables of the same type next to it in memory. The <i>lpMin </i>and <i>lpMax </i>parameters above are simply one-member arrays. The API convention is to pass the number of elements in the array in a separate parameter. </p>
+<p>
+Here's an ODL entry for the <b>SetSysColor</b> function, which takes two array parameters: </p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;[
+ &nbsp;&nbsp; usesgetlasterror,
+ &nbsp;&nbsp; entry("SetSysColor"),
+ &nbsp;&nbsp; helpstring("Sets colors of the display element..."),
+ &nbsp;&nbsp; ]
+ &nbsp;&nbsp; void&nbsp;&nbsp;&nbsp; WINAPI SetSysColors([in] int cElements,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [in] int FAR * lpaElements,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [in] COLORREF FAR * lpaRgbValues);
+</code></pre>
+<p>
+Like most API array functions, this one has a separate parameter, <i>cElements</i>,<i> </i>to indicate the number of elements in the array (or arrays, in this case). The <i>lpaElements </i>parameter is an array of constants indicating display elements to be modified, and <i>lpaRgbValues </i>indicates the new colors for each corresponding index. </p>
+<p>
+Don't confuse API arrays with Basic arrays, which are actually OLE safe arrays. They work very differently, as we'll see in Article 5. </p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;This entry also illustrates one of the more unpleasant aspects of the ODL syntax. Helpstring entries must fit on one line. If you look up <b>SetSysColors</b> in USER.ODL, you'll see that the real help description is almost 120 characters wide, and many other help strings are even wider. ODL authors must bear the same handicap Visual Basic programmers had to put up with until version 4.0—lack of a line continuation character. Object Browsers such as the one in Visual Basic normally perform automatic word wrapping, so it doesn't matter how long you make your helpstrings. But the single-line limitation does make it hard to read your own source code, and even more difficult to display code in articles like this one. Furthermore, the text editor you use to edit ODL files may have a line length limitation. Fortunately, Microsoft Developer Studio doesn't have such a limitation—or at least not one that I had the patience to exceed when I tried typing a line longer than 500 characters. </p>
+<h3>Typeless Parameters</h3>
+<p>
+The <b>SendMessage</b> function is a classic example of the typeless parameter. Here are a couple of 32-bit Basic <b>Declare</b> statements for it: </p>
+<pre><code>Declare Function SendMessage Lib "USER32" Alias "SendMessageA" ( _
+ &nbsp;&nbsp; ByVal hWnd As Long, ByVal wMsg As Long, _
+ &nbsp;&nbsp; ByVal wParam As Long, ByVal lParam As Any) As Long
+Declare Function SendMessageByRef Lib "USER32" Alias "SendMessageA" ( _
+ &nbsp;&nbsp; ByVal hWnd As Long, ByVal wMsg As Long, _
+ &nbsp;&nbsp; ByVal wParam As Long, lParam As Any) As Long
+</code></pre>
+<p>
+The <i>lParam </i>argument can be almost any type, depending on what message you are sending. Sometimes you send data by value in a Long. Sometimes you send a string (a pointer to characters in C++). Sometimes you send a pointer to data in a structure, array, or other variable. The declarations above allow you to pass any kind of data either by value or by reference. Actually, you could get by with only the second definition if you were willing to give the ByVal keyword in the Basic call, rather than in the declaration, whenever you wanted to pass something by value. </p>
+<p>
+But you can't declare either of these in a type library because ODL has no equivalent of the As Any statement. A C++ programmer might guess that <i>void * </i>would be equivalent to As Any, but unfortunately it doesn't work that way. You can indeed define a parameter as <i>void * </i>in ODL, but Visual Basic won't have a clue what you're talking about. </p>
+<p>
+That doesn't mean you can't define <b>SendMessage</b>. It just means you'll have to define a group of aliased <b>SendMessage</b> functions such as these:</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;[
+ &nbsp;&nbsp; #ifdef WIN32
+ &nbsp;&nbsp; usesgetlasterror,
+ &nbsp;&nbsp; entry("SendMessageA"),
+ &nbsp;&nbsp; #else
+ &nbsp;&nbsp; entry("SendMessage"),
+ &nbsp;&nbsp; #endif
+ &nbsp;&nbsp; helpstring("Sends a Windows message (LPARAM as String)")
+ &nbsp;&nbsp; ]
+ &nbsp;&nbsp; LRESULT WINAPI SendMessageAsStr([in] HWND hwnd, [in] UINT uMsg,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [in] WPARAM wParam,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [in, out] LPSTR lParam);
+
+ &nbsp;&nbsp; [
+ &nbsp;&nbsp; #ifdef WIN32
+ &nbsp;&nbsp; usesgetlasterror,
+ &nbsp;&nbsp; entry("SendMessageA"),
+ &nbsp;&nbsp; #else
+ &nbsp;&nbsp; entry("SendMessage"),
+ &nbsp;&nbsp; #endif
+ &nbsp;&nbsp; helpstring("Sends a Windows message (LPARAM as Long pointer)")
+ &nbsp;&nbsp; ]
+ &nbsp;&nbsp; LRESULT WINAPI SendMessageAsLp([in] HWND hwnd, [in] UINT uMsg,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [in] WPARAM wParam,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [in] LONG lParam);
+
+ &nbsp;&nbsp; [
+ &nbsp;&nbsp; #ifdef WIN32
+ &nbsp;&nbsp; usesgetlasterror,
+ &nbsp;&nbsp; entry("SendMessageA"),
+ &nbsp;&nbsp; #else
+ &nbsp;&nbsp; entry("SendMessage"),
+ &nbsp;&nbsp; #endif
+ &nbsp;&nbsp; helpstring("Sends a Windows message (LPARAM as ByRef Long or Long array)")
+ &nbsp;&nbsp; ]
+ &nbsp;&nbsp; LRESULT WINAPI SendMessageForLong([in] HWND hwnd, [in] UINT uMsg,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [in] WPARAM wParam,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [in, out] LONG * lParam);
+</code></pre>
+<p>
+Notice that the <i>entry </i>attribute is the same for all of these because they're actually the same function in the system DLL. The name and the parameter types are different in each declaration, and you'll see these different aliases in an object browser. </p>
+<h3>The Structure Problem</h3>
+<p>
+Many Windows API functions receive parameters as blocks of related variables called structures. Basic has a syntax for representing these blocks of related variables as user-defined types (UDTs). For example, you can define the following type in Basic:</p>
+<pre><code>Type TPoint
+ &nbsp;&nbsp; x As Long
+ &nbsp;&nbsp; y As Long
+End Type
+</code></pre>
+<p>
+Windows calls this structure a POINT, but I change that because I find all-uppercase names confusing in Basic. You can write a <b>Declare</b> statement to use this type in a function like this:</p>
+<pre><code>Declare Function GetCurrentPositionEx Lib "GDI32" ( _
+ &nbsp;&nbsp; ByVal hDC As Long, pt As TPoint) As Long
+</code></pre>
+<p>
+Object Description Language has a <b>typedef</b> <b>struct</b> syntax for blocks of related variables. You can define the type like this in ODL:</p>
+<pre><code>typedef struct {
+ &nbsp;&nbsp; long x;
+ &nbsp;&nbsp; long y;
+} TPoint;
+</code></pre>
+<p>
+You can define an ODL entry to use this type in a function like this: </p>
+<pre><code>[
+usesgetlasterror,
+entry("GetCurrentPositionEx"),
+helpstring("Gets current position in a TPoint structure"),
+]
+BOOL WINAPI GetCurrentPositionEx ([in] HDC hDC, [out] TPoint * ppt);
+</code></pre>
+<p>
+So what's the problem? You should be able to use the ODL TPoint in a function defined by a Basic <b>Declare</b> statement, or use the Basic TPoint in a function defined by an ODL entry, right? Wrong! Worse yet, you can't even use the ODL TPoint in the ODL function. An ODL structure may look like a Basic UDT to you and me, but it doesn't look the same to Basic. The Visual Basic development team looked at what it would take to make this work in version 4.0, but this particular enhancement didn't make the grade. I've heard rumors that the next version of Visual Basic will be able to handle structures (and void * for As Any). In the meantime, you'll have to use Basic <b>Declares</b> and UDTs for API functions that take structures—unless you want to hack. </p>
+<p>
+I'm not going to get into all the details of what you have to hack to get ODL definitions to work in Visual Basic; it's discussed in Chapter 6 of <i>Hardcore Visual Basic</i>. Here's a compressed version. Let's say you have the following ODL entry:</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;[
+ &nbsp;&nbsp; usesgetlasterror,
+ &nbsp;&nbsp; entry("GetCurrentPositionEx"),
+ &nbsp;&nbsp; helpstring("Get current position in a POINT structure"),
+ &nbsp;&nbsp; ]
+ &nbsp;&nbsp; BOOL&nbsp;&nbsp;&nbsp; WINAPI GetCurrentPositionEx([in] HDC hdc,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [in, out] int FAR * lpPoint);
+</code></pre>
+<p>
+Notice that the helpstring says it's a POINT structure, but the prototype says it's a pointer to an int, which to 32-bit Visual Basic is an array of Longs. Now let's say you have the following code: </p>
+<pre><code>Dim axy(0 To 1) As Long
+f = GetCurrentPositionEx(hDC, axy(0))
+</code></pre>
+<p>
+After this call, the <i>x</i> coordinate would be in axy(0) and the <i>y</i> coordinate would be in axy(1). Windows simply fills the first 8 bytes of memory at the address of axy(0) with the appropriate values. It doesn't care that you passed it a two-element array of Longs rather than a TPoint variable. I'll leave you to figure out how to expand on this technique to create and use a <b>CPoint</b> class (or a class representing any structure) in Visual Basic. </p>
+<p>
+The point is, this technique has to be hacked on the Visual Basic side, and all the type library can do to help is to take a parameter that is a pointer to the target structure's first member. </p>
+<h2>All About Constants</h2>
+<p>
+Type libraries provide a convenient alternative to the Visual Basic <b>Const</b> statement. You can define all the thousands of Windows constants. Furthermore, you can define constants that can't be declared in Basic. The ODL language provides two different ways to declare constants, each with its advantages and disadvantages. </p>
+<h3>Constants with the const Statement</h3>
+<p>
+You can place all the module statements you want in an ODL module block with the <b>Const</b> statement. The ODL statement looks and works pretty much the same as the C++ <b>const</b> statement. </p>
+<p>
+Most of the constants you'll want to define will be integers. Let's take a random constant from Windows, MF_SEPARATOR. In the Windows include files, this constant appears as a <b>#define</b> rather than a <b>const</b>. It looks like one of these statements: </p>
+<pre><code>#define MF_SEPARATOR 0x00000800L&nbsp;&nbsp;&nbsp; // 32-bit WINUSER.H
+#define MF_SEPARATOR 0x0800&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // 16-bit WINDOWS.H
+</code></pre>
+<p>
+That's what I'd call an unsigned integer, and if you look at functions such as <b>InsertMenu</b> that use this flag, you'll see that the type is indeed UINT. Type libraries can't expose external constants with <b>#define</b>, so you have to convert to <b>const</b>: </p>
+<pre><code>[ helpstring("Flag for menu functions: Separator line") ]
+const UINT MF_SEPARATOR = 0x0800;
+</code></pre>
+<p>
+Always define a help string for your constants. You can start by writing them for all the constants I didn't get around to in the Windows API type library. </p>
+<p>
+As you may remember, Visual Basic doesn't recognize unsigned integer types, so UINT is actually a typedef for the <i>int </i>type:</p>
+<pre><code>typedef&nbsp; int UINT; 
+</code></pre>
+<p>
+This typedef resides in a conditional compilation block in WINTYPE.ODL so that you can use the correct unsigned type if you are targeting an OLE client that understands unsigned numbers. </p>
+<p>
+Normally, decimal and hexadecimal constants work fine, but if you want to define a constant with the high bit set, you might have a little trouble:</p>
+<pre><code>const short&nbsp;&nbsp;&nbsp; t1 =&nbsp; 0x8000;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Fails 16-bit and 32-bit
+const int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; t2 =&nbsp; 0x8000;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Fails 16-bit
+const long&nbsp;&nbsp;&nbsp;&nbsp; t3 =&nbsp; 0x80000000;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Never fails 
+</code></pre>
+<p>
+You can get around this by defining the number in decimal rather than hexadecimal form. </p>
+<pre><code>const short&nbsp;&nbsp;&nbsp; t1 =&nbsp; -32768;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Never fails 
+</code></pre>
+<p>
+Of course, you're much less likely to hit this problem if you're 32-bit only. </p>
+<p>
+You can also define floating point constants if your Basic programs need them. </p>
+<pre><code>const DOUBLE pi = 3.14159265;
+</code></pre>
+<h3>String Constants</h3>
+<p>
+Some of the most useful constants are strings because ODL is more flexible than Basic in dealing with characters. One of the most frustrating minor annoyances of Visual Basic before type libraries was the inability to define a constant for that most common of strings, the carriage return/line feed sequence. You could define the string easily enough:</p>
+<pre><code>sCrLf = Chr$(13) &amp; Chr$(10)
+</code></pre>
+<p>
+But you only need to define this variable once, and you want it to be globally available forever from anywhere. In other words, you want a constant. But you can't code</p>
+<pre><code>Public Const sCrLf = Chr$(13) &amp; Chr$(10)
+</code></pre>
+<p>
+because Basic doesn't like the <b>Chr$</b> function or concatenation operators in constants. But in a type library it's easy:</p>
+<pre><code>[ helpstring("Carriage return/line feed (ASCII 13,10)") ]
+const LPSTR sCrLf = "\r\n";
+</code></pre>
+<p>
+You can write constants for all the control characters that have C++ escape sequences:</p>
+<pre><code>[ helpstring("Bell (ASCII 7)") ]
+const LPSTR sBell = "\a";
+</code></pre>
+<p>
+The more obscure control characters are more difficult. You might expect that ODL would recognize C++ hexadecimal or octal escape sequences, but no such luck:</p>
+<pre><code>const LPSTR sEOT = "\x4";&nbsp;&nbsp;&nbsp;&nbsp; // Hex doesn't work 
+const LPSTR sEOT = "\4";&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Neither does octal
+</code></pre>
+<p>
+This limitation seems to be fixed in the MIDL compiler, but for now you have to find yourself an editor that allows you to enter control characters directly into text. If the Microsoft Developer Studio does this, I haven't figured out how. The old MS-DOS® DEBUG program works if all else fails. Fortunately, I've already done it for you.</p>
+<p>
+Here are three other handy strings:</p>
+<pre><code>[ helpstring("Empty string (\"\")") ]
+const LPSTR sEmpty = "";
+[ helpstring("Null character (ASCII 0)") ]
+const LPSTR sNullChr = "\0";
+[ helpstring("Null string pointer (address zero)") ]
+const LPSTR sNullStr = 0;
+</code></pre>
+<p>
+The sEmpty constant is equivalent to "" in Basic. The sNullChr constant is equivalent to Chr$(0), and sNullStr is a null pointer. The null pointer is particularly handy because it has the value zero, but is of String type. You can pass it to API functions (such as <b>FindWindow</b>) that expect either a string or a null pointer. The Visual Basic for Applications type library has an equivalent constant called vbNullString.</p>
+<h3>Constants with the typedef enum Statement</h3>
+<p>
+You can also define constants with the <b>typedef</b> and <b>enum</b> statements. In C++ a <b>typedef</b> is a <b>typedef</b> and an <b>enum</b> is an <b>enum</b> , but ODL has its own strange logic. There is no such thing as an <b>enum</b> without a <b>typedef</b>. A <b>typedef</b> block goes inside the main library block. You can't nest it within a module block. </p>
+<p>
+Here's a typical <b>typedef</b> <b>enum</b>:</p>
+<pre><code>[ helpstring("Error constants") ]
+typedef enum {
+ &nbsp;&nbsp; [ helpstring("There really isn't any such file anywhere") ]
+ &nbsp;&nbsp; errNoSuchFile = 1, 
+ &nbsp;&nbsp; [ helpstring("No directory either") ]
+ &nbsp;&nbsp; errNoSuchDirectory,
+ &nbsp;&nbsp; [ helpstring("What planet are you from, anyway?") ]
+ &nbsp;&nbsp; errNoSuchPlanet
+} Errors;
+</code></pre>
+<p>
+If your ODL documentation seems to indicate a different syntax for <b>enum</b>s or <b>typedef</b>s, ignore it. This is how they really work. </p>
+<p>
+Why use a <b>typedef enum</b> rather than individual <b>const</b> statements within a module? Not much reason, really. They come to the same thing. Generally, you use a <b>const</b> to define a constant with a specific value. You use an <b>enum</b> for a group of related constants when you don't really care what the value is. The compiler automatically increments each <b>enum</b> element. But you can also assign a separate value to each element. An <b>enum</b> is equivalent to an int—an Integer in 16-bit Basic or a Long in 32-bit Basic. </p>
+<p>
+I usually use <b>const</b> statements in type libraries that map system DLLs. I use <b>enum</b>s more often in type libraries for DLLs or OLE objects. </p>
+<h2>Type Library Help Files</h2>
+<p>
+I haven't had much to say about help files for type libraries, but let me take this opportunity to lay down the law once and for all. You should never create a type library without a corresponding help file that explains every entry. So why didn't I create a help file for the Windows API type library? </p>
+<p>
+I wanted to, and at various times I had different schemes for doing it:
+<ul type=disc>
+<li>
+At one time I had a grand idea of extracting all the C-specific help text from Windows API text files and converting it to a Basic-specific help file. Basic function syntax would replace C syntax. Basic examples would replace C examples. Functions that don't work with Basic would be noted. Hacks required to call certain functions from Basic would be explained. Each entry in the type library would have a help-context link to the corresponding entry in the help file. All I needed to complete this task was an army of word processing specialists, a few Basic gurus to help translate the text and write examples, and several months of overtime. You'd have to pay for this product (no way was I going to provide it free with a book CD), but to a lot of hardcore Visual Basic programmers, such a help file would be cheap at any price. It didn't happen for me, but don't let that stop you. If you create this product, I will be first in line with hard cash.<br><br></li>
+<li>
+Plan B was to link to the type library help contexts to the existing Windows API help files. The text for each entry would still be C-specific, but at least you'd get there with a single click from the Visual Basic object browser. The only problem is that you'd have to figure out every single help context number from the API help files and insert them into the corresponding ODL entries. There are tools for dumping such information from help files, but this is not a task for human beings. A wizard program would have to be written to extract the context numbers from the help file and insert them in the type library source. I didn't have the time or the expertise to write this wizard. <br><br></li>
+<li>
+Plan C was to create a forwarding help file. I would write a wizard that would go through the type library source, numbering the help context of each entry consecutively. At the same time it would create a separate help file that associated the entry names with the context numbers. Each entry in the help file would be a macro that called the entry name in the real help file. I could go into more detail, but it doesn't matter because 32-bit Windows API help is no longer provided in a help file. Starting with Visual Basic 4.0, the Win32 API is documented in the Microsoft Developer Network (MSDN)/Visual Basic starter kit (MSDNVB). This is an InfoView file, not a help file. On to plan D. <br><br></li>
+<li>
+Your forwarding help file must call a help macro to find a given keyword in the MSDNVB InfoView file. I'll show you how in a minute, but first let me say why I never did this. The MSDNVB help file supplied with Visual Basic 4.0 is fatally flawed for this particular use. The index of keywords is messed up so that if you look up <b>GetWindow</b>, you'll come out at a random topic. This isn't a great problem because most users find topics in MSDNVB with the query tool rather than the index. But if you're calling keywords automatically from a help file, you need the keyword index. The Win32 API is documented in several other InfoView help files, such as the ones in the MSDN Library or the one in Microsoft Visual C++. The indexes in these work fine, but I can't be sure all Visual Basic programmers have access to them. </li>
+</ul>
+<p>
+So I'm stymied at every turn in efforts to connect the Windows API type library to Win32 help. Nevertheless, I'll show you what I had in mind. Because the current version of MSDNVB doesn't work, we'll assume you and your customers all have the full MSDN Library for the following examples. In order to bring up a keyword in an InfoView help file, you have to run a program called IV2TOOL.EXE with a command line like this: </p>
+<pre><code>iv2tool /t *msdn /k GetWindow
+</code></pre>
+<p>
+We'll further assume that you name your forwarding help file WINTLB.HLP and that you specify it as the help file for each module in your type library: </p>
+<pre><code>[
+uuid(54674046-3A82-101B-8181-00AA003743D3),
+helpstring("Windows User Functions"),
+dllname("USER32.DLL")
+helpfile("WINTLB.HLP")
+]
+module User { ...
+</code></pre>
+<p>
+You fill the help file with topics that do nothing except invoke the <b>ExecFile</b> help macro for each function entry: </p>
+<pre><code>ExecFile(iv2tool, /t *msdnvb /k GetWindow)
+</code></pre>
+<p>
+For each entry in the type library, you give a help context number and simultaneously put the same help context number in the type library. So if the macro to call <b>GetWindow</b> goes in help context 357, you give the <b>GetWindow</b> type library entry the same number: </p>
+<pre><code>[
+usesgetlasterror,
+entry("GetWindow"),
+helpstring("Gets handle of window with specified relationship..."),
+helpcontext(357)
+]
+HWND&nbsp;&nbsp;&nbsp; WINAPI GetWindow([in] HWND hwnd, [in] UINT uCmd);
+</code></pre>
+<p>
+Matching the numbers in the help file and the type library file is far too tedious for human beings, but it shouldn't be difficult to write a program to do it automatically. There's one other little hitch. Neither IV2TOOL.EXE nor its 32-bit cousin, IVTOOL.EXE, are supplied with Visual Basic, although IV2TOOL.EXE comes with the full MSDN Library. You'll need to get permission to redistribute these files to your customers.</p>
+<p>
+In short, there are a lot of obstacles to providing help files for type libraries that map system API functions for Visual Basic. There's no such problem with help files for DLLs and OLE objects that you create. You just create the help file and all its contents and map the context entries to help context numbers in the type library. But that's another topic.</p>
+</BODY>
+</HTML>

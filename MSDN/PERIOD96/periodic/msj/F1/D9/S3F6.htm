@@ -1,0 +1,1184 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Hide Your Data and Make Objects Responsible for their Own User Interfaces</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  Hide Your Data and Make Objects Responsible for their Own User Interfaces</H1><P>Allen Holub</P>
+<P>Allen Holub is a programmer, consultant, and trainer specializing in C++, object-oriented design, and Microsoft operating systems. He can be reached at allen@holub.com or http://www.holub.com.</P>
+<P>A fundamental principle of object-oriented programming (OOP) is data hiding: you should never expose the implementation details of a class to the outside world. Among other things, this means all data members of a class must be private. Period. No exceptions. You should be able to change the internal structure of a class radically without affecting the outside world at all. If you allow access to the fields of a class, changing a field affects every user of the class. You have to look at every subroutine that uses objects of the modified class to make sure it's not broken. This is a maintenance nightmare, and it's exactly what OOP is meant to avoid. Ideally, you should be able to make radical changes inside a class definition without changing any of the code that uses objects of the class.</P>
+<P>In a previous article ("Rewriting the MFC Scribble Program Using an Object-Oriented Design Approach," <I>MSJ</I> August 1995), I suggested that you have to apply this principle to the MFC document/view architecture if you want to be object-oriented. The CView implementation in Scribble, for example, violates the integrity of the CDocument object by reaching into the document to get data. The view actually accesses fields in the document directly; it draws by traversing a list of CStroke objects that is a member of the document class. In a more object-oriented approach, the view would ask the document to create the drawing.</P>
+<P>In this article, the first of two parts, I will discuss the theory behind data hiding and the problems that crop up with object-oriented programming. After theorizing, I will apply the theory to a simple data type (a string), and provide solutions to the tricky issues of cooperating with MFC. In the second part of this series, I will use the ideas developed here to build a real-world application.</P>
+<P>Let's get started by discussing some OOP theory. As a rule of thumb, don't request or extract from an object the data needed for an operation. Instead ask the data-containing object to do the operation for you. This principle is called delegation. Get and Set functions, which just return values from or modify member fields, should set off alarms when you see them. There's no architectural difference between accessing fields directly and accessing them indirectly through Get and Set functions. I know someone will try to claim that Get and Set functions provide controlled access to the fields, but any access—controlled or otherwise—causes problems in the long run. </P>
+<P>As an example, let's use the Employee class from my previous article. Don't compare Employee objects by extracting the names and passing them to strcmp; instead, ask an Employee to compare itself against another Employee with an Employee::compare function.</P>
+<P> </P>
+<P><BR></P>
+<PRE> bool Employee::compare( const Employee &amp;other )</PRE>
+<P> </P>
+<P>Likewise, don't print an Employee by extracting fields and then printing them on some surface. Instead, tell the Employee to print itself on the surface. (A really object-oriented approach would be to write a canvas class, which would be the surface on which you draw. It would be like a Windows¨ device context, but easier to use.)</P>
+<P>An advantage to this approach is that you can have different kinds of Employees (Managers and Peons, for example), each of which has different attributes. The Employee base class defines a virtual print_yourself method, which prints information common to all Employees. The Manager and Peon-derived classes override this function to print additional information known only to the derived class. The Peon might also print its Manager, for example. </P>
+<P> </P>
+<H2><A NAME="sec0"></A>  String 'Em Up</H2><P>Even strings are affected by this data hiding. A string simply shouldn't expose its internal buffer with a get_buf call or an operator const char* function, for example. You can't return anything reliable from such a function. If you return a const char*, what happens if you change the internal representation of the string to Unicode? Returning a _TCHAR doesn't help either. What if you augment the characters with font and formatting information and end up needing 32-bit characters? Making any of these changes requires you to change the return-value type of your get_buf function. Any code that calls that function would have to be changed as well. Simply adding another get_buf function with a different return value won't help because there's no guarantee the current internal representation of a string can be represented in the old format.</P>
+<P>There are other issues as well. A string object, for example, could keep track of the current language (English, Russian, Japanese) and change the behavior of the relational-operator overloads to correctly order strings regardless of language. The C strcmp function isn't that smart, so code that uses the exported string would have to have language-dependent compare functions. I'd rather have this complexity hidden in one place—inside the string class—than spread throughout my program.</P>
+<P>Exporting the internal buffer by copying it to some external array doesn't work because you have to change the receiving array's type if you change the internal buffer. Even if you copy the bits out successfully, you can't do anything with the copy because you don't know how the bits are represented. Do the characters have formatting information attached to them? Is the string English or Japanese? You certainly can't pass a 32-bit character string to any of the existing string functions (strcmp, wcscmp, _mbscmp, _tcscmp, and so on), so what's the point in even extracting it?</P>
+<P>Consider this bug in the following MFC code, which tries to initialize a string:</P>
+<P> </P>
+<P><BR></P>
+<PRE> const _TCHAR *glob;
+const _TCHAR *f( void )
+{
+    CString s = "abcd";
+    glob = (const _TCHAR *) s;
+    return s;
+}</PRE>
+<P> </P>
+<P>The MFC operator const _TCHAR* function just returns a pointer to the CString's internal buffer, which is destroyed by str's destructor when f returns. The f function returns garbage (a pointer to deleted memory) and glob holds garbage after f returns. The compiler doesn't even give you a warning here. These are the perils of exposing the internal data structures.</P>
+<P> </P>
+<H2><A NAME="sec1"></A>  A Better Text Class</H2><P>What you really need is a better string, one that can completely hide the data. This brings up some questions. How do you initialize the string? How do you let the user manipulate the string? How do you serialize the string? The solution is simple; ask the string to load, edit, and display itself. In this article, I'll develop a Text class that works like a string but implements its own interface.</P>
+<P>I treat a Text object just like a normal string.</P>
+<P> </P>
+<P><BR></P>
+<PRE> Text s = "Initial Value";</PRE>
+<P> </P>
+<P>My sample code does this in a CView derivative. I can invoke the interact method on the Text object to make it create a user interface:</P>
+<P> </P>
+<P><BR></P>
+<PRE> s.interact(this, Rect(0,0,100,20) );</PRE>
+<P> </P>
+<P>This causes an edit control to pop up on top of the parent window (the current view) with the location and size specified in the rectangle. Any modifications made to the string in the edit control are transferred to the text control immediately and automatically.</P>
+<P>If I wrote an ok_box function, it would take the Text object as a parameter. Inside the ok_box function, the Text object is asked to draw itself onto the client area of the box. From your application, you simply need to call the ok_box function and pass in the Text object. Here is a typical menu item handler that can do this:</P>
+<P> </P>
+<P><BR></P>
+<PRE> void CFormsView::OnReport() 
+{
+    ok_box( s ); // throws up a message box showing the
+                 // string
+}</PRE>
+<P> </P>
+<P>I can import new data into the Text object just as I would a string, and the new value appears immediately in the associated window. </P>
+<P> </P>
+<P><BR></P>
+<PRE> void CFormsView::OnModifyString() 
+{
+    s = "The new value";
+}</PRE>
+<P> </P>
+<P>I can get rid of the user-interface window (but not the string) by saying</P>
+<P> </P>
+<P><BR></P>
+<PRE> s.hide()</PRE>
+<P> </P>
+<P>If a Text object goes out of scope or is passed to delete, its user interface disappears too. The point is that I'm never dealing with windows; I write code in terms of text strings and the user interface takes care of itself.</P>
+<P> </P>
+<H2><A NAME="sec2"></A>  Using the Text Class</H2><P>Restricting access to the data of the Text class means all functions in your program that use strings must use string objects, not arrays of _TCHAR. You can't pull this off entirely in MFC because many Microsoft library functions require _TCHAR* arguments rather than CStrings. The real fix is to make all functions in the system use a CString, not to kludge a conversion to const _TCHAR* into the CString class as in MFC. If you go back and look at the code in my previous article, you'll see that I didn't use _TCHAR or its equivalent except to initialize a CString from a string constant. Everything else was done with CStrings.</P>
+<P>Moving on to the general case, how do you initialize the objects if you don't know anything about the contained fields, not even the type? What do you do when you need different behaviors for the same operation? For example, what if you're implementing a spreadsheet and you want to look at the same data as a grid, a graph, and a pie chart? How can you do this with a single draw-yourself message? In an object oriented MFC-based app, the document represents the spreadsheet and the view does nothing but invoke draw-yourself methods at appropriate times.</P>
+<P>What if you don't need to print the entire object or you need to print it different ways in different scenarios? You need an Employee's name in one case, but you need just the Social Security number in another. The various attributes of an Employee might need to be displayed on several different output forms, but the set of attributes—not to mention position, size, and so on—will be different on each form. How can you handle this with a simple display-yourself method invoked on an Employee object? Exporting a string to which you invoke a print-yourself-here method is sometimes a workable compromise. It isn't ideal because you can't change the set of attributes associated with the Employee class without affecting external code. That is, the code that uses the Employee has to tell the Employee <BR>object which attributes to put into the string. You can't change the nature of these attributes at will without changing the user code. A print_these_attributes function has the same problem.</P>
+<P>Consider a class like CDialog in MFC. A CDialog derivative usually contains several fields that map directly to controls on the dialog box itself. (In fact, the Class Wizard makes it utterly painless to do this.) For example, an edit control for entering a date might map to a CString member of a CDialog derivative called "m_TheDate". To get that information, though, an object must extract the value from the CDialog object, breaking the data-hiding rule.</P>
+<P>Data entry also presents a problem. If you have no idea how the internal data of an object is represented, then what do you pass to an object to initialize it? I suppose passing a CString that holds some representation of a date to a date object could work, but that's awkward at best.</P>
+<P> </P>
+<H2><A NAME="sec3"></A>  An Object Owns its Interface</H2><P>As it turns out, the same answer applies to all of the foregoing problems—it's more a matter of scale than anything else. The basic principle is that an object is responsible for its own user interface. Let's start by looking at the problem of both initializing and displaying a string.</P>
+<P>A string object needs the standard constructors (default, copy, and probably a const _TCHAR*) so it can be initialized programmatically. With that exception, the internal workings of a string should be a dark secret. You wouldn't, for example, read a bunch of characters from a disk and import them to a string; instead, ask the string to load itself from the disk. Flushing to disk works the same way. Don't extract the characters and then pass them to fwrite or equivalent; ask the string to flush itself. Ideally, this disk-level I/O works through a persistence implementation. You can also implement the standard shift-operator overloads</P>
+<P> </P>
+<P><BR></P>
+<PRE> fstream file("name", ios::in | ios::out );
+file &lt;&lt; string;
+file &gt;&gt; string;</PRE>
+<P> </P>
+<P>or introduce methods like this:</P>
+<P> </P>
+<P><BR></P>
+<PRE> string::load ( FILE *fp ); // initialize yourself from
+                           // a file
+string::flush( FILE *fp ); // flush yourself to a file.</PRE>
+<P> </P>
+<P>Output to a window can be handled similarly. You can provide overloads of the shift operator that take a window object as the left operand and draw on the window, or you can provide functions like these:</P>
+<P> </P>
+<P><BR></P>
+<PRE> string::draw( CWnd *win, const CRect &amp;here );
+string::draw( CDC  *dc, const CRect &amp;here );</PRE>
+<P> </P>
+<P>None of these alternatives expose to the outside world any information about how the string is stored internally.</P>
+<P>What about user input? How do you initialize a string if you don't know how it looks inside? Transferring information from a standard edit control to the string is not possible if I want to keep with the data-hiding goal. Again, ask the string to load itself. The interact function I demonstrated earlier is really a short name for</P>
+<P> </P>
+<P><BR></P>
+<PRE> String::load_yourself_interactively(CWnd *win, const   
+                                    CRect &amp;here);</PRE>
+<P> </P>
+<P>This function creates a user interface—which can be a normal edit control, if that's appropriate—on the indicated parent window (win). The interface is limited in size and position to the dimensions specified in the here argument. The interface can be as elaborate or as simple as you want since you create it yourself. A date object, for example, could expose an edit control into which you typed a date, but it could also draw a calendar on the screen and let you pick a date by clicking on a cell in the calendar. A very elaborate interface might even add menu items to the parent window's menu bar or support right-mouse-button popup menus.</P>
+<P>This way of doing things is really not much different from what an OLE object does when activated in-place by an OLE container. The OLE object creates its own interface—it even inserts menu items into the container's menu. The container itself doesn't know what the contained object's interface looks like. You can change the interface completely and the container-level code doesn't need to change at all. If you activate several OLE objects in place at the same time (as is the case with OLE controls), each would control its own part of the overall user interface with no object knowing what the other interfaces look like. The only job of the container in this situation is to make sure the controls don't write on top of each other.</P>
+<P>A similar analogy is an MDI child represented by a document template in an MFC-based application. If you look at the document template as the actual object, it creates its own interface (the document, frame, and view) when it's activated. Like the OLE example, the MDI child installs its own menu on the main frame's menu bar. It can also create other interface elements like toolbars.</P>
+<P>A dialog box poses a problem. If it's used to initialize an Employee, it will probably have a control for each field in the Employee and the associated CDialog object will have a field for each control. A procedural program would typically create the dialog and Employee as separate objects, then transfer the data from the dialog box to the Employee after the user filled out the fields. However, if the dialog-box object and the Employee object have the same fields, why not make them the same object? Taking this reasoning a step farther, all fields in the Employee whose values will be provided by a user could be represented by objects such as the self-initializing string discussed earlier. The Employee, when asked to initialize itself, just relays the request to its various fields that create the appropriate edit controls. For example, a name attribute represented by a string object creates an edit control for itself when the Employee container (the dialog) sends an initialize-yourself-from-the-user message to its name field. The main job of the Employee dialog is to organize the fields in such a way that they look nice on the screen. The Employee is a dialog box because it creates a user interface (a window) on which its Employee fields each create subwindows (controls). If you implement an Employee as an OLE container and each of its attributes as an OLE server, the Employee works essentially as I've just described it.</P>
+<P>MFC lets you implement this architecture in a very restricted situation: if the Employee always displays in the same way and all Employee objects initialize from user input, you can implement this structure in MFC by deriving an Employee from CDialog. When you want to initialize the Employee from user input, just send the Employee object a DoModal message. You don't have to export information from a dialog to an Employee object simply because the Employee is the dialog. If you don't want the overhead of a CDialog in every Employee, you can use multiple inheritance.</P>
+<P> </P>
+<P><BR></P>
+<PRE> class employee_with_user_interface
+    : public Employee
+    , public CDialog
+.
+.
+.</PRE>
+<P> </P>
+<P>This structure is a bit awkward, however, since you have to specify Employee base-class fields in the derived class's DoDataExchange override.</P>
+<P>Most real-world objects will not let you use such a simple structure. A more realistic solution is possible if all fields in the Employee use objects that implement load_yourself_interactively functions. The Employee, when asked to load itself interactively, essentially creates a dialog box at run time by asking its fields to load themselves interactively. The user enters data directly into the fields—the Employee container is not involved in this process at all, so it doesn't need to know anything about the internal structure of the fields. Similarly, whoever asked the Employee object to load itself knows nothing about the fields in the Employee object. Though I suppose you could do the same thing with multiple dialog-box definitions and Windows subclassing, it seems more straightforward to just create the various data-entry screens at run time. For one thing, run-time creation lets the user customize the dialog boxes, at least with respect to sizing the fields or moving them around. You can store a description of what the user wants the dialog to look like in the registry or an INI file. You can also do neat things like dynamically sizing the fields to fit into the containing frame. This way, the user can grab the lower-right corner of a dialog box and drag to make it larger and the controls will all get larger too.</P>
+<P> </P>
+<H2><A NAME="sec4"></A>  An Object of Many Faces</H2><P>It's possible to use derivation and virtual functions to solve some of these same problems. Representing a spreadsheet in three different ways can be handled with a Spreadsheet base class from which you derive Graph_<BR>spreadsheet and Pie_spreadsheet. The Spreadsheet base class implements a virtual draw_yourself function that draws a grid. The two derived classes override this function to render the same data in different formats. The same reasoning can be applied to Employees. Different kinds of Employees implement different virtual overloads of draw_yourself, and each overload draws the Employee a little differently.</P>
+<P>The main difficulty with this approach is that it's not possible to tell the same object to render itself in different ways. Any given object can draw itself with the virtual function implemented in its own class. It can grab a different version of that function only from a base class, not from a sibling class. Sometimes that's not a problem; sometimes it's reasonable to implement several drawing functions in the base class (draw_yourself_as_grid, draw_yourself_<BR>as_graph, and so on) and use derivation only to extend the system down the line. If none of the above is workable, though, you end up doing a lot of unnecessary copying at run time, transforming one object type into another through a cast operator overload or its equivalent.</P>
+<P>Using derivation solely to change the rendering behavior can also introduce serious maintenance difficulties. Say you derived several classes from Employee to do different renderings, but a year from now you want to extend the definition of Employee by deriving Manager and Peon classes from it. This extension is almost impossible unless Employee has no derived classes. If that's not the case, you find yourself either restructuring large parts of the class hierarchy—which could easily break existing code—or ending up with something like the mess in <B>Figure 1</B>. (This is a Booch-style class diagram with the arrows pointing <I>from</I> derived <I>to</I> base class. If you are unfamiliar with Booch-style diagrams, see the sidebar.) The class hierarchy quickly reaches an unmaintainable level of complexity and probably contains lots of duplicate code.</P>
+<P><img src="hide1.gif"></P>
+<P><B> Figure 1  A Messy Derivation</B></P>
+<P> </P>
+<H2><A NAME="sec5"></A>  Coming Unstrung</H2><P>How can you use the techniques just described to implement a string that's attached to a user interface? First, you have to decide if you want the string to be solely responsible for exposing its own edit or static-text control, or if you want an object that could externally masquerade as either an edit control or a string. That is, do you want to be able to pass the object to a function that takes a CEdit argument, have that function invoke a SetWindowText method on that object, and have the object's associated string update automatically? Likewise, I want to be able to pass my object to a function that takes a string argument and have an associated edit or static-text control update to reflect whatever's in the string automatically. I'd also like to have any changes users enter into the edit control reflected in the related string object simultaneously.</P>
+<P>The last of these problems is solved easily by using multiple inheritance and MFC. The MFC 4.<I>x</I> message-reflection feature lets you have the CEdit class notify the Ui_string-derived class like this:</P>
+<P> </P>
+<P><BR></P>
+<PRE> class Ui_string: public CEdit, public CString
+{
+.
+.
+.
+private: 
+    afx_msg void OnChange();
+    DECLARE_MESSAGE_MAP()
+};
+
+BEGIN_MESSAGE_MAP(ui_string, CEdit) 
+    ON_CONTROL_REFLECT(EN_CHANGE, OnChange) 
+END_MESSAGE_MAP()
+
+afx_msg void ui_string::OnChange()
+{
+    CEdit::GetWindowText
+      ( /*is modified:*/ *(CString *)this ); 
+}</PRE>
+<P> </P>
+<P>I can cause the Ui_string to expose a user interface by invoking the Create method. When the user types a character into the edit control, the OnChange function is called and it updates the data in the CString base class to reflect the change. New to MFC and included with Visual C++¨ 4.<I>x</I>, the message reflection causes EN_CHANGE to bounce back to the originating control's message map.</P>
+<P>The OnChange handler uses GetWindowText to transfer the new contents of the edit control directly into the CString base class. To understand this last call, remember that the pointer references the entire derived-class object. Casting the pointer to (CString*) yields a pointer that references only the CString base-class component of the derived-class object. The * on the far left converts the pointer into an actual object, which is passed by reference to GetWindowText. GetWindowText confusingly modifies the object referenced by its argument.</P>
+<P>Stylistically, I think it's better to use reference arguments only for inputs to functions and use pointers for outputs. If you use reference outputs, there's no way to distinguish a pass-by-value from a pass-by-reference just by looking at the function call itself—you have to look up the prototype. To my mind, something that looks like a pass-by-value should act like a pass-by-value. If the argument to GetWindowText was a pointer to a string that the function would modify, the * at the far left wouldn't be there and the code would be a lot easier to read. I put the comment /*is modified*/ into the code to remind me that the incoming string will be modified by the function.</P>
+<P>If SetWindowText were virtual, I could provide an override in my UiString that both chains to the base-class version and also relays changes to the CString base class (using the same code as OnChange). SetWindowText is not virtual, however. Similarly, CString wasn't designed with derivation in mind. None of the CString member functions that modify the string are virtual. As a consequence, the Ui_string derived class can't use virtual-function overrides to detect modifications to the CString base class and relay changes to the CEdit base class.</P>
+<P>I might add that this design flaw in CString isn't a problem just in the current situation. Let's say that you want to derive the class Japanese_string from CString so you can inherit basic string functionality. You want to redefine the behavior of the relational operators, though, so they rank strings in the way they'd appear in a Japanese dictionary rather than in Unicode order. This way you could use an existing CString-sorting function to sort Japanese_<BR>strings too. CString's relational operator overloads would have to be virtual to pull this off, however, and they aren't. </P>
+<P>This technique—writing a function in terms of base-class objects that can also operate on derived-class objects without modification—is also pretty basic to OOP; it's called code reuse. The whole point of OOP code reuse is that the same function can do different things without modification. If <BR>a function has a bug, you fix it in one place and the bug is fixed everywhere.</P>
+<P>I hate to modify the MFC sources to fix the problem by adding "virtual" all over the place because I'd have to redo my modifications with every release of the library. CString is used all over MFC, so whatever string class I come up with must be able to convert to and from a CString. Deriving from CString would be the simplest (and most efficient) solution, but it's risky. A derived-class object would behave differently depending on whether it was accessed through a CString pointer or a derived-class pointer. That is, modifying <BR>the derived-class object through a derived-class pointer would cause the associated UI object to change too, but modifying the same object through a CString pointer wouldn't update the screen at all. This schizophrenic behavior reeks of maintenance difficulties.</P>
+<P>The only safe choices are to make CString a private base class of my own string class, make it a private member of the class, or give up on CString entirely and implement a class from scratch, fabricating a CString on an as-needed basis in a type-conversion function. I've opted for the last approach because it gives me a string class that I can use in non-MFC applications. </P>
+<P><B>Figure 2</B> shows the architecture I've chosen. It's somewhat more complicated than you might expect, but this makes it as reusable as possible. The basic String class (which uses cout for output and has no input functions other than constructors and operator=) is in the upper right of <B>Figure 2</B>. The actual code is in <B>Figure 3</B>. The main simplification I've made is the removal of all nonessential functions. A properly done String class should support at least all the functionality defined in the ANSI string-manipulation functions (like strcat, strtok, strupr, and so on). MFC does this, but I've stripped the code out of my own implementation in the interest of simplicity.</P>
+<P><img src="hide2.gif"></P>
+<P><B> Figure 2  An OO I/O String (Booch notation)</B></P>
+<P><img src="hide3.gif"></P>
+<P><B> Key</B></P>
+<P><B>Figure 3  String</B></P>
+<P><BR></P>
+<PRE> </PRE>
+<P>mystring.h</P>
+<P><BR></P>
+<PRE> #ifndef MYSTRING_H__
+#define MYSTRING_H__
+
+#include "ansi.h"
+#include "notify.h"
+
+#include &lt;iostream.h&gt;
+#include &lt;iomanip.h&gt;
+
+//=====================================================================
+// Microsoft's &lt;tchar.h&gt; file contains support for (ANSI-compatible)
+// UNICODE and (Microsoft-specific) multi-byte character Strings.
+// The macros map to one of two values, depending on whether _UNICODE
+// or _MBCS is defined. The mappings used in the current file are:
+//
+//                  _UNICODE and           _UNICODE             _MBCS
+//                  _MBCS not defined      defined              defined
+//
+// _TCHAR            char                  wchar_t              char
+// _T("x")           "x"                   L"x"                 "x"
+// _TEXT("x")        "x"                   L"x"                 "x"
+// _tcscpy           strcmp                wcscmp               _mbscmp
+// _tcslen           strlen                wcslen               _mbslen
+// _tcscmp           strcpy                wcscpy               _mbscpy
+
+#include &lt;tchar.h&gt;
+
+//=====================================================================
+class String : public Notifier
+{
+      class Buffer; // Buffer is a nested class, but I've moved the class
+                    // declaration out of the class definition to reduce
+                    // clutter;
+
+      Buffer          *buf;
+      Notifiable      *observer;
+public:
+      virtual 
+      ~String( void  );
+                                                           
+       String(                   Notifiable *tell = &amp;Nobody );
+       String( const _TCHAR *p , Notifiable *tell = &amp;Nobody );
+       String( const String &amp;r , Notifiable *tell = &amp;Nobody );
+
+      const virtual String &amp;operator= ( const String &amp;r      );
+      const virtual String &amp;operator= ( const _TCHAR *p      );
+
+      bool operator&lt; ( const String &amp;r ) const;
+      bool operator&gt; ( const String &amp;r ) const;
+      bool operator&lt;=( const String &amp;r ) const;
+      bool operator&gt;=( const String &amp;r ) const;
+      bool operator==( const String &amp;r ) const;
+      bool operator!=( const String &amp;r ) const;
+
+      virtual int           compare ( const String &amp;r      ) const;
+      virtual ostream       &amp;print  ( ostream &amp;dst         ) const;
+              bool          is_empty( void                 ) const;
+
+      #ifdef MFC
+            String( const CString &amp;s, Notifiable *tell = &amp;Nobody);
+            operator CString( void );
+      #endif
+};
+
+extern const String Empty_string;
+//=====================================================================
+// class String::Buffer
+//=====================================================================
+// This is actually a nested-class definition. You could remove the
+// String:: and move the following class definition inside the String
+// class definition without affecting anything. Note that the
+// "Class View" window in the MS Developer's Studio gets confused and
+// doesn't list the class name, however (there's a little icon but not
+// identifying class name).
+
+class String::Buffer
+{
+      int             ref_count;
+      _TCHAR       *buf;
+public:
+      virtual
+      ~Buffer      ( void                 );
+       Buffer      ( const _TCHAR *p      );
+       Buffer      ( const Buffer &amp;r      );
+
+      Buffer       *attach ( void            );
+      void         release ( void            );
+      int          compare ( const Buffer &amp;r ) const;
+      ostream      &amp;print  ( ostream &amp;dst    ) const;
+      bool         is_empty( void            ) const;
+
+      #ifdef MFC
+            operator CString( void );
+      #endif
+};
+//---------------------------------------------------------------------
+inline String::Buffer::Buffer( const _TCHAR *p )
+                              : buf            ( new _TCHAR[_tcsclen(p) + 1] )
+                              , ref_count      ( 1 )
+{
+      assert( p );
+      _tcscpy( buf, p );            // generic strcmp()
+}
+//---------------------------------------------------------------------
+// The copy constructor should never be called. Declare a private version
+// to prevent it from being called externally. Deliberately do not
+// implement it so that the linker will kick out an error if anyone
+// (like a friend or local function) manages to call it anyway. Note
+// that this strategy (of forcing a link error) won't work on all
+// compilers, since some will generate a default copy constructor even
+// if a prototype is present in the class declaration. If this is
+// the case, uncomment the function body, below, so you'll at least
+// get a runtime error.
+//
+// inline String::Buffer::Buffer( const Buffer &amp;r )
+// {
+//    assert(0);
+// }
+//---------------------------------------------------------------------
+inline bool String::Buffer::is_empty( void ) const
+{
+      return *buf == '\0';
+}
+//---------------------------------------------------------------------
+inline String::Buffer *String::Buffer::attach( void )
+{
+      assert(this);
+      ++ref_count;
+      return this;
+}
+//---------------------------------------------------------------------
+inline void String::Buffer::release( void )
+{
+      // The assert(this) assures that the function isn't called through
+      // a null pointer. It probably wouldn't hurt to do it everywhere,
+      // but doing it here saves me from having to do an assert(buf)
+      // everywhere before release() is called in the String members.
+
+      assert( this );
+      assert( ref_count &gt; 0 );
+
+      if( --ref_count &lt;= 0 )
+            delete this;
+}
+//---------------------------------------------------------------------
+inline int      String::Buffer::compare( const Buffer &amp;r ) const
+{
+      assert( this );
+      return _tcscmp( buf, r.buf );      // generic strcmp()
+}
+//---------------------------------------------------------------------
+inline ostream &amp;String::Buffer::print( ostream &amp;dst ) const
+{
+      #ifndef NDEBUG
+            assert( this );
+            dst &lt;&lt; "ref_count=" &lt;&lt; dec &lt;&lt; ref_count &lt;&lt; ", buf=";
+      #endif
+
+      dst &lt;&lt; buf &lt;&lt; "\n" ;
+      return dst;
+}
+//---------------------------------------------------------------------
+#ifdef MFC
+inline String::Buffer::operator CString( void )
+{
+      // This function is resonably efficient only because the CString
+      // itself is reference counted. If it weren't, I'd have to expose
+      // the _TCHAR buf to the containing string class to avoid an
+      // unnecessary copy of the string's contents.
+
+      return CString( buf );
+}
+#endif
+//=====================================================================
+// class String
+//=====================================================================
+inline String::String( Notifiable *tell): buf      (new Buffer(_T(""))),
+                                          observer ( tell             )
+{}
+//---------------------------------------------------------------------
+inline String::String( const _TCHAR *p, Notifiable *tell ):
+                         buf      ( new Buffer(p)),
+                         observer ( tell         )
+{}
+//---------------------------------------------------------------------
+inline String::String( const String &amp;r, Notifiable *tell ):
+                         buf      ( r.buf-&gt;attach()),
+                         observer ( tell           )
+{}
+//---------------------------------------------------------------------
+#ifdef MFC
+inline String::String( const CString &amp;s, Notifiable *tell ):
+                         buf        ( new Buffer( (const _TCHAR *)s )),
+                         observer   ( tell                           )
+{}
+#endif
+//---------------------------------------------------------------------
+#ifdef MFC
+inline String::operator CString( void )
+{
+      return CString( *buf );
+}
+#endif
+//---------------------------------------------------------------------
+inline bool String::operator&lt; (const String &amp;r)const{ return compare(r)&lt; 0;}
+inline bool String::operator&gt; (const String &amp;r)const{ return compare(r)&gt; 0;}
+inline bool String::operator&lt;=(const String &amp;r)const{ return compare(r)&lt;=0;}
+inline bool String::operator&gt;=(const String &amp;r)const{ return compare(r)&gt;=0;}
+inline bool String::operator==(const String &amp;r)const{ return compare(r)==0;}
+inline bool String::operator!=(const String &amp;r)const{ return compare(r)!=0;}
+inline bool String::is_empty  ( void          )const{ return buf-&gt;is_empty(); }
+//---------------------------------------------------------------------
+inline ostream &amp;String::print( ostream &amp;dst ) const
+{
+      #ifndef NDEBUG
+            assert( this );
+            dst &lt;&lt; "buf=0x" &lt;&lt; hex &lt;&lt; setw(8) &lt;&lt; buf &lt;&lt; ", ";
+      #endif
+
+      return buf-&gt;print( dst );
+}
+//=====================================================================
+// Global functions
+//=====================================================================
+inline ostream &amp;operator&lt;&lt;( ostream &amp;out, const String &amp;s )
+{
+      return s.print( out );
+}
+//=====================================================================
+#endif // MYSTRING_H__
+
+</PRE>
+<P>string.cpp</P>
+<P><BR></P>
+<PRE> #include "stdafx.h"
+#include "mystring.h"
+//=====================================================================
+// class String::Buffer
+//=====================================================================
+const String Empty_string;
+//=====================================================================
+/*virtual*/ String::Buffer::~Buffer( void )
+{
+      assert( ref_count == 0 );
+      delete[] buf;
+}
+//=====================================================================
+// class String
+//=====================================================================
+/*virtual*/ String::~String( void )
+{
+      assert(this);
+
+      buf-&gt;release();
+}
+//---------------------------------------------------------------------
+/*virtual*/ int String::compare( const String &amp;r ) const
+{
+      return buf-&gt;compare( *r.buf );
+}
+//---------------------------------------------------------------------
+/*virtual*/ const String &amp;String::operator=( const String &amp;r )
+{
+      assert( this );
+
+      if( this != &amp;r )
+      {
+            buf-&gt;release();
+            buf = r.buf-&gt;attach();
+      }
+
+      notify(observer);
+      return *this;
+}
+//---------------------------------------------------------------------
+/*virtual*/ const String &amp;String::operator=( const _TCHAR *p )
+{
+      assert( this );
+      buf-&gt;release();
+      buf = new Buffer( p );
+      notify(observer);
+      return *this;
+}</PRE>
+<P></P>
+<P>The string class in <B>Figure 3</B> does have an important ability needed in all real-world string implementations: reference counting. (<I>See Paul DiLascia's "C++ Q&amp;A" column in this issue for a complete explanation of reference counting</I>—Ed.)</P>
+<P>Since reference counting is such an important part of efficient C++ code, my real-world class library implements the mechanism as a generic template used by the String class. I've simplified things a bit here by hardcoding a buffer into the String class itself rather than expanding a template. The buffer is a nested class, so the class name at the global level is String::Buffer. This way I don't have to worry about a user accidentally declaring a global-level class called Buffer. The names won't conflict. The Buffer class definition is also private to the string, so only strings can create buffers.</P>
+<P>Even at this level, I've taken an OOP approach to the design of the buffer. The public interface comprises four messages, none of which expose information about how the buffer does its work. You can attach a buffer to yourself, release the attached buffer, compare two buffers, and print a buffer. At no point do I expose the internal ref_count or the buf fields. This way I can change the definitions of these fields at will without affecting the string class. The attach and release functions do the main work. </P>
+<P> </P>
+<P><BR></P>
+<PRE> inline String::Buffer *String::Buffer::attach( void )
+{
+    assert(this);
+    ++ref_count; 
+    return this; 
+}</PRE>
+<P> </P>
+<P>The assert(this) takes care of a particularly hard-to-find bug:</P>
+<P> </P>
+<P><BR></P>
+<PRE> some_object *p = NULL;
+p-&gt;f();</PRE>
+<P> </P>
+<P>The this pointer will be NULL inside f in this case. Attaching a buffer to yourself involves a simple increment of the reference count. String's copy constructor attaches a buffer to itself in its initialization list like this:</P>
+<P> </P>
+<P><BR></P>
+<PRE> inline String::String( const String &amp;r)
+                : buf        ( r.buf-&gt;attach()  )
+                , observer    ( &amp;Nobody         )</PRE>
+<P> </P>
+<P>The reference count in r.buf is incremented and the current object's buf is initialized to point at r.buf. </P>
+<P>The release function is a little more interesting.</P>
+<P><BR></P>
+<PRE> 
+inline void
+String::Buffer::release( void ) 
+{
+    assert( this ); 
+    assert( ref_count &gt; 0 ); 
+
+    if( —ref_count &lt;= 0 ) 
+        delete this; 
+}</PRE>
+<P> </P>
+<P>If more than one string references the buffer, the release just decrements the reference count. When the last string deletes the buffer, memory for the buffer is deleted. Don't be confused by the "delete this"; it works like any other delete invocation, freeing the indicated memory and calling the destructor for String::Buffer. However, whoever called release cannot continue to use the pointer through which release is called. Given code like (p-&gt;release()), assume that p is invalid after release returns. The string-class destructor does the release like this:</P>
+<P> </P>
+<P><BR></P>
+<PRE> /*virtual*/ String::~String( void )
+{
+    assert(this); 
+    buf-&gt;release();
+}</PRE>
+<P> </P>
+<P>The buffer frees itself if the reference count is 1 when the destructor releases the buffer. The string's operator= function releases its own buffer and then attaches the right-operand's buffer to itself.</P>
+<P> </P>
+<P><BR></P>
+<PRE> const String &amp;String::operator=( const String &amp;r )
+{
+    assert( this ); 
+    if( this != &amp;r ) 
+    {
+        buf-&gt;release();
+        buf = r.buf-&gt;attach();
+    }
+    notify(observer);
+    return *this; 
+}</PRE>
+<P> </P>
+<P>The other new thing that appears in operator= is the call to notify(observer). The Notifiable class (see <B>Figure 4</B>) solves the problem of callback functions: member functions of one class that are called from another class through a pointer rather than directly. The problem is that the string must modify the Text object when it changes. I can make every member function of class String that modified the class virtual; the derived class could then provide an override for each function that chains to the base-class function before doing its job. For example, the Text class updates the associated Text_control when the string changes. This structure requires you to provide overrides of 20 or 30 functions every time you derive from String. A better approach is for the string to notify its derived class when it changes. You can do this with a virtual function too: the strings define a virtual notify function that you override in the derived class. String functions could call the virtual function (effectively calling the derived-class function) when they change.</P>
+<P><B> Figure 4  notify.h</B></P>
+<P><BR></P>
+<PRE> #ifndef NOTIFY_H__
+#define NOTIFY_H__
+
+#include "ansi.h"
+
+class Notifiable
+{
+public:
+      virtual void notify( class Notifier *sender ) = 0;
+};
+
+class Notifier
+{
+      bool      am_silent;
+public:
+      virtual ~Notifier(){};
+
+      Notifier( void ): am_silent( false ) {}
+
+      void      notify_on      ( void ){ am_silent = false;}
+      void      notify_off     ( void ){ am_silent = true; }
+      
+      void notify(Notifiable *observer)
+      {
+            if( !am_silent )
+                  observer-&gt;notify(this);
+      }
+};
+
+
+static class Notify_nobody: public Notifiable
+{
+public:
+      virtual void notify( Notifier * ){}
+}
+Nobody;
+
+#endif // NOTIFY_H__</PRE>
+<P></P>
+<P>The problem is that both base classes in the current architecture (String and Text_control) need to notify the derived class. If both classes call the function "notify", you will have problems in the derived class. It's certainly possible for a single function in the derived class to serve as an override for a virtual function in more than one base class. In the code in <B>Figure 5</B>, calls to the base-class functions result in the derived-class object being notified through a call to its override of notify.</P>
+<P><B> Figure 5  Single Function Working Overridable</B></P>
+<P><BR></P>
+<PRE> class base1
+{
+public: virtual void notify(void) = 0; 
+        void change_base1( void ) { notify(); }
+};
+class base2
+{
+public: virtual void notify(void) = 0; 
+        void change_base2( void ) { notify(); }
+};
+class derived: public base1, public base2
+{
+    virtual void notify( void )
+    {
+        AfxMessageBox("Some base class has changed.");
+    }
+};</PRE>
+<P> </P>
+<P><BR></P>
+<PRE> BOOL foo()
+{
+    derived d; 
+    d.change_base1();
+    d.change_base2();
+}</PRE>
+<P> </P>
+<P>However, there's no good way for the derived class to find out which of the two base classes notified it. Passing a simple argument won't work because that argument would have to be defined in the base class and there's no guarantee that all potential base classes have unique values. You could use the run-time-type-identification (RTTI) mechanism to pass a type_info structure (as returned by typeid) to notify, but that doesn't work very well under derivation because the type_info.name function returns the actual class name and you might be interested in the name of some base class. Passing a pointer to the object using a void* doesn't work because the type information isn't available. The following code prints the string "void*", not "some_class":</P>
+<P> </P>
+<P><BR></P>
+<PRE> void *p = new some_class;
+cout &lt;&lt; typeid(p).name();</PRE>
+<P> </P>
+<P>In any event, I want a generic notification mechanism through which a String object can notify any other class—not just a derived class—when it changes. In C, we could pass the object a pointer to a function to call when the string changed, but that doesn't work particularly well in C++. Looking back at the class diagram, the callback function would be a member of the Text (derived) class and would have to be declared as such in the rather awkward C++ declaration syntax.</P>
+<P> </P>
+<P><BR></P>
+<PRE> void (Text::* f)(void);</PRE>
+<P> </P>
+<P>You'd have to pass the function to the String class with a message like this:</P>
+<P> </P>
+<P><BR></P>
+<PRE> String::call_this_function_on_change
+( void (Text::* f)(void) );</PRE>
+<P> </P>
+<P>The requirement that you specify the class in which the function is defined just to declare the pointer effectively couples the String class to the Text class. The Text class definition must be processed by the compiler before it can process the String class definition—a forward reference isn't good enough. Since I'd like to be able to use strings without having to use Text objects as well, this coupling is undesirable.</P>
+<P> </P>
+<H2><A NAME="sec6"></A>  Problem Solved!</H2><P>I solved the problem with the generic class Notifiable, which implements a single virtual function called notify. Generally, you can pass a pointer to an object that has a virtual function anywhere that you would pass a straight function pointer. It doesn't make much difference whether you call the function indirectly through an explicit pointer or indirectly through the pointer in the virtual-function table, although the latter tends to be more manageable. The Notify class's notify function is implemented in the derived class. Looking back at the class diagram, the Text object has to be notified if either the string or the Text_control changes, so it derives a class from Notifiable. The notify function in this derived class is a friend of the Text class so it can access fields of the Text object without difficulty. The Text object declares an object class Observer and passes a pointer to this object to the String and Text_control base classes as constructor arguments.</P>
+<P>The string is a notifier (it derives from the notifier base class defined in <B>Figure 4</B>). It notifies a Text::observer object (which in turn talks to the Text object) that something happened by calling</P>
+<P> </P>
+<P><BR></P>
+<PRE> notify(observer);</PRE>
+<P> </P>
+<P>Using the Notifiable abstraction eliminates the coupling between the string and the text classes. The string is coupled to a Notifiable instead, but that's a much more manageable coupling.</P>
+<P>The Notifiable derivative knows where the notification comes from by looking at the argument to the notify function, which must be an object that derives from class Notifiable. The problem I'm solving is that a void* argument to notify</P>
+<P> </P>
+<P><BR></P>
+<PRE>     virtual void notify( void *sender ) = 0;</PRE>
+<P> </P>
+<P>doesn't work because there's no reliable way to identify the sender's class. The proposed ANSI-run-time-type-identification (RTTI) mechanism can't be used because you can't do a dynamic cast from void*. Changing the notify function's argument type to notifier lets me do the following:</P>
+<P> </P>
+<P><BR></P>
+<PRE> class Text::Observer: public Notifiable
+{
+public:
+    virtual void notify( Notifier *notifier ) 
+    {
+        String *p = dynamic_cast&lt;String *&gt;(notifier);
+        if( !p )
+            ;// something's wrong
+    }
+}</PRE>
+<P> </P>
+<P>The notifier also sports a simple mechanism for suppressing notification, provided you notify an observer by calling Notifier::notify(observer) instead of observer-&gt;notify(this). Both functions do the same thing, but if you do it through the Notifier base class, you can turn off notification by sending a notify_off() message to the notifier.</P>
+<P>The final class definition in notify.h is the Notify_nobody class, which derives from Notifiable and provides a do-nothing override of the notify function. I've also defined a static object of this class called Nobody. This way I can initialize a Notifiable to notify Nobody.</P>
+<P> </P>
+<P><BR></P>
+<PRE> Notifiable *p = Nobody;
+p-&gt;notify(this);    // Calls Notify_nobody::notify(),
+                    // which does nothing.</PRE>
+<P> </P>
+<P>I suppose it would be just as easy to initialize the pointer to NULL and test for the NULL pointer before every notify call, but the Notify_nobody class is pretty light and it cleans up the String class code by eliminating these tests.</P>
+<P>In the current example, I could just as well derive the text class from Notifiable and dispense with the nested observer class. Derivation won't work in the general case, though, and I want to demonstrate the general solution. You must have one or more nested observers to be notified about more than one event occurring. Typically you'll have one observer for each event. Similarly, you'll need one observer per notifier if you need to know who notified you but you either have multiple notifiers of the same class or don't know the sending object's type (you can't use RTTI to distinguish the sender in either case). Derivation will usually work if there's only one event (not the case here) or you can use RTTI to distinguish one sender from another (which is the case here).</P>
+<P>Yes, I could have done the same thing with global-level functions that were friends of the Text class. I prefer the class-based solution for several reasons. First, I really hate the idea of global-level functions that the user doesn't know about—it's just too easy for the user to accidentally declare a function with a conflicting name. Putting the functions into a namespace minimizes, but doesn't eliminate, the problem since the namespace name is a global-level symbol. Since the observer is nested inside the Text class's namespace, neither the class nor its member functions are part of the global namespace. I also like the generality of the notifier mechanism: I can pass a pointer to a Notifiable object to anybody who should notify me. </P>
+<P>Finally, using the class instead of a function gives me a lot of latitude for code reuse. In the Win32¨ environment, for example, I can derive a class from Notifiable that encapsulates a Win32 event object. The notify function override signals the event. This way, a string running on one thread notifies an object that's running on a different thread that the string was modified. This is a significant change, but the String class doesn't need any modification. The Notifiable object works in exactly the same way, but it behaves quite differently. This is what code reuse is all about.</P>
+<P> </P>
+<H2><A NAME="sec7"></A>  Put Up the Storm Windows</H2><P>The next set of classes puts layers around MFC objects and tries to make Visual C++ conform better to the ANSI/ISO C++ Committee's Draft Working Paper. <B>Figure 6</B> corrects a few minor ANSI-related omissions. In particular, it introduces a bool type and values for true and false (implemented as macros because the compiler treats them as reserved words). It also maps the MFC ASSERT (uppercase) to an ANSI C assert (lowercase) and defines the ANSI C NDEBUG when _DEBUG is not defined.</P>
+<P><B> Figure 6  ansi.h</B></P>
+<P><BR></P>
+<PRE> #ifndef ANSI_H__
+#define ANSI_H__</PRE>
+<P> </P>
+<P><BR></P>
+<PRE> // Attempts to bring VC++ into line with the ANSI C++ DWP.</PRE>
+<P> </P>
+<P><BR></P>
+<PRE> // First, ANSI C defines NDEBUG when you're aren't debugging. MFC defines
+// _DEBUG when you are. Set things up so you can use NDEBUG. Also arange
+// for an MFC ASSERT macro to be mapped to an ANSI assert macro:</PRE>
+<P> </P>
+<P><BR></P>
+<PRE> #ifdef ASSERT
+#   define assert(x) ASSERT(x)
+#else
+#   include &lt;assert.h&gt;
+#endif
+
+#ifndef _DEBUG
+#   define NDEBUG 1
+#else
+#   undef NDEBUG
+#endif</PRE>
+<P> </P>
+<P><BR></P>
+<PRE> // ANSI/ISO C++ is going to include a bool native type and true and fals
+// keywords. These are reserved words to the VC++ 4.x compiler, but
+// aren't implemented. Set up some macros so we can use them. (You
+// can't use a typedef or enum because the words are reserved.)</PRE>
+<P> </P>
+<P><BR></P>
+<PRE> #define bool  unsigned
+#define true  1      
+#define false 0</PRE>
+<P> </P>
+<P><BR></P>
+<PRE> #endif // ANSI_H__</PRE>
+<P></P>
+<P>The various MFC wrappers are defined in wrappers.h and wrappers.cpp (see <B>Figure 7</B>). Referring back to the class diagram in <B>Figure 2</B>, the Text_control hides both an edit control (CEdit) and a static-text control (CStatic). The Text_control is essentially the same as the Windows objects that it hides, but the abstraction makes it easier to move my own code to a different operating system or class library. I only change the Text_control object to work in a non-MFC environment. The hidden static-text and edit controls have identical interfaces and both are needed to provide an interface for the String class, so it seems reasonable to combine them into a single container. I derive from CEdit, as compared to using a private member, because I need to catch the EN_CHANGE notification through a message map. I make it a private base class because the CEdit object really should be a private member and private base classes are effectively treated as private members. If CEdit wasn't private, someone with a Text_control pointer could invoke a method like SetWindowText directly to the CEdit base class component. Since this method isn't virtual, I can't provide an override in the Text_control derived class, so there's no way to determine that the edit control has been modified.</P>
+<P><B> Figure 7  MFC Wrappers</B></P>
+<P><BR></P>
+<PRE> </PRE>
+<P>wrappers.h</P>
+<P><BR></P>
+<PRE> #include &lt;stddef.h&gt;
+
+#ifndef WRAPPERS_H__
+#define WRAPPERS_H__
+
+#include "ansi.h"
+#include "mystring.h"
+#include "userintf.h"
+
+extern void ok_box( const String &amp;s );      // generic message box
+
+//----------------------------------------------------------------------
+typedef CWnd window;
+
+class Rect : public CRect // Can't use "Rectangle" because there's
+{                         // a global function with that name.
+public:
+      Rect( int l, int t, int r, int b ): CRect(l,t,r,b) {}
+      Rect( const Rect &amp;source         ): CRect(source ) {}
+}; 
+
+//----------------------------------------------------------------------
+// A text control handles both the display and input of text. It's
+// an amalgam of a Windows Edit and Static-Text control.
+//
+// We must have an operator delete function because the one defined
+// in CObject (which is an indirect base class of CEdit) will be
+// unaccessable otherwise. We'd get:
+//
+//       error C2247: 'delete' not accessible because 'Text_control'
+//                    uses 'private' to inherit from 'CEdit'
+//
+// MFC #defines new to DEBUG_NEW, so we have to undef it before
+// we can declare the function.
+#ifdef new
+#undef new
+#endif
+
+class Text_control: private CEdit, public Notifier
+{
+private:
+      Notifiable            *observer;
+      CWnd                  *windows_obj;
+
+      const Text_control &amp;operator=( const Text_control &amp;r );
+      Text_control( const Text_control &amp;r );
+
+public:
+      enum ctrl_type{ write_only, read_write };
+
+      Text_control( ctrl_type            type,
+                          const Rect     &amp;position,
+                          Window         *parent,
+                          const String   &amp;initial_value = Empty_string,
+                          Notifiable     *tell          = &amp;Nobody );
+
+      virtual ~Text_control();
+
+      void import ( const String &amp;s );
+      void export ( String *s       );
+      void enable ( void            );
+      void disable( void            );
+
+public: // MFC Stuff required because of private inheritance
+
+      void* PASCAL      operator new(size_t nSize);
+      void* PASCAL      operator new(size_t, void* p);
+      void  PASCAL      operator delete(void* p);
+
+#if defined(_DEBUG) &amp;&amp; !defined(_AFX_NO_DEBUG_CRT)
+      void* PASCAL      operator new(size_t  nSize, 
+                                     LPCSTR  lpszFileName,
+                                     int     nLine);
+#endif
+
+private: // MFC Stuff
+
+      //{{AFX_VIRTUAL(Text_control)
+      //}}AFX_VIRTUAL
+
+      //{{AFX_MSG(Text_control)
+      afx_msg void OnChange();
+      //}}AFX_MSG
+
+      DECLARE_MESSAGE_MAP()
+};
+//----------------------------------------------------------------------
+inline void Text_control::enable( void )
+{
+      assert( windows_obj-&gt;m_hWnd );
+      windows_obj-&gt;EnableWindow( TRUE );
+}
+//----------------------------------------------------------------------
+inline void Text_control::disable( void )
+{
+      assert( windows_obj-&gt;m_hWnd );
+      windows_obj-&gt;EnableWindow( FALSE );
+}
+//----------------------------------------------------------------------
+inline void* PASCAL Text_control::operator new(size_t nSize)
+{
+      return CEdit::operator new(nSize);
+}
+
+inline void* PASCAL Text_control::operator new(size_t size, void* p)
+{
+      return CEdit::operator new( size, p );
+}
+
+#if defined(_DEBUG) &amp;&amp; !defined(_AFX_NO_DEBUG_CRT)
+inline void* PASCAL Text_control::operator new
+                                  (size_t nSize, LPCSTR lpszFileName, int nLine)
+{
+      return CEdit::operator new(nSize, lpszFileName, nLine);
+}
+#endif
+
+inline void Text_control::operator delete(void *p)
+{
+      CEdit::operator delete(p);
+}
+
+#ifdef _DEBUG      // put back standard mfc macro
+#define new DEBUG_NEW
+#endif
+
+#endif // WRAPPERS_H__
+
+</PRE>
+<P>wrappers.cpp</P>
+<P><BR></P>
+<PRE> #include "stdafx.h"
+#include "wrappers.h"
+
+//======================================================================
+// Global Functions
+//======================================================================
+void ok_box( const String &amp;s )
+{
+      CString cs = (CString)s;
+      AfxMessageBox( (const _TCHAR *)cs );
+}
+
+//======================================================================
+// Text_control
+//======================================================================
+Text_control::Text_control( ctrl_type        type,
+                            const Rect       &amp;position,
+                            Window           *parent,
+                            const String     &amp;initial_value,
+                            Notifiable       *tell): observer ( tell )
+{
+      bool success = false;
+
+      // Casts in the conditional, below, are required because the ?
+      // and : phrases must evaluate to objects of the same type.
+
+      windows_obj = (type==write_only) ? (CWnd*)(new CStatic())
+                                                       : (CWnd*)(CEdit*)this ;
+      if(windows_obj == this)
+      {
+            success = CEdit::Create(
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                    position,
+                                    parent,
+                                    ~0U );      // ID is immaterial
+      }
+      else
+      {
+            success = ((CStatic *)windows_obj)-&gt;
+                             Create("",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                    position,
+                                    parent,
+                                    ~0U );      // ID is immaterial
+      }
+
+      assert(success);  // Maybe throw an exception here instead of assert.
+
+      // The SetWindowText sends an EN_CHANGE, which calls OnChange, which
+      // notifies the Text_control, which updates the String, which notifies
+      // the Text_control, which updates the window text, and around and
+      // and around. Solve the problem in the OnChange() function, but set
+      // "initializing" true to tell OnChange what's going on. Turn off
+      // notification to prevent this.
+      //
+      // I'm assuming synchronous behavior; I don't expect SentWindowText
+      // to return until AFTER the EnChange() handler has been executed.
+      // If this turns out not to be the case in the future, you'll have
+      // to modify this code: add an "initializing" field to the class,
+      // set it true instead of calling notify_off, set it false instead
+      // of calling notify_on, and modify OnChange to not notify anybody
+      // if "initializing" is true.
+
+
+      if( !initial_value.is_empty() )
+      {
+            notify_off();
+            windows_obj-&gt;SetWindowText
+                           ( (const _TCHAR *)(CString)initial_value );
+            notify_on();
+      }
+}
+//----------------------------------------------------------------------
+/*virtual*/ Text_control::~Text_control( void )
+{
+      if( windows_obj != this )      // it came from new
+            delete windows_obj;
+}
+//----------------------------------------------------------------------
+void Text_control::import( const String &amp;s )
+{
+      assert( windows_obj-&gt;m_hWnd ); // Make sure there's a window
+      windows_obj-&gt;SetWindowText( (const _TCHAR *)(CString)s );
+      notify(observer);
+}
+//----------------------------------------------------------------------
+void Text_control::export( String *s )
+{
+      _TCHAR buf[255];
+
+      // Get the text from Windows. Note that the buffer size has to be
+      // computed with sizeof(buf)/sizeof(*buf) because a _TCHAR can
+      // evaluate to a wchar_t, which will be two bytes. A simple
+      // sizeof(buf) without the subsequent divide could yield a number
+      // twice the actual buffer size.
+
+      assert( windows_obj-&gt;m_hWnd ); // Make sure there's a window
+      windows_obj-&gt;GetWindowText( buf, sizeof(buf)/sizeof(*buf) );
+      
+      *s = buf;
+}
+
+//----------------------------------------------------------------------
+BEGIN_MESSAGE_MAP(Text_control, CEdit)
+      //{{AFX_MSG_MAP(Text_control)
+      ON_CONTROL_REFLECT(EN_CHANGE, OnChange)
+      //}}AFX_MSG_MAP
+END_MESSAGE_MAP()
+//---------------------
+void Text_control::OnChange() 
+{
+      notify( observer );
+}</PRE>
+<P></P>
+<P>The code for Text_control in control.h and control.cpp works around several design problems with MFC. You can't just declare CEdit as a private base class or you'll get a compiler error like "'C2247: delete' not accessible because 'Text_control' uses 'private' to inherit from 'CEdit'." The problem is that CEdit derives indirectly from CObject, which defines operator new and delete overloads. If CEdit is a private base class of Text_control, the overloads are inherited as private members and nobody will be able to allocate or delete objects of type Text_control. You can solve the problem by putting operator new (there are three of them) and delete overloads in the Text_control and have them chain to the base-class versions. There are problems doing even this; MFC #defines the word new to a version of new that takes arguments, effectively preventing you from declaring an operator new function unless you #undef new first. I've done the undef at the top of control.h and have put it back to its original value at the bottom.</P>
+<P>The Text_control class defines an observer field. It points at a Notifiable object, which is informed when the Text_control changes. The observer is initialized, like the string, by the constructor. The class prevents copy operations by defining private copy constructor and operator= functions. It doesn't really make sense to copy a C++ object whose purpose is to be a proxy for a Windows window, but the compiler would provide a copy constructor and operator= function if we didn't define one. Making them private prevents access to the functions. This version of the Text_control is pretty minimal. The four functions that comprise the public interface are import (which changes the text on the screen), export (which transfers the screen text to a string), enable, and disable. A full implementation would probably let you set attributes like borders and background color as well. (In my real-world class library, I do this in a window base class from which Text_control derives.)</P>
+<P>The Text_control accesses the current Windows object through the CWnd-pointer member, windows_obj, which points at either a CStatic object created by new or the CEdit base class of the current object. This dramatically simplifies the rest of the code since messages sent to the underlying control are actually defined in CWnd, not in CStatic or CEdit. The constructor in the CPP file is one of the few places where you have to know whether you're dealing with a CEdit or a CStatic. The latter has to be manufactured by the constructor, which also loads the initial value.</P>
+<P>The import and export functions are complicated by my reluctance to compromise my own String class definition by providing a get_buffer function. If I had invented MFC, no functions would take _TCHAR* arguments and I'd use String objects everywhere, as I do here. Alas, MFC functions occasionally require the underlying _TCHAR. I decided to solve the problem by keeping the kludges in the realm of MFC as much as possible. I convert the incoming string to a CString, then let the CString expose its innards. SetWindowText, for reasons known only to its developer, takes a CString* (or a _TCHAR*) argument instead of a const CString reference, so I can't just cast the incoming string to a CString and pass the result to SetWindowText—I have to get a pointer. I'm reluctant to take the address of a temporary variable, even though it probably would work, so instead of doing this</P>
+<P> </P>
+<P><BR></P>
+<PRE> SetWindowText( &amp;(CString)s )</PRE>
+<P> </P>
+<P>I do this to get my pointer:</P>
+<P> </P>
+<P><BR></P>
+<PRE> SetWindowText( (const _TCHAR *)(CString)s );</PRE>
+<P> </P>
+<P>The import function notifies anybody who's interested that a new value was imported into the window by calling notify(observer). The OnChange handler, called when the CEdit object is modified by the user, does nothing but notify the user of the Text_control. In both cases, the user can get the new value by sending an export message. <B>Figure 8</B> shows a Text_control object being used directly. Class Flintstone sets itself up as a Notifiable object, and a pointer to fred is passed to the Text_control constructor. Every time the Text_control changes value (for example, the user types in a new value), Flintstone::notify() is called. The export call exports the data from the Text_control to a normal string, which is then printed.</P>
+<P><B> Figure 8  Using a Text Control Directly</B></P>
+<P><BR></P>
+<PRE> class Flintstone: public Notifiable
+{
+public:
+    virtual void notify( Notifier *sender )
+    {
+        Text_control *p = dynamic_cast&lt;Text_control *&gt;(sender);
+        if( !p )
+            cerr &lt;&lt; "Something's wrong\n" ;
+        else
+        {
+            String s;
+            p-&gt;export( &amp;s );
+            cout &lt;&lt; "The window changed to: " &lt;&lt; s &lt;&lt; "\n";
+        }
+    }
+}
+fred;</PRE>
+<P> </P>
+<P><BR></P>
+<PRE> Text_control *The_control;
+void CFormsView::OnTest()
+{
+    The_control = new Text_control( Text_control::read_write,
+                                    Rect(0,0,100,20),
+                                    this,
+                                    "Initial value",
+                                    &amp;fred
+                                  );
+}</PRE>
+<H2><A NAME="sec8"></A>  The Vulcan Mind Meld</H2><P>Now we're finally in a position to manufacture a bridge class that connects the Text_control to the String object: class Text (see <B>Figure 9</B>). The Text class is a string that implements the User_interface interface (see <B>Figure 10</B>), so both of these are properly made public base classes. All string functionality is available through a Text object, but it can also display its own interface. The basic idea is to be able to traverse a list of User_interface objects without having to know exactly what each object is, invoking the "display" or "interact" methods of the object as appropriate. In the long term, I'll derive many classes other than Text_control from User_interface.</P>
+<P><B> Figure 9  Text</B></P>
+<P><BR></P>
+<PRE> 
+text.h
+#ifndef TEXT_H__
+#define TEXT_H__
+
+#include "ansi.h"
+#include "mystring.h"
+#include "userintf.h"
+#include "wrappers.h"
+#include "notify.h"
+
+class Text : public String, public User_interface
+{
+      class Observer: public Notifiable
+      {
+            Text *the_text_obj;
+      public:
+            Observer   ( Text *container  ): the_text_obj(container){}
+            void notify( Notifier *sender );
+      }
+      watcher;
+
+      friend void Observer::notify( Notifier *sender );
+
+      Text_control      *display_mechanism;
+
+public: // overrides of User_interface functions
+      Text( void            );
+      Text( const String &amp;r );
+
+      virtual      ~Text( void );
+
+      virtual      const String &amp;operator=( const String &amp;r );
+      virtual      const String &amp;operator=( const _TCHAR *p );
+      virtual      const Text   &amp;operator=( const Text   &amp;r );
+
+      virtual bool display ( Window *win, const Rect &amp;rect );
+      virtual bool interact( Window *win, const Rect &amp;rect );
+      virtual void hide    ( void                          );
+};
+//---------------------------------------------------------
+// The following code kicks out:
+//
+// warning C4355: 'this' : used in base member initializer list.
+//
+// Normally, it would be dangerous for the contained-object
+// constructor to access the container class because the contained
+// objects are initialized before the container is initialized.
+// We don't do that here, and it's convenient to pass a pointer
+// to the container at construction time, so turn off the warning.
+
+#pragma warning( disable : 4355 )
+
+inline Text::Text( void ): watcher           ( this         ),
+                           display_mechanism ( NULL         ),
+                           String            ( "", &amp;watcher )
+{}
+
+inline Text::Text( const String &amp;r ): watcher                 ( this        ),
+                                      display_mechanism       ( NULL        ),
+                                      String                  ( r, &amp;watcher )
+{}
+
+#pragma warning( default : 4355 )
+#endif // TEXT_H__
+
+text.cpp
+#include "stdafx.h"
+#include "text.h"
+
+/*virtual*/ Text::~Text( void )
+{
+      delete display_mechanism;
+}
+
+/*virtual*/      const String &amp;Text::operator=( const String &amp;r )
+{
+      return String::operator=(r);
+}
+
+/*virtual*/      const String &amp;Text::operator=( const _TCHAR *r )
+{
+      return String::operator=(r);
+}
+
+/*virtual*/      const Text &amp;Text::operator=( const Text &amp;r )
+{
+      *(String *)this = r;
+      return *this;
+}
+
+/*virtual*/ void Text::Observer::notify( Notifier *sender )
+{
+      // This function is a friend of class Text, a pointer to which is
+      // in the owner field; It's called when the String base class changes.
+      // Note that we have to turn notify off in whichever object is being
+      // updated. Otherwise, we'll just end up back here.
+
+      Text *p = dynamic_cast&lt;Text *&gt;(sender);
+      if( p )
+      {
+            // String base class was changed, transfer the new value
+            // to the display.
+
+            if( p-&gt;display_mechanism )
+            {
+                  p-&gt;display_mechanism-&gt;notify_off();
+                  p-&gt;display_mechanism-&gt;import( *the_text_obj );
+                  p-&gt;display_mechanism-&gt;notify_on();
+            }
+      }
+      else // User changed the Text_control, copy new value to
+      {    // the string base class of the associated text object.
+
+            Text_control *display = dynamic_cast&lt;Text_control*&gt;(sender);
+            assert(display);
+            
+            display-&gt;notify_off ();
+            display-&gt;export     ( the_text_obj );
+            display-&gt;notify_on  ();
+      }
+}
+
+/*virtual*/ bool Text::display(Window *win, const Rect &amp;rect)
+{
+      // Create a static-text object displaying the text in the
+      // String base class.
+
+      display_mechanism =      new Text_control( Text_control::write_only,
+                                                 rect,
+                                                 win,
+                                                 *(String *)this,
+                                                 &amp;watcher
+                                               );
+      return true;
+}
+
+/*virtual*/ void Text::hide( void )
+{
+      delete display_mechanism;
+      display_mechanism = NULL;
+}
+
+/*virtual*/ bool Text::interact(Window *win, const Rect &amp;rect)
+{
+      // Create an editble representation of the String base
+      // class. Any changes made by the user will transfer
+      // automatically to the string.
+
+      display_mechanism =      new Text_control( Text_control::read_write,
+                                                 rect,
+                                                 win,
+                                                 *(String *)this,
+                                                 &amp;watcher
+                                               );
+      return true;
+}</PRE>
+<P><B> Figure 10  userintf.h</B></P>
+<P><BR></P>
+<PRE> #ifndef USERINTF_H__
+#define USERINTF_H__
+
+typedef CWnd Window; // Forward references to classes in wrappers.h,
+class Rect;          // avoids circular #include dependency;
+
+class User_interface
+{
+public:
+      virtual void hide    ( void                          ) = 0;
+      virtual bool display ( Window *win, const Rect &amp;rect ) = 0;
+      virtual bool interact( Window *win, const Rect &amp;rect ) = 0;
+};
+
+#endif // USERINTF_H__</PRE>
+<P></P>
+<P>Since the whole point of this exercise is to relieve any need to worry about user-interface issues, I decided to make the Text_control a private member of the Text object (called display_mechanism) as compared to a base class. This way the user can't access it at all. </P>
+<P>The Text class also contains a nested definition for a Notifiable class called Observer and an object of that class called Watcher. A pointer to Watcher is passed to both the String base class and the Text_control object when they are created so they can notify the Text object about any changes. The Text::Observer::notify function is a friend of the Text class, so it can do the necessary work. I physically nested the classes (as compared to using a forward reference like I did with the String::Buffer class back in <B>Figure 3</B>) to avoid some forward-referencing problems.</P>
+<P>The actual code in text.cpp (see <B>Figure 9</B>) is straightforward. The operator= overloads just correct for the fact that operator= overloads aren't inherited—they just chain to the base-class functions. The notify function uses the dynamic_cast mechanism to see who sent the notification. If the sender is a Text object, then it's the String base class, otherwise it must be the Text_control. When the string is changed, the function imports the value into the Text_control. When the Text_control object changes, the characters are exported from the Text_control to the CString base class. The only complication is that notification must be turned off on the receiving end to avoid an infinitely recursive notification loop. (The string notifies the Text object of a change, which causes the Text object to update the Text_control, which causes an EN_CHANGE notification to be sent, which causes the OnChange function to be called, which causes the Text_control to import a new value into the string base class, which causes it to notify the Text object of a change, and so on.) Saying</P>
+<P> </P>
+<P><BR></P>
+<PRE>     display-&gt;notify_off();
+    display-&gt;export( the_text_obj );
+    display-&gt;notify_on();</PRE>
+<P> </P>
+<P>sets things up so the Text_control doesn't notify the Text object when the export call changes its value.</P>
+<P>All that's left are the display and interact handlers, which create a read_write or read_only Text_control as appropriate.</P>
+<P> </P>
+<H2><A NAME="sec9"></A>  Whew!</H2><P>As is typical of C++, a lot of work is required to get to a simple place. You can use a Text object just as you would a string, but you can pass it a display-yourself or interact-with-user message to create a user interface. If you choose interact, the data goes directly from the user into the string so you don't have to worry about creating edit controls and the like. In fact, if you take the architecture out to the obvious conclusion, you don't have to worry about Windows at all. You write code that uses strings and the strings deal with Windows for you. </P>
+<P>You can probably see where I'm headed with this in terms of the Employee class. An Employee will also implement the User_interface. When you pass it an interact message, it just relays the message to its fields. The result is something that looks like a dialog box (though it's created at runtime), but unlike a CDialog, there's no need to transfer data anywhere. The characters typed by the user of the program effectively go directly into the various fields of an Employee without the Employee container being involved at all. This vastly simplifies the code in the Employee class, of course. In the second part of this series, I'll explain how to do this in a generic way</P>
+<H2><A NAME="sec10"></A>  BOOCH NOTATION</H2><P>A popular mechanism for depicting classes in C++ is Booch notation (see <B>Figure 2</B>). The diagram details the Text class discussed in the main article.</P>
+<P>The clouds indicate classes. The class name is underlined, and various relevant attributes and operations (such as message handlers) are listed under the name. The "A" in the triangle indicates an abstract class—the class defines one or more pure virtual functions. Clouds can be nested the same way that you can nest one C++ class definition inside another. The only effect this has is to put the nested class into the namespace of the nesting class. That is, the nested class is named String::Buffer. A user could declare another class called Buffer at the global level without creating a name conflict because this second definition is in the global namespace, not the String namespace. String::Buffer and ::Buffer are different classes.</P>
+<P>The lines in a Booch class diagram show relationships between classes. The ones with arrows indicate derivation (the arrow points at the base class). The double hatches at the derived-class end of the line indicate a private base class (no hatch means public). The relationships are often labeled to show the role the class has in the system. For example, a Text object "is" a string that's "displayed as" a Text_control. A Text object also "implements" the interface defined by various pure virtual functions in the User_interface class. </P>
+<P>The lines with hollow circles represent "uses" relationships. As before, the double hatches on the line mean private. The String class, for example, uses a CString. It also uses a Notifiable, which it presumably got from the Text object since Notifiable is an abstract class implemented in the Text object. Note that the relationship is between the string and the Notifiable base class, not between the string and the Text::Observer derived class. The string is actually passed a pointer to the Text::Observer object at run time, but the string treats it as a generic notifiable object. The string doesn't know that it's dealing with a derived-class object.</P>
+<P>The lines with solid circles represent "has" relationships. The Text object has a Text::Observer—it contains a private field of type Text::Observer. Has relationships usually imply creation and destruction. A thing that has some object must create and destroy that object. The object will probably exist as long as you do—it's either a field in the class or is created in the constructor and destroyed in the destructor. Uses is usually a transitive relationship—you get it from somewhere (or create it yourself), use it for a while, and then forget about it or discard it. Uses relationships usually imply that you have a pointer to the object. The triangle with the "F" in it that adorns the have or uses line means friend. Text::Observer is a friend of the Text object.</P>
+<P>Cardinality relationships, if they're important, are shown as numbers at the ends of the lines. The fact that several strings share a single Buffer is indicated by putting "1" next to the String side of the line and "1...n" next to the Buffer side. Finally, the hollow box at the end of the line represents reference (or pointer). Put this all together and the diagram says "a String object class has a pointer to a Buffer which it shares with other String objects."</P>
+<P><I>This article is reproduced from Microsoft Systems Journal. Copyright </I>©<I> 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P><I>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</I></P>
+<P></P></font></body></HTML>

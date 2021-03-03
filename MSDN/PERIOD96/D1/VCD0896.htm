@@ -1,0 +1,608 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<html>
+
+<head>
+<meta http-equiv="Content-Type"
+content="text/html; charset=iso-8859-1">
+<meta name="GENERATOR" content="Microsoft FrontPage 2.0">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Battling Backup Anxiety with Win32 (August)</title>
+
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+
+<BODY bgcolor="#FFFFFF">
+<font face="verdana,arial,helvetica" size="2">
+
+<H1>Battling Backup Anxiety with Win32</h1>
+
+<P>Eric Bergman-Terrell</p>
+
+<P><i>What does backup reliability have to do with
+Win32 directory recursion and memory-mapped file I/O? Plenty, if
+you use some neat features of Win32 to answer the question: Are
+the files on my backup tape really the same as those on my hard
+disk? This article explores a handy console application that
+provides the answers. You'll learn about tree traversal and
+memory-mapped file I/O in the process.</i></p>
+
+<P>I'M paranoid. I backup my hard disk to tape
+habitually. I store the tapes in a safe deposit box at my bank.
+The thought of losing my files in a hard disk crash is more than
+I can bear. I get a lot of comfort in knowing my files are safely
+tucked away in a 50-ton bank vault. So when I started hearing
+reports that some backups that passed my backup software's verify
+phase couldn't be reliably restored, I panicked. Apparently I
+couldn't trust my backup software's verify feature. Having a
+strong urge to know the truth about my backups, I decided to
+write a program that compares all the files in two directory
+trees. With this program, I could backup my files and restore
+them to a temporary directory and then run a comparison to
+determine, once and for all, if my backups were good or bad.
+Since this directory comparison program uses some interesting
+Win32 programming techniques, I thought it would be fun to
+describe them in this article. In a nutshell, it's a console
+application that uses the Win32 directory tree traversal API, and
+uses memory-mapped file I/O to compare files. So let's take a
+look.</p>
+
+<H2>The sample application</h2>
+
+<P>The directory comparison program is named DIRCMP and
+the complete source code is included on the Developer's Disk.
+DIRCMP is a Win32 console application that can be compiled with
+MSVC++ 4.1. A console application is a character-mode program
+that runs in a Windows 95 or NT command shell. Since they're full
+Win32 applications they can't run under Win32s. DIRCMP is simple
+to run. Just open a command shell and type DIRCMP &lt;directory
+1&gt; &lt;directory 2&gt;.</p>
+
+<P>For example, if you want to compare the C:\SOURCE
+with C:\TMP directories, you would enter this command:</p>
+
+<P><br>
+</p>
+
+<pre> C:\&gt;DIRCMP  C:\SOURCE  C:\TMP</pre>
+
+<P>If you want more detailed output, you can use the
+optional /verbose mode:</p>
+
+<P><br>
+</p>
+
+<pre> C:\&gt;DIRCMP  C:\SOURCE  C:\TMP  /VERBOSE</pre>
+
+<P>When DIRCMP runs, it creates a data structure
+containing the files in either directory. It then displays two
+lists: the files that exist in the first directory but not in the
+second directory, and the files that exist in the second
+directory but not in the first directory. Next, the program
+displays the number of files in both directories. Finally, the
+program compares the files in both directories and displays a
+list of like-named files that are different or have different
+sizes. I used the VC++ AppWizard to create the application shell.
+</p>
+
+<P>I was surprised to find that AppWizard doesn't
+create a skeleton console application. I expected it to create a
+file containing a skeleton main() function something like the one
+shown here. Instead, Visual C++ 4.1 forces you to create your
+main() manually. Perhaps a future version will automate this
+process. After all, how hard could it be to enhance AppWizard to
+create<b> </b>less than 10 lines of code?</p>
+
+<P><br>
+</p>
+
+<pre> #include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+
+int main(int argc, char *argv[])
+
+  {
+  // TODO:  Add your code here
+
+  return EXIT_SUCCESS;
+  }</pre>
+
+<H2>Exploring console applications</h2>
+
+<P>The main function's parameters correspond to the
+arguments entered on the command line by the user. The argc
+parameter is the number of arguments plus one. The parameter argv
+is an array of character pointers that contains the program's
+executable path plus each argument. For example, let's say you
+enter the following command:</p>
+
+<P><br>
+</p>
+
+<pre> C:\&gt;C:\BIN\DIRCMP C:\SOURCE C:\TMP</pre>
+
+<P>In this situation, the value of the argc parameter
+is three and the array contains these values:</p>
+
+<P><br>
+</p>
+
+<pre> argv[0] == &quot;C:\BIN\DIRCMP.EXE&quot;
+argv[1] == &quot;C:\SOURCE&quot;
+argv[2] == &quot;C:\TMP&quot;</pre>
+
+<P>While a console application isn't an MFC CWinApp,
+console applications can use CStrings and the MFC collection
+classes. DIRCMP's main function first checks the argument count.
+If the count is valid, it calls CDirectoryCompare::Compare to
+compare the two directories. If there are three arguments (in
+other words, if argc == 4) it assumes that the user has specified
+the /verbose mode. Here's the source code for the Main()
+function:</p>
+
+<P><br>
+</p>
+
+<pre> #include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;afxwin.h&gt;
+#include &lt;afxext.h&gt;
+#include &quot;dircmp.h&quot;
+
+
+int main(int argc, char *argv[])
+
+  {
+  // Check the argument count and give a usage
+  // message if it's incorrect.
+  if (argc != 3 &amp;&amp; argc != 4)
+    {
+    printf(&quot;usage: dircmp &lt;directory 1&gt; &quot;
+           &quot;&lt;directory 2&gt; {/verbose}\n&quot;);
+    exit(EXIT_FAILURE);
+    }
+
+  // Compare the directories.
+  CDirectoryCompare DirCmp;
+    DirCmp.Compare(argv[1], argv[2], argc == 4);
+
+  printf(&quot;\ndircmp completed successfully\n&quot;);
+
+  return EXIT_SUCCESS;
+  }</pre>
+
+<H2>Walking the directory tree</h2>
+
+<P>Unlike Win16 programs that must call MS-DOS
+functions to traverse directory trees, Win32 console applications
+can call native Win32 functions. Let's examine the calls we'll
+use:</p>
+
+<P><br>
+</p>
+
+<pre> HANDLE FindFirstFile(LPCTSTR lpFileName, 
+                     LPWIN32_FIND_DATA lpFindFileData);</pre>
+
+<P>The parameter lpFileName must be either a valid
+directory or a path and filename. It can contain wildcard
+characters (* and ?). Under Windows 95, lpFileName can't have
+more than MAX_PATH characters. The parameter lpFindFileData is
+the address of a WIN32_FIND_DATA structure that receives
+information about the found file or subdirectory. FindFirstFile's
+return value, if successful, is a search handle for use in calls
+to FindNextFile and FindClose. Otherwise, it returns
+INVALID_HANDLE_VALUE:</p>
+
+<P><br>
+</p>
+
+<pre> BOOL FindNextFile(HANDLE hFindFile, LPWIN32_FIND_DATA 
+                 lpFindFileData);</pre>
+
+<P>In FindNextFile the hFindFile parameter is the
+search handle returned by the call to FindFirstFile. The
+lpFindFileData parameter is the address of a WIN32_FIND_DATA
+structure that receives information about the found file or
+subdirectory. FindNextFile's return value is TRUE if the function
+call succeeds and FALSE if it doesn't:</p>
+
+<P><br>
+</p>
+
+<pre> BOOL FindClose(HANDLE hFindFile);</pre>
+
+<P>Our last traversal function is FindClose. Having
+only one parameter, hFindFile is the search handle returned by
+the original call to FindFirstFile. This function releases the
+search handle. Its return value is TRUE on success and FALSE on
+failure. We'll use these functions in
+CDirectoryCompare::AddFilesToList. </p>
+
+<P>DIRCMP keeps track of which files are in which
+directories by using an MFC CMapStringToOb collection named
+m_FileList. Items in m_FileList are stored with their filenames
+as the retrieval key. Each item is a CFileListItem that specifies
+which directories contain the file. Here's the declaration of the
+CFileListItem class: </p>
+
+<P><br>
+</p>
+
+<pre> class CFileListItem : public CObject
+
+  {
+  DECLARE_DYNAMIC(CFileListItem)
+
+  public:
+    CFileListItem();
+
+    enum { m_nElements = 2 };
+    BOOL m_bWhichDir[m_nElements];
+  };</pre>
+
+<P>If a CFileListItem object has a value of TRUE in the
+first element of its m_bWhichDir array, the file is stored in the
+first directory specified in the DIRCMP command line. If the
+second element has a value of TRUE, the file is stored in the
+second directory specified in the DIRCMP command. </p>
+
+<P>CDirectoryCompare::AddFilesToList uses FindFirstFile
+and FindNextFile to find all files and subdirectories in the
+directory specified by DirName. If the dwFileAttributes
+FILE_ATTRIBUTE_DIRECTORY bit is clear, the item is a file and its
+filename is stored in the cFileName field of the WIN32_FIND_DATA
+structure. If the filename isn't already stored in m_FileList, a
+new CFileListItem object is created and added to m_FileList.
+Otherwise a pointer to the CFileListItem is retrieved using the
+Lookup function. In either case, the m_bWhichDir array is updated
+to record which directory contains the file.</p>
+
+<P>When the program encounters a subdirectory, it calls
+CDirectoryCompare::AddFilesToList recursively to process the
+files in the subdirectories. When all directories have been
+processed the program calls FindClose to close the search handle.
+Here's the code for CDirectoryCompare::AddFilesToList:</p>
+
+<P><br>
+</p>
+
+<pre> void CDirectoryCompare::AddFilesToList(
+                         const CString&amp; RootDir,
+                         const CString&amp; DirName,
+                         int nIndex)
+
+// Add all files in the directory specified by
+// RootDir and DirName to m_FileList.
+
+  {
+  WIN32_FIND_DATA FindFileData;
+
+  if (DirName.GetLength() &gt;= MAX_PATH)
+    printf(&quot;File or Directory Name is too &quot;
+           &quot;long: \&quot;%s\&quot;\n&quot;, (LPCSTR) DirName);
+  else
+    {
+    // Get first file or directory in the 
+    // directory.
+    const HANDLE hFindFile = 
+        FindFirstFile(DirName + &quot;\\*.*&quot;,
+                      &amp;FindFileData);
+    ASSERT(hFindFile != INVALID_HANDLE_VALUE);
+
+    CString FileName(FindFileData.cFileName);
+
+    // If there are files and/or directories
+    // in the directory, add all of them to
+    // m_FileList.
+    if (hFindFile != INVALID_HANDLE_VALUE)
+      {
+      do
+        {
+        // Get filename of file or directory.
+        FileName = FindFileData.cFileName;
+
+        // If the item is a file, add it to 
+        // m_FileList.
+        if (!(FindFileData.dwFileAttributes &amp; 
+              FILE_ATTRIBUTE_DIRECTORY))
+          {
+          const CString NewLine = 
+                  DirName + &quot;\\&quot; + FileName;
+          CString NewFileName = 
+            NewLine.Right(NewLine.GetLength() - 
+                          RootDir.GetLength());
+
+          NewFileName.MakeUpper();
+
+          CObject       *pValue = NULL;
+          CFileListItem *pItem  = NULL;
+
+          // If a new item must be created...
+          if (nIndex == 0 || 
+              !m_FileList.Lookup(NewFileName,
+                                 pValue))
+            {
+            // Create a new item.
+            pItem = new CFileListItem;
+            ASSERT(pItem);
+
+            pItem-&gt;m_bWhichDir[nIndex] = TRUE;
+
+            // Add new item to m_FileList.
+            m_FileList.SetAt(NewFileName, pItem);
+            }
+          else
+            {
+            ASSERT(pValue &amp;&amp; pValue-&gt;IsKindOf(
+                  RUNTIME_CLASS(CFileListItem)));
+
+            pItem = (CFileListItem *) pValue;
+
+            // Update the item which is already
+            // in m_FileList.
+            pItem-&gt;m_bWhichDir[nIndex] = TRUE;
+            }
+          }
+
+        // If item is a directory, add its
+        // files.
+        if (FindFileData.dwFileAttributes &amp;
+            FILE_ATTRIBUTE_DIRECTORY &amp;&amp;
+            FileName != &quot;.&quot; &amp;&amp; FileName != &quot;..&quot;)
+          AddFilesToList(RootDir, DirName + 
+                         &quot;\\&quot; + FileName, 
+                         nIndex);
+        } while (FindNextFile(hFindFile, 
+                              &amp;FindFileData));
+
+      FindClose(hFindFile);
+      }
+    }
+  }</pre>
+
+<P>DIRCMP calls CDirectoryCompare::AddFilesToList for
+both directories specified on the DIRCMP command line. The
+directory names are stored in an array named m_Dirs. Here's how
+the lists are managed:</p>
+
+<P><br>
+</p>
+
+<pre> 
+void CDirectoryCompare::PopulateFileList()
+
+// Add the names of all files in either directory
+// to m_FileList.
+
+  {
+  ClearFileList();
+
+  for (int i = 0; i &lt; 2; i++)
+    AddFilesToList(m_Dirs[i], m_Dirs[i], i);
+  }</pre>
+
+<H2>Let's compare</h2>
+
+<P>Once all the filenames have been added to m_FileList
+by CDirectoryCompare::PopulateFileList, it's time to compare the
+files that exist in both directories specified in the DIRCMP
+command line. The Win32 memory-mapped file I/O feature makes it
+easy to compare files. Memory-mapped file I/O lets Win32 programs
+associate a region of virtual memory with a disk file so that any
+access of the memory will access the associated file data. If the
+files to be compared are the same size, each file can be mapped
+to a virtual memory address. The files can then be compared by
+simply passing the addresses to the memcmp function.</p>
+
+<P>Memory-mapped file I/O is supported by Windows 95,
+NT, and even Win32s. Table 1 (see page 12) provides a summary of
+the memory-mapped file I/O functions and their parameters.</p>
+
+<P>Here's how CDirectoryCompare::CompareFiles works.
+First, CreateFile opens the files. Then GetFileSize verifies that
+the files are the same size. If so, CreateFileMapping and
+MapViewOfFile memory map the files. The actual comparison of the
+file contents is done by memcmp. Finally, UnmapViewOfFile and
+CloseHandle clean up.</p>
+
+<P>CDirectoryCompare::CompareFiles is limited to files
+smaller than 4G because memcmp's third argument, which specifies
+the number of bytes to compare, is a 32-bit value. If you need to
+compare files larger than 4G, you'll need to compare them in
+chunks smaller than 4G. Here's the code for running the
+comparison:</p>
+
+<P><br>
+</p>
+
+<pre> CDirectoryCompare::ComparisonType 
+CDirectoryCompare::CompareFiles(
+                    const CString&amp; Path,
+                    DWORD&amp; dwBytesCompared) const
+
+// The file specified by Path is in both 
+// directories. Compare both copies and
+// determine if they are identical.
+//
+// Return Value:
+//
+// DifferentSizes     Files are different sizes
+//
+// DifferentContents  Files are the same size but
+//                    have different contents.
+//
+// Identical          Files are the same size and
+//                    have identical contents.
+
+  {
+  dwBytesCompared = 0;
+
+  CString Paths[2];
+
+  // Determine full filenames of both copies
+  // of the file.
+  for (int i = 0; i &lt; 2; i++)
+    Paths[i] = m_Dirs[i] + Path; 
+
+  HANDLE FileHandle[2];
+  DWORD dwSizeLow[2], dwSizeHigh[2];
+
+  // Attempt to open both copies of the file.
+  for (i = 0; i &lt; 2; i++)
+    {
+    FileHandle[i] = CreateFile(
+                         (LPCSTR) Paths[i], 
+                         GENERIC_READ, 
+                         FILE_SHARE_READ,
+                         NULL, 
+                         OPEN_EXISTING, 
+                         FILE_ATTRIBUTE_NORMAL,
+                         NULL);
+
+    if (FileHandle[i] == INVALID_HANDLE_VALUE)
+      {
+      printf(&quot;Cannot open file %s\n&quot;,
+             (LPCSTR) Paths[i]);
+      exit(EXIT_FAILURE);
+      }
+
+    // Determine size of both copies of the file.
+    dwSizeLow[i] = GetFileSize(FileHandle[i], 
+                               &amp;dwSizeHigh[i]);
+
+    // If the file is larger than 4 GB, exit.
+    if (dwSizeHigh[i] != 0)
+      {
+      printf(&quot;File %s is too large\n&quot;,
+             (LPCSTR) Paths[i]);
+      exit(EXIT_FAILURE);
+      }
+    }  
+
+  // Determine if the copies are different sizes.
+  if (dwSizeLow[0] != dwSizeLow[1])
+    return DifferentSizes;
+
+  // At this point, the files are identical in 
+  // size.
+  const DWORD dwFileSize = dwSizeLow[0];
+
+  // No need to compare empty files
+  if (dwFileSize == 0)
+    return Identical;
+
+  HANDLE Maps[2];
+  const void *FileContents[2];
+
+  // Map the files using memory-mapped file I/O.
+  for (i = 0; i &lt; 2; i++)
+    {
+    Maps[i] = CreateFileMapping(FileHandle[i],
+                                NULL,
+                                PAGE_READONLY,
+                                0,
+                                dwFileSize,
+                                NULL);
+
+    if (Maps[i] == NULL)
+      {
+      printf(&quot;Cannot map file %s\n&quot;, 
+             (LPCSTR) Paths[i]);
+      exit(EXIT_FAILURE);
+      }
+
+    FileContents[i] = MapViewOfFile(
+                            Maps[i],
+                            FILE_MAP_READ,
+                            0,
+                            0,
+                            dwFileSize);
+
+    if (FileContents[i] == NULL)
+      {
+      printf(&quot;Cannot map file %s\n&quot;, 
+             (LPCSTR) Paths[i]);
+      exit(EXIT_FAILURE);
+      }
+    }
+
+  // Compare the memory-mapped files with memcmp.
+  const BOOL bResult = memcmp(FileContents[0], 
+                              FileContents[1], 
+                              dwFileSize) == 0;
+
+  dwBytesCompared = dwFileSize;
+
+  // Unmap and close the files.
+  for (i = 0; i &lt; 2; i++)
+    {
+    if (!UnmapViewOfFile(FileContents[i]))
+      {
+      printf(&quot;Cannot unmap file %s\n&quot;,
+             (LPCSTR) Paths[i]);
+      exit(EXIT_FAILURE);
+      }
+
+    if (!CloseHandle(Maps[i]))
+      {
+      printf(&quot;Cannot close file %s\n&quot;, 
+             (LPCSTR) Paths[i]);
+      exit(EXIT_FAILURE);
+      }
+
+    if (!CloseHandle(FileHandle[i]))
+      {
+      printf(&quot;Cannot close file handle &quot;
+             &quot;for file %s\n&quot;, (LPCSTR) Paths[i]);
+      exit(EXIT_FAILURE);
+      }
+    }
+
+  return bResult ? Identical : DifferentContents;
+  }</pre>
+
+<H2>Conclusion</h2>
+
+<P>In addition to providing the simplicity of a flat
+memory model, the Win32 API provides several other great
+conveniences. Console applications are useful for utilities that
+are best run from the command line. The native Win32 directory
+tree traversal API allows you to search for files without using
+MS-DOS functions. And finally, memory-mapped file I/O makes
+working with files as easy as manipulating pointers.
+Incidentally, DIRCMP provided proof that my backup software and
+hardware were actually working perfectly. Still, I'm glad I wrote
+the program so that I can ensure the reliability of my backups.
+After all, even paranoids have enemies.</p>
+
+<P><i>Eric Bergman-Terrell, author of Vault and
+Astronomy Lab, writes Windows travel agency applications at
+Galileo International. CompuServe 73667,3517.</i></p>
+
+<P>&nbsp;</p>
+
+<P align="center"><a
+href="http://www.pinpub.com/vcd/"><img src="Pinnacle.gif"
+border="0" width="216" height="72"></a></p>
+
+<P align="center"><strong>To find out more about Visual
+C++ Developer and Pinnacle Publishing, <br>
+visit their website at</strong> <a
+href="http://www.pinpub.com/vcd/"><strong>http://www.pinppub.com/vcd/
+</strong></a></p>
+
+<P align="center"><font size="1">Note: This is not a
+Microsoft Corporation website. <br>
+Microsoft is not responsible for its content.</font></p>
+
+<P>This article is reproduced from the August 1996
+issue of Visual C++ Developer. Copyright 1996, by Pinnacle
+Publishing, Inc., unless otherwise noted. All rights are
+reserved. Visual C++ Developer is an independently produced
+publication of Pinnacle Publishing, Inc. No part of this article
+may be used or reproduced in any fashion (except in brief
+quotations used in critical articles and reviews) without prior
+consent of Pinnacle Publishing, Inc. To contact Pinnacle
+Publishing, Inc., please call (800)788-1900 or (206)251-1900.</p>
+</font></body>
+</html>

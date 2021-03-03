@@ -1,0 +1,689 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Sample code for a Service Provider</title>
+<link disabled rel=stylesheet href=../../../backsdk3.css>
+<style type="text/css">
+@import url(../../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h2><a name="_win32_sample_code_for_a_service_provider"></a>Sample code for a Service Provider</h2>
+<p>
+This section contains a source code sample that demonstrates how to implement the GetXbyY functions using the new, protocol-independent RNR functions. A developer should implement these functions as a starting point. To comply with the Windows Sockets specification, many more functions are needed.</p>
+<p>
+<b>Important</b>  The following code is not guaranteed to compile.</p>
+<pre><code>/*++
+    xbyrnr.cpp
+
+    Copyright (c) 1996 Microsoft Corporation
+    All rights reserved
+
+    GetXbyY emulation via new WinSock2 RNR. This source module shows
+    code that is built into the WinSock2 DLL (ws2_32.dll). It
+    demonstrates how the older GetXByY functions are mapped to the new
+    WSALookupServiceBegin, WSALookupServiceNext, WSALookupServiceEnd
+    functions.
+
+    This module is not guaranteed to compile. It is provided as source
+    code for RNR name-space service providers to understand what will
+    be coming down to their code in response to the traditional
+    GetXbyY calls.
+
+    At this time, only
+        gethostname
+        gethostbyname
+        gethostbyaddr
+        getservbyname
+        getservbyport
+    are implemented in this manner.
+
+    Warning:  This code is preliminary, and may change before Windows 
+    Sockets 2 is released.
+
+    Warning: This is not provided as a template for either RNR
+    applications or name space providers. This code is only intended
+    to illustrate what happens in the WinSock2 DLL to map the GetXbyY
+    calls to the new RNR APIs.
+--*/
+
+#include "svcguid.h"
+
+//
+//  Forward declares
+//
+
+LPBLOB
+getxyDataEnt(
+    PCHAR  pResults,
+    DWORD  dwSize,
+    LPSTR lpszName,
+    LPGUID lpType,
+    LPSTR *  lppName
+    );
+
+
+VOID
+FixList(PCHAR ** List, PCHAR Base);
+
+VOID
+UnpackHostEnt(struct hostent * hostent);
+
+VOID
+UnpackServEnt(struct servent * servent);
+
+GUID HostnameGuid = SVCID_INET_HOSTADDRBYNAME;
+GUID AddressGuid =  SVCID_INET_HOSTADDRBYINETSTRING;
+GUID IANAGuid    =  SVCID_INET_SERVICEBYNAME;
+
+//
+// Utility to turn a list of offsets into a list of addresses. Used
+// to convert structures returned as BLOBs.
+//
+
+VOID
+FixList(PCHAR ** List, PCHAR Base)
+{
+    if(*List)
+    {
+        PCHAR * Addr;
+
+        Addr = *List = (PCHAR *)( ((DWORD)*List + Base) );
+        while(*Addr)
+        {
+            *Addr = (PCHAR)(((DWORD)*Addr + Base));
+            Addr++;
+        }
+    }
+}
+
+
+//
+// Routine to convert a hostent returned in a BLOB to one with
+// usable pointers. The structure is converted in-place.
+//
+VOID
+UnpackHostEnt(struct hostent * hostent)
+{
+     PCHAR pch;
+
+     pch = (PCHAR)hostent;
+
+     if(hostent-&gt;h_name)
+     {
+         hostent-&gt;h_name = (PCHAR)((DWORD)hostent-&gt;h_name + pch);
+     }
+     FixList(&amp;hostent-&gt;h_aliases, pch);
+     FixList(&amp;hostent-&gt;h_addr_list, pch);
+}
+
+//
+// Routine to unpack a servent returned in a BLOB to one with
+// usable pointers. The structure is converted in-place
+//
+
+VOID
+UnpackServEnt(struct servent * servent)
+{
+    PCHAR pch;
+
+    pch = (PCHAR)servent;
+
+    FixList(&amp;servent-&gt;s_aliases, pch);
+    servent-&gt;s_name = (PCHAR)(DWORD(servent-&gt;s_name) + pch);
+    servent-&gt;s_proto = (PCHAR)(DWORD(servent-&gt;s_proto) + pch);
+}
+
+
+struct hostent FAR * WSAAPI
+gethostbyaddr(
+    IN const char FAR * addr,
+    IN int len,
+    IN int type
+    )
+/*++
+Routine Description:
+
+    Get host information corresponding to an address.
+
+Arguments:
+
+    addr - A pointer to an address in network byte order.
+
+    len - The length of the address, which must be 4 for PF_INET
+    addresses.
+
+    type - The type of the address, which must be PF_INET.
+
+Returns:
+
+    If no error occurs, gethostbyaddr() returns a pointer to the
+    hostent structure described above. Otherwise it returns a NULL
+    pointer and a specific error code is stored with SetErrorCode(). 
+--*/
+{
+    CHAR qbuf[100];
+    struct hostent *ph;
+    LPBLOB pBlob;
+    PCHAR pResults;
+    int err, ErrorCode;
+    PDPROCESS Process;
+    PDTHREAD Thread;
+
+    err = PROLOG(&amp;Process,
+                   &amp;Thread,
+                    &amp;ErrorCode);
+    if(err != NO_ERROR)
+    {
+        SetLastError(ErrorCode);
+        return(NULL);
+    }
+
+    pResults = new CHAR[RNR_BUFFER_SIZE];
+
+    if(!pResults)
+    {
+        SetLastError(WSA_NOT_ENOUGH_MEMORY);
+        return(NULL);
+    }
+
+    //
+    // NOTICE. Only handles current inet address forms. 
+    //
+    (void)wsprintfA(qbuf, "%u.%u.%u.%u",
+            ((unsigned)addr[0] &amp; 0xff),
+            ((unsigned)addr[1] &amp; 0xff),
+            ((unsigned)addr[2] &amp; 0xff),
+            ((unsigned)addr[3] &amp; 0xff));
+
+
+    pBlob = getxyDataEnt(pResults,
+                         RNR_BUFFER_SIZE,
+                         qbuf,
+                         &amp;AddressGuid,
+                         0);
+    if(pBlob)
+    {
+        ph = (struct hostent *)Thread-&gt;CopyHostEnt(pBlob);
+        if(ph)
+        {
+            UnpackHostEnt(ph);
+        }
+    }
+    else
+    {
+        ph = 0;
+        if(GetLastError() == WSASERVICE_NOT_FOUND)
+        {
+            SetLastError(WSANO_ADDRESS);
+        }
+    }
+    delete pResults;
+    return(ph);
+}  // gethostbyaddr
+
+
+struct hostent FAR * WSAAPI
+gethostbyname(
+    IN const char FAR * name
+    )
+/*++
+Routine Description:
+
+    Get host information corresponding to a hostname.
+
+Arguments:
+
+    name - A pointer to the null terminated name of the host.
+
+Returns:
+
+    If no error occurs, gethostbyname() returns a pointer to the
+    hostent structure described above. Otherwise it returns a NULL
+    pointer and a specific errorr code is stored with SetErrorCode().
+--*/
+{
+    struct hostent * hent;
+    LPBLOB pBlob;
+    PCHAR pResults;
+    int err, ErrorCode;
+    PDPROCESS Process;
+    PDTHREAD Thread;
+    CHAR  szLocalName[200];   // for storing the local name. This
+                              // is simply a big number assumed
+                              // to be large enough. This is used
+                              // only when the caller chooses not to
+                              // provide a name.
+    PCHAR pszName;
+
+    err = PROLOG(&amp;Process,
+                 &amp;Thread,
+                 &amp;ErrorCode);
+    if(err != NO_ERROR)
+    {
+        SetLastError(ErrorCode);
+        return(NULL);
+    }
+
+    //
+    // A NULL input name means look for the local name. So,
+    // get it.
+    //
+    if(!name || !*name)
+    {
+        if(gethostname(szLocalName, 200) != NO_ERROR)
+        {
+            return(NULL);
+        }
+        pszName = szLocalName;
+    }
+    else
+    {
+        pszName = (PCHAR)name;
+    }
+
+    pResults = new CHAR[RNR_BUFFER_SIZE];
+
+    if(!pResults)
+    {
+        SetLastError(WSA_NOT_ENOUGH_MEMORY);
+        return(NULL);
+    }
+
+    pBlob = getxyDataEnt( pResults,
+                          RNR_BUFFER_SIZE,
+                          pszName,
+                          &amp;HostnameGuid,
+                          0);
+    if(pBlob)
+    {
+        hent = (struct hostent *)Thread-&gt;CopyHostEnt(pBlob);
+        if(hent)
+        {
+            UnpackHostEnt(hent);
+        }
+    }
+    else
+    {
+        hent = 0;
+        if(GetLastError() == WSASERVICE_NOT_FOUND)
+        {
+            SetLastError(WSAHOST_NOT_FOUND);
+        }
+    }
+    delete pResults;
+    return(hent);
+}  // gethostbyname
+
+int WSAAPI
+gethostname(
+    OUT char FAR * name,
+    IN int namelen
+    )
+/*++
+Routine Description:
+
+    Return the standard host name for the local machine.
+
+Arguments:
+
+    name    - A pointer to a buffer that will receive the host name.
+
+    namelen - The length of the buffer.
+
+Returns:
+
+    Zero on success else SOCKET_ERROR. The error code is stored with
+    SetErrorCode(). 
+--*/
+{
+    PCHAR lpName;
+    int err, ErrorCode;
+    PDPROCESS Process;
+    PDTHREAD Thread;
+    PCHAR pResults;
+
+    err = PROLOG(&amp;Process,
+                   &amp;Thread,
+                    &amp;ErrorCode);
+    if(err != NO_ERROR)
+    {
+        SetLastError(ErrorCode);
+        return(SOCKET_ERROR);
+    }
+
+    pResults = new CHAR[RNR_BUFFER_SIZE];
+
+    if(!pResults)
+    {
+        SetLastError(WSA_NOT_ENOUGH_MEMORY);
+        return(SOCKET_ERROR);
+    }
+
+    if(getxyDataEnt(pResults, 
+                    RNR_BUFFER_SIZE, 
+                    NULL, 
+                    &amp;HostnameGuid, 
+                    &amp;lpName
+                    ))
+    {
+        INT iSize = strlen(lpName) + 1;
+
+        if(iSize &lt;= namelen)
+        {
+            memcpy(name, lpName, iSize);
+        }
+        else
+        {
+            SetLastError(WSAEFAULT);
+            err = SOCKET_ERROR;
+        }
+    }
+    else
+    {
+        err = SOCKET_ERROR;   // assume LastError has been set
+    }
+    delete pResults;
+    return(err);
+}  // gethostname
+
+
+struct servent FAR * WSAAPI
+getservbyport(
+    IN int port,
+    IN const char FAR * proto
+    )
+/*++
+Routine Description:
+
+    Get service information corresponding to a port and protocol.
+
+Arguments:
+
+    port  - The port for a service, in network byte order.
+
+    proto - An optional pointer to a protocol name. If this is NULL,
+            getservbyport() returns the first service entry for which
+            the port matches the s_port. Otherwise getservbyport() 
+            matches both the port and the proto. 
+
+Returns:
+
+    If no error occurs, getservbyport() returns a pointer to the
+    servent structure described above. Otherwise it returns a NULL
+    pointer and a specific error code is stored with SetErrorCode(). 
+--*/
+{
+    PCHAR pszTemp;
+    struct servent * sent;
+    int err, ErrorCode;
+    PDPROCESS Process;
+    PDTHREAD Thread;
+    LPBLOB pBlob;
+    PCHAR pResults;
+
+
+    err = PROLOG(&amp;Process,
+                   &amp;Thread,
+                    &amp;ErrorCode);
+    if(err != NO_ERROR)
+    {
+        SetLastError(ErrorCode);
+        return(NULL);
+    }
+
+    pResults = new CHAR[RNR_BUFFER_SIZE];
+
+    if(!pResults)
+    {
+        SetLastError(WSA_NOT_ENOUGH_MEMORY);
+        return(NULL);
+    }
+
+    if(!proto)
+    {
+        proto = "";
+    }
+
+    //
+    // the 5 is the max number of digits in a port
+    //
+    pszTemp = new CHAR[strlen(proto) + 1 + 1 + 5];
+    wsprintfA(pszTemp, "%d/%s", (port &amp; 0xffff), proto);
+    pBlob =  getxyDataEnt(pResults, 
+                          RNR_BUFFER_SIZE, 
+                          pszTemp, 
+                          &amp;IANAGuid,
+                          0
+                          );
+    delete pszTemp;
+    if(!pBlob)
+    {
+        sent = 0;
+        if(GetLastError() == WSATYPE_NOT_FOUND)
+        {
+            SetLastError(WSANO_DATA);
+        }
+    }
+    else
+    {
+        sent = (struct servent *)Thread-&gt;CopyServEnt(pBlob);
+        if(sent)
+        {
+            UnpackServEnt(sent);
+        }
+    }
+    delete pResults;
+    return(sent);
+}  // getservbyport
+
+struct servent FAR * WSAAPI
+getservbyname(
+    IN const char FAR * name,
+    IN const char FAR * proto
+    )
+/*++
+Routine Description:
+
+    Get service information corresponding to a service name and
+    protocol.
+
+Arguments:
+
+     name  - A pointer to a null terminated service name.
+
+    proto - An optional pointer to a null terminated protocol name. If
+            this pointer is NULL, getservbyname() returns the first
+            service entry for which the name matches the s_name or one 
+            of the s_aliases. Otherwise getservbyname() matches both 
+            the name and the proto.
+ 
+Returns:
+
+    If no error occurs, getservbyname() returns a pointer to the servent
+    structure described above. Otherwise it returns a NULL pointer and a
+    specific error code is stored with SetErrorCode(). 
+
+--*/
+{
+    PCHAR pszTemp;
+    struct servent * sent;
+    int err, ErrorCode;
+    PDPROCESS Process;
+    PDTHREAD Thread;
+    LPBLOB pBlob;
+    PCHAR pResults;
+
+    err = PROLOG(&amp;Process,
+                 &amp;Thread,
+                 &amp;ErrorCode);
+    if(err != NO_ERROR)
+    {
+        SetLastError(ErrorCode);
+        return(NULL);
+    }
+
+    pResults = new CHAR[RNR_BUFFER_SIZE];
+
+    if(!pResults)
+    {
+        SetLastError(WSA_NOT_ENOUGH_MEMORY);
+        return(NULL);
+    }
+
+    if(!proto)
+    {
+        proto = "";
+    }
+    pszTemp = new CHAR[strlen(name) + strlen(proto) + 1 + 1];
+    wsprintfA(pszTemp, "%s/%s", name, proto);
+    pBlob = getxyDataEnt(pResults,
+                        RNR_BUFFER_SIZE, 
+                        pszTemp, 
+                        &amp;IANAGuid, 
+                        0
+                        );
+    delete pszTemp;
+    if(!pBlob)
+    {
+        sent = 0;
+        if(GetLastError() == WSATYPE_NOT_FOUND)
+        {
+            SetLastError(WSANO_DATA);
+        }
+    }
+    else
+    {
+        sent = (struct servent *)Thread-&gt;CopyServEnt(pBlob);
+        if(sent)
+        {
+            UnpackServEnt(sent);
+        }
+    }
+    delete pResults;
+    return(sent);
+}  // getservbyname
+
+//
+// Common routine for obtaining a xxxent buffer. Input is used to
+// execute the WSALookup series of APIs.
+//
+// Args:
+//   pResults -- a buffer supplied by the caller to be used in
+//               the WASLookup calls. This should be as large as
+//               the caller can afford to offer.
+//   dwLength -- number of bytes in pResults
+//   lpszName -- pointer to the service name. May by NULL
+//   lpType   -- pointer to the service type . This should be one of
+//               the SVCID_INET_xxxxx types. It may be anything
+//               that produces a BLOB.
+//   lppName  -- pointer to pointer where the resulting name pointer
+//               is stored. May be NULL if the name is not needed.
+//
+// Returns:
+//   0  --   No BLOB data was returned. In general, this means the 
+//           operation failed. Evev if the WSALookupNext succeeded 
+//           and returned a name, the name will not be returned.
+//   else -- a pointer to the BLOB.
+//
+//
+//
+// The protocol restrictions list for all emulation operations. This 
+// should limit the invoked providers to the set that know about 
+// hostents and servents. If not, then the special SVCID_INET GUIDs 
+// should take care of the remainder.
+//
+AFPROTOCOLS afp[2] = {
+                      {AF_INET, IPPROTO_UDP},
+                      {AF_INET, IPPROTO_TCP}
+                     };
+
+LPBLOB
+getxyDataEnt(
+    PCHAR pResults,
+    DWORD dwLength,
+    LPSTR lpszName,
+    LPGUID lpType,
+    LPSTR *  lppName)
+{
+
+    PWSAQUERYSETA pwsaq = (PWSAQUERYSETA)pResults;
+    int err;
+    HANDLE hRnR;
+    LPBLOB pvRet = 0;
+    INT Err = 0;
+
+    //
+    // create the query
+    //
+    memset(pwsaq, 0, sizeof(*pwsaq));
+    pwsaq-&gt;dwSize = sizeof(*pwsaq);
+    pwsaq-&gt;lpszServiceInstanceName = lpszName;
+    pwsaq-&gt;lpServiceClassId = lpType;
+    pwsaq-&gt;dwNameSpace = NS_ALL;
+    pwsaq-&gt;dwNumberOfProtocols = 2;
+    pwsaq-&gt;lpafpProtocols = &amp;afp[0];
+
+    err = WSALookupServiceBeginA(pwsaq,
+                                 LUP_RETURN_BLOB | LUP_RETURN_NAME,
+                                 &amp;hRnR);
+
+    if(err == NO_ERROR)
+    {
+        //
+        // The query was accepted, so execute it via the Next call.
+        //
+        err = WSALookupServiceNextA(
+                                hRnR,
+                                0,
+                                &amp;dwLength,
+                                pwsaq);
+        //
+        // if NO_ERROR was returned and a BLOB is present, this
+        // worked, just return the requested information. Otherwise,
+        // invent an error or capture the transmitted one.
+        //
+
+        if(err == NO_ERROR)
+        {
+            if(pvRet = pwsaq-&gt;lpBlob)
+            {
+                if(lppName)
+                {
+                    *lppName = pwsaq-&gt;lpszServiceInstanceName;
+                }
+            }
+            else
+            {
+                err = WSANO_DATA;
+            }
+        }
+        else
+        {
+            //
+            // WSALookupServiceEnd clobbers LastError so save
+            // it before closing the handle.
+            //
+
+            err = GetLastError();
+        }
+        WSALookupServiceEnd(hRnR);
+
+        //
+        // if an error happened, stash the value in LastError
+        //
+
+        if(err != NO_ERROR)
+        {
+            SetLastError(err);
+        }
+    }
+    return(pvRet);
+}
+ </code></pre>
+<p>
+</p>
+<p>&nbsp;</p></body>
+</HTML>

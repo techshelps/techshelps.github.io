@@ -1,0 +1,833 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Wicked Code</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  Wicked Code</H1><P>Jeff Prosise</P>
+<P>Jeff Prosise writes extensively about programming in Windows and is a contributing editor of several computer magazines. He is the author of <I>Programming Windows 95 with MFC</I> (Microsoft Press).</P>
+<P>Psst! Want to see some wicked code?</P>
+<P>This month marks the start of a new column in <I>MSJ</I>óone whose mission is to tackle sticky Win32® programming problems and present truly wicked solutions. Each column will come with the source code for a set of C-style procedures or C++ classes that you can download and use in your own applications. The aim is both to prevent you from having to duplicate the efforts of other programmers and to demonstrate effective Win32 programming techniques.</P>
+<P>The subject of this month's column is color quantization using the Gervautz-Purgathofer octree method. (How's that for a mouthful?) Color quantization is the process of finding the optimal <I>n</I> colors with which to display a bitmap that contains <I>m</I> colors, where <I>m</I> is greater (usually much greater) than <I>n</I>. A quantized color palette enables bitmaps containing thousands or even millions of different colors to be displayed with reasonable accuracy on systems using 256-color video drivers. Scanning a bitmap and deciding which <I>n</I> colors best represents it in a logical color palette is not a trivial task. I'll make it easier for you by presenting a CreateOctreePalette function that takes a DIB section handle and gives you an HPALETTE in return. The algorithm this function uses is fast and requires substantially less memory than other color quantization algorithms. That, combined with the fact that it works equally well with 16, 24, and 32-bit DIB sections, makes CreateOctreePalette a handy addition to the toolbox of any Win32 graphics programmer.</P>
+<P> </P>
+<H2><A NAME="sec0"></A>  Color Quantization Overview</H2><P>Before I start slinging code, let's briefly discuss color quantization and why it's needed in Win32. Windows® uses a 24-bit RGB color model that represents individual colors by combining 8-bit red, green, and blue values. On video adapters that support 24-bit color, Windows displays colors on the screen exactly as you specify them. On palettized output devices, Windows maps RGB color values to the nearest colors in the system palette. The vast majority of palettized video adapters can display at most 256 colors at a time. When a 24-bit bitmap is displayed on a 256-color device with the default system palette, colors in the bitmap are mapped to the same 20 static colors that the GDI programs into the adapter's palette registers for menus, window frames, and so on. The resulting image typically suffers severe color degradation due to the limited number of colors available.</P>
+<P>The display quality of 24-bit images can be vastly improved by creating a logical palette that contains up to 236 colors and realizing the palette prior to displaying the image. You want 236 colors (instead of 256) because the top 10 and bottom 10 color-palette entries are those static colors mentioned previously. The trick, of course, is picking the right 236 palette colors. Choose your colors wisely and most 24-bit images will look almost as good on 256-color screens as they do on 16.7 million-color screens. (Dithering can further improve the quality of the output, but that's a topic for another day.) Choose them poorly, and the resulting image won't look much better on a 256-color screen than it would on a 16-color VGA screen.</P>
+<P>There are two basic approaches to picking palette colors for images containing thousands of different colors: you can create a generic halftone palette containing a rainbow of colors, or you can create a quantized palette containing colors derived from those in the image. The first approach is simpler and faster because the palette colors can be picked without regard to the image colors. With Win32, you can create a halftone palette in one line of code by calling the CreateHalftonePalette API function. In 256-color environments, CreateHalftonePalette returns an HPALETTE referencing a palette that includes the 216 colors in a 6 <FONT FACE="Symbol">¥</FONT> 6 <FONT FACE="Symbol">¥</FONT> 6 color cube plus a variety of handpicked colors useful for grayscale imaging and other applications. The wide distribution of colors in a halftone palette ensures that no color in the image will undergo a wholesale color shift. On the downside, subtle variations in tone will be lost.</P>
+<P>A quantized palette (also known as an "adaptive" or "optimized" palette) generally produces a markedly better image than a halftone palette because the colors in the palette are driven by the colors in the image. Think of it this way: displaying a picture of a red ball containing 200 different shades of red essentially wastes all the halftone palette colors with nonzero blue or green components. Displaying the same image with a quantized palette yields more accurate results because the preponderance of reds in the image produces a similar bias toward red in the quantized palette colors.</P>
+<P>How do you pick 236 palette colors to represent an image that contains a much wider variety of colors? In the past, programmers have favored two techniques. The "popularity method" counts the number of occurrences of each color in the image and assigns the most frequently occurring colors to the palette. In the median-cut method, a 3D cube representing RGB color space is recursively subdivided until it has been carved into volumes representing roughly equal numbers of pixels. Palette colors are chosen by averaging the RGB color values of the pixels in each volume or simply computing each volume's centroid.</P>
+<P>The popularity method is simpler to implement in code. The usual approach is to create an array representing a histogram of colors and color frequencies, sort the array in order of descending frequencies, and copy the first 236 colors in the array to the palette. To keep the array size manageable, the least significant 3 or 4 bits of each 8-bit color component are normally discarded. A popularity palette generally produces better output than a halftone palette, but infrequently appearing colors that are nonetheless important to the eye may be omitted.</P>
+<P>The widely used algorithm for median-cut color quantization developed in the early 1980s by Paul Heckbert overcomes many deficiencies of the popularity method. Heckbert's algorithm has been documented and analyzed in countless papers, books, and magazine articles so I won't rehash the details here. This method produces a highly optimized palette that is finely tuned to the colors in the image. Unfortunately, practical implementations of the algorithm require generous amounts of memory, and there is inevitably some sorting to be done on large arrays.</P>
+<P> </P>
+<H2><A NAME="sec1"></A>  Octree Color Quantization</H2><P>In 1988, M. Gervautz and W. Purgathofer of Austria's Technische Universität Wien published an article entitled "A Simple Method for Color Quantization: Octree Quantization." They proposed an elegant new method for quantizing color bitmap images by employing octreesótree-like data structures whose nodes contain pointers to up to eight subnodes. Properly implemented, octree color quantization is at least as fast as the median-cut method and more memory-efficient.</P>
+<P>The basic idea in octree color quantization is to graph an image's RGB color values in a hierarchical octree. The octree can go up to nine levels deepóa root level plus one level for each bit in an 8-bit red, green, or blue valueóbut it's typically restricted to fewer levels to conserve memory. Lower levels correspond to less significant bits in RGB color values, so allowing the octree to grow deeper than five or six levels has little or no effect on the output. Leaf nodes (nodes with no children) store pixel counts and running totals of the red, green, and blue color components of the pixels encoded there, while intermediate nodes form paths from the topmost level in the octree to the leaves. This is an efficient way to count colors and the number of occurrences of each color because no memory is allocated for colors that don't appear in the image. If the number of leaf nodes happens to be equal to or less than the number of palette colors you want, you can fill a palette simply by traversing the octree and copying RGB values from its leaves.</P>
+<P>The beauty of the octree method is what happens when the number of leaf nodes <I>n</I> exceeds the desired number of palette colors <I>k</I>. Each time adding a color to the octree creates a new leaf, <I>n</I>  is compared to <I>k</I>. If <I>n</I> is greater than <I>k</I>, the tree is reduced by merging one or more leaf nodes into the parent. After the operation is complete, the parent, which was an intermediate node, is a leaf node that stores the combined color information of all its former children.</P>
+<P>Because the octree is trimmed continually to keep the leaf count under <I>k</I>, you end up with an octree containing <I>k</I> or fewer leaves whose RGB values make ideal palette colors. No matter how many colors the image contains, you can walk the octree and pick leaves off it to formulate a palette. Better yet, the octree never requires memory for more than <I>k</I>+1 leaf nodes plus some number of intermediate nodes.</P>
+<P>There are two parts of an octree that I want to study: the parent-child relationship between nodes and the significance of the RGB data in each leaf. <B>Figure 1</B> shows the parent-child relationship for each node. At a given level in the tree, a value from zero to 7, derived from the RGB color value, identifies a child node. At the uppermost (root) level, bit 7 of the red value is combined with bit 7 of the green value and bit 7 of the blue value to form a 3-bit index. Bit 7 from the red value becomes bit 2 in the index, bit 7 from the green value becomes bit 1 in the index, and bit 7 from the blue value becomes bit zero in the index. At the next level, bit 6 is used instead of bit 7, and the bit number keeps decreasing as the level number increases. For red, green, and blue color values equal to 109 (binary 01101101), 204 (11001100), and 170 (10101010), the index of the first child node is 3 (011), the index of the second child node is 6 (110), and so on. This mechanism places the more significant bits of the RGB values at the top of the tree. In this example, the octree's depth is restricted to five levels, which allows you to factor in up to 4 bits of each 8-bit color component. The remaining bits are effectively averaged together.</P>
+<P><img src="wicked1.gif"></P>
+<P><B> Figure 1  How an Octree Maps RGB Values</B></P>
+<P>To help you visualize how RGB values and pixel counts are stored in octree leaves, <B>Figure 2</B> depicts part of an octree that charts one occurrence of the color RGB (105, 204, 170) and two occurrences of RGB (109, 204, 170) both before and after reduction. The RGB value is multiplied by the number of pixels containing that value and the result is stored in the leaf. Before reduction, the octree contains two leavesóone for each color. After reduction, it contains one. Dividing the combined red, green, and blue values in the leaves before reduction by the combined number of pixels represented (3) yields an average color value of RGB (107, 204, 170). This value is multiplied by the number of pixels represented and stored in the reduced node. </P>
+<P><img src="wicked2.gif"></P>
+<P><B> Figure 2  Reducing Two Leaves of an Octree</B></P>
+<P> </P>
+<H2><A NAME="sec2"></A>  The Code</H2><P>The source code shown in <B>Figure 3</B> is the complete listing for an app named Colors that loads and displays BMP files. Commands in the Options menu let you choose from three methods of palette formation, and depth of the octree. No Palette displays bitmaps with the default system palette; Halftone Palette uses a halftone palette created by the CreateHalftonePalette API function; and Optimized Palette uses a palette of matching colors for bitmaps with up to 8 bits of color information per pixel and a quantized palette for bitmaps featuring 16, 24, or 32 color bits per pixel. Quantized color palettes are created through the Gervautz-Pergathofer octree method. Palettes are not used on video adapters that display 16 or 24-bit color, so to see the differences in the output be sure to switch your display settings to a 256-color video mode.</P>
+<P><B> Figure 3  Colors</B></P>
+<P>Colors.h</P>
+<P><BR></P>
+<PRE> //***************************************************************************
+//
+//  Colors.h
+//
+//***************************************************************************
+
+#define IDR_MENU                    100
+#define IDD_COLORBITSDLG            101
+#define IDC_COLORBITS               102
+#define IDC_SPINBUTTON              103
+
+#define IDM_OPEN                    200
+#define IDM_NO_PALETTE              201
+#define IDM_HALFTONE_PALETTE        202
+#define IDM_OPTIMIZED_PALETTE       203
+#define IDM_COLOR_BITS              204
+#define IDM_EXIT                    205
+
+typedef struct _NODE {
+    BOOL bIsLeaf;               // TRUE if node has no children
+    UINT nPixelCount;           // Number of pixels represented by this leaf
+    UINT nRedSum;               // Sum of red components
+    UINT nGreenSum;             // Sum of green components
+    UINT nBlueSum;              // Sum of blue components
+    struct _NODE* pChild[8];    // Pointers to child nodes
+    struct _NODE* pNext;        // Pointer to next reducible node
+} NODE;
+
+</PRE>
+<P>Colors.rc</P>
+<P><BR></P>
+<PRE> //***********************************************************************
+//
+//  Colors.rc
+//
+//***********************************************************************
+
+#include &lt;windows.h&gt;
+#include &lt;commctrl.h&gt;
+#include "Colors.h"
+
+IDR_MENU MENU
+BEGIN
+    POPUP "&amp;Options" {
+        MENUITEM "&amp;Open...",            IDM_OPEN
+        MENUITEM SEPARATOR
+        MENUITEM "&amp;No Palette",         IDM_NO_PALETTE
+        MENUITEM "&amp;Halftone Palette",   IDM_HALFTONE_PALETTE,   CHECKED
+        MENUITEM "Optimi&amp;zed Palette",  IDM_OPTIMIZED_PALETTE
+        MENUITEM SEPARATOR
+        MENUITEM "&amp;Color Bits...",      IDM_COLOR_BITS
+        MENUITEM SEPARATOR
+        MENUITEM "E&amp;xit",               IDM_EXIT
+    }
+END
+
+IDD_COLORBITSDLG DIALOG 0, 0, 144, 72
+STYLE DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_VISIBLE |
+    WS_SYSMENU
+CAPTION "Set Color Bits"
+FONT 8, "MS Sans Serif"
+BEGIN
+    LTEXT           "Significant Color Bits", -1, 16, 24, 68, 8
+    EDITTEXT        IDC_COLORBITS, 88, 20, 40, 14, ES_AUTOHSCROLL
+    CONTROL         "", IDC_SPINBUTTON, "MSCTLS_UPDOWN32", UDS_SETBUDDYINT |
+                    UDS_AUTOBUDDY | UDS_ARROWKEYS | UDS_ALIGNRIGHT, 0, 0, 0, 0
+    DEFPUSHBUTTON   "OK", IDOK, 16, 48, 50, 14, WS_GROUP
+    PUSHBUTTON      "Cancel", IDCANCEL, 80, 48, 50, 14, WS_GROUP
+END
+
+</PRE>
+<P>Colors.c</P>
+<P><BR></P>
+<PRE> //***************************************************************************
+//
+//  Colors presents an implementation of the Gervautz-Purgathofer octree
+//  color quanitization algorithm that creates optimized color palettes for
+//  for 16, 24, and 32-bit DIB sections
+//
+//***************************************************************************
+
+#include &lt;windows.h&gt;
+#include &lt;commctrl.h&gt;
+#include "Colors.h"
+
+LRESULT CALLBACK WndProc (HWND, UINT, WPARAM, LPARAM);
+BOOL CALLBACK DlgProc (HWND, UINT, WPARAM, LPARAM);
+
+HPALETTE CreateExactPalette (HANDLE);
+HPALETTE CreateOctreePalette (HANDLE, UINT, UINT);
+void AddColor (NODE**, BYTE, BYTE, BYTE, UINT, UINT, UINT*, NODE**);
+NODE* CreateNode (UINT, UINT, UINT*, NODE**);
+void ReduceTree (UINT, UINT*, NODE**);
+void DeleteTree (NODE**);
+void GetPaletteColors (NODE*, PALETTEENTRY*, UINT*);
+int GetRightShiftCount (DWORD);
+int GetLeftShiftCount (DWORD);
+
+void UpdatePaletteType (HWND, UINT);
+BOOL DoFileOpen (HWND);
+void UpdateWindowTitle (HWND, LPSTR);
+void DisplayDIBSection (HDC, HANDLE, HPALETTE);
+HPALETTE GetPaletteHandle (HWND, HANDLE);
+UINT BitsPerPixel (HANDLE);
+
+/////////////////////////////////////////////////////////////////////////////
+// Global variables
+
+UINT        g_nPaletteType          = IDM_HALFTONE_PALETTE;
+HANDLE      g_hImage                = NULL;
+HPALETTE    g_hPalette              = NULL;
+UINT        g_nColorBits            = 6;
+
+/////////////////////////////////////////////////////////////////////////////
+// WinMain
+
+int WINAPI WinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance,
+    LPSTR lpszCmdLine, int nCmdShow)
+{
+    static char szAppName[] = "Colors";
+    WNDCLASS wc;
+    HWND hwnd;
+    MSG msg;
+
+    wc.style = 0;
+    wc.lpfnWndProc = (WNDPROC) WndProc;
+    wc.cbClsExtra = 0;
+    wc.cbWndExtra = 0;
+    wc.hInstance = hInstance;
+    wc.hIcon = LoadIcon (NULL, IDI_APPLICATION);
+    wc.hCursor = LoadCursor (NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH) (COLOR_WINDOW + 1);
+    wc.lpszMenuName = MAKEINTRESOURCE (IDR_MENU);
+    wc.lpszClassName = szAppName;
+
+    RegisterClass (&amp;wc);
+
+    hwnd = CreateWindow (szAppName, szAppName,
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+        CW_USEDEFAULT, HWND_DESKTOP, NULL, hInstance, NULL);
+
+    ShowWindow (hwnd, nCmdShow);
+    UpdateWindow (hwnd);
+
+    while (GetMessage (&amp;msg, NULL, 0, 0)) {
+        TranslateMessage (&amp;msg);
+        DispatchMessage (&amp;msg);
+    }
+    return msg.wParam;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Window procedure
+
+LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    HDC hdc;
+    PAINTSTRUCT ps;
+    UINT nColors;
+
+    switch (msg) {
+
+    case WM_CREATE:
+        InitCommonControls ();
+        return 0;
+
+    case WM_PAINT:
+        hdc = BeginPaint (hwnd, &amp;ps);
+        if (g_hImage != NULL)
+            DisplayDIBSection (hdc, g_hImage, g_hPalette);
+        EndPaint (hwnd, &amp;ps);
+        return 0;
+
+    case WM_QUERYNEWPALETTE:
+        if (g_hPalette != NULL) {
+            hdc = GetDC (hwnd);
+            SelectPalette (hdc, g_hPalette, FALSE);
+
+            if (nColors = RealizePalette (hdc))
+                InvalidateRect (hwnd, NULL, FALSE);
+
+            ReleaseDC (hwnd, hdc);
+            return nColors;
+        }
+        break;
+
+    case WM_PALETTECHANGED:
+        if ((g_hPalette != NULL) &amp;&amp; ((HWND) wParam != hwnd)) {
+            hdc = GetDC (hwnd);
+            SelectPalette (hdc, g_hPalette, FALSE);
+
+            if (RealizePalette (hdc))
+                InvalidateRect (hwnd, NULL, FALSE);
+
+            ReleaseDC (hwnd, hdc);
+            return 0;
+        }
+        break;
+
+    case WM_COMMAND:
+        switch (LOWORD (wParam)) {
+
+        case IDM_OPEN:
+            if (DoFileOpen (hwnd)) {
+                if (g_hPalette != NULL)
+                    DeleteObject (g_hPalette);
+                g_hPalette = GetPaletteHandle (hwnd, g_hImage);
+                InvalidateRect (hwnd, NULL, TRUE);
+            }
+            return 0;
+
+        case IDM_NO_PALETTE:
+            UpdatePaletteType (hwnd, IDM_NO_PALETTE);
+            return 0;
+
+        case IDM_HALFTONE_PALETTE:
+            UpdatePaletteType (hwnd, IDM_HALFTONE_PALETTE);
+            return 0;
+
+        case IDM_OPTIMIZED_PALETTE:
+            UpdatePaletteType (hwnd, IDM_OPTIMIZED_PALETTE);
+            return 0;
+
+        case IDM_COLOR_BITS:
+            if (DialogBox ((HINSTANCE) GetWindowLong (hwnd, GWL_HINSTANCE),
+                MAKEINTRESOURCE (IDD_COLORBITSDLG), hwnd, DlgProc)) {
+                if (g_hPalette != NULL)
+                    DeleteObject (g_hPalette);
+                if (g_hImage != NULL) {
+                    g_hPalette = GetPaletteHandle (hwnd, g_hImage);
+                    InvalidateRect (hwnd, NULL, FALSE);
+                }
+            }
+            return 0;
+
+        case IDM_EXIT:
+            PostMessage (hwnd, WM_CLOSE, 0, 0);
+            return 0;
+        }
+        break;
+
+    case WM_DESTROY:
+        PostQuitMessage (0);
+        return 0;
+    }
+    return DefWindowProc (hwnd, msg, wParam, lParam);
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Palette generation routines and helpers
+
+HPALETTE CreateExactPalette (HANDLE hImage)
+{
+    DIBSECTION ds;
+    UINT nColors, i;
+    RGBQUAD* prgb;
+    LOGPALETTE* plp;
+    HDC hdc, hdcMem;
+    HBITMAP hOldBitmap;
+    HPALETTE hPalette;
+    DWORD dwSize;
+
+    // Get the number of colors in the image
+    GetObject (hImage, sizeof (ds), &amp;ds);
+    if (ds.dsBmih.biClrUsed != 0)
+        nColors = ds.dsBmih.biClrUsed;
+    else
+        nColors = 1 &lt;&lt; ds.dsBmih.biBitCount;
+
+    if (nColors &gt; 256) // Sanity check
+        return NULL;
+
+    // Retrieve the image's color table
+    if ((prgb = (RGBQUAD*) HeapAlloc (GetProcessHeap (), 0,
+        nColors * sizeof (RGBQUAD))) == NULL)
+        return NULL;
+
+    hdc = GetDC (NULL);
+    hdcMem = CreateCompatibleDC (hdc);
+    hOldBitmap = SelectObject (hdcMem, hImage);
+    nColors = min (nColors, GetDIBColorTable (hdcMem, 0, nColors, prgb));
+    SelectObject (hdcMem, hOldBitmap);
+    DeleteDC (hdcMem);
+    ReleaseDC (NULL, hdc);
+
+    if (nColors == 0) { // Another sanity check
+        HeapFree (GetProcessHeap (), 0, prgb);
+        return NULL;
+    }
+        
+    // Create a logical palette from the colors in the color table
+    dwSize = sizeof (LOGPALETTE) + ((nColors - 1) * sizeof (PALETTEENTRY));
+    if ((plp = (LOGPALETTE*) HeapAlloc (GetProcessHeap (), 0,
+        dwSize)) == NULL) {
+        HeapFree (GetProcessHeap (), 0, prgb);
+        return NULL;
+    }
+
+    plp-&gt;palVersion = 0x300;
+    plp-&gt;palNumEntries = (WORD) nColors;
+
+    for (i=0; i&lt;nColors; i++) {
+        plp-&gt;palPalEntry[i].peRed   = prgb[i].rgbRed;
+        plp-&gt;palPalEntry[i].peGreen = prgb[i].rgbGreen;
+        plp-&gt;palPalEntry[i].peBlue  = prgb[i].rgbBlue;
+        plp-&gt;palPalEntry[i].peFlags = 0;
+    }
+
+    hPalette = CreatePalette (plp);
+
+    HeapFree (GetProcessHeap (), 0, plp);
+    HeapFree (GetProcessHeap (), 0, prgb);
+    return hPalette;
+}
+
+HPALETTE CreateOctreePalette (HANDLE hImage, UINT nMaxColors, UINT nColorBits)
+{
+    DIBSECTION ds;
+    int i, j, nPad;
+    BYTE* pbBits;
+    WORD* pwBits;
+    DWORD* pdwBits;
+    DWORD rmask, gmask, bmask;
+    int rright, gright, bright;
+    int rleft, gleft, bleft;
+    BYTE r, g, b;
+    WORD wColor;
+    DWORD dwColor, dwSize;
+    LOGPALETTE* plp;
+    HPALETTE hPalette;
+    NODE* pTree;
+    UINT nLeafCount, nIndex;
+    NODE* pReducibleNodes[9];
+
+    // Initialize octree variables
+    pTree = NULL;
+    nLeafCount = 0;
+    if (nColorBits &gt; 8) // Just in case
+        return NULL;
+    for (i=0; i&lt;=(int) nColorBits; i++)
+        pReducibleNodes[i] = NULL;
+
+    // Scan the DIB and build the octree
+    GetObject (hImage, sizeof (ds), &amp;ds);
+    nPad = ds.dsBm.bmWidthBytes - (((ds.dsBmih.biWidth *
+        ds.dsBmih.biBitCount) + 7) / 8);
+
+    switch (ds.dsBmih.biBitCount) {
+
+    case 16: // One case for 16-bit DIBs
+        if (ds.dsBmih.biCompression == BI_BITFIELDS) {
+            rmask = ds.dsBitfields[0];
+            gmask = ds.dsBitfields[1];
+            bmask = ds.dsBitfields[2];
+        }
+        else {
+            rmask = 0x7C00;
+            gmask = 0x03E0;
+            bmask = 0x001F;
+        }
+
+        rright = GetRightShiftCount (rmask);
+        gright = GetRightShiftCount (gmask);
+        bright = GetRightShiftCount (bmask);
+
+        rleft = GetLeftShiftCount (rmask);
+        gleft = GetLeftShiftCount (gmask);
+        bleft = GetLeftShiftCount (bmask);
+
+        pwBits = (WORD*) ds.dsBm.bmBits;
+        for (i=0; i&lt;ds.dsBmih.biHeight; i++) {
+            for (j=0; j&lt;ds.dsBmih.biWidth; j++) {
+                wColor = *pwBits++;
+                b = (BYTE) (((wColor &amp; (WORD) bmask) &gt;&gt; bright) &lt;&lt; bleft);
+                g = (BYTE) (((wColor &amp; (WORD) gmask) &gt;&gt; gright) &lt;&lt; gleft);
+                r = (BYTE) (((wColor &amp; (WORD) rmask) &gt;&gt; rright) &lt;&lt; rleft);
+                AddColor (&amp;pTree, r, g, b, nColorBits, 0, &amp;nLeafCount,
+                          pReducibleNodes);
+                while (nLeafCount &gt; nMaxColors)
+                    ReduceTree (nColorBits, &amp;nLeafCount, pReducibleNodes);
+            }
+            pwBits = (WORD*) (((BYTE*) pwBits) + nPad);
+        }
+        break;
+
+    case 24: // Another for 24-bit DIBs
+        pbBits = (BYTE*) ds.dsBm.bmBits;
+        for (i=0; i&lt;ds.dsBmih.biHeight; i++) {
+            for (j=0; j&lt;ds.dsBmih.biWidth; j++) {
+                b = *pbBits++;
+                g = *pbBits++;
+                r = *pbBits++;
+                AddColor (&amp;pTree, r, g, b, nColorBits, 0, &amp;nLeafCount,
+                          pReducibleNodes);
+                while (nLeafCount &gt; nMaxColors)
+                    ReduceTree (nColorBits, &amp;nLeafCount, pReducibleNodes);
+            }
+            pbBits += nPad;
+        }
+        break;
+
+    case 32: // And another for 32-bit DIBs
+        if (ds.dsBmih.biCompression == BI_BITFIELDS) {
+            rmask = ds.dsBitfields[0];
+            gmask = ds.dsBitfields[1];
+            bmask = ds.dsBitfields[2];
+        }
+        else {
+            rmask = 0x00FF0000;
+            gmask = 0x0000FF00;
+            bmask = 0x000000FF;
+        }
+
+        rright = GetRightShiftCount (rmask);
+        gright = GetRightShiftCount (gmask);
+        bright = GetRightShiftCount (bmask);
+
+        pdwBits = (DWORD*) ds.dsBm.bmBits;
+        for (i=0; i&lt;ds.dsBmih.biHeight; i++) {
+            for (j=0; j&lt;ds.dsBmih.biWidth; j++) {
+                dwColor = *pdwBits++;
+                b = (BYTE) ((dwColor &amp; bmask) &gt;&gt; bright);
+                g = (BYTE) ((dwColor &amp; gmask) &gt;&gt; gright);
+                r = (BYTE) ((dwColor &amp; rmask) &gt;&gt; rright);
+                AddColor (&amp;pTree, r, g, b, nColorBits, 0, &amp;nLeafCount,
+                          pReducibleNodes);
+                while (nLeafCount &gt; nMaxColors)
+                    ReduceTree (nColorBits, &amp;nLeafCount, pReducibleNodes);
+            }
+            pdwBits = (DWORD*) (((BYTE*) pdwBits) + nPad);
+        }
+        break;
+
+    default: // DIB must be 16, 24, or 32-bit!
+        return NULL;
+    }
+
+    if (nLeafCount &gt; nMaxColors) { // Sanity check
+        DeleteTree (&amp;pTree);
+        return NULL;
+    }
+
+    // Create a logical palette from the colors in the octree
+    dwSize = sizeof (LOGPALETTE) + ((nLeafCount - 1) * sizeof (PALETTEENTRY));
+    if ((plp = (LOGPALETTE*) HeapAlloc (GetProcessHeap (), 0,
+        dwSize)) == NULL) {
+        DeleteTree (&amp;pTree);
+        return NULL;
+    }
+
+    plp-&gt;palVersion = 0x300;
+    plp-&gt;palNumEntries = (WORD) nLeafCount;
+    nIndex = 0;
+    GetPaletteColors (pTree, plp-&gt;palPalEntry, &amp;nIndex);
+    hPalette = CreatePalette (plp);
+
+    HeapFree (GetProcessHeap (), 0, plp);
+    DeleteTree (&amp;pTree);
+    return hPalette;
+}
+
+void AddColor (NODE** ppNode, BYTE r, BYTE g, BYTE b, UINT nColorBits,
+    UINT nLevel, UINT* pLeafCount, NODE** pReducibleNodes)
+{
+    int nIndex, shift;
+    static BYTE mask[8] = { 0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01 };
+
+    // If the node doesn't exist, create it
+    if (*ppNode == NULL)
+        *ppNode = CreateNode (nLevel, nColorBits, pLeafCount,
+                              pReducibleNodes);
+
+    // Update color information if it's a leaf node
+    if ((*ppNode)-&gt;bIsLeaf) {
+        (*ppNode)-&gt;nPixelCount++;
+        (*ppNode)-&gt;nRedSum += r;
+        (*ppNode)-&gt;nGreenSum += g;
+        (*ppNode)-&gt;nBlueSum += b;
+    }
+
+    // Recurse a level deeper if the node is not a leaf
+    else {
+        shift = 7 - nLevel;
+        nIndex = (((r &amp; mask[nLevel]) &gt;&gt; shift) &lt;&lt; 2) |
+            (((g &amp; mask[nLevel]) &gt;&gt; shift) &lt;&lt; 1) |
+            ((b &amp; mask[nLevel]) &gt;&gt; shift);
+        AddColor (&amp;((*ppNode)-&gt;pChild[nIndex]), r, g, b, nColorBits,
+                  nLevel + 1, pLeafCount, pReducibleNodes);
+    }
+}
+
+NODE* CreateNode (UINT nLevel, UINT nColorBits, UINT* pLeafCount,
+                  NODE** pReducibleNodes)
+{
+    NODE* pNode;
+
+    if ((pNode = (NODE*) HeapAlloc (GetProcessHeap (), HEAP_ZERO_MEMORY,
+        sizeof (NODE))) == NULL)
+        return NULL;
+
+    pNode-&gt;bIsLeaf = (nLevel == nColorBits) ? TRUE : FALSE;
+    if (pNode-&gt;bIsLeaf)
+        (*pLeafCount)++;
+    else { // Add the node to the reducible list for this level
+        pNode-&gt;pNext = pReducibleNodes[nLevel];
+        pReducibleNodes[nLevel] = pNode;
+    }
+    return pNode;
+}
+
+void ReduceTree (UINT nColorBits, UINT* pLeafCount, NODE** pReducibleNodes)
+{
+    int i;
+    NODE* pNode;
+    UINT nRedSum, nGreenSum, nBlueSum, nChildren;
+
+    // Find the deepest level containing at least one reducible node
+    for (i=nColorBits - 1; (i&gt;0) &amp;&amp; (pReducibleNodes[i] == NULL); i--);
+
+    // Reduce the node most recently added to the list at level i
+    pNode = pReducibleNodes[i];
+    pReducibleNodes[i] = pNode-&gt;pNext;
+
+    nRedSum = nGreenSum = nBlueSum = nChildren = 0;
+    for (i=0; i&lt;8; i++) {
+        if (pNode-&gt;pChild[i] != NULL) {
+            nRedSum += pNode-&gt;pChild[i]-&gt;nRedSum;
+            nGreenSum += pNode-&gt;pChild[i]-&gt;nGreenSum;
+            nBlueSum += pNode-&gt;pChild[i]-&gt;nBlueSum;
+            pNode-&gt;nPixelCount += pNode-&gt;pChild[i]-&gt;nPixelCount;
+            HeapFree (GetProcessHeap (), 0, pNode-&gt;pChild[i]);
+            pNode-&gt;pChild[i] = NULL;
+            nChildren++;
+        }
+    }
+
+    pNode-&gt;bIsLeaf = TRUE;
+    pNode-&gt;nRedSum = nRedSum;
+    pNode-&gt;nGreenSum = nGreenSum;
+    pNode-&gt;nBlueSum = nBlueSum;
+    *pLeafCount -= (nChildren - 1);
+}
+
+void DeleteTree (NODE** ppNode)
+{
+    int i;
+
+    for (i=0; i&lt;8; i++) {
+        if ((*ppNode)-&gt;pChild[i] != NULL)
+            DeleteTree (&amp;((*ppNode)-&gt;pChild[i]));
+    }
+    HeapFree (GetProcessHeap (), 0, *ppNode);
+    *ppNode = NULL;
+}
+
+void GetPaletteColors (NODE* pTree, PALETTEENTRY* pPalEntries, UINT* pIndex)
+{
+    int i;
+
+    if (pTree-&gt;bIsLeaf) {
+        pPalEntries[*pIndex].peRed =
+            (BYTE) ((pTree-&gt;nRedSum) / (pTree-&gt;nPixelCount));
+        pPalEntries[*pIndex].peGreen =
+            (BYTE) ((pTree-&gt;nGreenSum) / (pTree-&gt;nPixelCount));
+        pPalEntries[*pIndex].peBlue =
+            (BYTE) ((pTree-&gt;nBlueSum) / (pTree-&gt;nPixelCount));
+        (*pIndex)++;
+    }
+    else {
+        for (i=0; i&lt;8; i++) {
+            if (pTree-&gt;pChild[i] != NULL)
+                GetPaletteColors (pTree-&gt;pChild[i], pPalEntries, pIndex);
+        }
+    }
+}
+
+int GetRightShiftCount (DWORD dwVal)
+{
+    int i;
+
+    for (i=0; i&lt;sizeof (DWORD) * 8; i++) {
+        if (dwVal &amp; 1)
+            return i;
+        dwVal &gt;&gt;= 1;
+    }
+    return -1;
+}
+
+int GetLeftShiftCount (DWORD dwVal)
+{
+    int nCount, i;
+
+    nCount = 0;
+    for (i=0; i&lt;sizeof (DWORD) * 8; i++) {
+        if (dwVal &amp; 1)
+            nCount++;
+        dwVal &gt;&gt;= 1;
+    }
+    return (8 - nCount);
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Other helper routines
+
+void UpdatePaletteType (HWND hwnd, UINT nNewPaletteType)
+{
+    HMENU hMenu;
+
+    hMenu = GetMenu (hwnd);
+    CheckMenuItem (hMenu, g_nPaletteType, MF_UNCHECKED);
+    CheckMenuItem (hMenu, nNewPaletteType, MF_CHECKED);
+    g_nPaletteType = nNewPaletteType;
+
+    if (g_hPalette != NULL)
+        DeleteObject (g_hPalette);
+
+    if (g_hImage != NULL) {
+        g_hPalette = GetPaletteHandle (hwnd, g_hImage);
+        InvalidateRect (hwnd, NULL, FALSE);
+    }
+}
+
+BOOL DoFileOpen (HWND hwnd)
+{
+    OPENFILENAME ofn;
+    char szFileName[MAX_PATH];
+    char szFileTitle[MAX_PATH];
+    char szErrMsg[MAX_PATH + 32];
+    HANDLE hImage;
+
+    szFileName[0] = 0;
+    szFileTitle[0] = 0;
+    ZeroMemory (&amp;ofn, sizeof (ofn));
+    ofn.lStructSize         = sizeof (ofn); 
+    ofn.hwndOwner           = hwnd;
+    ofn.lpstrFilter         = "BMP Files\0*.bmp\0All Files\0*.*\0"; 
+    ofn.lpstrFile           = szFileName; 
+    ofn.nMaxFile            = sizeof (szFileName); 
+    ofn.lpstrFileTitle      = szFileTitle; 
+    ofn.nMaxFileTitle       = sizeof (szFileTitle); 
+    ofn.Flags               = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY |
+                              OFN_EXPLORER | OFN_SHOWHELP; 
+    ofn.lpstrDefExt         = "bmp"; 
+
+    if (GetOpenFileName (&amp;ofn)) {
+        UpdateWindowTitle (hwnd, ofn.lpstrFileTitle);
+
+        hImage = LoadImage (NULL, ofn.lpstrFile, IMAGE_BITMAP, 0, 0,
+            LR_LOADFROMFILE | LR_CREATEDIBSECTION);
+        if (hImage != NULL) {
+            if (g_hImage != NULL)
+                DeleteObject (g_hImage);
+            g_hImage = hImage;
+            return TRUE;
+        }
+        else { // LoadImage failed
+            lstrcpy (szErrMsg, szFileTitle);
+            lstrcat (szErrMsg, " does not contain a valid DIB");
+            MessageBox (hwnd, szErrMsg, "Error", MB_ICONEXCLAMATION | MB_OK);
+        }
+    }
+    return FALSE;
+}
+
+void UpdateWindowTitle (HWND hwnd, LPSTR pszDocName)
+{
+    char szTitle[MAX_PATH + 16];
+
+    lstrcpy (szTitle, pszDocName);
+    lstrcat (szTitle, " - Colors");
+    SetWindowText (hwnd, szTitle);
+}
+
+void DisplayDIBSection (HDC hdc, HANDLE hImage, HPALETTE hPalette)
+{
+    HDC hdcMem;
+    HBITMAP hOldBitmap;
+    DIBSECTION ds;
+    int cx, cy;
+
+    hdcMem = CreateCompatibleDC (hdc);
+    if (hPalette != NULL) {
+        SelectPalette (hdcMem, hPalette, FALSE);
+        RealizePalette (hdcMem);
+        SelectPalette (hdc, hPalette, FALSE);
+        RealizePalette (hdc);
+    }
+
+    GetObject (g_hImage, sizeof (ds), &amp;ds);
+    cx = ds.dsBmih.biWidth;
+    cy = ds.dsBmih.biHeight;
+    hOldBitmap = SelectObject (hdcMem, hImage);
+    BitBlt (hdc, 0, 0, cx, cy, hdcMem, 0, 0, SRCCOPY);
+    SelectObject (hdcMem, hOldBitmap);
+    DeleteDC (hdcMem);
+}
+
+HPALETTE GetPaletteHandle (HWND hwnd, HANDLE hImage)
+{
+    HDC hdc;
+    HPALETTE hPalette;
+    HCURSOR hCursor;
+    int bpp;
+
+    // Return NULL if this isn't a palette-based device
+    hdc = GetDC (hwnd);
+    if (!(GetDeviceCaps (hdc, RASTERCAPS) &amp; RC_PALETTE)) {
+        ReleaseDC (hwnd, hdc);
+        return NULL;
+    }
+    // Otherwise create a palette and return the palette handle
+    switch (g_nPaletteType) {
+
+    case IDM_NO_PALETTE:
+        hPalette = NULL;
+        break;
+    case IDM_HALFTONE_PALETTE:
+        hPalette = CreateHalftonePalette (hdc);
+        break;
+    case IDM_OPTIMIZED_PALETTE:
+        bpp = BitsPerPixel (hImage);
+        if (bpp &lt;= 8)
+            hPalette = CreateExactPalette (hImage);
+        else if ((bpp == 16) || (bpp == 24) || (bpp == 32)) {
+            hCursor = SetCursor (LoadCursor (NULL, IDC_WAIT));
+            hPalette = CreateOctreePalette (hImage, 236, g_nColorBits);
+            SetCursor (hCursor);
+        }
+        else // Default = halftone palette
+            hPalette = CreateHalftonePalette (hdc);
+        break;
+    }
+    ReleaseDC (hwnd, hdc);
+    return hPalette;
+}
+
+UINT BitsPerPixel (HANDLE hImage)
+{
+    DIBSECTION ds;
+    GetObject (hImage, sizeof (ds), &amp;ds);
+    return (UINT) ds.dsBmih.biBitCount;
+}
+/////////////////////////////////////////////////////////////////////////////
+// Dialog Procedure
+BOOL CALLBACK DlgProc (HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    UINT nColorBits;
+    switch (msg) {
+    case WM_INITDIALOG:
+        SendDlgItemMessage (hwnd, IDC_SPINBUTTON, UDM_SETRANGE, 0,
+                            (LPARAM) MAKELONG (8, 1));
+        SetDlgItemInt (hwnd, IDC_COLORBITS, g_nColorBits, FALSE);
+        return TRUE;
+    case WM_COMMAND:
+        switch (LOWORD (wParam)) {
+        case IDOK:
+            nColorBits = GetDlgItemInt (hwnd, IDC_COLORBITS, NULL, FALSE);
+            if ((nColorBits &lt; 1) || (nColorBits &gt; 8)) {
+                MessageBox (hwnd, "Enter a value from 1 to 8", "Error",
+                            MB_ICONEXCLAMATION | MB_OK);
+                SendDlgItemMessage (hwnd, IDC_COLORBITS, EM_SETSEL, 0, -1);
+                SetFocus (GetDlgItem (hwnd, IDC_COLORBITS));
+            }
+            else {
+                g_nColorBits = nColorBits;
+                EndDialog (hwnd, 1);
+            }
+            return TRUE;
+        case IDCANCEL:
+            EndDialog (hwnd, 0);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+</PRE>
+<P></P>
+<P><B>Figure 4</B> shows a 24-bit color image in its original form. <B>Figures 5</B>, <B>6</B>, and <B>7</B> show the same image displayed on a 256-color screen with the three palette options. The No Palette method (see <B>Figure 5</B>) is the worst of the three because the 20 static colors in the default system palette simply don't provide the variety of colors needed to accurately portray the image. Halftone Palette is better (see <B>Figure 6</B>), but even it exhibits pronounced posterization effects. The octree version created with Optimized Palette (see <B>Figure 7</B>) is almost as good as the original; in fact, the two are virtually identical on a four-color magazine page. These examples illustrate the dramatic difference color selection can make on palettized video adapters.</P>
+<P><img src="wicked4.gif"></P>
+<P><B> Figure 4  Original 24-bit image</B></P>
+<P><img src="wicked5.gif"></P>
+<P><B> Figure 5  Default system palette</B></P>
+<P><img src="wicked6.gif"></P>
+<P><B> Figure 6  Halftone palette</B></P>
+<P><img src="wicked7.gif"></P>
+<P><B> Figure 7  Octree palette</B></P>
+<P>The quantization code is found in the CreateOctreePalette function and its helpers. As a group, the functions are self-contained; all you have to do to import them into your own code is cut and paste the CreateOctreePalette, AddColor, CreateNode, ReduceTree, DeleteTree, GetPaletteColors, GetRightShiftCount, and GetLeftShiftCount functions and their corresponding function prototypes.</P>
+<P>You'll also need to supply a value to the nColorBits parameter, which controls the depth of the tree by specifying the number of significant bits in each 8-bit color component. This value can be from 1 to 8 (higher numbers give better quality and use more memory), but you will find that a value of 4 or 5 provides the best compromise of performance and memory use. If you want to see the effects of the other values, try them in the sample program. </P>
+<P>To use these functions, simply pass CreateOctreePalette a handle to a DIB section (DDBs and ordinary DIBs won't do) and a value specifying the maximum number of colors in the palette. Then select the returned HPALETTE into a device context and realize it before displaying the image. It's your responsibility to delete the HPALETTE when you're through with it. Note that the palette CreateOctreePalette creates will sometimes contain slightly fewer colors than the number you specify. A reduction in the octree size lops off up to seven leaves, so there's no guarantee the final octree will contain exactly nMaxColors colors.</P>
+<P>There's a lot that goes on behind the scenes when you call CreateOctreePalette. The important part is that CreateOctreePalette scans the bitmap pixel by pixel and passes the RGB color of each pixel to AddColors. AddColors calls itself recursively to add octree nodes or add color information to existing nodes. Each node in the octree is represented by a structure of type NODE, which is defined in Colors.h. Memory for each node is allocated and initialized by the CreateNode function. After adding a color to the octree, CreateOctreePalette compares the number of leaves (nLeafCount) to nMaxColors and calls ReduceTree if the leaf count needs to be reduced. After the entire bitmap is scanned, GetPaletteColors traverses the octree from top to bottom copying leaf colors to a LOGPALETTE structure, then calls CreatePalette to create the logical palette. Before returning, CreateOctreePalette calls the recursive DeleteTree function to free memory allocated to the octree nodes.</P>
+<P>One implementation detail you should be aware of, especially if you want to modify the code, is how ReduceTree picks a node to reduce. It's important to do your reductions as deep in the octree as possible because deeper levels correspond to subtler variations in tone. Since it's time-consuming to traverse the entire tree from top to bottom, I borrowed an idea from an excellent article by Dean Clark that appeared in the January 1996 issue of <I>Dr. Dobb's Journal </I>("Color Quantization Using Octrees"); I implemented an array of linked lists named pReducibleNodes containing pointers to all the reducible (non-leaf) nodes in each level of the octree. Thus, finding the deepest level with a reducible node is as simple as scanning the array from bottom to top until a non-NULL pointer is located. Like Dean's code, mine picks the node most recently added to a given level as the one to reduce. You could refine my implementation somewhat by adding more intelligence to the node-selection processófor example, by walking the linked list and picking the node that represents the fewest or the most colors.</P>
+<P>Colors uses the versatile LoadImage function in Windows 95 to create a DIB section from a BMP file with one function call. It features a handy CreateExactPalette function for creating a palette of matching colors for 1, 4, and 8-bit images, and it demonstrates how to extract color information from raw bitmap bits in 16, 24, and 32-bit images. For details, see the code following the case statements in CreateOctreePalette.</P>
+<P> </P>
+<H2><A NAME="sec3"></A>  Your Needs, Your Ideas</H2><P>That's it for this month. Meanwhile, if there are tough Win32 questions you'd like to see answered, send me e-mail at the address listed below. I regret that time doesn't permit me to respond individually to all messages, but rest assured that I'll read every suggestion and consider each for inclusion in a future column.</P>
+<P>Have a tricky issue dealing with Windows? Send your questions via e-mail to Jeff Prosise: 72241.44@compuserve.com</P>
+<P><I>This article is reproduced from Microsoft Systems Journal. Copyright </I>©<I> 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P><I>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</I></P>
+<P></P></font></body></HTML>

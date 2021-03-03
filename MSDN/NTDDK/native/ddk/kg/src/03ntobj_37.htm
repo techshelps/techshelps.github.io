@@ -1,0 +1,135 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML>
+<HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>3.9.2  Event Objects</TITLE>
+<style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD>
+<BODY BGPROPERTIES="FIXED" TEXT="#000000" BGCOLOR="#FFFFFF">
+
+<FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<H3><A NAME="DDK_Event_Objects_KG"></A>3.9.2  Event Objects</H3>
+<P>
+As mentioned in <A HREF="03ntobj_35.htm">Section 3.9</A>, some
+of the system-supplied drivers use an event object in their <B>DriverEntry</B>
+routines to wait while the next-lower driver processes an IRP set up by the
+waiting driver. NT drivers that have driver-created threads or driver Dispatch
+routines that wait on the completion of a synchronous I/O request also can use
+an event object to synchronize operations between their threads and/or other
+driver routines.
+<P>
+<A NAME="DDK_Figure_3.24_KG"></A>Any NT driver that uses an event object must call
+<B>KeInitializeEvent</B>&nbsp;or <B>IoCreate</B><I>Xxx</I><B>Event</B>&nbsp;before it
+waits on, sets, clears, or resets the event. Figure 3.24 illustrates how a
+driver with a thread can use an event object for synchronization.
+<P>
+<B><IMG SRC="../art/3evntobj.gif" BORDER=0></B>
+<P>
+<B>Figure 3.24    Waiting on an Event Object</B>
+<P>
+As Figure 3.24 shows, such a driver must provide the storage for the event
+object, which must be resident. The driver can use the device extension of a
+driver-created device object (see <A HREF="03ntobj_2.htm">Section
+3.2</A>), the controller extension if it uses a controller object (see <A HREF="03ntobj_20.htm">Section
+3.4</A>), or nonpaged pool allocated by the driver.
+<P>
+When the <B>DriverEntry</B>&nbsp;or Reinitialize routine calls <B>KeInitializeEvent</B>,
+it must pass a pointer to the driver’s resident storage for the event object.
+In addition, the caller must specify the initial <I>State</I>&nbsp;(Signaled or
+Not-Signaled) for the event object, as shown in Figure 3.24. The caller also
+must specify the <I>Type</I>&nbsp;for its event object, which can be either of the
+following:
+<UL>
+<LI>
+<B>SynchronizationEvent</B>
+<P>
+When such an event is set to the Signaled state, a single thread that is
+waiting on the event becomes eligible for execution and the event’s state is
+automatically reset to Not-Signaled.
+<P>
+This type of event is sometimes called an <I>autoclearing event</I>, because
+its Signaled state is automatically reset each time a wait is satisfied.
+<P>
+<LI>
+<B>NotificationEvent</B>
+<P>
+When such an event is set to the Signaled state, all threads that were waiting
+on the event become eligible for execution and the event remains in the
+Signaled state until an explicit reset to Not-Signaled occurs: that is, there
+is a call to <B>KeClearEvent</B>&nbsp;or <B>KeResetEvent</B>&nbsp;with the given <I>Event</I>
+pointer.
+</UL>
+<P>
+Very few NT device or intermediate drivers have a single driver-dedicated
+thread, let alone a set of threads that might synchronize their operations by
+waiting on an event that protects a shared resource.
+<P>
+Most NT drivers that use event objects to wait for the completion of an I/O
+operation set the input <I>Type</I>&nbsp;to <B>NotificationEvent </B>when they call
+<B>KeInitializeEvent</B>. An event object set up for IRPs that an NT driver
+creates with <B>IoBuildSynchronousFsdRequest</B>&nbsp;or <B>IoBuildDeviceIoControlRequest</B>
+is almost always initialized as a <B>NotificationEvent</B>&nbsp;because the caller
+will wait on the event for notification that its request has been satisfied by
+one or more lower-level drivers.
+<P>
+After the driver has initialized, its thread, if any, and other routines can
+synchronize their operations on the event. For example, a driver with a thread
+that manages the queueing of IRPs, such as the system floppy controller
+driver, might synchronize IRP processing on an event, as shown in Figure 3.24:
+<OL>
+<LI>
+The thread, which has dequeued an IRP for processing on the device, calls <B>KeWaitForSingleObject</B>
+with a pointer to the driver-supplied storage for the initialized event
+object.
+<P>
+<LI>
+Other driver routines carry out device I/O operations necessary to satisfy the
+IRP, and, when these operations are complete, the driver’s DpcForIsr routine
+calls <B>KeSetEvent</B>&nbsp;with a pointer to the event object, a
+driver-determined priority boost for the thread (<I>Increment</I>, as shown in
+Figure 3.24), and a Boolean <I>Wait</I>&nbsp;set to FALSE. Calling <B>KeSetEvent</B>
+sets the event object to the Signaled state, thereby changing the waiting
+thread’s state to ready.
+<P>
+<LI>
+The Kernel dispatches the thread for execution as soon as a processor is
+available: that is, no other thread with a higher priority is currently in the
+ready state and there are no kernel-mode routines to be run at raised IRQL
+(greater than PASSIVE_LEVEL).
+<P>
+The thread now can complete the IRP if the DpcForIsr has not called <B>IoCompleteRequest</B>
+with the IRP already, and can dequeue another IRP to be processed on the
+device.
+</OL>
+<P>
+Calling <B>KeSetEvent</B>&nbsp;with the <I>Wait</I>&nbsp;parameter set to TRUE indicates
+the caller’s intention to immediately call a <B>KeWait..Object(s)</B>&nbsp;support
+routine on return from <B>KeSetEvent</B>.
+<H5><IMG SRC="../../../wedge.gif" BORDER=0>&nbsp; &nbsp; NT driver writers should consider the following guidelines for setting the <I>Wait</I>&nbsp;parameter to KeSetEvent: </H5>
+<P>
+A pageable thread or pageable driver routine that runs at IRQL PASSIVE_LEVEL
+should <I>never</I>&nbsp;call <B>KeSetEvent</B>&nbsp;with the <I>Wait</I>&nbsp;parameter set
+to TRUE. Such a call causes a fatal page fault if the caller happens to be
+paged out between the calls to <B>KeSetEvent</B>&nbsp;and <B>KeWait..Object(s)</B>.
+<P>
+Any standard driver routine that runs at an IRQL greater than PASSIVE_LEVEL <I>cannot</I>
+wait for a nonzero interval on any dispatcher object(s) without bringing down
+the system (see <A HREF="03ntobj_35.htm">Section 3.9</A>).
+However, such a routine can call <B>KeSetEvent</B>&nbsp;while running at an IRQL
+less than or equal to DISPATCH_LEVEL.
+<P>
+For a summary of the IRQLs at which standard NT driver routines run, see
+Chapter 16. For support-routine-specific IRQL requirements, see the <I>Kernel-Mode
+Driver Reference</I>.
+<P>
+<B>KeResetEvent</B>&nbsp;returns the previous state of a given <I>Event</I>:
+whether it was set to Signaled or not when the call to <B>KeResetEvent</B>
+occurred. <B>KeClearEvent</B>&nbsp;simply sets the state of the given <I>Event</I>
+to Not-Signaled.
+<H5><IMG SRC="../../../wedge.gif" BORDER=0>&nbsp; &nbsp; Consider the following a guideline for when to call the preceding support routines: </H5>
+<P>
+For better performance, every NT driver should call <B>KeClearEvent</B>&nbsp;unless
+the caller needs the information returned by <B>KeResetEvent</B>&nbsp;to determine
+what to do next.
+<P></FONT>
+</BODY>
+</HTML>

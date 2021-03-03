@@ -1,0 +1,521 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Under the Hood</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  Under the Hood</H1><P>Matt Pietrek</P>
+<P>Matt Pietrek is the author of <I>Windows 95 System Programming Secrets</I> (IDG Books, 1995). He works at Nu-Mega Technologies Inc., and can be reached at 71774.362@compuserve.com.</P>
+<P><OBJECT id=sample1 type="application/x-oleobject"
+classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Backgrounders Samples">
+<PARAM name="Item2" value="4597">
+</OBJECT><a href="javascript:sample1.Click()">
+
+Click to open or copy the SHOWTITL project files.</A></P><P></P>
+<P>In my article "An Exclusive tour of the New TOOLHELP32 Functions for Windows® 95," (MSJ, September 1995), I described how Windows 95-based programs can easily access system-level information. The functionality that TOOLHELP32 provides includes process lists, thread lists, module lists, heap lists, and heap walking. Unfortunately, the TOOLHELP32 API isn't part of Win32®, so if you're coding for Microsoft® Windows NT™, these functions simply aren't available.</P>
+<P>In place of TOOLHELP32 functions, Windows NT has what's known as performance information. "Performance" is somewhat a misnomer, since much of the information in the Windows NT performance data has nothing to do with how fast something executes. Through the performance information, you can access the running process list, the amount of free memory on a given disk, and many other things unrelated to performance.</P>
+<P>In this and a future column, I'm going to describe how to access the Windows NT performance information. This month, I'll describe the basic components that need to be set up prior to using Windows NT performance data. Next month I'll describe the performance data structures and how you can access them. Because the performance data structures are of variable length, I've chosen to encapsulate some of the complexity using C++® classes.</P>
+<P>The Windows NT performance information is the basis for at least two utilities that should be familiar to you. PERFMON, which comes with Windows NT, is really just a front-end viewer for Windows NT performance information. The code for PERFMON can be found in the Win32 SDK samples. Alas, the PERFMON program has lots of code unrelated to accessing the performance information, so it's not the best example if you want to quickly learn how to access the performance data. The other program that uses the performance information is PVIEW (AKA PVIEWER). PVIEW focuses on the process and thread lists found in the performance information. The code for PVIEW also comes with the Win32 SDK, and is simpler than PERFMON's. Still, it can be confusing if you just want to learn about performance data.</P>
+<P>All Windows NT performance information is accessed through the registry. There's even a special predefined registry key called HKEY_PERFORMANCE_DATA that's used to read the information. In my September 1995 Under the Hood column, I described how Windows 95 keeps performance information in its registry. Unfortunately, the registry keys and the data structures are completely different in Windows NT and Windows 95. In fact, this difference issogreat that Windows 95 calls its performance key HKEY_DYN_DATA, rather than HKEY_PERFORMANCE_DATA. While the Windows 95 performance information is relatively easy to access, the level of information that Windows 95 provides via this mechanism is just a drop in the bucket compared to the amount of information found in the Windows NT registry.</P>
+<P>Unlike regular registry keys such as HKEY_LOCAL_MACHINE,thedataretrievedfromHKEY_PERFORMANCE_DATA isn't file-based, nor is it persistent. Instead, when you query the registry for performance information, the registry code reads the information from system internal data structures. What this means is that the performance data will be different each time you query the registry. By the time the calling program gets around to using the information, the system may already have changed its state. More on this later.</P>
+<P> </P>
+<H2><A NAME="sec0"></A>  The Title Database</H2><P>Before diving into the specifics of the performance data, it's important to first understand how the performance information gives titles (or names) to the various components of the performance data. The titles of the performance data components are kept separate from the data itself. Since the naming mechanism can be described independently of the actual performance data, I'm going to first describe how performance titles are managed. Later, I'll connect this topic to the actual performance data.</P>
+<P>One of the apparent design goals of the Windows NT performance information is that it should be self-describing. By that, I mean that the information accessible via the performance data can be arbitrarily extended. For example, Windows NT device drivers can make their own performance data accessible. The key point is that any code that uses performance data shouldn't need to change if new information is made available in the performance data. Thus, there aren't any magic #defines in a header file somewhere that say "this represents a thread ID," or "that is the current page file size." Instead, the names of objects and counters are maintained in a block of data that's also read in via the registry.</P>
+<P>Next month, I'll give a more precise definition of performance objects and counters. For now, it's sufficient to know that an object is something like a process list, memory details, or the paging file. A counter is a specific piece of information about an object instance. For example, the process ID for a particular process is represented as a counter. The important thing to remember is that these titles are dynamic. They could theoretically change from boot to boot or machine to machine.</P>
+<P>All of the object and counter name strings are collected together in one place for easy access. They're kept in what I call a title database for lack of a better term. You read the title database in one big chunk from the registry. A title database consists of a series of null-terminated strings, one after the other in memory. To make things more interesting, only half the strings in the title database are actually an object or counter title. The remaining strings are string representations of decimal numbers; for instance, the string "126." These number strings are each paired up with an actual name string. For instance, in my machine's title database, I have the following sequence of strings: </P>
+<P> </P>
+<P><BR></P>
+<PRE> "86", "Cache"
+"88", "Data Maps/sec"
+"90", "Sync Data Maps/sec"</PRE>
+<P> </P>
+<P>As you navigate through the performance data, you'll come across data structures that describe a type of object (such as the cache) or a counter (such as "Data Maps/sec"). In these data structures, the title of an object or counter is stored as a binary value corresponding to a string number in the title database. For instance, using the above sequence of strings, the description for a cache object would include the binary value 86. Likewise, the counter data structure that describes "Data Maps/sec" would contain 88 for the title.</P>
+<P>Whileyou could look up a given string in the title database using a brute force approach of comparing strings, there's obviously a better way. If you know how many strings are in the array, you can create an array of pointers to the name strings within the raw title data. Looking up a name becomes very easy at that point. For a given title index, simply use the corresponding array entry from your array of string pointers. Beware, though. Not every index value has a string associated with it. In fact, in the latter part of the title database, you'll come across large gaps in the indexes of consecutive title strings.</P>
+<P>Tomakethe title database easy to use, I wrote the CPerfTitleDatabase class (<B>Figure 1</B>). The two most important member functions of this class are GetTitleStringFromIndex and GetIndexFromTitleString. The GetTitleStringFromIndex method simply returns whatever value is in the specified slot in the string array, while GetIndexFromTitleString performs a linear search of the string array, comparing the input string to each nonzero string pointer in the array.</P>
+<P><B> Figure 1  CPerfTitleDatabase</B></P>
+<P></P>
+<P>CTITLEDB.H</P>
+<P><BR></P>
+<PRE> #ifndef __Ctitledb_h__
+#define __Ctitledb_h__
+
+enum PERFORMANCE_TITLE_TYPE { PERF_TITLE_COUNTER, PERF_TITLE_EXPLAIN };
+
+class CPerfTitleDatabase
+{
+    private:
+
+    unsigned    m_nLastIndex;
+    PTSTR       * m_TitleStrings;
+    PTSTR       m_pszRawStrings;
+    
+    public:
+        
+    CPerfTitleDatabase( PERFORMANCE_TITLE_TYPE titleType );
+    ~CPerfTitleDatabase( );
+
+    unsigned    GetLastTitleIndex(void) { return m_nLastIndex; }
+    PTSTR       GetTitleStringFromIndex( unsigned index );
+    unsigned    GetIndexFromTitleString( PTSTR pszTitleString );
+};
+
+#endif</PRE>
+<P></P>
+<P>CTITLEDB.CPP</P>
+<P><BR></P>
+<PRE> //===========================================================================
+// File: CTITLEDB.CPP
+// Author: Matt Pietrek
+// From: Microsoft Systems Journal, "Under the Hood", March 1996
+//===========================================================================
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include &lt;windows.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;winperf.h&gt;
+#include &lt;tchar.h&gt;
+#pragma hdrstop
+#include "ctitledb.h"
+
+CPerfTitleDatabase::CPerfTitleDatabase(
+        PERFORMANCE_TITLE_TYPE titleType )
+{
+    m_nLastIndex = 0;
+    m_TitleStrings = 0;
+    m_pszRawStrings = 0;
+
+    // Determine the appropriate strings to pass to RegOpenKeyEx
+    PTSTR psz009RegValue, pszLastIndexRegValue;
+    if ( PERF_TITLE_COUNTER == titleType )
+    {
+        psz009RegValue = TEXT("Counter 009");
+        pszLastIndexRegValue = TEXT("Last Counter");
+    }
+    else if ( PERF_TITLE_EXPLAIN == titleType )
+    {
+        psz009RegValue = TEXT("Explain 009");
+        pszLastIndexRegValue = TEXT("Last Help");
+    }
+    else
+        return;
+
+    // Find out the max number of entries
+    HKEY hKeyPerflib = 0;
+    DWORD cbLastIndex;
+    
+    // Open the registry key that has the values for the maximum number
+    // of title strings
+    if ( ERROR_SUCCESS != RegOpenKeyEx(
+            HKEY_LOCAL_MACHINE,
+            TEXT("software\\microsoft\\windows nt\\currentversion\\perflib"),
+            0, KEY_READ, &amp;hKeyPerflib ) )
+        return;
+
+    // Read in the number of title strings
+    if ( ERROR_SUCCESS != RegQueryValueEx(
+                hKeyPerflib, pszLastIndexRegValue, 0, 0,
+                (PBYTE)&amp;m_nLastIndex, &amp;cbLastIndex ) )
+    {
+        RegCloseKey( hKeyPerflib );
+        return;
+    }
+    
+    RegCloseKey( hKeyPerflib );
+    
+    //
+    // Now go find and process the raw string data
+    //
+
+    // Determine how big the raw data in the REG_MULTI_SZ value is
+    DWORD cbTitleStrings;
+    if ( ERROR_SUCCESS != RegQueryValueEx( HKEY_PERFORMANCE_DATA,                                                   psz009RegValue, 0,0,0, &amp;cbTitleStrings))
+        return;
+
+    // Allocate memory for the raw registry title string data
+    m_pszRawStrings = new TCHAR[cbTitleStrings];
+    
+    // Read in the raw title strings
+    if ( ERROR_SUCCESS != RegQueryValueEx( HKEY_PERFORMANCE_DATA,
+                            psz009RegValue, 0, 0, (PBYTE)m_pszRawStrings,
+                            &amp;cbTitleStrings ) )
+    {
+        delete []m_pszRawStrings;
+        return;
+    }
+
+    // allocate memory for an array of string pointers.
+    m_TitleStrings = new PTSTR[ m_nLastIndex+1 ];
+    if ( !m_TitleStrings )
+    {
+        delete []m_pszRawStrings;
+        return;
+    }
+
+    // Initialize the m_TitleStrings to all NULLs, since there may
+    // be some array slots that aren't used.
+    memset( m_TitleStrings, 0, sizeof(PTSTR) * (m_nLastIndex+1) );
+
+    // The raw data entries are an ASCII string index (e.g., "242"), followed
+    // by the corresponding string.  Fill in the appropriate slot in the
+    // m_TitleStrings array with the pointer to the string name.  The end
+    // of the list is indicated by a double NULL.
+
+    PTSTR pszWorkStr = (PTSTR)m_pszRawStrings;
+    unsigned cbCurrStr;
+
+    // While the length of the current string isn't 0...
+    while ( 0 != (cbCurrStr = lstrlen( pszWorkStr)) )
+    {
+        // Convert the first string to a binary representation
+        unsigned index = _ttoi( pszWorkStr );   // _ttoi -&gt; atoi()
+
+        if ( index &gt; m_nLastIndex )
+            break;
+        
+        // Now point to the string following it.  This is the title string
+        pszWorkStr += cbCurrStr + 1;
+
+        // Fill in the appropriate slot in the title strings array.
+        m_TitleStrings[index] = pszWorkStr;
+        
+        // Advance to the next index/title pair
+        pszWorkStr += lstrlen(pszWorkStr) + 1;
+    }
+}
+
+CPerfTitleDatabase::~CPerfTitleDatabase( )
+{
+    delete []m_TitleStrings;
+    m_TitleStrings = 0;
+    delete []m_pszRawStrings;
+    m_pszRawStrings = 0;
+    m_nLastIndex = 0;
+}
+    
+PTSTR
+CPerfTitleDatabase::GetTitleStringFromIndex( unsigned index )
+{
+    if ( index &gt; m_nLastIndex ) // Is index within range?
+        return 0;
+    
+    return m_TitleStrings[ index ];
+}
+
+unsigned
+CPerfTitleDatabase::GetIndexFromTitleString( PTSTR pszTitleString )
+{
+    if ( IsBadStringPtr(pszTitleString, 0xFFFFFFFF) )
+        return 0;
+
+    // Loop through all the non-null string array entries, doing a case-
+    // insensitive comparison.  If found, return the correpsonding index
+    for ( unsigned i = 1; i &lt;= m_nLastIndex; i++ )
+    {
+        if ( m_TitleStrings[i] )
+            if ( 0 == _tcsicmp( pszTitleString, m_TitleStrings[i] ) )
+                return i;
+    }
+    
+    return 0;
+}</PRE>
+<P>The most interesting method in the CPerfTitleDatabase class is its constructor. There you'll find the code that reads in the raw title strings from the registry and builds the array of string pointers. The code begins by determining how many elements the array of title string pointers needs. The code does this by reading the "Last Counter" value from theHKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion\PerfLib key in the registry. The value returned is not the actual number of title strings, however. Rather, it's the maximum index value that a given titlestringcanhave.Using this value, the constructor allocates enough memory for the array of string pointers.</P>
+<P>After allocating the string pointer array, the constructor reads in the raw title strings as one giant blob. The function reads the title strings from the "Counter 009" value of the HKEY_PERFORMANCE_DATA key. According to the documentation, the "009" portion of the string indicates the Englishlanguage.It'snotclearfromthedocumentationwhat you'd use in place of "009" for non-English versions of Windows NT.</P>
+<P>After reading in the title string data, the code processes the strings in pairs, first the array index string, then the title string. For each title string that's encountered, the appropriate slot in the string pointer array is set to point at the title string in the raw data.</P>
+<P>To convert the array index string into its binary representation, I use the _ttoi function. What's _ttoi? It's essentially the atoi (ASCII to Integer) function, but it can be used when compiling for either ANSI or Unicode. I implemented this class using code that's ANSI/Unicode compatible. That's why you'll see a lot of TEXT macros and potentially unfamiliar RTL functions sprinkled throughout the class code.</P>
+<P>In addition to the strings that describe the objects and counters, there's an entirely separate registry key that also contains string pairs in the same format as the object and counter titles. This second set of strings is descriptive help text for the object and counter titles. For each title string in the counter database, there's a corresponding description string. In some (but not all) cases, the index of the description string for a counter title is the counter string's index plus one. For example, index 2 in the counter strings is "System," while index 3 in the help string database is: "The System object type includes those counters that apply to all processors on the computer collectively. These counters represent the activity of all processors on the computer."</P>
+<P>The maximum number of possible entries in the description title database is found by reading the "Last Help" value from the same key where "Last Counter" is located. The raw help description strings are obtained by reading the "Explain 009" value of the HKEY_PERFORMANCE_DATA key. Since the counter and help title databases are so similar, I made the CPerfTitleDatabase class work with both. The CPerfTitleDatabase constructor takes an enum parameter which indicates whether the counter or help titles should be used. The rest of my code doesn't use the help strings, but you can easily extend the classes to do so. Since I won't have space this month to describe the actual formats of the objects and counters in the performance data, I wrote a trivial program (SHOWTITL) that demonstrates the CPerfTitleDatabase class in action. This way, you'll at least be able to see what sort of goodies can be found in the performance database. The SHOWTITL code is in <B>Figure 2</B>. The code declares two CPerfTitleDatabase class instances (one with counter strings, the other with description strings), and then enumerates through each string in both databases, printing the strings out as it encounters them. On my system, the first part of the SHOWTITL output is:</P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="32pt" VALIGN="TOP"><COL WIDTH="351pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P> 1</P></TD><TD VALIGN="TOP"><P>1847</P></TD></TR><TR><TD VALIGN="TOP"><P>  2</P></TD><TD VALIGN="TOP"><P>System</P></TD></TR><TR><TD VALIGN="TOP"><P>  4</P></TD><TD VALIGN="TOP"><P>Memory</P></TD></TR><TR><TD VALIGN="TOP"><P>  6</P></TD><TD VALIGN="TOP"><P>% Processor Time</P></TD></TR><TR><TD VALIGN="TOP"><P> 10</P></TD><TD VALIGN="TOP"><P>File Read Operations/sec</P></TD></TR><TR><TD VALIGN="TOP"><P> 12 </P></TD><TD VALIGN="TOP"><P>File Write Operations/sec</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P><B> Figure 2  SHOWTITL.CPP</B></P>
+<P><BR></P>
+<PRE> //====================================================
+// File: SHOWTITL.CPP
+// Author: Matt Pietrek
+// From: Microsoft Systems Journal
+//       "Under the Hood", March 1996
+// To Build: CL [arguments] SHOWTITL.CPP CTITLEDB.CPP
+//====================================================
+#include &lt;windows.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;tchar.h&gt;
+#pragma hdrstop
+#include "ctitledb.h"
+
+int main()
+{
+    CPerfTitleDatabase counterTitles( PERF_TITLE_COUNTER );
+    CPerfTitleDatabase explainTitles( PERF_TITLE_EXPLAIN );
+    unsigned i;
+    PTSTR psz;
+
+    // Display the counter title strings
+    for ( i = 0; i &lt; counterTitles.GetLastTitleIndex(); i++ )
+    {
+        psz = counterTitles.GetTitleStringFromIndex( i );
+        if ( psz )
+            _tprintf( TEXT("%u %s\n"), i, psz );
+    }
+
+    // Display the "Explain" (help) title strings
+    for ( i = 0; i &lt; explainTitles.GetLastTitleIndex(); i++ )
+    {
+        psz = explainTitles.GetTitleStringFromIndex( i );
+        if ( psz )
+            _tprintf( TEXT("%u %s\n"), i, psz );
+    }
+    
+    return 0;
+}</PRE>
+<P>That's it for my quick tour of the title database. Let's now start acquiring actual performance data.</P>
+<P> </P>
+<H2><A NAME="sec1"></A>  Performance Snapshots </H2><P>When using the Windows 95 TOOLHELP32 functions, you create what's called a snapshot by calling CreateToolhelp32Snapshot. A TOOLHELP32 snapshot records all of the desired information into a single data block that you then pass to other functions to retrieve the various bits and pieces of information. Using the Windows NT performance information is somewhat similar, except that there isn't a set of API functions to parse the data block. You have to parse the data structures yourself. This parsing isn't trivial, and is the main reason I wrote C++ classes to encapsulate the dirty work. Another difference is that the Windows NT performance data isn't referred to as a snapshot by the Microsoft documentation. In spite of this, I've decided to call the raw performance data a snapshot because the documentation doesn't offer any better alternative name. Calling it a snapshot also highlights the fact that the performance data is similar in some ways to Windows 95 TOOLHELP32 snapshots.</P>
+<P>To take a performance snapshot, you read yet another value from the HKEY_PERFORMANCE_DATA key in the registry. What's unique about taking a snapshot is that the value parameter passed to RegQueryValueEx isn't a predefined string. Instead, you pass RegQueryValueEx a value name that's composed of zero or more tokens. Based on the value name that you pass, RegQueryValueEx creates an appropriate snapshot containing the requested data. Taking a performance snapshot is somewhat like ordering from a menu. You can say "I'd like a thread list and a list of logical disks. That's all, thanks." Interestingly, when you order certain dishes, you may automatically get side orders. For example, when you request thread information, the snapshot data also contains a process list. That's because a thread cannot be completely described without mentioning the process that owns it. Likewise, a complete logical disk description requires information about the physical disk that the logical disk resides on. It's up to the code that parses the snapshot data to realize that the snapshot may contain more data than was actually requested.</P>
+<P>Assuming you only want selected parts of the total available performance information, you first create a string with one or more tokens representing which information you'd like. The tokens are separated by spaces, and each token is a string representation of a counter index. For example, on my system, the process list object corresponds to counter index 230, and the logical disk list has counter index 236. To collect information on just those two items, I'd read the HKEY_PERFORMANCE_DATA key, and pass "230 236" as the value name parameter.</P>
+<P>If you'd like to sample nearly everything on the performance menu, you can pass the string "Global" to RegQueryValueEx. The returned snapshot will contain all the performance data that isn't expensive (timewise) to collect. On my system, passing "Global" returns information about these items: </P>
+<UL><LI>    system</LI><LI>   processor (list)</LI><LI>   memory</LI><LI>   cache</LI><LI>   physicalDisk (list)</LI><LI>   logicalDisk (list)</LI><LI>   process (list)</LI><LI>   thread (list)</LI><LI>   objects</LI><LI>   redirector</LI><LI>   server</LI><LI>   paging file</LI><LI>   browser</LI></UL><P>Another predefined string value that can be passed to RegQueryValueEx is "Costly." The Costly performance data contains information that takes the system a relatively long time to acquire. On my system, reading the Costly data takes 4 or 5 seconds, even with just a few programs running. The Costly information on my system is the following: </P>
+<UL><LI>    process address space (list)</LI><LI>   image (list)</LI><LI>   thread details (list) </LI></UL><P>Yet another predefined string value that can be used when reading performance data is "Foreign &lt;computer name&gt;." This causes the registry to take a performance snapshot of a remote machine over a network. Since I don't have a Windows NT-based network, I wasn't able to try this feature out and see how long it takes to acquire the data.</P>
+<P>One messy part of taking a performance snapshot is that you don't know ahead of time how big a buffer you'll need for the data. Normally if you don't know how big a buffer you'll need when reading data from the registry, you can call RegQueryValueEx, and tell it that the buffer size is zero bytes. The registry can then indicate to you how big the buffer needs to be—you can allocate a buffer of the correct size and try again. The problem is that when reading performance data, the required buffer size for a snapshot can vary from invocation to invocation of RegQueryValueEx. The result is that you might ask the registry how big a buffer you need. After allocating a buffer of that size, you could query the registry again and still have the call fail because the buffer was too small. One way to handle this problem is pass in a very large buffer and hope for the best. A better approach is to ask for the performance data in a loop. If RegQueryValueEx returns ERROR_MORE_DATA, allocate a bigger buffer and go through the loop again. This is what the Microsoft sample code does, and this is what my C++ class code does, as you'll see shortly.</P>
+<P>After you successfully take a performance snapshot, what exactly do you have? Take a look in the WINPERF.H header file that comes with your compiler, and you'll find several structure definitions. I'll go over most of them next month. What's of interest right now is the PERF_DATA_BLOCK structure. All snapshots begin with this structure. Immediately following PERF_DATA_BLOCK is the data for the object types that you requested. </P>
+<P>While there are over a dozen fields in the PERF_DATA_BLOCK structure, the most important fields tell you how many object types follow the PERF_DATA_BLOCK (for example, "System"), and where the first object description can be found in the snapshot data. Additional information in the PERF_DATA_BLOCK includes the name of the system that the snapshot was taken for (as a Unicode string), and various timing related fields. The WINPERF.H file describes each field, so I won't waste space with a description here.</P>
+<P>To encapsulate the complexities of taking and managing snapshot data, I wrote the CPerfSnapshot class in <B>Figure 3</B>. The constructor for CPerfSnapshot takes a CTitleDatabase pointer as an argument and stores it in a private data member for later use. A snapshot isn't actually taken in the constructor code. The destructor for the CPerfSnapshot class just deletes any memory allocated by previously taken snapshot. </P>
+<P><B> Figure 3  CPerfSnapshot</B></P>
+<P></P>
+<P>PERFSNAP.H</P>
+<P><BR></P>
+<PRE> #ifndef __Perfsnap_h__
+#define __Perfsnap_h__
+
+#ifndef _WINPERF_
+#include &lt;winperf.h&gt;
+#endif
+
+class CPerfTitleDatabase;
+
+class CPerfSnapshot
+{
+    private:
+        
+    PPERF_DATA_BLOCK    m_pPerfDataHeader;      // Points to snapshot data
+    CPerfTitleDatabase  * m_pCounterTitles;     // The title conversion object
+
+    // Private function to convert the ASCII strings passedto TakeSnapshot()
+    // into a suitable form for the RegQueryValue call
+    BOOL ConvertSnapshotItemName( PTSTR pszIn, PTSTR pszOut, DWORD nSize );
+
+    public:
+
+    CPerfSnapshot( CPerfTitleDatabase * pCounterTitles );
+    
+    ~CPerfSnapshot( void );
+
+    BOOL TakeSnapshot( PTSTR pszSnapshotItems );
+
+    void DisposeSnapshot( void );
+
+    DWORD GetNumObjectTypes( void );    // # of objects the snapshot includes
+
+    BOOL GetSystemName( PTSTR pszSystemName, DWORD nSize );
+    
+    PVOID GetPostHeaderPointer( void ); // Pointer to data following header
+};
+
+#endif</PRE>
+<P></P>
+<P>PERFSNAP.CPP</P>
+<P><BR></P>
+<PRE> //============================================================================
+// File: PERFSNAP.CPP
+// Author: Matt Pietrek
+// From: Microsoft Systems Journal, "Under the Hood", March 1996
+//============================================================================
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include &lt;windows.h&gt;
+#include &lt;winperf.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;tchar.h&gt;
+#pragma hdrstop
+#include "ctitledb.h"
+#include "perfsnap.h"
+#include "makeptr.h"
+
+CPerfSnapshot::CPerfSnapshot(
+    CPerfTitleDatabase * pCounterTitles )
+{
+    m_pPerfDataHeader = 0;
+    m_pCounterTitles = pCounterTitles;
+}
+
+CPerfSnapshot::~CPerfSnapshot( void )
+{
+    DisposeSnapshot();
+}
+
+BOOL
+CPerfSnapshot::TakeSnapshot( PTSTR pszSnapshotItems )
+{
+    DisposeSnapshot();  // Clear out any current snapshot
+
+    // Convert the input string (e.g., "Process") into the form required
+    // by the HKEY_PERFORMANCE_DATA key (e.g., "232")
+
+    TCHAR szConvertedItemNames[ 256 ];
+    if ( !ConvertSnapshotItemName( pszSnapshotItems, szConvertedItemNames,
+                                   sizeof(szConvertedItemNames) ) )
+        return FALSE;
+
+    DWORD cbPerfInfo = 0, cbAllocSize = 0;
+    LONG retValue;
+
+    m_pPerfDataHeader = 0;
+        
+    while ( 1 ) // Loop until we get the data, or we fail unexpectedly
+    {
+        retValue = RegQueryValueEx( HKEY_PERFORMANCE_DATA,
+                                    szConvertedItemNames, 0, 0,
+                                    (PBYTE)m_pPerfDataHeader, &amp;cbPerfInfo );
+
+        if ( retValue == ERROR_SUCCESS )    // We apparently got the snapshot
+        {
+            // Verify that the signature is a unicode "PERF"
+            if ( memcmp( m_pPerfDataHeader-&gt;Signature, L"PERF", 8 ) )
+                break;
+
+            return TRUE;
+        }
+        else if ( retValue != ERROR_MORE_DATA ) // Anything other failure
+            break;                              // code means something
+                                                // bad happened, so bail out.
+
+        // If we get here, our buffer wasn't big enough.  Delete it and
+        // try again with a bigger buffer.
+        delete []m_pPerfDataHeader;
+        
+        // The new buffer size will be 4096 bytes bigger than the larger
+        // of: 1) The previous allocation size, or 2) The size that the
+        // RegQueryValueEx call said was necessary.
+        if ( cbPerfInfo &gt; cbAllocSize )
+            cbAllocSize = cbPerfInfo + 4096;
+        else
+            cbAllocSize += 4096;
+
+        // Allocate a new, larger buffer in preparation to try again.
+        m_pPerfDataHeader = (PPERF_DATA_BLOCK) new BYTE[ cbAllocSize ];
+        if ( !m_pPerfDataHeader )
+            break;
+
+        cbPerfInfo = cbAllocSize;
+    }
+
+    // If we get here, the RegQueryValueEx failed unexpectedly.
+    delete []m_pPerfDataHeader;
+    m_pPerfDataHeader = 0;
+
+    return FALSE;
+}
+
+void
+CPerfSnapshot::DisposeSnapshot( void )
+{
+    delete m_pPerfDataHeader;
+    m_pPerfDataHeader = 0;
+}
+
+DWORD
+CPerfSnapshot::GetNumObjectTypes( void )
+{
+    return m_pPerfDataHeader ? m_pPerfDataHeader-&gt;NumObjectTypes: 0;
+}
+
+BOOL
+CPerfSnapshot::GetSystemName( PTSTR pszSystemName, DWORD nSize )
+{
+    if ( !m_pPerfDataHeader )   // If no snapshot data, bail out.
+        return FALSE;
+
+    // Make sure the input buffer size is big enough
+    if ( nSize &lt; m_pPerfDataHeader-&gt;SystemNameLength )
+        return FALSE;
+
+    // Make a unicode string point to the system name string
+    // that's stored in the PERF_DATA_BLOCK
+    LPWSTR lpwszName = MakePtr( LPWSTR, m_pPerfDataHeader,
+                                m_pPerfDataHeader-&gt;SystemNameOffset );
+
+    #ifdef UNICODE  // Copy the PERF_DATA_BLOCK string to the input buffer
+    lstrcpy( pszSystemName, lpwszName );
+    #else
+    wcstombs( pszSystemName, lpwszName, nSize );
+    #endif
+        
+    return TRUE;
+}
+
+PVOID
+CPerfSnapshot::GetPostHeaderPointer( void )
+{
+    // Returns a header to the first byte following the PERF_DATA_BLOCK
+    // (including the variable length system name string at the end)
+    return m_pPerfDataHeader ?
+            MakePtr(PVOID, m_pPerfDataHeader,m_pPerfDataHeader-&gt;HeaderLength)
+            : 0;
+}
+
+BOOL
+CPerfSnapshot::ConvertSnapshotItemName( PTSTR pszIn,
+                                        PTSTR pszOut, DWORD nSize )
+{
+    if ( IsBadStringPtr( pszIn, 0xFFFFFFFF ) )
+        return FALSE;
+
+    PTSTR pszCopy = _tcsdup( pszIn );   // Need a copy because _tcstok will
+                                        // modify the string it processes
+    PTSTR pszCopy2 = pszCopy, pszToken;
+    PTSTR pszOut2 = pszOut;
+
+    // For each token (' ' delimited) from the input string, see if it
+    // corresponds to a counter title.  If so, emit the title index as
+    // in ASCII form to the output string.  If the input token isn't a
+    // counter title, pass it through unmodified to the output string.
+    // This allows things like "Global" and "Costly" to go through unscathed.
+
+    while ( pszToken = _tcstok(pszCopy2, TEXT(" ")) )   // _tcstok == strtok
+    {
+        DWORD objectID = m_pCounterTitles-&gt;GetIndexFromTitleString(pszToken);
+
+        // Needs to check output string len!
+        if ( objectID )
+            pszOut2 += wsprintf( pszOut2, TEXT("%u "), objectID );
+        else
+            pszOut2 += wsprintf( pszOut2, TEXT("%s "), pszToken );
+        
+        pszCopy2 = 0;   // Set to 0 for 2nd and later passes through the loop
+    }
+    
+    free( pszCopy );
+    return TRUE;
+}</PRE>
+<P></P>
+<P>MAKETPR.H</P>
+<P><BR></P>
+<PRE> // MakePtr is a macro that allows you to easily add two values (including
+// pointers) together without dealing with C's pointer arithmetic.  It
+// essentially treats the last two parameters as DWORDs.  The first
+// parameter is used to typecast the result to the appropriate pointer type.
+#define MakePtr(cast, ptr, addValue) (cast)( (DWORD)(ptr) + (DWORD)(addValue))</PRE>
+<P></P>
+<P>The most important member function for the CPerfSnapshot class is TakeSnapshot. This function takes one parameter, a string indicating what sort of data you'd like in the snapshot. To make the class easier to use, the function does any necessary conversions on the string prior to passing it as the value parameter to RegQueryValueEx. For instance, instead of passing "230," you can pass "Process." The private member function ConvertSnapshotItemName handles the messy work of looking up the counter titles and creating the final string.</P>
+<P>After TakeSnapshot has a string that's suitable to pass to RegQueryValueEx, the code enters into a while loop. The first time through the loop, the input buffer size is 0, so RegQueryValueEx fails with a code of ERROR_MORE_DATA. However, in doing so, the function fills in the cbPerfInfo variable with the required buffer size for the snapshot.  My code then adds 4KB to this size, allocates a memory block of that size, and then loops back to the RegQueryValueEx call.</P>
+<P>The second time through the loop, the buffer should be big enough, and RegQueryValueEx should return ERROR_SUCCESS. If this happens, the TakeSnapshot code checks for the "PERF" signature that's at the start of a valid PERF_DATA_BLOCK structure, and returns TRUE if everything's OK. If the second call to RegQueryValueEx fails, the code bumps up the buffer size by at least another 4KB and loops again. The loop continues in the same way until RegQueryValueEx returns either a success code or some other error code besides ERROR_MORE_DATA.</P>
+<P>The GetNumObjectTypes and GetSystemName member functions of the CPerfSnapshot class are relatively self-explanatory. They both retrieve the desired data out of the PERF_DATA_BLOCK structure. One slight twist to the GetSystemName method is that it has code to convert the Unicode system name string to ANSI if you're compiling in ANSI mode. The last member function of the CPerfSnapshot class to describe is GetPostHeaderPointer. This function returns a pointer to the first byte of the snapshot buffer following the PERF_DATA_BLOCK structure. You'll see this function in action next month, when I get to the classes that demonstrate how to enumerate through the performance objects and their associated counters. </P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="221pt" VALIGN="TOP"><COL WIDTH="221pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD COLSPAN="2" VALIGN="TOP"><P> Have a question about programming in Windows? You can mail it directly to Under The Hood, Microsoft Systems Journal, 825 Eighth Avenue, 18th Floor, New York, New York 10019, or send it to MSJ <BR>(re: Under The Hood) via:</P></TD></TR><TR><TD VALIGN="TOP"><P> <BR>Internet:</P>
+<P><BR>Internet:</P></TD><TD VALIGN="TOP"><P>Matt Pietrek<BR>71774.362@compuserve.com</P>
+<P>Eric Maffei<BR>ericm@microsoft.com</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P><I>This article is reproduced from Microsoft Systems Journal. Copyright © 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</P>
+<P></P></font></body></HTML>

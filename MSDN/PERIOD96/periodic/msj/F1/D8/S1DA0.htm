@@ -1,0 +1,363 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Win32 Q &amp; A</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  Win32 Q &amp; A</H1><P>Jeffrey Richter</P>
+<P>Jeffrey Richter wrote <I>Advanced Windows</I> (Microsoft Press, 1995) and <I>Windows 95: A Developer's Guide</I> (M&amp;T Books, 1995). Jeff is a consultant and teaches Win32-based programming seminars. He can be reached at v-jeffrr@microsoft.com.</P>
+<P><font size="6" face="verdana,arial,helvetica">Q</font>In your March 1996 column, you wrote about the problems associated with using the TerminateThread function to kill a thread. You specifically mentioned the ill effects this could have during a call to malloc because of a critical section malloc uses to serialize access to the heap.</P>
+<P>I noticed that critical sections were not implemented properly in Windows¨ 95. Specifically, the abandonment of a critical section under Windows 95 does not cause all other threads contending for the object to block indefinitely. This behavior is not implied by the Win32¨ documentation, and Windows NT¨ certainly doesn't behave this way.</P>
+<P>This could have profound effects on the malloc case that you described. Imagine that a thread is killed when malloc has serialized access to the heap by grabbing the aforementioned critical section object. There is no telling what weird state the heap manager might be in. However, under Windows 95, future calls to malloc and other heap-manipulating functions will inherit the manager in this weird state and chaos may ensue.</P>
+<P>The worst part is that, unlike a mutex, the next receiver of the critical section has no way of testing the object for abandonment. I tried digging around in the _RTL_CRITI-CAL_SECTION structure at run time for some clues about this behavior. I thought about writing a thin wrapper for EnterCriticalSection that watches and validates the owner member of this structure before actually trying to grab the critical section object. The effect would be similar, I assumed, to the new TryEnterCriticalSection function to be introduced with the next version of Windows NT. Unfortunately, the structure seems to be used actively by the OS under Windows NT but not under Windows 95.</P>
+<P>Please let me know how Microsoft intends to deal with this problem in the future and how I might work around it until a fix is available. Critical sections are great for speed when there is no contention, but I'm not sure I feel safe using them under Windows 95.</P>
+<P>I'm using a mutex until I hear from you.</P>
+<P><I>Kevin Hazzard</I></P>
+<P>Via the Internet</P>
+<P></P>
+<P><font size="6" face="verdana,arial,helvetica">A</font>When I first received this mail, I just couldn't believe that the implementation of critical sections in Windows 95 had this bug. Then, after running into Kevin at the Microsoft Professional Developer's Conference, he convinced me to delve deeper into this situation and delivered the sample program shown in <B>Figure 1</B>. After compiling and testing Kevin's sample on both Windows 95 and Windows NT, I saw that the two operating systems did in fact behave differently.</P>
+<P><B> Figure 1  TOptEx.c</B></P>
+<P><BR></P>
+<PRE> /******************************************************************************
+Module name: TOptEx.c
+Written by:  Kevin Hazzard and Jeffrey Richter
+Purpose:     Demonstrates the critical section "feature" on 
+             Windows 95 and how to fix it using the OPTEX (optimized 
+             mutex) synchronization object
+******************************************************************************/
+
+
+#include &lt;windows.h&gt;
+#include &lt;stdio.h&gt;
+
+
+///////////////////////////////////////////////////////////////////////////////
+
+
+// JR: The lines below were added to test the OPTEX 
+#define _USE_OPTEX_INSTEAD_OF_CRITICAL_SECTIONS_
+#include "OptEx.h"
+// JR: The lines above were added to test the OPTEX 
+
+
+///////////////////////////////////////////////////////////////////////////////
+
+
+// The number of spawned threads
+#define THREAD_COUNT    3
+
+// The global critical section object
+CRITICAL_SECTION g_cs;
+
+// Prototype of thread function
+DWORD WINAPI ThreadFunc(LPVOID pvParam);
+
+
+///////////////////////////////////////////////////////////////////////////////
+
+
+void main (void) {
+   DWORD dwID, dw;
+   HANDLE hThreads[THREAD_COUNT];
+
+   // Initialize the critical section before any threads enter it
+   InitializeCriticalSection(&amp;g_cs);
+
+   // Create a pool of threads
+   for (dw = 0; dw &lt; THREAD_COUNT; dw++) {
+      hThreads[dw] = CreateThread(NULL, 0, ThreadFunc, 
+                                  (LPVOID) dw, 0, &amp;dwID);
+   }
+
+   // Wait for the spawned threads to terminate
+   WaitForMultipleObjects(THREAD_COUNT, hThreads, TRUE, INFINITE);
+
+   // Close the thread handles
+   for (dw = 0; dw &lt; THREAD_COUNT; dw++) CloseHandle(hThreads[dw]);
+
+   printf("All worker threads shut themselves down.\n");
+
+   // Delete the critical section after the threads have exited
+   DeleteCriticalSection(&amp;g_cs);
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+
+
+// The thread function
+DWORD WINAPI ThreadFunc (LPVOID pvParam) {
+   DWORD dwThreadNum = (DWORD) pvParam;
+   printf("Thread %u is waiting on the CritSec.\n", dwThreadNum);
+   EnterCriticalSection(&amp;g_cs);
+   printf("Thread %u entered the CritSec.\n", dwThreadNum);
+   Sleep(5000);
+   printf("Thread %u is abandoning the CritSec.\n", dwThreadNum);
+   return(0);
+}
+
+
+///////////////////////////////// End of File /////////////////////////////////
+</PRE>
+<P></P>
+<P>At that point, I was sure there was a bug in the implementation of critical sections in Windows 95 because I felt (like Kevin did) that an abandoned critical section should stay abandoned, preventing the potentially corrupted data (guarded by the critical section) from becoming even more corrupted. In fact, I asked the Microsoft¨ Windows 95 team about this bug. They told me that this "feature" was intended to be in the operating system. Specifically,  code in VWIN32 unblocks any thread waiting for a critical section owned by a terminating thread. The Windows 95 team considers this a feature because, "as with many design decisions in Windows 95, it was deemed more important for users to be able to save their work instead of having an application hang." Since it is a feature, the Windows 95 team has no plans to alter this behavior.</P>
+<P>In light of this news, a mutex does seem to be the best solution—your application's thread can get notifications of abandonment and react accordingly. However, mutexes are not as lightweight as critical sections, which brings us to a comparison of mutexes and critical sections.</P>
+<P>As you should know, critical sections and mutexes behave almost identically. However, mutexes have a few advantages over critical sections: mutexes can synchronize threads across process boundaries, you can wait on a mutex by specifying a timeout value, and mutexes notify a thread when they are abandoned. This is a nice list of mutex features that critical sections don't share. Why use a critical section instead of a mutex? There is only one answer: critical sections are faster. Mutex objects are kernel objects and as such the functions that manipulate them (WaitForSingleObject and ReleaseMutex) require the transition from user mode to kernel mode. This transition is on the order of 600 CPU instructions (on x86 processors).</P>
+<P>Critical sections are not kernel objects and the implementations of EnterCriticalSection and LeaveCriticalSection exist almost entirely in user mode so the CPU does not transition to kernel mode. Calling these functions executes approximately 9 CPU instructions (on x86 processors). For threads making repeated calls to malloc and free, the performance hit from using kernel objects (like mutexes) versus critical sections can be quite noticeable and is certainly not desirable.</P>
+<P>To be fair, critical sections do not execute entirely in user mode. As long as a thread does not attempt to acquire the critical section while another thread owns it, EnterCriticalSection and LeaveCriticalSection execute entirely in user mode as I mentioned. However, if a thread attempts to enter the critical section while it is owned by another thread, the critical section degrades to a kernel object and the thread executes 600 CPU instructions. However, in most applications it is rare that two (or more) threads contend for a critical section simultaneously, which still makes critical sections very useful.</P>
+<P>OptEx.h and OptEx.c  show my OPTEX (optimized mutex) API library (see <B>Figure 2</B>). This library shows how critical sections could be implemented in Win32. After understanding this code you should be able to see why critical sections are faster than mutexes. </P>
+<P><B> Figure 2  OPTEX</B></P>
+<P><BR></P>
+<PRE> </PRE>
+<P>OptEx.h</P>
+<P><BR></P>
+<PRE> /******************************************************************************
+Module name: OptEx.h
+Written by:  Jeffrey Richter
+Purpose:     Defines the OPTEX (optimized mutex) synchronization object
+******************************************************************************/
+
+
+// The opaque OPTEX data structure
+typedef struct {
+   LONG   lLockCount;
+   DWORD  dwThreadId;
+   LONG   lRecurseCount;
+   HANDLE hEvent;
+} OPTEX, *POPTEX;
+
+
+///////////////////////////////////////////////////////////////////////////////
+
+
+BOOL  OPTEX_Initialize (POPTEX poptex);
+VOID  OPTEX_Delete     (POPTEX poptex);
+DWORD OPTEX_Enter      (POPTEX poptex, DWORD dwTimeout);
+VOID  OPTEX_Leave      (POPTEX poptex);
+
+
+///////////////////////////////////////////////////////////////////////////////
+
+
+#ifdef _USE_OPTEX_INSTEAD_OF_CRITICAL_SECTIONS_
+
+#define CRITICAL_SECTION                      OPTEX
+#define InitializeCriticalSection(poptex)     ((VOID) OPTEX_Initialize(poptex))
+#define DeleteCriticalSection(poptex)         OPTEX_Delete(poptex)
+#define EnterCriticalSection(poptex)          ((VOID) OPTEX_Enter(poptex, <BR>                                                                  INFINITE))
+#define LeaveCriticalSection(poptex)          OPTEX_Leave(poptex)
+
+#endif   // _USE_OPTEX_INSTEAD_OF_CRITICAL_SECTIONS_
+
+
+///////////////////////////////// End of File /////////////////////////////////
+
+</PRE>
+<P>OptEx.c</P>
+<P><BR></P>
+<PRE> /******************************************************************************
+Module name: OptEx.c
+Written by:  Jeffrey Richter
+Purpose:     Implements the OPTEX (optimized mutex) synchronization object
+******************************************************************************/
+
+
+#include &lt;windows.h&gt;
+#include "OptEx.h"
+
+
+///////////////////////////////////////////////////////////////////////////////
+
+
+BOOL OPTEX_Initialize (POPTEX poptex) {
+
+   poptex-&gt;lLockCount = -1;   // No threads have enterred the OPTEX
+   poptex-&gt;dwThreadId = 0;    // The OPTEX is unowned
+   poptex-&gt;lRecurseCount = 0; // The OPTEX is unowned
+   poptex-&gt;hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+   return(poptex-&gt;hEvent != NULL);  // TRUE if the event is created
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+
+
+VOID OPTEX_Delete (POPTEX poptex) {
+
+   // No in-use check
+   CloseHandle(poptex-&gt;hEvent);  // Close the event
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+
+
+DWORD OPTEX_Enter (POPTEX poptex, DWORD dwTimeout) {
+
+   DWORD dwThreadId = GetCurrentThreadId();  // The calling thread's ID
+
+   // Assume that the thread waits successfully
+   DWORD dwRet = WAIT_OBJECT_0;  
+
+   if (InterlockedIncrement(&amp;poptex-&gt;lLockCount) == 0) {
+
+      // ---&gt; No thread owns the OPTEX
+      poptex-&gt;dwThreadId = dwThreadId; // We own it
+      poptex-&gt;lRecurseCount = 1;       // We own it once
+
+   } else {
+
+      // ---&gt; Some thread owns the OPTEX
+      if (poptex-&gt;dwThreadId == dwThreadId) {
+
+         // ---&gt; We already own the OPTEX
+         poptex-&gt;lRecurseCount++;     // We own it again
+
+      } else {
+
+         // ---&gt; Another thread owns the OPTEX
+         // Wait for the owning thread to release the OPTEX
+         dwRet = WaitForSingleObject(poptex-&gt;hEvent, dwTimeout);
+         if (dwRet != WAIT_TIMEOUT) {
+
+            // ---&gt; We got ownership of the OPTEX
+            poptex-&gt;dwThreadId = dwThreadId; // We own it now
+            poptex-&gt;lRecurseCount = 1;       // We own it once
+         }
+      }
+   }
+
+   // Return why we continue execution
+   return(dwRet);
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+
+
+VOID OPTEX_Leave (POPTEX poptex) {
+
+   if (--poptex-&gt;lRecurseCount &gt; 0) {
+
+      // We still own the OPTEX
+      InterlockedDecrement(&amp;poptex-&gt;lLockCount);
+
+   } else {
+
+      // We don't own the OPTEX
+      poptex-&gt;dwThreadId = 0;
+      if (InterlockedDecrement(&amp;poptex-&gt;lLockCount) &gt;= 0) {
+         // Other threads are waiting, wake one on them
+         SetEvent(poptex-&gt;hEvent);
+      }
+   }
+}
+
+
+///////////////////////////////// End of File /////////////////////////////////
+</PRE>
+<P></P>
+<P>The library consists of a single data structure called OPTEX and four functions, all prefixed with "OPTEX_". My library works exactly like the CRITICAL_SECTION data structure and the four functions that operate on it. In fact, if you want to use my library functions, you should be able to replace the critical section functions with calls to my functions by performing a global search and replace throughout your existing code.</P>
+<P>To use the library, you'll have to replace your CRITICAL_ SECTION data structure with the OPTEX structure.</P>
+<P> </P>
+<P><BR></P>
+<PRE> typedef struct {
+   LONG   lLockCount;    // # times OPTEX entered
+   DWORD  dwThreadId;    // unique ID of thread owning 
+                         // OPTEX
+   LONG   lRecurseCount; // # times OPTEX owned by 
+                         // thread
+   HANDLE hEvent;        // handle to event kernel 
+                         // object
+} OPTEX, *POPTEX;</PRE>
+<P> </P>
+<P>This structure contains four members that your application should consider to be opaque or "off-limits" just like the members inside the CRITICAL_SECTION data structure.</P>
+<P>After creating an OPTEX structure, you'll want to initialize it by calling</P>
+<P> </P>
+<P><BR></P>
+<PRE> BOOL OPTEX_Initialize (POPTEX poptex);</PRE>
+<P> </P>
+<P>This function works just the like the InitializeCriticalSection function in that it initializes the members of the OPTEX structure. However, OPTEX_Initialize returns a Boolean value, indicating failure if the event kernel object cannot be created. (By the way, the Win32 InitializeCriticalSection function can also fail, but since it is prototyped as returning VOID, an application cannot detect when the function fails.)</P>
+<P>When you know that no threads are entering or leaving the OPTEX, you should delete it by calling</P>
+<P> </P>
+<P><BR></P>
+<PRE> VOID OPTEX_Delete (POPTEX poptex);</PRE>
+<P> </P>
+<P>This function works just like its DeleteCriticalSection counterpart. Notice that the function does not check to see if the OPTEX is currently owned by a thread. It's up to you to call this function at the correct time.</P>
+<P>To enter an OPTEX, your code calls its equivalent of EnterCriticalSection:</P>
+<P> </P>
+<P><BR></P>
+<PRE> DWORD OPTEX_Enter (POPTEX poptex, DWORD dwTimeout);</PRE>
+<P> </P>
+<P>You should notice some big differences between Enter-CriticalSection and OPTEX_Enter. First, OPTEX_Enter has a second parameter, dwTimeout. This parameter gives you an advantage over using critical sections: the ability to time out if the OPTEX is owned by another thread. You can pass zero to indicate no timeout period, a time in milliseconds, or INFINITE for this parameter's value. The second difference is that OPTEX_Enter returns a DWORD indicating why the calling thread is allowed to continue execution. The possible return values are shown in <B>Figure 3</B>. Unfortunately it is not possible for a thread to know when an OPTEX is abandoned because the kernel-mode code must detect when a thread terminates and signal a kernel object. Since an OPTEX is not a kernel object, there is no way to detect abandonment and return WAIT_ABANDONED to a waiting thread.</P>
+<P><B> Figure 3  OPTEX_Enter Return Values</B></P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="140pt" VALIGN="TOP"><COL WIDTH="302pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P><B> Return Value</B></P></TD><TD VALIGN="TOP"><P><B>Description</B></P></TD></TR><TR><TD VALIGN="TOP"><P> WAIT_OBJECT_0</P></TD><TD VALIGN="TOP"><P>The thread successfully gained ownership of the OPTEX (or incremented its recur–sion count)</P></TD></TR><TR><TD VALIGN="TOP"><P> WAIT_TIMEOUT</P></TD><TD VALIGN="TOP"><P>The thread could not gain ownership of the OPTEX in the specified time</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P>Finally, to leave an OPTEX, you call</P>
+<P> </P>
+<P><BR></P>
+<PRE> VOID OPTEX_Leave (POPTEX poptex);</PRE>
+<P> </P>
+<P>Like LeaveCriticalSection, this function decrements the calling thread's ownership of the OPTEX, and if the thread doesn't own the OPTEX anymore, a thread that is waiting for the OPTEX can become its new owner. Like OPTEX_Delete, this function does not determine that the calling thread already owns the OPTEX before decrementing its ownership count.</P>
+<P>There is one additional feature that could be added to the OPTEX library, but I left it out of this first version: the ability for threads in different processes to synchronize each other on the OPTEX. It wouldn't be too difficult to add this feature. You'd have to separate the OPTEX into two parts: a shared part (which contains the thread ID and the two count members) and a private part (which contains a process-relative handle to the event kernel object and a pointer to the shared part). You would use a memory-mapped file for the shared part, so you'd also have to keep the file mapping's process-relative handle inside the private part. However, I thought that adding this support would add too much confusion to this example. If I get enough responses from people who really want to share an OPTEX across process boundaries, I will add this feature in a future column.</P>
+<P></P>
+<P><font size="6" face="verdana,arial,helvetica">Q</font>I noticed that some applications change the screen resolution under Windows 95. For example, the Hover game that ships with the Windows 95 CD-ROM has a full- screen mode that switches the display to 640 <FONT FACE="Symbol">´</FONT> 480. When you switch to another application, the screen resolution switches back to the user's default resolution automatically. How can I add this support to my own applications?</P>
+<P><I>Vivian Yuan</I></P>
+<P>Via The Internet</P>
+<P></P>
+<P><font size="6" face="verdana,arial,helvetica">A</font>The Win32 API has some new functions that allow you to work with screen resolutions. The first function is</P>
+<P> </P>
+<P><BR></P>
+<PRE> BOOL EnumDisplaySettings(LPCTSTR lpszDeviceName, 
+                         DWORD iModeNum, 
+                         LPDEVMODE lpDevMode);</PRE>
+<P> </P>
+<P>This function enumerates all of the possible display settings for a given display. The first parameter, lpszDeviceName, indicates the display for which you want to enumerate settings. For now, you must pass NULL, but Microsoft is hard at work adding multiple-display support to Windows.  In the future you'll be able to pass a string like "\\.\DisplayX", where X can have the values 1, 2, or 3.</P>
+<P>Each display has a collection of settings that it supports. The iModeNum parameter indicates the collection entry that you want to obtain (the first setting is index 0). EnumDisplaySettings returns TRUE unless you pass an index in iModeNum that is outside the collection, in which case it returns FALSE. The display's setting information is returned in the DEVMODE structure pointed to by the lpDevMode parameter. DEVMODE has many members, but only 5 members have anything to do with display settings (see <B>Figure 4</B>).</P>
+<P><B> Figure 4  DEVMODE's Relevant Members for Screen Settings</B></P>
+<P> </P>
+
+<TABLE COLS="3" BORDER="0"><COLGROUP><COL WIDTH="149pt" VALIGN="TOP"><COL WIDTH="175pt" VALIGN="TOP"><COL WIDTH="148pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P><B> DEVMODE Member</B></P></TD><TD VALIGN="TOP"><P><B>Description</B></P></TD><TD VALIGN="TOP"><P><B>Example</B></P></TD></TR><TR><TD VALIGN="TOP"><P> dmBitsPerPel</P></TD><TD VALIGN="TOP"><P>Indicates the display's color resolution</P></TD><TD VALIGN="TOP"><P>4 bits for 16 colors</P>
+<P>8 bits for 256 colors<BR>16 bits for 65536 colors</P></TD></TR><TR><TD VALIGN="TOP"><P> dmPelsWidth</P></TD><TD VALIGN="TOP"><P>Indicates the width of the display</P></TD><TD VALIGN="TOP"><P>640 pixels</P></TD></TR><TR><TD VALIGN="TOP"><P> dmPelsHeight</P></TD><TD VALIGN="TOP"><P>Indicates the height of the display</P></TD><TD VALIGN="TOP"><P>480 pixels</P></TD></TR><TR><TD VALIGN="TOP"><P> dmDisplayFlags</P></TD><TD VALIGN="TOP"><P>Indicates the display's mode</P></TD><TD VALIGN="TOP"><P>DM_GRAYSCALE indicates that the display does not support color<BR>DM_INTERLACED indicates that the display mode is interlaced</P></TD></TR><TR><TD VALIGN="TOP"><P> dmDisplayFrequency</P></TD><TD VALIGN="TOP"><P>Indicates the refresh frequency of the display (Windows 95 always returns 0)</P></TD><TD VALIGN="TOP"><P>60 Hz</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P>OK, so that's how you get the settings supported by your display. To change a display's settings, you'll need to create a DEVMODE structure, initialize the members that pertain to the display, and call ChangeDisplaySettings.</P>
+<P> </P>
+<P><BR></P>
+<PRE> LONG ChangeDisplaySettings(LPDEVMODE lpDevMode, 
+                           DWORD dwflags);</PRE>
+<P> </P>
+<P>The first parameter is the address of the initialized DEVMODE structure. The second parameter is one of the flags shown in <B>Figure 5</B>. Possible return values for ChangeDisplaySettings are shown in <B>Figure 6</B>. If DISP_CHANGE_SUCCESSFUL returns, a WM_DISPLAYCHANGE message is broadcast to all the top-level windows indicating the new bits-per-pixel, width, and height of the display. Finally, to get the current display settings, you'll use a Win32 function that's been around for years and years: GetDeviceCaps. </P>
+<P><B> Figure 5  Change Display Settings Flags</B></P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="162pt" VALIGN="TOP"><COL WIDTH="265pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P><B> Flag</B></P></TD><TD VALIGN="TOP"><P><B>Description</B></P></TD></TR><TR><TD VALIGN="TOP"><P> 0</P></TD><TD VALIGN="TOP"><P>Change the display settings now</P></TD></TR><TR><TD VALIGN="TOP"><P> CDS_UPDATEREGISTRY</P></TD><TD VALIGN="TOP"><P>Change the display settings now and make these settings the default by saving them in the registry under HKEY_CURRENT_USER</P></TD></TR><TR><TD VALIGN="TOP"><P> CDS_TEST</P></TD><TD VALIGN="TOP"><P>Just test to see if the requested settings are valid</P></TD></TR><TR><TD VALIGN="TOP"><P> CDS_FULLSCREEN</P></TD><TD VALIGN="TOP"><P>This undocumented flag tells the system that the calling application wants to enter/leave full screen mode—this prevents the system from repositioning other windows to keep them visible</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P><B> Figure 6  Change Display Settings Return Values</B></P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="158pt" VALIGN="TOP"><COL WIDTH="243pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P><B> Return value</B></P></TD><TD VALIGN="TOP"><P><B>Description</B></P></TD></TR><TR><TD VALIGN="TOP"><P> DISP_CHANGE_SUCCESSFUL</P></TD><TD VALIGN="TOP"><P>The display's settings have changed immediately—Windows NT 4.0 cannot change settings dynamically, and always returns DISP_CHAGE_RESTART instead</P></TD></TR><TR><TD VALIGN="TOP"><P> DISP_CHANGE_RESTART</P></TD><TD VALIGN="TOP"><P>The display's settings have been changed but require the computer to be rebooted before they can take affect</P></TD></TR><TR><TD VALIGN="TOP"><P> DISP_CHANGE_BADFLAGS</P></TD><TD VALIGN="TOP"><P>An invalid flag was passed</P></TD></TR><TR><TD VALIGN="TOP"><P> DISP_CHANGE_FAILED</P></TD><TD VALIGN="TOP"><P>The display driver failed to change the settings</P></TD></TR><TR><TD VALIGN="TOP"><P> DISP_CHANGE_BADMODE</P></TD><TD VALIGN="TOP"><P>The requested settings are not supported by the display</P></TD></TR><TR><TD VALIGN="TOP"><P> DISP_CHANGE_NOTUPDATED</P></TD><TD VALIGN="TOP"><P>The settings are not changed because they couldn't also be saved in the registry—this only happens on Windows NT if access to the registry key is denied by the administrator</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P>The following example shows how to get the current display settings:</P>
+<P> </P>
+<P><BR></P>
+<PRE> DEVMODE dvmdOrig;
+HDC hdc = GetDC(NULL);  // Screen DC used to get 
+                        // current display
+                        // settings
+dvmdOrig.dmPelsWidth        = GetDeviceCaps(hdc,
+                                            HORZRES);
+dvmdOrig.dmPelsHeight       = GetDeviceCaps(hdc, 
+                                            VERTRES);
+dvmdOrig.dmBitsPerPel       = GetDeviceCaps(hdc,
+                                            BITSPIXEL);
+dvmdOrig.dmDisplayFrequency = GetDeviceCaps(hdc, 
+                                            VREFRESH);
+ReleaseDC(NULL, hdc);</PRE>
+<P> </P>
+<P>To demonstrate the ChangeDisplaySettings function, I wrote the ChgResAndRun application (see <B>Figure 7</B>). This is a small, useful utility that changes the display's settings and spawns another application. It waits for the child process to terminate, then changes the resolution back to its original settings. I use this application myself all the time when playing games. For example, I usually run my machine in 1024<FONT FACE="Symbol">´</FONT>768 resolution, but when I want to play "You Don't Know Jack" I switch my display to 640<FONT FACE="Symbol">´</FONT>480 mode. When I'm finished, I want the display settings to reset to 1024<FONT FACE="Symbol">´</FONT>768. </P>
+<P>To switch resolution and run my game, I created a shortcut with the following command line:</P>
+<P> </P>
+<P><BR></P>
+<PRE> "C:\Program Files\ChgResAndRun.exe" 640 480 0 0<BR>                                     =C:\YDKJ\YDKJ32.EXE</PRE>
+<P> </P>
+<P>ChgResAndRun requires five command line arguments. The first two ("640" and "480") indicate the requested width and height of the display. The third argument indicates the bits-per-pixel, and the fourth argument indicates the refresh-frequency rate. If you pass a zero for any of the arguments, that particular setting is not changed. In the command line shown above, I pass zero for both the bits-per-pixel and the refresh frequency so these settings will not be affected.</P>
+<P>After the four display setting arguments, you must have an equal sign followed by the command line that you want to execute. In my example, YDKJ32.EXE is invoked after the display settings are changed. While I'm playing, ChgResAndRun lingers in the background. When I quit the game, ChgResAndRun changes the display settings back to the original values and terminates.</P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="221pt" VALIGN="TOP"><COL WIDTH="221pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD COLSPAN="2" VALIGN="TOP"><P> Have a question about programming in Win32? You can mail it directly to Win32 Q&amp;A, Microsoft Systems Journal, 825 Eighth Avenue, 18th Floor, New York, New York 10019, or send it to MSJ (re: Win32 Q&amp;A) via:</P></TD></TR><TR><TD VALIGN="TOP"><P> <BR>Internet:</P></TD><TD VALIGN="TOP"><P>Jeffrey Richter<BR>v-jeffrr@microsoft.com</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P><I>This article is reproduced from Microsoft Systems Journal. Copyright </I>©<I> 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P><I>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</I></P>
+<P></P></font></body></HTML>

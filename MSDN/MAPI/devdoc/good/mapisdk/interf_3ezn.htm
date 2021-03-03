@@ -1,0 +1,149 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Implementing IUnknown in C</title>
+<link disabled rel=stylesheet href=../../backsdk3.css>
+<style type="text/css">
+@import url(../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h3><a name="_mapi1book_implementing_iunknown_in_c"></a>Implementing IUnknown in C</h3>
+<p>
+Implementations of <b>QueryInterface</b> in C are very similar to C++ implementations. There are two basic steps to the implementation: 
+<ol>
+<li>
+Validating parameters.</li>
+<li>
+Checking the identifier of the requested interface against the list of interfaces supported by the object and returning either the E_NO_INTERFACE value or a valid interface pointer. If an interface pointer is returned, the implementation should also call the <b>AddRef</b> method to increment the reference count.</li>
+</ol>
+<p>
+The main difference between an implementation of <b>QueryInterface</b> in C and C++ is the additional first parameter in the C version. Because the object pointer is added to the parameter list, a C implementation of <b>QueryInterface</b> must have more parameter validation than a C++ implementation. The logic for checking the interface identifier, incrementing the reference count, and returning an object pointer should be identical in both languages.</p>
+<p>
+The following code sample shows how to implement <b>QueryInterface</b> in C for a status object:</p>
+<pre><code>STDMETHODIMP STATUS_QueryInterface(LPMYSTATUSOBJ lpMyObj, REFIID lpiid, 
+                                   LPVOID FAR * lppvObj)
+{
+
+    HRESULT hr = hrSuccess;
+
+    // Validate object pointer
+    if (IsBadReadPtr(lpMyObj, sizeof(MYSTATUSOBJECT))
+        || lpMyObj-&gt;lpVtbl != &amp;vtblSTATUS )
+    {
+        hr = ResultFromScode(E_INVALIDARG);
+        return hr;
+
+    }
+
+    // Validate other parameters
+    if (IsBadReadPtr(lpiid, (UINT) sizeof(IID))
+        || IsBadWritePtr(lppvObj, sizeof(LPVOID)))
+    {
+        hr = ResultFromScode(E_INVALIDARG);
+        return hr;
+    }
+
+    // Set output pointer to NULL
+    *lppvObj = NULL;    
+
+    // Check interface identifier
+    if (memcmp(lpiid, &amp;IID_IUnknown, sizeof(IID)) &amp;&amp;
+        memcmp(lpiid, &amp;IID_IMAPIProp, sizeof(IID)) &amp;&amp;
+        memcmp(lpiid, &amp;IID_IMAPIStatus, sizeof(IID)))
+    {
+        hr = ResultFromScode(E_NOINTERFACE);
+        return hr;
+    }
+
+    // Interface is supported. Increment reference count and return
+    lpMyObj-&gt;lpVtbl-&gt;AddRef(lpMyObj);
+    *lppvObj = lpMyObj;
+    return hr;
+}
+ </code></pre>
+<p>
+Whereas the implementation of <b>AddRef</b> in C is similar to a C++ implementation, a C implementation of <b>Release</b> can get more elaborate than a C++ version. This is because much of the functionality involved with freeing an object can be incorporated into the C++ constructor and destructor and C has no such mechanism. All of this functionality must be included in the <b>Release</b> method. Also, because of the additional parameter and its explicit vtable, more validation is required.</p>
+<p>
+The following <b>AddRef</b> method call illustrates a typical C implementation for a status object:</p>
+<pre><code>STDMETHODIMP_(ULONG) STATUS_AddRef(LPMYSTATUSOBJ lpMyObj)
+{
+    LONG cRef;
+
+    // Check to see if it has a lpVtbl object member
+    if (IsBadReadPtr(lpMyObj, 
+            offsetof(MYSTATUSOBJECT, lpVtbl)+sizeof(STATUS_Vtbl *)))
+    {
+        return 1;
+    }
+
+    // Check size of vtable
+    if (IsBadReadPtr(lpMyObj-&gt;lpVtbl,
+         offsetof(STATUS_Vtbl, AddRef)+sizeof(STATUS_AddRef *)))
+    {
+        return 1;
+    }
+
+    // Check method
+    if (STATUS_AddRef != lpMyObj-&gt;lpVtbl-&gt;AddRef)
+    {
+        return 1;
+    }
+
+    InterlockedIncrement(lpMyObj-&gt;cRef);
+    cRef = ++lpMyObj-&gt;cRef;
+    InterlockedDecrement (lpMyObj-&gt;cRef);
+
+    return cRef;
+}
+ </code></pre>
+<p>
+A typical implementation of <b>Release</b> for a C status object follows. If after decrementing the reference count, it becomes zero, a C status object implementation should perform the following tasks:
+<ul>
+<li>
+Release any held pointers to objects. </li>
+<li>
+Set the vtable to NULL, facilitating debugging in the case where an object's user has called <b>Release</b> yet continued to try to use the object. </li>
+<li>
+Call <a href="function_85yq.htm"><b>MAPIFreeBuffer</b></a> to free the object.</li>
+</ul>
+<pre><code>STDMETHODIMP_(ULONG) STATUS_Release(LPMYSTATUSOBJ lpMyObj)
+{
+    LONG cRef;
+
+    // Check size of vtable
+    if (IsBadReadPtr(lpMyObj, sizeof(MYSTATUSOBJ)))
+    {
+        return 1;
+    }
+
+    // Check if correct vtable
+    if (lpMyObj-&gt;lpVtbl != &amp;vtblSTATUS)
+    {
+        return 1;
+    }
+
+    InterlockedIncrement(lpMyObj-&gt;cRef);
+    cRef = --lpMyObj-&gt;cRef;
+    InterlockedIncrement (lpMyObj-&gt;cRef);
+
+    if (cRef == 0)
+    {
+        lpMyObj-&gt;lpVtbl-&gt;Release(lpMyObj);
+        DeleteCriticalSection(&amp;lpMyObj-&gt;cs);
+
+        // release IMAPIProp pointer
+        lpMyObj-&gt;lpProp-&gt;Release(lpMyObj-&gt;lpProp);
+        lpMyObj-&gt;lpVtbl = NULL;    
+        lpMyObj-&gt;lpFreeBuff(lpMyObj);
+        return 0;
+    }
+
+    return cRef;
+
+}
+ </code></pre>
+<p>&nbsp;</p></body>
+</HTML>

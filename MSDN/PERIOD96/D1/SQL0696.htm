@@ -1,0 +1,452 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<html>
+
+<head>
+<meta http-equiv="Content-Type"
+content="text/html; charset=iso-8859-1">
+<meta name="GENERATOR" content="Microsoft FrontPage 2.0">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Practical Disaster Recovery, Part 2 (June)</title>
+
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+
+<BODY bgcolor="#FFFFFF">
+<font face="verdana,arial,helvetica" size="2">
+
+<H1>Practical Disaster Recovery, Part 2</h1>
+
+<P>Andrew Zanevsky</p>
+
+<P><i>Last month Andrew shared his experiences
+preparing for disaster recovery, human aspects of SQL Server
+crisis situations, and problems dealing with vendors' technical
+support. In this sequel, he compares different backup and
+recovery methods and offers his view on disaster situation
+compromises. Included on this month's Developer's Disk is
+Andrew's stored procedure sp_bcp, which you can use to generate
+command files to export and import data with bcp.</i></p>
+
+<P>ONCE you implement a good database backup and
+support routine, complete with automated periodic SQL Server
+health checkups, it's natural to want to test your handiwork.
+What you need is a corrupt database to make sure that the
+scheduled DBCC routine finds and reports corruption as you
+expected. But it seems that databases corrupt when they feel like
+it and not when you order them to. Here's how you can
+&quot;fake&quot; a database corruption:</p>
+
+<ul>
+    <li>First, create a special test database that you won't miss
+        if you can't recover it. <i>Never </i>attempt what
+        follows in a production or even development environment.
+        If you aren't sure how to perform <i>any</i> step of this
+        procedure, don't even think about trying it. Corrupting a
+        database manually requires a certain level of DBA
+        expertise.</li>
+    <li>You will need sa authority to perform the following
+        necessary changes. </li>
+    <li>Create one or more dummy tables that you'll deliberately
+        corrupt. Populate them with dummy data.</li>
+    <li>Set the server configuration option <i>allow updates</i>
+        to on.</li>
+    <li>Delete all rows from sysobjects, syscolumns, and
+        sysindexes in your test database where id equals the
+        object id of one of the dummy tables. This will result in
+        message 2540 being reported by DBCC NEWALLOC.</li>
+    <li>Try updating columns <i>first</i> and <i>root </i>of
+        table sysindexes for one of the dummy tables where indid
+        = 0 or 1 and id = object id of the dummy table. Depending
+        on what you set, you may get different error messages
+        when running DBCC NEWALLOC. DBCC CHECKDB will most likely
+        report error 605.</li>
+    <li>When you're finished, don't forget to set <i>allow
+        updates</i> to off.</li>
+</ul>
+
+<P>I had reservations about including this information
+since it can obviously be abused. But I do it in the spirit of
+providing legitimate DBAs the means to simulate a true disaster
+and make it relatively easy for you to practice error detection
+and recovery. Nevertheless, anyone with sa authority could use
+the procedures to corrupt <i>any</i> database, not just a test
+database. Handle with care. </p>
+
+<H2>Backup and recovery techniques</h2>
+
+<P>There are several different techniques you can use
+to back up and recover your SQL Server databases. </p>
+
+<H3>Database dumps</h3>
+
+<P>Here are some observations on the ever-expanding
+variety of media you can use to perform database dumps:</p>
+
+<ul>
+    <li>Disk (preferably with a separate disk controller) is the
+        fastest, but requires that you reserve a considerable
+        amount of space for the dump files.</li>
+    <li>Using a network disk to store dumps offers a better
+        flexibility in distributing your data, but at the expense
+        of network performance. Also, remember that to dump to a
+        network device, SQL Server service must be running under
+        an account that has the authority to write to the device.</li>
+    <li>Tape is an inexpensive alternative to disk backup, but
+        it's also slower and may require either an operator to
+        swap tapes or investment in a tape juke box.</li>
+    <li>CD-R (recordable) technology will replace tapes in the
+        near future, offering a compromise between tape and disk
+        when it comes to speed of file retrieval. Instant access
+        to the necessary file gives it a fair advantage over
+        tapes, though performance isn't as good as the hard disk.</li>
+</ul>
+
+<P>SQL Server's DUMP DATABASE is smart enough to allow
+transactions to run in the database while it's being backed up.
+If a transaction attempts to modify certain pages that haven't
+been backed up, SQL Server will back up these pages first before
+allowing the transaction to continue. Dump files include only <i>used</i>
+database pages, so don't be surprised if you get a dump
+significantly smaller than the declared database size.</p>
+
+<P>Loading a database from a dump generally takes
+longer than it takes to make a backup since SQL Server still has
+to format an unused portion of a loaded database. </p>
+
+<P>Sometimes you can fix corruption by dumping and
+reloading a database. This is the case if corruption existed on
+unused pages because they aren't usually backed up. However, if
+used pages of the database had been corrupted before the dump was
+made, then reloading restores corruption as well. By the way, a
+page erroneously marked as used will be backed up even when no
+object claims it. That explains why some error messages don't go
+away when you dump and reload a database.</p>
+
+<H3>Copy data files</h3>
+
+<P>Simple file copying is an unconventional technique
+that can be very effective in certain scenarios. Data files that
+correspond to SQL Server devices may be copied as any other
+operating system file. The only problem is that SQL Server
+service must be stopped during the operation. Imagine that you
+have two databases of the same size with identical device and
+segment structures on different servers, and you want to copy the
+contents of one into another. The source server may be stopped
+for an extended period of time, but you want to minimize downtime
+on the target one. Provided that you have enough room on disks,
+you can proceed as follows:</p>
+
+<ul>
+    <li>Shut down the source server.</li>
+    <li>Copy data files that contain the target database to the
+        same directories on the target server disks, but with
+        different names. </li>
+    <li>Shut down the target server.</li>
+    <li>Rename or delete the old data files.</li>
+    <li>Give the new data files that came from the source server
+        their original names.</li>
+    <li>Restart the target server.</li>
+    <li>You may need to restore user accounts and permissions if
+        they don't match on two servers. (In this situation,
+        prepare a script in advance.)</li>
+</ul>
+
+<P>In this scenario, the target server is taken down
+only for several minutes, and it comes back with a new
+database&#151;no matter how large it may be. I want to label this
+technique as &quot;Handle with care&quot; since it's crucially
+important that you copy <i>all</i> data files that contain the
+database, including transaction log devices. SQL Server devices
+(files) must not be shared with other databases that aren't
+copied. If you miss a device, you may end up rebuilding the
+database from scratch. Make sure that you understand mapping of
+databases&#151;to devices&#151;to files and the structure and
+contents of such system tables as sysdevices, syssegments,
+sysusages, and sysdatabases. It may be wise <i>not</i> to delete
+data files that you are replacing on the target server, but
+rename them and keep them handy until you verify that the
+operation worked as expected. It provides an option of renaming
+again.</p>
+
+<P>Naturally, using the file level backup approach, any
+database corruption that existed in the source database will be
+replicated regardless of whether it was on a used or unused page.</p>
+
+<P>This technique can also be used when you have a
+corruption and want to restore the database from a backup but
+want to keep the corrupt database so you can come back later and
+try to recover some lost data. You may then save the database
+data file rather than attempt dumping it. A dump may fail on a
+corrupt database.</p>
+
+<P>This method may also save you many hours of down
+time in non-disaster situations. One such task is periodically
+reloading data into a large decision-support database through
+bcp. Instead of shutting down operations on the database for the
+duration of the load, consider creating another database of the
+same size with data files sitting in the same directories as the
+primary database files. Users can continue working with the
+primary database while you're loading flat files into the
+secondary twin one. Once bcp is done, you shut down the server,
+rename data files, and restart the service. In a matter of
+seconds the freshly loaded database becomes the primary one and
+the old one can be used for the next data load.</p>
+
+<P>Data file backup generally proceeds faster than a
+SQL Server dump unless there's a lot of unused space in the
+database. In that case, a dump is faster since it only backs up
+used pages. Restoring a data file is always faster than loading
+from a dump.</p>
+
+<P><b>Warning</b></p>
+
+<p>Never restart SQL Server service while a data file is being
+copied. The result is that all databases with segments on the
+source device will be marked as &quot;suspect.&quot; To fix the
+problem, you'll need to reset the <i>status </i>column in
+sysdatabases and restart SQL Server.</p>
+
+<H3>bcp in and bcp out</h3>
+
+<P>I don't recommend the bcp in and bcp out approach
+unless there's no other way to rescue data, and you can't afford
+to lose it. You probably already know that bcp is inherently slow
+compared to other backup and recovery techniques. Furthermore,
+bcp requires that you reconstruct all database DDL scripts and
+user accounts and permissions information. (SQL Object Manager in
+SQL Server 4.2x and SQL Enterprise Manager in 6.0 are handy in
+reverse-engineering DDL.) Nevertheless, at some point all data
+leaves the database and sits in data files that aren't protected
+by RDBMS. I'm never 100 percent sure that SQL Server will load
+this data back once the database is rebuilt. Furthermore, several
+problems may occur during the bcp<i> in </i>step. </p>
+
+<P>For example, the transaction log may overflow. To
+resolve this turn the &quot;select into/bulkcopy&quot; option on
+and not create indexes on tables until you load them. It may help
+to activate truncate transaction log on checkpoint. If the
+transaction log still overflows, then you need to increase its
+size. Even though bulkcopy operations <i>per se </i>aren't
+logged, new extents are allocated for a table as it is populated,
+and this process requires some logging.</p>
+
+<P>Another potential &quot;gotcha&quot; is that your
+database may run out of space when creating clustered indexes.
+Creating a clustered index requires that free space in the
+database can't be less than 1.2 times the size of the table.
+(Hint: create a clustered index on the largest table first, then
+on other tables, then create non-clustered indexes.) You may
+still need to increase the size of your database. Creating all
+indexes on all tables may take so much time that you'll want to
+consider other means of recovery.</p>
+
+<P>It's imperative that you practice a complete bcp out
+and subsequent bcp in operation on a real production size
+database at least once to estimate the time required to perform
+this operation and to find bottlenecks up front. </p>
+
+<P>Enclosed on this month's <i>SQL Server Professional </i>Developer's
+Disk you'll find my stored procedure sp_bcp. It automates the
+generation of command files for data export and import with bcp.
+sp_bcp provides flexible options of flat filename formatting.
+Filenames may be composed of database, owner, table name, date,
+and time in any combination. Stored procedure is also capable of
+producing eight-character filenames unique for each table within
+a given SQL Server. This may be particularly useful on operating
+systems limited to the 8.3 file naming convention.</p>
+
+<H3>Use Transfer Manager to copy the database</h3>
+
+<P>Using Transfer Manager to copy the database is just
+an automated variation of the previous technique, and although TM
+may offer an acceptable alternative for small databases, remember
+that you need to have another database where you copy all the
+objects and data&#151;even though it doesn't have to be the same
+size. What you gain in ease of use, however, is offset by your
+lack of control in cases such as transaction logs or database
+overflows.</p>
+
+<H3>The &quot;warm&quot; backup approach</h3>
+
+<P>The warm backup approach is the most reliable and
+most expensive solution. Every database dump is loaded onto a
+backup server and subsequent transaction logs are also applied.
+It's easy to swap servers at any time, even though you'll lose
+changes since the last transaction log dump. If you can afford
+having two servers instead of one, you'll greatly reduce disaster
+risks. To reduce sensitivity to natural disasters, fire, and
+other physical damage to your server, you should set up the
+backup server in another location. You'll incur increased WAN
+traffic for this additional protection.</p>
+
+<H3>The replication approach</h3>
+
+<P>Replication is similar to the previous technique,
+but more complicated to set up. There may be a delay in copying
+the data, and you may also lose some of the last transactions
+preceding disaster.</p>
+
+<H3>Application-specific backup and recovery methods</h3>
+
+<P>Depending on your application and environment, you
+may have additional recovery options such as reconstructing the
+data from other sources. It's often true for decision support,
+read-only databases.</p>
+
+<H2>Compromises</h2>
+
+<P>Suppose that you have two recovery plans. Plan A
+will safely restore all data in 48 hours, while plan B will take
+only an hour, but has a five percent chance of losing some data.
+Which one should you choose? Ultimately, <i>users</i> should
+decide. A good DBA must propose all realistic recovery
+alternatives. Some sites will be willing to take reasonable
+risks. Here are some practical compromises that speed up recovery
+at the expense of added risk.</p>
+
+<H3>Compromise 1</h3>
+
+<P>Once you've fixed corruption, consider <i>not</i>
+running a complete DBCC if it takes an enormous amount of time.
+Instead, take a database dump, load it on another server, and do
+the DBCC there. Users will continue to work with the recovered
+database while you are DBCCing the copy. It may happen that they
+will hit more corruption, in which case you'll have to stop
+production and follow safe procedures. But in most cases, you
+won't discover new error messages and will save your users many
+hours of otherwise lost productivity.</p>
+
+<P><b>Warning</b></p>
+
+<P>Remember, if corruption exists on unused pages
+that aren't backed up, DBCCing the copy won't discover the
+problem.</p>
+
+<H3>Compromise 2</h3>
+
+<P>If a single table is corrupt, attempt to restore
+that one table without bringing down the whole database. Try to
+copy the table's data out with bcp, and then select into, or
+insert into, another table. If you succeed, drop the corrupt
+table and rename the new one. If the corruption remains, it'll
+most likely exist on unused pages. Run DBCC NEWALLOC to find any
+corruption. </p>
+
+<H3>Compromise 3</h3>
+
+<P>Consider skipping DBCC CHECKDB, which usually adds
+significantly to the backup/restore process and won't notice
+problems on unused pages anyway. Performing a CHECKTABLE on the
+tables in question is often sufficient. </p>
+
+<H3>Compromise 4</h3>
+
+<P>Use the NOINDEX option to reduce runtime at the
+expense of not checking indexes. This is a particularly useful
+strategy if you have a strong reason to believe that corruption
+was isolated to data pages and indexes were intact. Most of the
+time spent performing CHECKDB and CHECKTABLE typically goes to
+index checking. In some cases it may take less time to drop all
+indexes, execute DBCC, and then re-create indexes rather than
+running DBCC on a fully indexed table.</p>
+
+<H3>Compromise 5</h3>
+
+<P>Don't fix errors 2540 and 2546 unless you have
+countless numbers of them and you can reclaim plenty of space by
+fixing them. Each message 2540 indicates a 2K loss. Let them stay
+in the database if correction requires precious production time.</p>
+
+<P>Sometimes you might hear that <i>not </i>fixing 2540
+may lead to other problems. Not exactly. It's no exaggeration to
+say that I've seen hundreds of thousands of message 2540s. Of
+course I haven't counted each one by hand, but automated jobs
+comb DBCC outputs and count messages for me every week. In my
+experience leaving them in never led to further damage. It's
+true, though, that numerous messages 2540 apparently indicate
+that something is wrong with your storage device, and more
+problems&#151;including fatal ones&#151;may occur if you continue
+to ignore the problem.</p>
+
+<H3>Compromise 6</h3>
+
+<P>Try to find information about
+&quot;unsupported&quot; DBCC options. They aren't necessarily
+documented and publicized, but they may be helpful in
+understanding and fixing the problem or learning more about a
+particular case of corruption. You'll find some of them buried in
+troubleshooting procedures. Here are a few such options: </p>
+
+<P><font face="Symbol">� </font>DBCC FIX_AL fixes
+&quot;innocent&quot; cases of error 2540 (lost pages). It
+normally takes the same amount of time as NEWALLOC.</p>
+
+<P><font face="Symbol">� </font>DBCC PGLINKAGE may
+help in analyzing broken page chains.</p>
+
+<P><font face="Symbol">� </font>DBCC PAGE shows the
+contents of a particular database page.</p>
+
+<P><font face="Symbol">� </font>DBCC
+TRACEON(3604)/TRACEOFF(3604) switches DBCC command output between
+the error log and your screen.</p>
+
+<P><b>Warning</b></p>
+
+<P>Don't seek your vendor's support on unsupported
+DBCC commands except when a support engineer offers to run them
+for you to resolve a problem.</p>
+
+<P>It's well-explained in the documentation, though
+often forgotten, that DBCC should be executed in a single-user
+database mode. When it runs concurrently with transactions
+modifying data in the same database, DBCC produces unreliable
+results. You may see scores of non-existing errors. Message 2521
+looks especially scary, but in all the likelihood it indicates
+only that some pages have been modified while DBCC NEWALLOC was
+in progress. When SQL Server says <i>&quot;Database is not in
+single user mode&#151;may find spurious allocation problems due
+to transactions in progress,&quot; </i>it means it.</p>
+
+<P>I hope many of today's corruption problems will be
+eliminated in forthcoming product updates and with improved
+hardware reliability. In my experience, both the frequency and
+severity of SQL Server disasters have declined substantially in
+the last few years. Nevertheless, I'd be delighted when this
+article becomes obsolete and we enter a corruption-free database
+future.</p>
+
+<P><i>Andrew Zanevsky, an independent consultant, has
+worked as a DBA and as an applications developer for several
+Fortune 500 companies using both Microsoft and Sybase versions of
+SQL Server. He is president of the Great Lakes SQL Server Users
+Group (http://www.glssug.com/glssug) located in Chicago.
+708-609-8783, CompuServe 71232,3446.</i></p>
+
+<P>&nbsp;</p>
+
+<P align="center"><a
+href="http://www.pinpub.com/sqlpro/"><img src="Pinnacle.gif"
+border="0" width="216" height="72"></a></p>
+
+<P align="center"><strong>To find out more about SQL
+Server Professional and Pinnacle Publishing, <br>
+visit their website at</strong> <a
+href="http://www.pinpub.com/sqlpro/"><strong>http://www.pinpub.com/sqlpro/</strong></a><strong>.
+</strong></p>
+
+<P align="center"><font size="1">Note: This is not a
+Microsoft Corporation website. <br>
+Microsoft is not responsible for its content.</font></p>
+
+<P>This article is reproduced from the June 1996
+issue of SQL Server Professional. Copyright 1996, by Pinnacle
+Publishing, Inc., unless otherwise noted. All rights are
+reserved. SQL Server Professional is an independently produced
+publication of Pinnacle Publishing, Inc. No part of this article
+may be used or reproduced in any fashion (except in brief
+quotations used in critical articles and reviews) without prior
+consent of Pinnacle Publishing, Inc. To contact Pinnacle
+Publishing, Inc., please call (800)788-1900 or (206)251-1900.</p>
+</font></body>
+</html>

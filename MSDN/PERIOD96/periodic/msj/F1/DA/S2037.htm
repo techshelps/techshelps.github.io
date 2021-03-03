@@ -1,0 +1,318 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>OLE Q &amp; A</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  OLE Q &amp; A</H1><P>Don Box</P>
+<P>Don Box is a principal scientist at DevelopMentor, where he builds tools and courseware for developers using OLE and COM. Don can be reached at dbox@braintrust.com.</P>
+<P><font size="6" face="verdana,arial,helvetica">Q</font>When users edit my OLE control's properties via its property page, the applied changes are reflected in the visual state of my control but not in the Visual Basic¨ property inspector. This leaves the state of my control inconsistent with the property inspector until I reselect it, which seems to force Visual Basic to re-read my properties.  Is there a way to ensure that the property inspector is always consistent with my control?</P>
+<P></P>
+<P><font size="6" face="verdana,arial,helvetica">A</font>The fact that your control's visual state is consistent with its property values indicates that you got the basics of state synchronization correct. <B>Figure 1</B> shows the overall notification and request diagram for controls. As you can see, a control's state can be modeled in terms of internal and external states. The transient values of the control's data members are the control's internal state. The persistent image of the control on disk and the visual image on the user's display can be viewed as the external state of the control. The control implementor is typically focused on the internal state of the control, since this is its data member. It's manipulated via the control's methods, where control implementors spend most of their time adding features, bugs, and Easter eggs. It is important, however, to ensure that the internal and external states of the control are always in synch. Fortunately, the COleControl class makes this simple.</P>
+<P><img src="oleqa1.gif"></P>
+<P><B> Figure 1  Control Notifications and Requests</B></P>
+<P>Keeping the visual and persistent states of a control synchronized with its internal state requires two operations: notifying the framework when an external state becomes inconsistent or dirty, and implementing the virtual function that synchronizes the external state. You typically must notify the framework whenever a data member in the control is modified. To notify the framework that the visual state of the control is inconsistent, call COleControl::InvalidateControl. I use the this-&gt;function style of programming to reinforce the fact that the member function belongs to this object.</P>
+<P> </P>
+<P><BR></P>
+<PRE> void CMyControl::OnLastNameChanged()
+{
+  RECT r;
+  //calculate which portion of the visual state 
+  //has been dirtied
+  GetBoundingRect(m_lastName, &amp;r); 
+  //notify framework
+  this-&gt;InvaldateControl(&amp;r);
+}</PRE>
+<P> </P>
+<P>COleControl::InvalidateControl is logically equivalent to CWnd::InvalidateRect. However, unlike a simple CWnd, a control is drawn in its own window when the control is active, and is drawn by the control's container when the control is displayed in design mode. In addition to invalidating the control's window when it is active, the control must also notify any external clients that have established advisory connections with the control's rendering interfaces (IDataObject and IViewObject2). This is exactly what the COleControl's implementation of InvalidateControl does.</P>
+<P>To indicate that the persistent state of the control is out of synch, call COleControl::SetModifiedFlag:</P>
+<P> </P>
+<P><BR></P>
+<PRE> void CMyControl::OnLastNameChanged()
+{
+  //notify framework
+  this-&gt;SetModifiedFlag(TRUE);
+}</PRE>
+<P> </P>
+<P>COleControl::SetModifiedFlag is logically equivalent to CDocument::SetModifiedFlag. COleControl's implementation simply caches the indicated dirty state in a data member (m_bModified). This member is used to implement the various OLE persistence interfaces (IPersistStorage, IPersistStreamInit, and IPersistPropertyBag) that are exposed to the container, allowing it to save the control's state. No OLE notifications need to be sent because the act of synchronizing the control's persistent state only occurs when some external action takes place in the container (for example, selecting Save from the File menu).</P>
+<P>The second operation required to maintain external state synchronization is to correctly implement the virtual function that resynchronizes the outside world's image of the control. To resynchronize the visual state of the control, the COleControl framework calls its virtual function OnDraw, giving the derived class a chance to render:</P>
+<P> </P>
+<P><BR></P>
+<PRE> /* virtual */ void 
+CMyControl::OnDraw(CDC *pdc,const CRect&amp; rcBounds,
+                   const CRect&amp; rcInvalid) 
+{
+  pdc-&gt;DrawText(m_lastName, LPRECT(&amp;rcBounds), 
+                DT_VCENTER|DT_SINGLELINE);
+}</PRE>
+<P> </P>
+<P>OnDraw is called  when either the control's HWND receives a WM_PAINT message or the OLE cache or out-of-process clients need metafile renderings. The control framework automatically routes all three of these requests through OnDraw.</P>
+<P>To resynchronize the persistent state of the control, the COleControl framework calls its virtual function DoPropExchange, giving the derived class an opportunity to serialize its properties.</P>
+<P> </P>
+<P><BR></P>
+<PRE> /* virtual */ void
+CMyControl::DoPropExchange(CPropExchange *pPX)
+{
+  //verify persistent version no.
+  ExchangeVersion(pPX, MAKELONG(_wVerMinor, 
+                                _wVerMajor));
+  //allow base class to serialize
+  COleControl::DoPropExchange(pPX);
+
+  //serialize our data members
+  PX_String(pPX, _T("LastName"), m_lastName);
+}</PRE>
+<P> </P>
+<P>This virtual function is called when the client calls Save or Load on any of the control's persistence interfaces. The control framework maps the requests onto a call to DoPropExchange automatically (often via the control's Serialize member).</P>
+<P>The previous discussion (as well as your control implementation) ignored one other external state of the control: property pages and inspectors. At various times, a control may have one or more external agents displaying and possibly modifying the control's IDispatch-based properties. As you might expect, this external state also requires explicit notification of dirtiness, and the control framework maps requests for resynchronization onto a virtual member function. </P>
+<P>To notify all property viewers that a property has changed, call COleControl::BoundPropertyChanged.</P>
+<P> </P>
+<P><BR></P>
+<PRE> void CMyControl::OnLastNameChanged()
+{
+  //notify framework
+  this-&gt;BoundPropertyChanged(dispidLastName);
+}</PRE>
+<P> </P>
+<P>COleControl's implementation of BoundPropertyChanged will walk the list of connected property viewers and call the OnChanged method on each viewer's IPropertyNotifySink interface. When property viewers need to display a control's properties, they attach themselves to the control via its connection point for the IPropertyNotifySink interface. The COleControl base class implements this connection point by default.</P>
+<P>When a property viewer receives the notification, it will call back into the control to refresh its state (see <B>Figure 1</B>). It does this via the control's primary IDispatch interface. As with any MFC-based IDispatch implementation, the control routes this request via the dispatch map to the appropriate data member or accessor function. Dispatch maps are usually manipulated by the Visual C++ ClassWizard or TextWizard. </P>
+<P>Given this explanation, should you call BoundPropertyChanged each time you modify a property? Well, maybe. You are only obliged to call BoundPropertyChanged for properties you have marked as bindable in your type library (using the bindable keyword in IDL or ODL). However, if you want the Visual Basic inspector to remain in sync when your control's property page applies its changes, you need to do this at least when the control is in design mode. You can detect this by calling COleControl::AmbientUserMode.</P>
+<P> </P>
+<P><BR></P>
+<PRE> void CMyControl::OnLastNameChanged()
+{
+  //notify framework if we are in design mode
+  if (!this-&gt;AmbientUserMode())
+  this-&gt;BoundPropertyChanged(dispidLastName);
+}</PRE>
+<P> </P>
+<P>This will yield exactly the behavior you are looking for in both design and user modes. </P>
+<P>Be aware that while you will not be sending extraneous notifications at run time when the control is active, you will be calling the control site's IDispatch interface each time the property is set, which will not always be faster than sending the unneeded property notifications.  A somewhat less elegant technique—that relies on the fact that most containers run your control in-place active—is considerably faster:</P>
+<P> </P>
+<P><BR></P>
+<PRE> void CMyControl::OnLastNameChanged()
+{
+  //notify framework if we are in design mode
+  if (!this-&gt;m_bInPlaceActive)
+  this-&gt;BoundPropertyChanged(dispidLastName);
+}</PRE>
+<P> </P>
+<P>The m_bInPlaceActive data member is part of the undocumented protected interface to COleControl and, unlike the AmbientUserMode method, is not guaranteed to be supported in future versions of MFC.</P>
+<P><font size="6" face="verdana,arial,helvetica">Q</font>How do I get Visual Basic to use those drop-down lists and popup dialogs when editing my control via its built-in property editor?</P>
+<P><font size="6" face="verdana,arial,helvetica">A</font>The Visual Basic property editor is a generic browser that fills a subclassed list box with one entry per property. For an OLE control, it can determine the DISPIDs and names of the control's exposed properties by enumerating the type information associated with the control. By default, when a user selects a property for editing, Visual Basic allows the user to type raw text into an edit control. Once the user changes input focus or hits the Enter key, Visual Basic uses IDispatch::Invoke to communicate the new value to the selected object.</P>
+<P>To let OLE controls customize the generic property browser of the container, the OLE control specification defines the IPerPropertyBrowsing interface (see <B>Figure 2</B>). Prior to displaying the edit control for a property, browsersfirst allow the control to populate a combo or list box from which the user can select predefined values (see <B>Figure 3</B>). It does this by calling the control's GetPredefinedStrings method. If the call returns S_FALSE or fails, then you can assume the property does not have a set of predefined values. If the call returns S_OK, then the second parameter  contains a counted array of strings that can be added to a list box or combo box. The control also provides a corresponding counted array of DWORDs that can be associated with the individual list box items using LB_SETITEMDATA. The array of DWORDs (known as cookies) is used to allow efficient lookup by the control once an item is selected.</P>
+<P><B> Figure 2  IPerPropertyBrowsing Interface</B></P>
+<P><BR></P>
+<PRE> typedef struct tagCALPOLESTR {
+            ULONG cElems;
+            OLECHAR ** pElems;
+} CALPOLESTR;
+
+typedef struct tagCADWORD {
+            ULONG cElems;
+            DWORD * pElems;
+} CADWORD;
+
+interface IPerPropertyBrowsing : IUnknown
+{
+  HRESULT GetDisplayString(DISPID dispid, BSTR * lpbstr);
+  HRESULT MapPropertyToPage(DISPID dispid, CLSID *lpclsid);
+  HRESULT GetPredefinedStrings(DISPID dispid, CALPOLESTR *lpcasz, 
+                               CADWORD *lpcadw);
+  HRESULT GetPredefinedValue(DISPID dispid, DWORD dwCookie,
+                             VARIANT *lpvarOut);
+}</PRE>
+<P></P>
+<P><img src="oleqa3.gif"></P>
+<P><B> Figure 3  Browsing and Predefined Strings</B></P>
+<P>The MFC COleControl class implements the IPerPropertyBrowsing interface and maps each of the member functions to virtual functions with default implementations. To provide an array of strings to the Visual Basic browser, you can implement your own version of OnGetPredefinedStrings (see <B>Figure 4</B>).</P>
+<P><B> Figure 4  OnGetPredefinedStrings</B></P>
+<P><BR></P>
+<PRE> LPCTSTR g_szBobs[] = { 
+  _T("Bob"), _T("Bobby"), _T("Robert") 
+};
+BOOL 
+CBobCtrl::OnGetPredefinedStrings(DISPID dispid, 
+                                 CStringArray* pStringArray,
+                                 CDWordArray * pCookieArray)
+{
+  BOOL result = FALSE; 
+  switch (dispid)
+  {
+  case dispidFirstName:
+//  update string and cookie arrays 
+//  and indicate that we have done it
+    pStringArray-&gt;Add(g_szBobs[0]);
+    pCookieArray-&gt;Add(0);
+    pStringArray-&gt;Add(g_szBobs[1]);
+    pCookieArray-&gt;Add(1);
+    pStringArray-&gt;Add(g_szBobs[2]);
+    pCookieArray-&gt;Add(2);
+    result = TRUE;
+    break;
+  default:
+//  allow base class to perform 
+//  default mappings (usually none)
+    result = COleControl::OnGetPredefinedStrings (dispid, 
+                                                  pStringArray,
+                                                  pCookieArray);
+  }
+  return result;
+}</PRE>
+<P></P>
+<P>Once the user selects an item from the list, the browser must map the selected item to a VARIANT that can update the property's value. It calls the control's GetPredefinedValue method, asking the control to map from the DWORD associated with the selected string onto the actual value represented as a VARIANT. The COleControl implementation simply routes this to a virtual member function that derived classes can override (see <B>Figure 5</B>). Implementing these two member functions forces Visual Basic to use a drop-down list for your control's property.</P>
+<P><B> Figure 5  Standard OnGetPredefinedValue</B></P>
+<P><BR></P>
+<PRE> BOOL 
+CBobCtrl::OnGetPredefinedValue(DISPID dispid, 
+                               DWORD dwCookie, 
+                               VARIANT * lpvarOut)
+{
+  USES_CONVERSION;
+  BOOL result = FALSE; 
+  switch (dispid)
+  {
+  case dispidFirstName:
+// map dwCookie to the name and indicate 
+// that we did it
+    VariantInit(lpvarOut);
+    lpvarOut-&gt;vt = VT_BSTR;
+    assert(dwCookie &lt; 3);
+    lpvarOut-&gt;bstrVal = SysAllocString(T2COLE(
+                            g_szBobs[dwCookie]));
+    result = TRUE;
+    break;
+  default:
+// allow base class to perform mappings
+   result = COleControl::OnGetPredefinedValue(dispid, 
+                                              dwCookie, 
+                                              lpvarOut);
+  }
+  return result;
+}</PRE>
+<P>Predefined strings are extremely useful for editing properties that are enumerations or restricted integral types and not string-based. For example, in the Bob control excerpted in <B>Figure 3</B>, you could represent the FirstName property as an integral type and expose an enumeration in your type library.</P>
+<P> </P>
+<P><BR></P>
+<PRE> // odl
+typedef enum { 
+  BOB = 0, BOBBY = 1, ROBERT = 2 
+} FIRSTNAMES;
+
+dispinterface _DBobControl {
+properties:
+  [id(1)] FIRSTNAMES FirstName;
+};</PRE>
+<P> </P>
+<P>This allows you to set the property in Visual Basic by using symbolic constants instead of strings.</P>
+<P> </P>
+<P><BR></P>
+<PRE> Sub Foo()
+  BobControl1.FirstName = BOB
+End Sub</PRE>
+<P> </P>
+<P>Assuming that the FirstName property is of the enumeration type FIRSTNAMES, the implementation of OnGetPredefinedValue must return the correct enumeration value, not the string that it represents (see <B>Figure 6</B>).</P>
+<P><B> Figure 6  Custom OnGetPredefinedValue</B></P>
+<P><BR></P>
+<PRE> BOOL 
+CBobCtrl::OnGetPredefinedValue(DISPID dispid,
+                               DWORD dwCookie, 
+                               VARIANT * lpvarOut)
+{
+  BOOL result = FALSE; 
+  switch (dispid)
+  {
+  case dispidFirstName:
+    VariantInit(lpvarOut);
+    lpvarOut-&gt;vt = VT_I2;
+    lpvarOut-&gt;iVal = short(dwCookie);
+    result = TRUE;
+    break line
+  default:
+    result = COleControl::OnGetPredefinedValue(dispid,
+                                               dwCookie,
+                                               lpvarOut);
+  }
+  return result;
+}</PRE>
+<P>While our implementation is in control of the cookies it receives (we will only see values that we had given out in OnGetPredefinedStrings), it is still necessary to guard against range errors for the property values passed in by programmers. Like the C programming languge, Visual Basic regards enumerations as suggested values, not mandatory ones. That means passing any integral value where an enumerated type is expected is completely legal in Visual Basic. To protect against illegal values, the following range check needs to take place in the mutator function that IDispatch uses to implement DISPATCH_PROPERTYPUT:</P>
+<P> </P>
+<P><BR></P>
+<PRE> void 
+CBobCtrl::SetFirstName(short nNewValue) 
+{
+  if (nNewValue &gt; ROBERT || nNewValue &lt; BOB)
+    AfxThrowOleDispatchException(42, 
+        _T("You tried to defeat my Bob-ness.")); 
+   m_firstName = nNewValue;
+   InvalidateControl();
+   SetModifiedFlag();
+}</PRE>
+<P> </P>
+<P>Throwing a dispatch exception is the easiest way to indicate that an error occurred. You could also make an argument for indicating that a type error occurred by returning DISP_E_TYPEMISMATCH from the Invoke method. This would require intercepting the MFC implementation of Invoke, which is beyond what I'm willing to do for so little gain.</P>
+<P>While you can implement just GetPredefinedValue and GetPredefinedStrings, you must implement GetDisplayString as well to achieve the correct look and feel. VisualBasic calls GetDisplayString to map the current value of a property to a string displayed on the right half of the list-box entry. COleControl implements this function by calling the virtual function OnGetDisplayString, giving derived classes a chance to map their custom properties. For the Bob control, the implementation shown in <B>Figure 7</B> would suffice. In the absence of this function, Visual Basic displays the integer value returned from the control's PROPERTYGET implementation.</P>
+<P><B> Figure 7  OnGetDisplayString</B></P>
+<P><BR></P>
+<PRE> BOOL 
+CBobCtrl::OnGetDisplayString(DISPID dispid, 
+                             CString&amp; strValue)
+{
+  BOOL result = FALSE; 
+  switch (dispid)
+  {
+  case dispidFirstName:
+//  update display string and indicate that 
+//  we did it
+    strValue = g_szBobs[m_firstName];
+    result = TRUE;
+    break;
+  default:
+//  allow base class to perform mappings
+    result = COleControl::OnGetDisplayString(dispid, 
+                                             strValue);
+  }
+  return result;
+}</PRE>
+<P></P>
+<P>For properties that are too complex to display in a simple drop-down list, the OLE control specification allows controls to map arbitrarily complex property pages onto individual properties. Browsers are expected to display these pages whenever the user attempts to edit the property. The Visual Basic browser displays an ellipsis button to indicate that the property has a specific property page (see <B>Figure 8</B>). To discover whether or not a property has a specific property page associated with it, browsers call the control's MapPropertyToPage method: </P>
+<P> </P>
+<P><BR></P>
+<PRE> HRESULT IPerPropertyBrowsing::MapPropertyToPage(
+                                 DISPID id,
+                                 CLSID *pclsid);</PRE>
+<P> </P>
+<P>If the control returns S_OK from the call, then the CLSID parameter indicates which property page can optionally edit this property. If the control returns S_FALSE, then the CLSID parameter indicates which property page must edit the property. All other results indicate that the control has no property-specific page to edit the requested property.</P>
+<P><img src="oleqa8.gif"></P>
+<P><B> Figure 8  Browsing with Per-Property Pages </B></P>
+<P>The COleControl class implements this interface method by calling the virtual function OnMapPropertyToPage, allowing derived classes to specify their own property pages. The default implementation of this virtual function maps the stock font and color properties to the built-in font and color property pages. To map a control's property to a specific page, just override OnMapPropertyToPage (see <B>Figure 9</B>).</P>
+<P><B> Figure 9  OnMapPropertyToPage</B></P>
+<P><BR></P>
+<PRE> BOOL 
+CBobCtrl::OnMapPropertyToPage(DISPID dispid, 
+                              CLSID *lpclsid, 
+                              BOOL* pbPageOptional)
+{
+  BOOL result = FALSE; 
+  switch (dispid)
+  {
+  case dispidLastName:
+//  map dispid to a CLSID and indicate 
+//  that we did it
+    *lpclsid = CLastNamePropPage::guid;
+    *pbPageOptional = TRUE;
+    result = TRUE;
+    break;
+  default:
+//  allow base class to perform mappings
+    result = COleControl::OnMapPropertyToPage(dispid, 
+                                              lpclsid, 
+                                              pbPageOptional);
+  }
+  return result;
+}</PRE>
+<P>Based on this implementation, when the user selects the LastName property in the Visual Basic property browser, the ellipsis button will be shown. When clicked, the button invokes a property sheet with only the page indicated in the code above. This is somewhat different from the behavior of the Visual C++ generic property browser (see <B>Figure 10</B>), which is implemented as one property page in the dialog editor's property sheet. This also contains the dialog's property page in addition to all property pages in the selected control's property page map. When attempting to edit a property with a custom property page, Visual C++ simply jumps to the indicated property page within the same sheet. This implies that the custom property page must be part of the control's property page map, which is not required by Visual Basic.</P>
+<P><img src="oleqa10.gif"></P>
+<P><B> Figure 10  Property Browsing in Visual C++</B></P>
+<P>So, as always, just clicking some buttons and selecting a few options in AppWizard and ClassWizard produces some code that compiles, links, and even works, but the resulting binary is less than satisfying for the user. To achieve a professional-quality fit and finish on the control, you have to scrape under the surface of MFC's COleControl class to hook into the underlying COM-based infrastructure. Fortunately, the IPerPropertyBrowsing interface is sufficiently hookable and requires that only a few virtual functions be implemented in the derived class.</P>
+<P>Have a question about programming in OLE? Send your questions via e-mail to Don Box at <I>This article is reproduced from Microsoft Systems Journal. Copyright </I>©<I> 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P><I>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</I></P>
+<P>dbox@braintrust.com</P>
+<P></P></font></body></HTML>

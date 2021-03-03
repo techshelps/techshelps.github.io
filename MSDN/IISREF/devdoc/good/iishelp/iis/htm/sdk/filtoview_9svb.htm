@@ -1,0 +1,67 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Summary of Event Ordering</title>
+<link disabled rel=stylesheet href=../../../../../backsdk3.css>
+<style type="text/css">
+@import url(../../../../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h2><a name="_in_summary_of_event_ordering"></a>Summary of Event Ordering</h2>
+<p>
+When a request comes and an event notification occurs, each filter you registered with high priority for that notification will be called. Next, each filter you registered with medium priority for that notification will be called. Finally, each filter you registered with low priority for that notification will be called. The default priority is low. If you register multiple filters with the same priority, the order is determined by the<a href="aoiisao_4h6b.htm"> IISFilters</a> <b>FilterLoadOrder</b> property.</p>
+<p>
+Priority is determined by the nature of the notification. For most events setting a high priority means that the filter should be notified before other filters. For events that involve sending a raw data to the client, however, IIS assumes that a high priority means the filter should be notified just before the client is contacted. As a result, if a filter sets a high priority for the SF_NOTIFY_SEND_RAW_DATA event, the filter will be notified after filters with a medium or low priority have been notified.</p>
+<p>
+If you have a filter that is notified of multiple events, you can not set different priorities for each notification within that filter. You establish the filter priority once and the priority applies to all the event notifications within the filter.</p>
+<p>
+The following sequence is the order of events if filters are not loaded that can impact the order of processing. 
+<ol>
+<li>
+When a client sends a request, one or more SF_NOTIFY_READ_RAW_DATA notifications will occur. Data will be read until the client has sent all of the HTTP headers associated with the request.</li>
+<li>
+A single SF_NOTIFY_PREPROC_HEADERS notification will occur for each request. This notification indicates that the server has completed pre-processing of the headers associated with the request.</li>
+<li>
+An SF_NOTIFY_URL_MAP notification will occur after the server has converted the URL associated with the request into a physical path on the server. Note that this event may occur for subsequent requests during a single session. </li>
+<li>
+An SF_NOTIFY_AUTHENTICATION notification will occur only on the first request made over a session. If keep-alive is negotiated between the client and server, the client may submit many requests over the session. This notification will not occur for any such subsequent requests.</li>
+<li>
+If the client is sending POST data with the request, and all of the data was not read in the first step, one or more SF_NOTIFY_READ_RAW_DATA notifications will occur here. Data will be read until either 48K of data is received from the client, or until all of the data is read, whichever occurs first. The 48K read size is typical, but it may be varied. For example, if the MD_UPLOAD_READAHEAD_SIZE in the metabase has been set to a value other than 48k, IIS will attempt to read that amount of data. Other factors can impact how much the server reads so filters should not rely on this exact behavior. </li>
+<li>
+The request is handled. This may be done by an ISAPI extension, a CGI application, a script engine (such as ASP, PERL, and so on), or by IIS itself for static files. If the handler calls <b>ReadClient</b> to continue reading POST data beyond 48K, one or more additional SF_NOTIFY_READ_RAW_DATA notifications will occur.</li>
+<li>
+The SF_NOTIFY_SEND_RESPONSE event occurs after the request is handled and before headers are sent back to the client. This event only occurs if the ISAPI extension uses HSE_REQ_SEND_RESPONSE_HEADER to send headers to the client..</li>
+<li>
+As the request handler returns data to the client, one or more SF_NOTIFY_SEND_RAW_DATA notifications will occur. If the handler is an ISAPI extension, each notification will correspond to either a call from the extension to <b>ServerSupportFunction</b> (with either HSE_REQ_SEND_RESPONSE_HEADER or HSE_REQ_SEND_URL_REDIRECT_RESP), or a call from the extension to <b>WriteClient</b>.</li>
+<li>
+At the end of each request, the SF_NOTIFY_END_OF_REQUEST notification occurs. See the notes below for an exception case where this notification does not occur.</li>
+<li>
+After the HTTP request has been completed, the SF_NOTIFY_LOG notification occurs just before the server writes the request to the log.</li>
+<li>
+When the connection between the client and server is closed, the SF_NOTIFY_END_OF_NET_SESSION notification occurs. If keep-alive has been negotiated, it is possible that many HTTP requests occur before this notification occurs.</li>
+</ol>
+<p>
+Some factors which can change this order of events are described in <a href="#_in_exceptions_to_the_event_sequence">Exceptions to the Event Sequence</a>.</p>
+
+<h3><a name="_in_exceptions_to_the_event_sequence"></a>Exceptions to the Event Sequence</h3>
+<p>
+ISAPI filters may interrupt or modify the sequence of event notifications. The order of events described in <a href="#_in_summary_of_event_ordering">Summary of Event Ordering</a> occurs if no ISAPI filters are installed that change the event sequence. ISAPI filters can modify the behavior of IIS and, therefore, the way the requests are handled. For example, if you return SF_STATUS_REQ_FINISHED from an SF_NOTIFY_PREPROC_HEADERS handler, SF_NOTIFY_URL_MAP will not be called for that request, although some subsequent notifications, such as SF_NOTIFY_END_OF_NET_SESSION, will still be called. </p>
+<p>
+The following points summarize some factors that can change the order of event processing.
+<ul>
+<li>
+The SF_NOTIFY_ACCESS_DENIED event notification occurs if a 401 response is sent to the client. With this notification the order of events will change. The next event will be SF_NOTIFY_END_OF_REQUEST.</li>
+<li>
+The SF_NOTIFY_URL_MAP event notification can occur multiple times on a single request, occasionally with an empty string for the <b>pszURL</b> member. One known cause of this is a call to <b>ServerSupportFunction</b> with HSE_REQ_MAP_URL_TO_PATH, or with SF_REQ_MAP_URL_TO_PATH if the call is from a filter.</li>
+<li>
+If NTLM authentication is being negotiated, there are typically 3 requests and responses between the client and server. The SF_NOTIFY_END_OF_REQUEST notification will not occur on the second request when IIS responds to the client with a challenge. All other notifications occur as expected on this second request and response. For this reason, you should not rely on this notification as a signal to free any memory allocated elsewhere in your filter unless you know NTLM authentication is not being used.</li>
+<li>
+SF_NOTIFY_SECURE_PORT and SF_NOTIFY_NONSECURE_PORT are not notifications. They are flags that modify when a given filter will be called. If a filter registers in GetFilterVersion for SF_NOTIFY_SECURE_PORT, its HttpFilterProc function will only be called for requests made over the servers secure HTTP port (i.e., SSL and PCT requests). If SF_NOTIFY_NONSECURE_PORT is registered, HttpFilterProc will get called for requests over the server's non-secure HTTP port. The flags may be combined to allow the HttpFilterProc to be called for all requests.</li>
+<li>
+You can use SF_NOTIFY_DISABLE_NOTIFICATIONS to disable expensive notifications if your filter no longer needs to be notified of an event.</li>
+</ul>
+<p>&nbsp;</p></body>
+</HTML>

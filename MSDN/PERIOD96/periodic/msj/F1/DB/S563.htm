@@ -1,0 +1,930 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Wicked Code</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  Wicked Code</H1><P>Jeff Prosise</P>
+<P>Jeff Prosise writes extensively about programming in Windows and is a contributing editor of several computer magazines. He is the author of <I>Programming Windows 95 with MFC</I> (Microsoft Press).</P>
+<P>Love it or hate it, some things about MFC just can't be beat. One of the greatest benefits of writing Win32¨ apps with MFC is that you can use MFC classes as base classes for more ambitious classes of your own. Ever since I laid eyes on the MFC 4.0 CTreeView class, I've wanted to build a drive-view class that displays a hierarchical listing of drives and folders—something resembling the left pane of an Explorer window, but without printer folders and other non-file-system objects. I thought it would be easy. </P>
+<P>It turns out the devil is in the details, as is so often the case in programming. Among other things, you have to worry what happens when the user creates, deletes, or renames a folder in an Explorer or shell folder window while the drive view is displayed. A mediocre drive-view class would probably ignore latent changes to a drive's subdirectory structure. A robust one would sense the changes and update itself accordingly. For improved performance, a drive-view class should mimic Explorer by adding folder items to the tree view on the fly rather than scanning every folder on every drive the moment the class is instantiated. In short, writing an industrial-strength drive-view class is not a trivial undertaking.</P>
+<P>The class I wrote, CDriveView, will save you loads of development time. It's completely self-contained, and it uses low-overhead threads to monitor activity in the file system. You can use it as is, or you can use it as the starting point for more powerful classes of your own. If you've never before written a multithreaded MFC class or used Win32 file change notification objects, CDriveView offers a working tutorial on both.</P>
+<P> </P>
+<H2><A NAME="sec0"></A>  CDriveView Primer</H2><P>The source code for CDriveView appears in <B>Figure 1</B>. CDriveView is derived from the MFC CTreeView class, which takes the functionality of a TreeView control (in MFC, CTreeCtrl) and places it in a CView-like wrapper. You can call CTreeCtrl functions on a CDriveView by first calling CTreeView::GetTreeCtrl to obtain a reference to the underlying CTreeCtrl. You can call CView functions on a CDriveView directly and also take advantage of key CView overridables such as OnInitialUpdate.</P>
+<P><B> Figure 1  CDriveView</B></P>
+<P>DriveView.cpp</P>
+<P><BR></P>
+<PRE> //***********************************************************************
+//
+//  DriveView.cpp
+//
+//***********************************************************************
+
+#include &lt;afxwin.h&gt;
+#include &lt;afxcview.h&gt;
+#include &lt;afxcoll.h&gt;
+#include &lt;afxmt.h&gt;
+#include "Resource.h"
+#include "DriveView.h"
+
+// Image list indexes
+#define ILI_HARD_DISK       0
+#define ILI_FLOPPY          1
+#define ILI_CD_ROM          2
+#define ILI_NET_DRIVE       3
+#define ILI_RAM_DRIVE       4
+#define ILI_CLOSED_FOLDER   5
+#define ILI_OPEN_FOLDER     6
+
+IMPLEMENT_DYNCREATE (CDriveView, CTreeView)
+
+BEGIN_MESSAGE_MAP (CDriveView, CTreeView)
+    ON_WM_DESTROY ()
+    ON_NOTIFY_REFLECT (TVN_ITEMEXPANDING, OnItemExpanding)
+    ON_NOTIFY_REFLECT (TVN_SELCHANGED, OnSelChanged)
+    ON_MESSAGE (WM_USER, OnDriveContentsChanged)
+END_MESSAGE_MAP ()
+
+/////////////////////////////////////////////////////////////////////////
+// Class constructor
+
+CDriveView::CDriveView () : m_event (FALSE, TRUE)
+{
+    m_nThreadCount = 0;
+}
+
+/////////////////////////////////////////////////////////////////////////
+// Overridables
+
+BOOL CDriveView::PreCreateWindow (CREATESTRUCT&amp; cs)
+{
+    if (!CTreeView::PreCreateWindow (cs))
+        return FALSE;
+
+    cs.style |= TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS;
+    return TRUE;
+}
+
+void CDriveView::OnInitialUpdate ()
+{
+    CTreeView::OnInitialUpdate ();
+    m_imglDrives.Create (IDR_DRIVEIMAGES, 16, 1, RGB (255, 0, 255));
+    GetTreeCtrl ().SetImageList (&amp;m_imglDrives, TVSIL_NORMAL);
+    InitTree ();
+}
+
+void CDriveView::OnSelectionChanged (CString&amp; strPathName)
+{
+    //
+    // NOTE: Override this function in a derived class to respond
+    // to selection changes differently. The default implementation
+    // calls UpdateAllViews to update other views of the document.
+    //
+    GetDocument ()-&gt;UpdateAllViews (this,
+        (LPARAM) (LPCTSTR) strPathName);
+}
+
+/////////////////////////////////////////////////////////////////////////
+// Message handlers
+
+void CDriveView::OnDestroy ()
+{
+    // Kill all running file change notification threads.
+    if (m_nThreadCount) {
+        m_event.SetEvent ();
+        ::WaitForMultipleObjects (m_nThreadCount, m_hThreads, TRUE,
+            INFINITE);
+        for (UINT i=0; i&lt;m_nThreadCount; i++)
+            delete m_pThreads[i];
+        m_nThreadCount = 0;
+    }
+
+    // Call the base class's OnDestroy handler.
+    CTreeView::OnDestroy ();
+}
+
+void CDriveView::OnItemExpanding (NMHDR* pnmh, LRESULT* pResult)
+{
+    NM_TREEVIEW* pnmtv = (NM_TREEVIEW*) pnmh;
+    HTREEITEM hItem = pnmtv-&gt;itemNew.hItem;
+    CString strPathName = GetPathFromItem (hItem);
+    *pResult = FALSE;
+
+    // Reset the drive node if the drive is empty or the media changed.
+    if (!IsMediaValid (strPathName)) {
+        HTREEITEM hRoot = GetDriveNode (hItem);
+        GetTreeCtrl ().Expand (hRoot, TVE_COLLAPSE);
+        DeleteChildren (hRoot);
+        AddDummyNode (hRoot);
+        *pResult = TRUE;
+        return;
+    }
+
+    // Delete the item if strPathName no longer specifies a valid path.
+    if (!IsPathValid (strPathName)) {
+        GetTreeCtrl ().DeleteItem (hItem);
+        *pResult = TRUE;
+        return;
+    }
+
+    // If the item is expanding, delete the dummy item attached to it
+    // and add folder items. If the item is collapsing instead, delete
+    // its folder items and add a dummy item if appropriate.
+    if (pnmtv-&gt;action == TVE_EXPAND) {
+        DeleteChildren (hItem);
+        if (!AddDirectoryNodes (hItem, strPathName))
+            *pResult = TRUE;
+    }
+    else {
+        DeleteChildren (hItem);
+        if (IsDriveNode (hItem))
+            AddDummyNode (hItem);
+        else
+            SetButtonState (hItem, strPathName);
+    }
+}
+
+void CDriveView::OnSelChanged (NMHDR* pnmh, LRESULT* pResult)
+{
+    HTREEITEM hItem = ((NM_TREEVIEW*) pnmh)-&gt;itemNew.hItem;
+    CString strPathName = GetPathFromItem (hItem);
+
+    // Reset the drive node if the drive is empty or the media changed.
+    if (!IsMediaValid (strPathName)) {
+        HTREEITEM hRoot = GetDriveNode (hItem);
+        GetTreeCtrl ().Expand (hRoot, TVE_COLLAPSE);
+        DeleteChildren (hRoot);
+        AddDummyNode (hRoot);
+        return;
+    }
+
+    // Delete the item if strPathName no longer specifies a valid path.
+    if (!IsPathValid (strPathName)) {
+        GetTreeCtrl ().DeleteItem (hItem);
+        return;
+    }
+
+    // Update the item's button state if the item is not expanded.
+    if (!(GetTreeCtrl ().GetItemState (hItem, TVIS_EXPANDED) &amp;
+        TVIS_EXPANDED) || !GetTreeCtrl ().ItemHasChildren (hItem))
+        UpdateButtonState (hItem, strPathName);
+
+    // Call the view's virtual OnSelectionChanged function.
+    OnSelectionChanged (strPathName);
+}
+
+LONG CDriveView::OnDriveContentsChanged (UINT wParam, LONG lParam)
+{
+    RefreshDrive ((UINT) wParam);
+    return 0;
+}
+
+/////////////////////////////////////////////////////////////////////////
+// Public member functions
+
+void CDriveView::RefreshDrive (UINT nDrive)
+{
+    // Find the HTREEITEM that corresponds to the target drive.
+    CString strDrive = "?:\\";
+    strDrive.SetAt (0, 0x41 + nDrive);
+
+    HTREEITEM hItem =
+        FindItem (GetTreeCtrl ().GetNextItem (NULL, TVGN_ROOT),
+        strDrive);
+
+    if (hItem == NULL)
+        return;
+
+    // Reset the drive node if the drive is empty or the media changed.
+    if (!IsMediaValid (strDrive)) {
+        GetTreeCtrl ().Expand (hItem, TVE_COLLAPSE);
+        DeleteChildren (hItem);
+        AddDummyNode (hItem);
+        return;
+    }
+
+    // Save the current drive and directory.
+    char szHome[MAX_PATH];
+    ::GetCurrentDirectory (sizeof (szHome), szHome);
+
+    // Change to the root directory of the target drive.
+    if (!::SetCurrentDirectory ((LPCTSTR) strDrive))
+        return; // Invalid drive specification
+
+    // Refresh the drive node and all displayed subfolders.
+    if (hItem != NULL)
+        RefreshDirectory (hItem);
+
+    // Return to the original drive and directory.
+    ::SetCurrentDirectory (szHome);
+}
+
+CString CDriveView::GetPathFromItem (HTREEITEM hItem)
+{
+    CString strPathName;
+    while (hItem != NULL) {
+        CString string = GetTreeCtrl ().GetItemText (hItem);
+        if ((string.Right (1) != "\\") &amp;&amp; !strPathName.IsEmpty ())
+            string += "\\";
+        strPathName = string + strPathName;
+        hItem = GetTreeCtrl ().GetParentItem (hItem);
+    }
+    return strPathName;
+}
+
+BOOL CDriveView::ExpandPath (LPCTSTR pszPath, BOOL bSelectItem)
+{
+    if (::lstrlen (pszPath) &lt; 3)
+        return FALSE;
+
+    // Begin by finding the corresponding drive node.
+    CString strPathName = pszPath;
+    CString strDrive = strPathName.Left (3);
+
+    HTREEITEM hItem =
+        FindItem (GetTreeCtrl ().GetNextItem (NULL, TVGN_ROOT),
+        strDrive);
+
+    if (hItem == NULL)
+        return FALSE; // Invalid drive specification
+
+    strPathName = strPathName.Right (strPathName.GetLength () - 3);
+
+    // Now bore down through the directory structure searching for the
+    // item that corresponds to the final directory name in pszPath.
+    while (strPathName.GetLength () &gt; 0) {
+        GetTreeCtrl ().Expand (hItem, TVE_EXPAND);
+        hItem = GetTreeCtrl ().GetChildItem (hItem);
+        if (hItem == NULL)
+            return FALSE;
+
+        int nIndex = strPathName.Find ('\\');
+        hItem = FindItem (hItem, nIndex == -1 ? strPathName :
+            strPathName.Left (nIndex));
+        if (hItem == NULL)
+            return FALSE; // Invalid path name
+
+        if (nIndex == -1)
+            strPathName.Empty ();
+        else
+            strPathName = strPathName.Right (strPathName.GetLength () -
+                nIndex - 1);
+    }
+
+    GetTreeCtrl ().Expand (hItem, TVE_EXPAND);
+    if (bSelectItem)
+        GetTreeCtrl ().Select (hItem, TVGN_CARET);
+    return TRUE;
+}
+
+/////////////////////////////////////////////////////////////////////////
+// Protected helper functions
+
+UINT CDriveView::InitTree ()
+{
+    int nPos = 0;
+    UINT nCount = 0;
+    CString strDrive = "?:\\";
+
+    DWORD dwDriveList = ::GetLogicalDrives ();
+
+    while (dwDriveList) {
+        if (dwDriveList &amp; 1) {
+            strDrive.SetAt (0, 0x41 + nPos);
+            if (AddDriveNode (strDrive))
+                nCount++;
+        }
+        dwDriveList &gt;&gt;= 1;
+        nPos++;
+    }
+    return nCount;
+}
+
+BOOL CDriveView::AddDriveNode (CString&amp; strDrive)
+{
+    HTREEITEM hItem;
+
+    UINT nType = ::GetDriveType ((LPCTSTR) strDrive);
+    UINT nDrive = (UINT) strDrive[0] - 0x41;
+
+    switch (nType) {
+
+    case DRIVE_REMOVABLE:
+        hItem = GetTreeCtrl ().InsertItem (strDrive, ILI_FLOPPY,
+            ILI_FLOPPY);
+        AddDummyNode (hItem);
+        m_dwMediaID[nDrive] = GetSerialNumber (strDrive);
+        break;
+
+    case DRIVE_FIXED:
+        hItem = GetTreeCtrl ().InsertItem (strDrive, ILI_HARD_DISK,
+            ILI_HARD_DISK);
+        SetButtonState (hItem, strDrive);
+        CreateMonitoringThread (strDrive);
+        break;
+
+    case DRIVE_REMOTE:
+        hItem = GetTreeCtrl ().InsertItem (strDrive, ILI_NET_DRIVE,
+            ILI_NET_DRIVE);
+        SetButtonState (hItem, strDrive);
+        CreateMonitoringThread (strDrive);
+        break;
+
+    case DRIVE_CDROM:
+        hItem = GetTreeCtrl ().InsertItem (strDrive, ILI_CD_ROM,
+            ILI_CD_ROM);
+        AddDummyNode (hItem);
+        m_dwMediaID[nDrive] = GetSerialNumber (strDrive);
+        break;
+
+    case DRIVE_RAMDISK:
+        hItem = GetTreeCtrl ().InsertItem (strDrive, ILI_RAM_DRIVE,
+            ILI_RAM_DRIVE);
+        SetButtonState (hItem, strDrive);
+        CreateMonitoringThread (strDrive);
+        break;
+
+    default:
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+UINT CDriveView::AddDirectoryNodes (HTREEITEM hItem, CString&amp; strPathName)
+{
+    HANDLE hFind;
+    WIN32_FIND_DATA fd;
+
+    UINT nCount = 0;
+
+    CString strFileSpec = strPathName;
+    if (strFileSpec.Right (1) != "\\")
+        strFileSpec += "\\";
+    strFileSpec += "*.*";
+
+    if ((hFind = ::FindFirstFile ((LPCTSTR) strFileSpec, &amp;fd)) ==
+        INVALID_HANDLE_VALUE) {
+        if (IsDriveNode (hItem))
+            AddDummyNode (hItem);
+        return 0;
+    }
+
+    do {
+        if (fd.dwFileAttributes &amp; FILE_ATTRIBUTE_DIRECTORY) {
+            CString strFileName = (LPCTSTR) &amp;fd.cFileName;
+            if ((strFileName != ".") &amp;&amp; (strFileName != "..")) {
+                HTREEITEM hChild =
+                    GetTreeCtrl ().InsertItem ((LPCTSTR) &amp;fd.cFileName,
+                    ILI_CLOSED_FOLDER, ILI_OPEN_FOLDER, hItem, TVI_SORT);
+
+                CString strNewPathName = strPathName;
+                if (strNewPathName.Right (1) != "\\")
+                    strNewPathName += "\\";
+
+                strNewPathName += (LPCTSTR) &amp;fd.cFileName;
+                SetButtonState (hChild, strNewPathName);
+                nCount++;
+            }
+        }
+    } while (::FindNextFile (hFind, &amp;fd));
+
+    ::FindClose (hFind);
+    return nCount;
+}
+
+void CDriveView::SetButtonState (HTREEITEM hItem, CString&amp; strPathName)
+{
+    if (HasSubdirectory (strPathName))
+        AddDummyNode (hItem);
+}
+
+void CDriveView::UpdateButtonState (HTREEITEM hItem, CString&amp; strPathName)
+{
+    if (HasSubdirectory (strPathName)) {
+        if (!GetTreeCtrl ().ItemHasChildren (hItem)) {
+            AddDummyNode (hItem);
+            Invalidate ();
+        }
+    }
+    else {
+        if (GetTreeCtrl ().ItemHasChildren (hItem))
+            DeleteChildren (hItem);
+    }
+}
+
+BOOL CDriveView::HasSubdirectory (CString&amp; strPathName)
+{
+    HANDLE hFind;
+    WIN32_FIND_DATA fd;
+    BOOL bResult = FALSE;
+
+    CString strFileSpec = strPathName;
+    if (strFileSpec.Right (1) != "\\")
+        strFileSpec += "\\";
+    strFileSpec += "*.*";
+
+    if ((hFind = ::FindFirstFile ((LPCTSTR) strFileSpec, &amp;fd)) !=
+        INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.dwFileAttributes &amp; FILE_ATTRIBUTE_DIRECTORY) {
+                CString strFileName = (LPCTSTR) &amp;fd.cFileName;
+                if ((strFileName != ".") &amp;&amp; (strFileName != ".."))
+                    bResult = TRUE;
+            }
+        } while (::FindNextFile (hFind, &amp;fd) &amp;&amp; !bResult);
+        ::FindClose (hFind);
+    }
+
+    return bResult;
+}
+
+BOOL CDriveView::IsDriveNode (HTREEITEM hItem)
+{
+    return (GetTreeCtrl ().GetParentItem (hItem) == NULL) ? TRUE : FALSE;
+}
+
+void CDriveView::AddDummyNode (HTREEITEM hItem)
+{
+    GetTreeCtrl ().InsertItem ("", 0, 0, hItem);
+}
+
+HTREEITEM CDriveView::FindItem (HTREEITEM hItem, CString&amp; strTarget)
+{
+    while (hItem != NULL) {
+        if (GetTreeCtrl ().GetItemText (hItem) == strTarget)
+            break;
+        hItem = GetTreeCtrl ().GetNextSiblingItem (hItem);
+    }
+    return hItem;
+}
+
+UINT CDriveView::DeleteChildren (HTREEITEM hItem)
+{
+    UINT nCount = 0;
+    HTREEITEM hChild = GetTreeCtrl ().GetChildItem (hItem);
+
+    while (hChild != NULL) {
+        HTREEITEM hNextItem = GetTreeCtrl ().GetNextSiblingItem (hChild);
+        GetTreeCtrl ().DeleteItem (hChild);
+        hChild = hNextItem;
+        nCount++;
+    }
+    return nCount;
+}
+
+HTREEITEM CDriveView::GetDriveNode (HTREEITEM hItem)
+{
+    HTREEITEM hParent;
+
+    do {
+        hParent = GetTreeCtrl ().GetParentItem (hItem);
+        if (hParent != NULL)
+            hItem = hParent;
+    } while (hParent != NULL);
+    return hItem;
+}
+
+DWORD CDriveView::GetSerialNumber (CString&amp; strDrive)
+{
+    DWORD dwSerialNumber;
+    if (!::GetVolumeInformation ((LPCTSTR) strDrive, NULL, 0,
+        &amp;dwSerialNumber, NULL, NULL, NULL, 0))
+        dwSerialNumber = 0xFFFFFFFF;
+    return dwSerialNumber;
+}
+
+BOOL CDriveView::IsMediaValid (CString&amp; strPathName)
+{
+    // Return TRUE if the drive doesn't support removable media.
+    UINT nDriveType = GetDriveType ((LPCTSTR) strPathName);
+    if ((nDriveType != DRIVE_REMOVABLE) &amp;&amp; (nDriveType != DRIVE_CDROM))
+        return TRUE;
+
+    // Return FALSE if the drive is empty (::GetVolumeInformation fails).
+    DWORD dwSerialNumber;
+    CString strDrive = strPathName.Left (3);
+    UINT nDrive = (UINT) strDrive[0] - 0x41;
+
+    if (!::GetVolumeInformation ((LPCTSTR) strDrive, NULL, 0,
+        &amp;dwSerialNumber, NULL, NULL, NULL, 0)) {
+        m_dwMediaID[nDrive] = 0xFFFFFFFF;
+        return FALSE;
+    }
+
+    // Also return FALSE if the disk's serial number has changed.
+    if ((m_dwMediaID[nDrive] != dwSerialNumber) &amp;&amp;
+        (m_dwMediaID[nDrive] != 0xFFFFFFFF)) {
+        m_dwMediaID[nDrive] = dwSerialNumber;
+        return FALSE;
+    }
+
+    // Update our record of the serial number and return TRUE.
+    m_dwMediaID[nDrive] = dwSerialNumber;
+    return TRUE;
+}
+
+BOOL CDriveView::IsPathValid (CString&amp; strPathName)
+{
+    if (strPathName.GetLength () == 3)
+        return TRUE;
+
+    HANDLE hFind;
+    WIN32_FIND_DATA fd;
+    BOOL bResult = FALSE;
+
+    if ((hFind = ::FindFirstFile ((LPCTSTR) strPathName, &amp;fd)) !=
+        INVALID_HANDLE_VALUE) {
+            if (fd.dwFileAttributes &amp; FILE_ATTRIBUTE_DIRECTORY)
+                bResult = TRUE;
+        ::CloseHandle (hFind);
+    }
+    return bResult;
+}
+
+void CDriveView::RefreshDirectory (HTREEITEM hItem)
+{
+    // If the item is not expanded, update its button state and return.
+    if (!(GetTreeCtrl ().GetItemState (hItem, TVIS_EXPANDED) &amp;
+        TVIS_EXPANDED) || !GetTreeCtrl ().ItemHasChildren (hItem)) {
+        if (!IsDriveNode (hItem)) {
+            CString strPathName = GetPathFromItem (hItem);
+            UpdateButtonState (hItem, strPathName);
+            GetTreeCtrl ().Expand (hItem, TVE_COLLAPSE);
+        }
+        return;
+    }
+
+    // Delete items corresponding to subdirectories that no longer exist
+    // and build a CStringList containing the names of all the items that
+    // are children of hItem.
+    CStringList list;
+    WIN32_FIND_DATA fd;
+    HANDLE hFind;
+
+    HTREEITEM hChild = GetTreeCtrl ().GetChildItem (hItem);
+
+    while (hChild != NULL) {
+        HTREEITEM hNextItem = GetTreeCtrl ().GetNextSiblingItem (hChild);
+        CString strDirName = GetTreeCtrl ().GetItemText (hChild);
+
+        if ((hFind = ::FindFirstFile ((LPCTSTR) strDirName, &amp;fd)) !=
+            INVALID_HANDLE_VALUE) {
+            if (fd.dwFileAttributes &amp; FILE_ATTRIBUTE_DIRECTORY)
+                list.AddTail (strDirName);
+            else
+                GetTreeCtrl ().DeleteItem (hChild);
+            ::FindClose (hFind);
+        }
+        else
+            GetTreeCtrl ().DeleteItem (hChild);
+
+        hChild = hNextItem;
+    }
+
+    // Add items for newly created subdirectories.
+    if ((hFind = ::FindFirstFile ("*.*", &amp;fd)) != INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.dwFileAttributes &amp; FILE_ATTRIBUTE_DIRECTORY) {
+                CString strFileName = (LPCTSTR) &amp;fd.cFileName;
+                if ((strFileName != ".") &amp;&amp; (strFileName != "..")) {
+                    if (list.Find (strFileName) == NULL) {
+                        hChild = GetTreeCtrl ().InsertItem (strFileName,
+                            ILI_CLOSED_FOLDER, ILI_OPEN_FOLDER,
+                            hItem, TVI_SORT);
+                        CString strPathName = GetPathFromItem (hChild);
+                        SetButtonState (hChild, strPathName);
+                        list.AddTail (strFileName);
+                    }
+                }
+            }
+        } while (::FindNextFile (hFind, &amp;fd));
+    ::FindClose (hFind);
+    }
+
+    // Remove all items from the CStringList.
+    list.RemoveAll ();
+
+    // Now repeat this procedure for hItem's children.
+    hChild = GetTreeCtrl ().GetChildItem (hItem);
+
+    while (hChild != NULL) {
+        CString string = GetTreeCtrl ().GetItemText (hChild);
+        ::SetCurrentDirectory ((LPCTSTR) string);
+        RefreshDirectory (hChild); // Recursion!
+        ::SetCurrentDirectory ("..");
+        hChild = GetTreeCtrl ().GetNextSiblingItem (hChild);
+    }
+}
+
+void CDriveView::CreateMonitoringThread (CString&amp; strDrive)
+{
+    PTHREADINFO pThreadInfo = new THREADINFO; // Thread will delete
+    pThreadInfo-&gt;nDrive = (UINT) strDrive[0] - 0x41;
+    pThreadInfo-&gt;hEvent = m_event.m_hObject;
+    pThreadInfo-&gt;hWnd = m_hWnd;
+
+    CWinThread* pThread = AfxBeginThread (ThreadFunc, pThreadInfo,
+        THREAD_PRIORITY_IDLE);
+
+    pThread-&gt;m_bAutoDelete = FALSE;
+    m_hThreads[m_nThreadCount] = pThread-&gt;m_hThread;
+    m_pThreads[m_nThreadCount++] = pThread;
+}
+
+/////////////////////////////////////////////////////////////////////////
+// Thread function for detecting file system changes
+
+UINT CDriveView::ThreadFunc (LPVOID pParam)
+{
+    PTHREADINFO pThreadInfo = (PTHREADINFO) pParam;
+    UINT nDrive = pThreadInfo-&gt;nDrive;
+    HANDLE hEvent = pThreadInfo-&gt;hEvent;
+    HWND hWnd = pThreadInfo-&gt;hWnd;
+    delete pThreadInfo;
+
+    CString strDrive = "?:\\";
+    strDrive.SetAt (0, 0x41 + nDrive);
+    
+    // Get a handle to a file change notification object.
+    HANDLE hChange = ::FindFirstChangeNotification ((LPCTSTR) strDrive,
+        TRUE, FILE_NOTIFY_CHANGE_DIR_NAME);
+
+    // Return now if ::FindFirstChangeNotification failed.
+    if (hChange == INVALID_HANDLE_VALUE)
+        return 1;
+
+    HANDLE aHandles[2];
+    aHandles[0] = hChange;
+    aHandles[1] = hEvent;
+    BOOL bContinue = TRUE;
+
+    // Sleep until a file change notification wakes this thread or
+    // m_event becomes set indicating it's time for the thread to end.
+    while (bContinue) {
+        if (::WaitForMultipleObjects (2, aHandles, FALSE, INFINITE) -
+            WAIT_OBJECT_0 == 0) { // Respond to a change notification.
+            ::PostMessage (hWnd, WM_USER, (WPARAM) nDrive, 0);
+            ::FindNextChangeNotification (hChange);
+        }
+        else // Kill this thread (m_event became signaled).
+            bContinue = FALSE;
+    }
+
+    // Close the file change notification handle and return.
+    ::FindCloseChangeNotification (hChange);
+    return 0;
+}
+</PRE>
+<P></P>
+<P>CDriveView overrides CTreeView::OnInitialUpdate and initializes the tree view with items representing the drives present in the system. Most of the work is done by the helper functions CDriveView::InitTree and CDriveView::AddDriveNode. The former uses the GetLogicalDrives API function to enumerate logical drives, and the latter is called once per logical drive to add a "node" (TreeView item) to the tree view. For its part, AddDriveNode uses the handy Win32 GetDriveType API to determine what kind of drive—floppy drive, local hard disk, network drive, CD-ROM drive, or RAM drive—it's dealing with. The drive type determines which image will represent the drive node in the tree view. The image is obtained from the image list assigned to the tree view in CDriveView::OnInitialUpdate. The bitmaps that make up the image list are contained in the file Drives.bmp.</P>
+<P>Initially, none of the drive items added to the CDriveView are expanded to show subitems, but each drive that contains at least one subdirectory is assigned a dummy child item that causes a button containing a small plus sign to appear to the left of the drive icon. Clicking the button expands the tree to show the folders in the drive's root directory. Just before the expansion occurs, the tree view sends a TVN_ITEMEXPANDING notification to its parent via a WM_NOTIFY message. An ON_NOTIFY_REFLECT macro in the class's message map reflects the notification back to the view and activates CDriveView::OnItemExpanding, which deletes the dummy item and replaces it with folders. The helper function DriveView::AddDirectoryNodes uses the Win32 FindFirstFile and FindNextFile APIs to enumerate subdirectories and CTreeCtrl::InsertItem to add items to the TreeView.</P>
+<P>OnItemExpanding is also activated when the user collapses a branch of the tree. When a branch collapses, OnItemExpanding does essentially the opposite of what it did earlier by deleting the subfolder items and adding a dummy item so the branch can be expanded again later.</P>
+<P>CDriveView's just-in-time approach to populating the tree view prevents it from having to delay the application to enumerate every folder on every drive each time a CDriveView is created. It also ensures that, if the user expands a branch in which a folder was added, renamed, or deleted since the CDriveView was initialized, the change will be reflected in the TreeView. Unfortunately, it doesn't help if a folder is created, renamed, or deleted in a branch that's already expanded.</P>
+<P>This is where multiple threads and file-change notifications come in. Win32-based applications can use the FindFirstChangeNotification API to get a handle to a file-change notification object. When a thread blocks on a file-change notification object with WaitForSingleObject or WaitForMultipleObjects, it is suspended in an efficient wait state until an event in the file system causes the object to become "signaled."</P>
+<P>Each time CDriveView::AddDriveNode adds a drive node to the TreeView, it calls CreateMonitoringThread, another CDriveView function, to create a worker thread whose relative thread priority is THREAD_PRIORITY_IDLE. That thread creates a file-change notification object that becomes signaled when a directory is created, renamed, or deleted anywhere on the specified drive. The thread then blocks on the notification object. When a file-change notification wakes it up, the thread posts a WM_USER message to the drive-view window with wParam identifying the drive on which the change occurred. CDriveView::OnDriveContentsChanged responds to the message by calling CDriveView::RefreshDrive to refresh the branches of the directory structure displayed in the TreeView.</P>
+<P>Thus, if you create, rename, or delete a folder outside of a CDriveView, the change is immediately reflected in the CDriveView—provided, of course, the affected folder is visible at the time. You can see for yourself how the threads work by examining the source code for CDriveView's CreateMonitoringThread, RefreshDrive, and ThreadFunc functions. The latter is a static member function that serves as the thread function for the threads launched by CreateMonitoringThread. Thread functions must be declared static if they're members of a class. Otherwise, the compiler will unwittingly add a this pointer to the function's parameter list and you won't like what happens.</P>
+<P>In the source code for ThreadFunc, notice that each worker thread blocks on two objects. One is the file-change notification object created by FindFirstChangeNotification; the other is a CEvent object named m_event that's part of CDriveView. m_event is a manual-reset event object that's initially unset. It's manual-reset because there will probably be several threads blocking on it, and an autoreset event object can't release more than one waiting thread. Setting m_event via SetEvent causes ThreadFunc's call to WaitForMultipleObjects to return immediately even if no change occurred in the file system. CDriveView::OnDestroy sets m_event just before the drive-view window is destroyed to terminate all running worker threads. It then calls WaitForMultipleObjects itself to wait for all the threads to terminate. When you write multithreaded MFC classes, you should make it a practice to terminate the threads that your class created before an object of that class goes away. Otherwise, the threads will continue to run after the object has been destroyed.</P>
+<P>So far, so good. There's just one little problem: file-change notifications don't work with floppy drives if the drive is empty when a thread blocks on the notification object. That's why AddDriveNode doesn't call CreateMonitoringThread for floppy drives. In Windows¨ 95, file-change notifications don't work with network drives, either (they do under Windows NT¨). So even though it's called for network drives, CreateMonitoringThread is ineffectual on those drives unless it's running under Windows NT.</P>
+<P>Removable-media drives complicate the picture even further. What happens, for example, if a TreeView is displayed for drive A: and the user removes the disk from the drive? Ideally, the drive node should collapse (and maybe even become disabled) to indicate that the drive is empty. But the system doesn't tell you when a floppy disk is removed, and if you use a timer or a low-priority idle thread to check the status of a floppy drive, you degrade performance by continually pinging the drive.</P>
+<P>CDriveView's solution to the problem of remote and removable-media drives is to perform a media check on a removable drive every time a branch is expanded or collapsed or the TreeView selection changes. Both CDriveView:: OnItemExpanding and CDriveView:: OnSelChanged call CDriveView::IsMediaValid and collapse the appropriate drive node if the function returns zero (which means either the drive is empty or the disk has been changed since the last time IsMediaValid was called). Media changes are detected by comparing serial numbers. If the drive passes the IsMediaValid test, the OnItemExpanding and OnSelChanged functions then call CDriveView::IsPathValid to verify that the path to the folder that's about to change appearance is still valid. A negative return value causes the folder item to be removed from the TreeView. Therefore, a folder deleted from a floppy disk won't immediately disappear from a CDriveView, but if it's clicked, expanded, or collapsed, it will go away.</P>
+<P> </P>
+<H2><A NAME="sec1"></A>  Using CDriveView</H2><P>Enough about CDriveView internals; let's talk about using a CDriveView in your applications. There are two ways to put CDriveView to work. You can use it as is in a doc/view app by passing the document template a CRuntimeClass pointer to CDriveView, or you can derive your own class from it and use the derived class as your view. The DVDemo application in <B>Figure 2</B> illustrates the first of these methods. DVDemo is an SDI application that uses a CDriveView to display a clickable map of the host PC's drive and directory structure (see <B>Figure 3</B>).</P>
+<P><B> Figure 2  DVDemo</B></P>
+<P>DVDemo.cpp</P>
+<P><BR></P>
+<PRE> 
+//***********************************************************************
+//
+//  DVDemo.cpp
+//
+//***********************************************************************
+
+#include &lt;afxwin.h&gt;
+#include &lt;afxcview.h&gt;
+#include &lt;afxmt.h&gt;
+#include "Resource.h"
+#include "DVDemo.h"
+#include "MainFrame.h"
+#include "DriveView.h"
+#include "DemoDoc.h"
+
+CMyApp myApp;
+
+BOOL CMyApp::InitInstance ()
+{
+    SetRegistryKey ("Microsoft Systems Journal");
+    LoadStdProfileSettings ();
+
+    CSingleDocTemplate* pDocTemplate;
+    pDocTemplate = new CSingleDocTemplate (
+        IDR_MAINFRAME,
+        RUNTIME_CLASS (CDemoDoc),
+        RUNTIME_CLASS (CMainFrame),
+        RUNTIME_CLASS (CDriveView)
+    );
+
+    AddDocTemplate (pDocTemplate);
+
+    CCommandLineInfo cmdInfo;
+    ParseCommandLine (cmdInfo);
+
+    if (!ProcessShellCommand (cmdInfo))
+        return FALSE;
+
+    return TRUE;
+}</PRE>
+<P>MainFrame.h</P>
+<P><BR></P>
+<PRE> 
+//***********************************************************************
+//
+//  MainFrame.h
+//
+//***********************************************************************
+
+class CMainFrame : public CFrameWnd
+{
+    DECLARE_DYNCREATE (CMainFrame)
+
+protected:
+    virtual BOOL PreCreateWindow (CREATESTRUCT&amp;);
+
+    afx_msg int OnCreate (LPCREATESTRUCT);
+    afx_msg void OnRefreshDrive (UINT);
+
+    DECLARE_MESSAGE_MAP ()
+};
+
+
+</PRE>
+<P></P>
+<P>MainFrame.cpp</P>
+<P><BR></P>
+<PRE> 
+//***********************************************************************
+//
+//  MainFrame.cpp
+//
+//***********************************************************************
+
+#include &lt;afxwin.h&gt;
+#include &lt;afxcview.h&gt;
+#include &lt;afxmt.h&gt;
+#include "Resource.h"
+#include "MainFrame.h"
+#include "DriveView.h"
+
+IMPLEMENT_DYNCREATE (CMainFrame, CFrameWnd)
+
+BEGIN_MESSAGE_MAP (CMainFrame, CFrameWnd)
+    ON_WM_CREATE ()
+    ON_COMMAND_RANGE (IDM_MENU_BASE, IDM_MENU_BASE + 25, OnRefreshDrive)
+END_MESSAGE_MAP ()
+
+BOOL CMainFrame::PreCreateWindow (CREATESTRUCT&amp; cs)
+{
+    if (!CFrameWnd::PreCreateWindow (cs))
+        return FALSE;
+
+    cs.style &amp;= ~FWS_ADDTOTITLE;
+    return TRUE;
+}
+
+int CMainFrame::OnCreate (LPCREATESTRUCT lpcs)
+{
+    if (CFrameWnd::OnCreate (lpcs) == -1)
+        return -1;
+
+    DWORD dwDriveList = ::GetLogicalDrives ();
+
+    for (int i=0; i&lt;26; i++) {
+        if (!(dwDriveList &amp; 1))
+            GetMenu ()-&gt;DeleteMenu (IDM_MENU_BASE + i, MF_BYCOMMAND);
+        dwDriveList &gt;&gt;= 1;
+    }
+    return 0;
+}
+
+void CMainFrame::OnRefreshDrive (UINT nID)
+{
+    UINT nDrive = nID - IDM_MENU_BASE;
+    ((CDriveView*) GetActiveView ())-&gt;RefreshDrive (nDrive);
+}
+
+</PRE>
+<P>DemoDoc.h</P>
+<P><BR></P>
+<PRE> 
+//***********************************************************************
+//
+//  DemoDoc.h
+//
+//***********************************************************************
+
+class CDemoDoc : public CDocument
+{
+    DECLARE_DYNCREATE (CDemoDoc)
+};
+
+</PRE>
+<P></P>
+<P>DemoDoc.cpp</P>
+<P><BR></P>
+<PRE> 
+//***********************************************************************
+//
+//  DemoDoc.cpp
+//
+//***********************************************************************
+
+#include &lt;afxwin.h&gt;
+#include "DemoDoc.h"
+
+IMPLEMENT_DYNCREATE (CDemoDoc, CDocument)</PRE>
+<P><img src="wicked3.gif"></P>
+<P><B> Figure 3  Using CDriveView</B></P>
+<P>You can call CView functions on a CDriveView, and you can call CTreeCtrl functions if you first call GetTreeCtrl. CDriveView also adds a few functions of its own (see <B>Figure 4</B>). Its external interface consists of three public member functions ("operations" in MFC parlance) and one virtual function (overridable). DVDemo's frame-window class uses one of CDriveView's public function members, RefreshDrive, to implement the Refresh Drive commands in the Options menu.</P>
+<P><B> Figure 4  CDriveView's External Interface</B></P>
+<H3><A NAME="sec2"></A> Operations</H3><P><BR></P>
+<PRE> BOOLExpandPath(LPCTSTRpszPath,BOOLbSelectItem=TRUE)
+</PRE>
+<P>Call ExpandPath to expand the tree to display a specified folder. A FALSE return usually means that pszPath specifies an invalid path name. The path name is case-sensitive, so this function will fail if pszPath points to "C:\My documents" and the actual path name is "C:\My Documents."</P>
+<P><B>Return Value</B></P>
+<P>TRUE if path was successfully expanded, FALSE if it was not.</P>
+<P><B>Parameters</B></P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="95pt" VALIGN="TOP"><COL WIDTH="315pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P> pszPath</P></TD><TD VALIGN="TOP"><P>String specifying the path to the folder to be displayed.</P></TD></TR><TR><TD VALIGN="TOP"><P> bSelectItem</P></TD><TD VALIGN="TOP"><P>TRUE if the folder should be selected,FALSE if not.</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P></P>
+<P><BR></P>
+<PRE> CString GetPathFromItem (HTREEITEM hItem)
+</PRE>
+<P>Given the handle of an item in the tree view, GetPathFromItem returns a path name for the item—for example, "C:\My Documents."</P>
+<P><B>Return Value</B></P>
+<P>ACString with the fully qualified path name for the folder represented by hItem.</P>
+<P><B>Parameters</B></P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="95pt" VALIGN="TOP"><COL WIDTH="315pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P> hItem</P></TD><TD VALIGN="TOP"><P>Handle of the TreeView item.</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P><BR></P>
+<PRE> 
+void RefreshDrive (UINT nDrive)
+</PRE>
+<P>Call this function to programmatically refresh the view of a drive and its folders. If the drive supports removable media and the current view of the drive is invalid because the media has changed or been removed, RefreshDrive collapses the drive node.</P>
+<P><B>Return Value</B></P>
+<P>None</P>
+<P><B>Parameters</B></P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="95pt" VALIGN="TOP"><COL WIDTH="315pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P> nDrive</P></TD><TD VALIGN="TOP"><P>Drive number (0=A:, 1=B:, and so on).</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P> </P>
+<H3><A NAME="sec3"></A> Overridables</H3><P><BR></P>
+<PRE> virtual void OnSelectionChanged (CString&amp; strPathName)
+</PRE>
+<P>Override OnSelectionChanged to respond to selection changes within the TreeView control—for example, to update the text in a status bar. The default implementation of this function calls the document's UpdateAllViews function to update other views of the document.</P>
+<P><B>Return Value</B></P>
+<P>None</P>
+<P><B>Parameters</B></P>
+<P>strPathName                   Path name for the selected folder.</P>
+<P>CDriveView::GetPathFromItem converts a TreeView item handle (HTREEITEM) into a fully qualified path name. Say you need the path name for the folder that's currently selected in the drive view to process a menu command. Here's how you'd go about it:</P>
+<P> </P>
+<P><BR></P>
+<PRE>   HTREEITEM hItem = 
+   GetTreeCtrl ().GetSelectedItem ();
+  CString strPathName = 
+      pView-&gt;GetPathFromItem (hItem);</PRE>
+<P> </P>
+<P>Converting a path name into an HTREEITEM is equally easy. First use CDriveView::ExpandPath to make sure the path to the folder you're interested in is expanded. Since ExpandPath by default also selects the folder whose path is expanded, you can then use CTreeCtrl::GetSelectedItem to retrieve the folder's HTREEITEM:</P>
+<P> </P>
+<P><BR></P>
+<PRE>   ExpandPath ("C:\\WINDOWS");
+  HTREEITEM hItem = GetTreeCtrl ().GetSelectedItem ();</PRE>
+<P> </P>
+<P>You can customize CDriveView's behavior by deriving your own view class from it and overriding virtual functions. Suppose you'd like your drive view to appear with the path to the current drive and directory already expanded. Simply override OnInitialUpdate in the derived class, call GetCurrentDirectory to get the current drive and directory, and pass the path name to CDriveView::ExpandPath:</P>
+<P> </P>
+<P><BR></P>
+<PRE>   void CMyDriveView::OnInitialUpdate ()
+  {
+      CDriveView::OnInitialUpdate ();
+      char szPath[MAX_PATH];
+      ::GetCurrentDirectory (sizeof (szPath), szPath);
+      ExpandPath (szPath);
+  }</PRE>
+<P> </P>
+<P>It's important to call the base class's OnInitialUpdate function first, or else the view won't be initialized and there will be no items for ExpandPath to expand.</P>
+<P>Another virtual function that's useful in a derived class is CDriveView::OnSelectionChanged. CDriveView uses message reflection to map TVN_SELCHANGED notifications, which indicate that the TreeView selection has changed to an internal handler named OnSelChanged. OnSelChanged, in turn, does some housekeeping and then calls OnSelectionChanged. The default implementation of OnSelectionChanged calls the document's UpdateAllViews function to update other views of the document, which is useful if you're writing an Explorer-like application that displays drives and folders in one pane and the contents of the currently selected folder in another pane.</P>
+<P>Maybe your app's main window has a status bar, and one of the status bar's panes shows the path to the folder that is currently selected in the drive-view window. In that case, you can override OnSelectionChanged and update the status-bar pane each time the selection changes:</P>
+<P><BR></P>
+<PRE> void CMyDriveView::OnSelectionChanged (
+                                  CString&amp; strPathName)
+{
+    CDriveView::OnSelectionChanged (strPathName);
+AfxGetMainWnd ()-&gt;m_wndStatusBar.SetPaneText (
+                    PANE_INDEX, (LPCTSTR) strPathName);
+}</PRE>
+<P> </P>
+<P>This example assumes that m_wndStatusBar is a public data member of the application's frame-window class. In real life, the status bar is usually a private or protected class member and the pane text is set by sending a message to the frame window, which in turn calls the status bar's SetPaneText function. Note that you can safely skip the call to the base class's OnSelectionChanged function if you don't need to call UpdateAllViews.</P>
+<P>CDriveView also includes more than a dozen protected member functions that could be useful to you in a derived class. One, GetSerialNumber, returns either a disk's serial number or 0xFFFFFFFF if the drive is currently empty. Another, FindItem, searches a group of TreeView items for one that's assigned a specified text string. Refer to the CDriveView source code for further information.</P>
+<P> </P>
+<H2><A NAME="sec4"></A>  Your Needs, Your Ideas</H2><P>Are there tough Win32 programming questions you'd like to see answered in this column? If so, email them to me at the address listed below. I regret that time doesn't permit me to respond individually to all questions, but rest assured that I'll read every one and consider each for inclusion in a future installment of Wicked Code.</P>
+<P>Have a tricky issue dealing with Windows? Send your questions via email to Jeff Prosise: 72241.44@compuserve.com</P>
+<P><I>This article is reproduced from Microsoft Systems Journal. Copyright </I>©<I> 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P><I>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</I></P>
+<P></P></font></body></HTML>

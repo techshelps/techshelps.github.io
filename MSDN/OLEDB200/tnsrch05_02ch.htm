@@ -1,0 +1,169 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Creating a Dataset and Getting Cell Data</title>
+<link disabled rel=stylesheet href=msdn_ie3.css>
+<style type="text/css">
+@import url(msdn_ie4.css);
+</style>
+</HEAD>
+<BODY>
+<FONT FACE="Verdana, Arial, Helvetica" SIZE="2">
+
+	<!--TOOLBAR_START-->
+	<!--TOOLBAR_EXEMPT-->
+	<!--TOOLBAR_END-->
+
+
+<h1><a name="creatingdatasetgettingcelldata"></a>Creating a Dataset and Getting Cell Data</h1>
+<p>
+<b>MDPDataset()</b> is used to get the cell data for an MDX query specified by <i>pwszQuery</i>, compute the cell data coordinates, and call <b>IMDDataset::GetCellData()</b> for each cell in the dataset.</p>
+<pre><code>//
+HRESULT MDPDataset(ICommandText *pICommandText, pwszQuery)
+{
+   HRESULT hr;
+
+   struct COLUMNDATA
+   {
+      SDWORD   dwLength;   // length of data (not space allocated)
+      DBSTATUS   dwStatus;   // status of column
+      VARIANT   var;         // variant value
+   };
+   // Execute the MDX query
+   IMDDataset* pIMDDataset = NULL;
+   hr = pICommandText-&gt;SetCommandText(DBGUID_MDX, pwszQuery);
+   hr = pICommandText-&gt;Execute(NULL, IID_IMDDataset, NULL, NULL, 
+                               (IUnknown **)&amp;pIMDDataset ));
+
+   // Fetch the axis info to compute the coordinates
+   ULONG cAxis;
+   MDAXISINFO* rgAxisInfo = NULL;
+   hr = pIMDDataset-&gt;GetAxisInfo( &amp;cAxis, &amp;rgAxisInfo );
+
+   // Calculate the coordinate "offset factors". These are used to 
+   // translate from a point in cell space to a set of axis coordinates.
+   // Example, consider a dataset with three axes and the following 
+   // number of coordinates for each axis:
+   //   {x,y,z} = {3,4,5}
+   //      rgAxisOffset[2] = 3*4
+   //      rgAxisOffset[1] = 3
+   //      rgAxisOffset[0] = 1
+   // Thus, where p represents the cell's ordinal value
+   //      z = p % 12
+   //      y = (p - z*12) % 3
+   //      x = (p - z*12 - y*3)
+   // And,
+   //      p = x + 3*y + 12*z
+
+   ULONG cAxisTuple;
+   ULONG iOffset = 1;
+   ULONG ulMaxCoord = 0;
+   ULONG rgAxisOffset[MAX_DIMS];   // Array of offset multipliers
+
+   // for all axes, excluding slicer axis
+   for (ULONG iAxis=0; iAxis &lt; cAxis-1; iAxis++)
+   {
+      rgAxisOffset[iAxis] = iOffset;
+      cAxisTuple = rgAxisInfo[iAxis].cCoordinates;
+      iOffset *= cAxisTuple;
+   }
+   ulMaxCoord = iOffset;
+   ULONG cSliceCoord = rgAxisOffset[cAxis-1]
+
+   // bind to the column values for each cell
+   IColumnsInfo *pIColumnsInfo = NULL;
+   hr = pIMDDataset-&gt;QueryInterface(IID_IColumnsInfo, 
+                        (void**)&amp;pIColumnsInfo);
+
+   ULONG cCol;
+   WCHAR* pStringsBuffer = NULL;
+   DBCOLUMNINFO* pInfo = NULL;
+   hr = pIColumnsInfo-&gt;GetColumnInfo(&amp;cCol, &amp;pInfo, &amp;pStringsBuffer);
+
+   // Create bindings for each cell's columns, ordered as returned by 
+   // GetColumnInfo(). Bind everything as Variant.
+   dwOffset = 0;
+   ULONG iBind = 0;
+   ULONG cBind = 0;
+   for (ULONG iCol=0; iCol &lt; cCol; iCol++)
+   {
+      rgBind[iBind].iOrdinal&nbsp; = pInfo[iCol].iOrdinal;
+      rgBind[iBind].obValue&nbsp;&nbsp; = dwOffset + 
+         offsetof(COLUMNDATA,var);
+      rgBind[iBind].obLength&nbsp; = dwOffset + 
+         offsetof(COLUMNDATA,dwLength);
+      rgBind[iBind].obStatus&nbsp; = dwOffset + 
+         offsetof(COLUMNDATA,dwStatus);
+      rgBind[iBind].pTypeInfo = NULL;
+      rgBind[iBind].pObject&nbsp;&nbsp; = NULL;
+      rgBind[iBind].pBindExt&nbsp; = NULL;
+      rgBind[iBind].cbMaxLen&nbsp; = sizeof(VARIANT);
+      rgBind[iBind].dwFlags&nbsp;&nbsp; = 0;
+      rgBind[iBind].eParamIO&nbsp; = DBPARAMIO_NOTPARAM;
+      rgBind[iBind].dwPart&nbsp;&nbsp;&nbsp; = DBPART_VALUE | 
+                                DBPART_LENGTH | 
+                                DBPART_STATUS;
+      rgBind[iBind].dwMemOwner= DBMEMOWNER_CLIENTOWNED;
+      rgBind[iBind].wType&nbsp;&nbsp;&nbsp;&nbsp; = DBTYPE_VARIANT;
+      rgBind[iBind].bPrecision= 0;
+      rgBind[iBind].bScale&nbsp;&nbsp;&nbsp; = 0;
+
+      dwOffset += rgBind[iBind].cbMaxLen + offsetof(COLUMNDATA,var);
+      iBind++;
+   }
+   cBind = iBind;
+
+   // Create the accessor.
+   IAccessor* pIAccessor;
+   hr = pIMDDataset-&gt;QueryInterface(IID_IAccessor, void**)&amp;pIAccessor);
+   // Note that the value of dwOffset contains the size of a cell
+   // failure to specify this value will result in an error.
+   hr = pIAccessor-&gt;CreateAccessor(DBACCESSOR_ROWDATA, cBind, rgBind, 
+                                   dwOffset, phAccessor, NULL);
+
+   pIAccessor-&gt;Release();
+   pIColumnsInfo-&gt;Release();
+
+   // Allocate a buffer for a single cell in a slice
+   ULONG cbRowsize = dwOffset;
+   pData = (BYTE*)CoTaskMemAlloc(cbRowSize);
+
+   // Fetch each cell in the dataset
+   for (ULONG ulCellCoord=0; ulCellCoord &lt; ulMaxCoord; ulCellCoord++)
+   {
+      // Populate cell buffer.
+      hr = pIMDDataset-&gt;GetCellData(hAccessor, ulCellCoord, ulCellCoord, 
+                                    pData);
+
+      // Traverse each bound cell property value for a single cell "row"
+      // Use pColumn to access each column’s data values
+      for (iBind=0; iBind &lt; cBind; iBind++)
+      {
+         // advance to the column value
+         (COLUMNDATA*)pColumn = (COLUMNDATA *)(pData + 
+                                 rgBind[iBind].obLength);
+         // pColumn-&gt;var points to the variant value
+      }
+   }
+   // Free the accessor and rowset
+   hr = pIAccessor-&gt;ReleaseAccessor(hAccessor, NULL);
+   hr = pIAccessor-&gt;Release();
+   hr = pIColumnsInfo-&gt;Release();
+
+   // Free the row data and bindings
+   CoTaskMemFree(pData);
+   CoTaskMemFree(rgBind);
+
+   // Free the column info.
+   CoTaskMemFree(pInfo);
+   CoTaskMemFree(pwszStringsBuffer);
+
+   hr = pIMDDataset-&gt;FreeAxisInfo(cAxis, rgAxisInfo);
+   hr = pIMDDataset-&gt;Release();
+   return hr;
+}
+
+</code></pre>
+</font></BODY>
+</HTML>

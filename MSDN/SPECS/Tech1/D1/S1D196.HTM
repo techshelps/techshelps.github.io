@@ -1,0 +1,77 @@
+<HTML><HEAD><META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252"><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Reusability Through Aggregation</TITLE><style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY BGCOLOR="#FFFFFF">
+
+</OBJECT></FORM>
+<H3>Reusability Through Aggregation</H3>  </P>
+Let's now say that we are planning to revise our TextRender object at a later time than out initial containment implementation in the previous section. At that time we find that the implementor of the TextImage object at the time the implementor of the TextRender object sat down to work (or perhaps is making a revision of his object) that the vendor of the TextImage object has improved TextImage such that it implements everything that TextRender would like to do through its IDataObject interface. That is, TextImage still accepts text through SetData but has recently added the ability to make copies of its text and provide those copies through GetData in addition to metafiles and bitmaps.</P>
+In this case, the implementor of TextRender now sees that TextImage's implementation of IDataObject<I> </I>is exactly the implementation that TextRender requires. What we, as the implementors of TextRender, would like to do now is simply expose TextImage's IDataObject as our own as shown in Figure 6-4.</P>
+<img src="ASL3G.gif"></P>
+<B>Figure 6-4: When an inner object does a complete job implementing an interface, outer objects may want to expose the interface directly.</B></P>
+The only catch is that we must implement the proper behavior of the IUnknown members in the inner object's (TextImage) IDataObject interface: AddRef<I> </I>and Release have to affect the reference count on the outer object (TextRender) and not the reference count of the inner object. Furthermore, QueryInterface has to be able to return the TextRender object's IPersistFile interface. The solution is to inform the inner object that it is being used in an aggregation such that when it sees IUnknown calls to its interfaces it can delegate those calls to the outer object.</P>
+<A NAME="PT2"></A>One other catch remains: the outer object must have a means to control the lifetime of the inner object through AddRef<I> </I>and Release as well as have a means to query for the interfaces that only exist on the inner object. For that reason, the inner object <I>must implement an isolated version of IUnknown that controls the inner object exclusively and never delegates to the outer object.</I><font class="MissingLink" meta="aslch06_FNNine">9.</font><I> </I>This requires that the inner object separates the IUnknown members of its functional interfaces from an implementation of IUnknown that strictly controls the inner object itself. In other words, the inner object, to support aggregation, must implement two sets of IUnknown<I> </I>functions: delegating and non-delegating.</P>
+This, then, is the mechanism for making aggregation work:</P>
+<SPAN CLASS="list"><OL><LI>When creating the inner object, the outer object must pass its own IUnknown to the inner object through the pUnkOuter parameter of IClassFactory::CreateInstance<I>. </I>pUnkOuter in this case is called the <I>controlling unknown.</I></LI><LI>The inner object must check pUnkOuter in its implementation of CreateInstance<I>. </I>If this parameter is non-NULL, then the inner object knows it is being created as part of an aggregate. If the inner object does not support aggregation, then it must fail with CLASS_E_NOAGGREGATION. If aggregation is supported, the inner object saves pUnkOuter for later use, but does not call AddRef on it. The reason is that the inner object's lifetime is entirely contained within the outer object's lifetime, so there is no need for the call and to do so would create a circular reference.</LI><LI>If the inner object detects a non-NULL pUnkOuter in CreateInstance<I>,</I> and the call requests the interface IUnknown itself (as is almost always the case), the inner object must be sure to return its non-delegating IUnknown.</LI><LI>If the inner object itself aggregates other objects (which is unknown to the outer object) it must pass the same pUnkOuter pointer it receives down to the next inner object.</LI><LI>When the outer object is queried for an interface it exposes from the inner object, the outer object calls QueryInterface in the non-delegating IUnknown to obtain the pointer to return to the client.</LI><LI>The inner object must delegate to the controlling unknown, that is, pUnkOuter, all IUnknown<I> </I>calls occurring in any interface it implements other than the non-delegating IUnknown.</LI></OL></SPAN>Through these steps, the inner object is made aware of the outer object, obtains an IUnknown to which it can delegate calls to insure proper behavior of reference counting and QueryInterface, and provides a way for the outer object to control the inner object's lifetime separately. The mechanism is illustrated in Figure 6-5.</P>
+<img src="ASL4G.gif"></P>
+<B>Figure 6-5: Aggregation requires an explicit implementation of </B><B><I>IUnknown</I></B><B> on the inner object and delegation of </B><B><I>IUnknown </I></B><B>function of any other interface to the outer object's </B><B><I>IUnknown</I></B><B> functions.</B></P>
+Now let's look at how this mechanism manifests in code. First off, the TextRender object no longer needs its own IDataObject implementation and can thus remove it from its class, but will need to add a member m_pUnkImage to maintain the TextImage's non-delegating <I>IUnknown</I>:</P>
+  </P>
+<BR></P>
+<pre><code>class CTextRender : public IPersistFile {
+   private:
+      ULONG      m_cRef;         //Reference Count
+      char *      m_pszText;      //Pointer to allocated text
+      ULONG      m_cchText;      //Number of characters in m_pszText
+
+      IUnknown *   m_pUnkImage;      //TextImage IUnknown
+      //Other internal member functions here
+
+   public:
+      [Constructor, Destructor]
+
+      //Outer object IUnknown
+      HRESULT QueryInterface(REFIID iid, void ** ppv);
+      ULONG AddRef(void);
+      ULONG Release(void);
+
+      //IPersistFile Member overrides
+      ...
+   };
+</code></pre>
+  </P>
+In the previous section we saw how the TextRender object would create a TextImage object for containment using CoCreateInstance with the pUnkOuter parameter set to NULL. In aggregation, this parameter will be TextRender's own IUnknown<I> </I>(obtained using a typecast). Furthermore, TextRender must request IUnknown initially from TextImage (storing the pointer in m_pUnkImage<I>)</I>:</P>
+  </P>
+<BR></P>
+<pre><code>//TextRender initialization
+HRESULT     hr;
+hr=CoCreateInstance(CLSID_TextImage, CLSCTX_ SERVER, (IUnknown *)this, IID_IUnknown, (void *)&amp;m_pUnkImage);
+if (FAILED(hr))
+   //TextImage not available, either fail or disable graphic rendering
+//Success:  can now make use of TextImage object.</code></pre>
+  </P>
+Now, since TextRender does not have its own IDataObject any longer, its implementation of QueryInterface will use m_pUnkImage to obtain interface pointers:</P>
+  </P>
+<BR></P>
+<pre><code>HRESULT CTextRender::QueryInterface(REFIID iid, void ** ppv) {
+   *ppv=NULL;
+
+   //This code assumes an overloaded == operator for GUIDs exists
+   if (IID_IUnknown==iid)
+      *ppv=(void *)(IUnknown *)this;
+
+   if (IID_IPersitFile==iid)
+      *ppv=(void *)(IPersistFile *)this;
+
+   if (IID_IDataObject==iid)
+      return m_pUnkImage-&gt;QueryInterface(iid, ppv);
+
+   if (NULL==*ppv)
+      return E_NOINTERFACE;      //iid not supported.
+   
+   //Any call to anyone's AddRef is our own.
+   AddRef();
+   return NOERROR;
+   }
+</code></pre>
+  </P>
+Note that delegating QueryInterface to the inner object is done only for those interfaces that the outer object knows it wants to expose. The outer object should not delegate the query as a default case, for such blind forwarding without an understanding of the semantic being forwarded will almost assuredly break the outer object should the inner one be revised with new functionality.</P>
+ </P></BODY></HTML>

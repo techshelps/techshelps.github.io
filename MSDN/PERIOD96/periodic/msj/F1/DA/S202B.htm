@@ -1,0 +1,535 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Win32 Q &amp; A</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  Win32 Q &amp; A</H1><P>Jeffrey Richter</P>
+<P>Jeffrey Richter wrote <I>Advanced Windows</I> (Microsoft Press, 1995) and <I>Windows 95: A Developer</I><I>'</I><I>s Guide</I> (M&amp;T Books, 1995). Jeff is a consultant and teaches Win32-based programming seminars. He can be reached at v-jeffrr@microsoft.com.</P>
+<P>I'd like to start off this column with an apology. There is a bug in the OPTEX code in my July column. Unfortunately, I noticed the bug after the article was sent to the printer, but I was able to correct the code before it was posted online. You can download the correct code from any of the places mentioned on page 5. I apologize for any inconvenience this may have caused.</P>
+<P>The bug was in my original implementation of OPTEX_Enter. Specifically, the code only worked if you specified a timeout value of INFINITE. The call to InterlockIncrement was not countered with a call to InterlockedDecrement in the case where waiting did timeout. Unfortunately, I couldn't add this feature to the code without always jumping to kernel mode, so I removed the ability to specify a timeout value when calling OPTEX_Enter. However, I did add a new OPTEX_TryEnter function that is similar to the new TryEnterCriticalSection function available in Windows NT® 4.0. My OPTEX_TryEnter function works with Windows NT 4.0 only because it takes advantage of the new InterlockedCompareExchange API.</P>
+<P><font size="6" face="verdana,arial,helvetica">Q</font>I'm designing an application that may or may not need to call functions contained in a DLL. Since I want to load the DLL only if I need to call a function in it, I obviously need to use explicit linking rather than implicit linking. However, I'd like to design my application so that it is smart—<B>Figure 1</B> will show what I mean.</P>
+<P><B> Figure 1  Incorrect SEH to Selectively Load DLLs</B></P>
+<P><BR></P>
+<PRE> #include &lt;windows.h&gt;
+// Decalre a pointer to the MessageBeep function
+typedef BOOL (WINAPI *PFNMESSAGEBEEP)(UINT);
+PFNMESSAGEBEEP g_pfnMessageBeep = NULL;
+
+LONG ExceptionFilter(); // Forward reference
+
+int WINAPI WinMain (HINSTANCE hinstExe, HINSTANCE hinstExePrev,
+                    LPSTR szCmdLine, int nCmdShow) {
+
+   __try {
+      // Try to call MessageBeep
+      g_pfnMessageBeep(MB_OK);
+   } 
+   __except(ExceptionFilter()) {
+   }
+   return(0);
+}
+
+
+LONG ExceptionFilter () {
+   // Make sure that USER32.DLL is loaded
+   HMODULE hinstDll = LoadLibrary(__TEXT("User32"));
+
+   // Get the address of MessageBeep and save it
+   g_pfnMessageBeep = (PFNMESSAGEBEEP)
+      GetProcAddress(hinstDll, "MessageBeep");
+
+   // Re-execute the instruction that
+   // raised the access violation
+   return(EXCEPTION_CONTINUE_EXECUTION);
+}</PRE>
+<P></P>
+<P>In this stripped-down sample, I declare a global variable, g_pfnMessageBeep, which holds the address of the MessageBeep function. I initialize this variable to NULL so I will get an access violation when I try to call this function. However, since the call to this function is inside a structured exception handling (SEH) frame, my exception filter function will be called. </P>
+<P>Inside the exception filter, I call LoadLibrary to  load USER32.DLL (the module that contains the MessageBeep function) into my process's address space dynamically. Next, I call GetProcAddress to get the address of the MessageBeep function and save the address in the global g_pfnMessageBeep variable. Finally, the filter returns EXCEPTION_CONTINUE_EXECUTION so the thread will re-execute the call to the function. The call should succeed this time.</P>
+<P>When I build and test the code shown, it does not work correctly. In fact, I get an infinite loop! It appears that even after I change g_pfnMessageBeep and return EXCEPTION_<BR>CONTINUE_EXECUTION, the thread still raises access violations. These access violations cause my exception filter to be called, which again returns EXCEPTION_CONTINUE_EXECUTION, and so on and so on.</P>
+<P>Can you explain what I am doing wrong? Is there a way to accomplish what I'm trying to do?</P>
+<P><I>Jeremy Y.Y. Lai</I></P>
+<P>Via the Internet</P>
+<P><font size="6" face="verdana,arial,helvetica">A</font>First, let's go into what's happening. From your question, it appears that you have a good understanding of how SEH works. As you pointed out, when an exception filter returns EXCEPTION_CONTINUE_EXECUTION, the thread re-executes the failed CPU instruction. However, let's take a closer look at this CPU instruction.</P>
+<P>Inside your __try block, you attempt to call a function using g_pfnMessageBeep. Since you initialize this variable to NULL, the thread tries to call a function at address 0x00000000. This means the thread's program counter (PC) is set to 0x00000000. After the PC is set, the CPU tries to read the instruction at address 0x00000000. This is what causes the access violation, not setting the PC to 0x00000000. </P>
+<P>When the access violation occurs, the system changes your thread's PC to your exception filter and the global g_pfnMessageBeep variable is changed correctly. Your filter returns EXCEPTION_CONTINUE_EXECUTION, which causes the thread's PC to be set back to the same address, 0x00000000. Again, the CPU is unable to read an instruction at this address and another access violation is raised. This explains why the function is never called and why the thread is in an infinite loop. Think of it this way—if the PC was a salesman hawking giant hair dryers, and the person at address 0x00000000 was Jean-Luc Picard, the exception is raised when Picard answers the door—not when the salesman arrives at the doorstep. If, after Picard slams the door in the salesman's face (the exception), the salesman does not go to the correct door (Marge Simpson), the exception will be raised again when Picard answers the door a second time. </P>
+<P>Let's fix this. Inside the exception filter, tell the system that you want the thread to continue execution from the MessageBeep function instead of address 0x00000000 and then return EXCEPTION_CONTINUE_EXECUTION. Inside an exception filter, you can tell the system where you want it to continue execution. You do not have to continue execution from the same CPU instruction that raised the violation.</P>
+<P>To set the PC yourself, your exception filter will have to be modified so you pass the result of calling GetExceptionInformation into it. I wrote some code that fixes your problem and adds some features (see <B>Figure 2</B>). Notice that the WinMain function (shown at the end of the listing) calls GetExceptionInformation when calling the DemandLoadDll_ExceptionFilter function. GetExceptionInformation returns a pointer to an EXCEPTION_POINTERS structure.</P>
+<P> </P>
+<P><BR></P>
+<PRE> typedef struct _EXCEPTION_POINTERS {
+   PEXCEPTION_RECORD ExceptionRecord;
+   PCONTEXT ContextRecord;
+} EXCEPTION_POINTERS;</PRE>
+<P> </P>
+<P>The ContextRecord member points to a CONTEXT structure that contains a member for each register on your CPU. When a thread raises an exception, the system takes a snapshot of the CPU's registers and saves them in this structure. This way, when a filter returns EXCEPTION_CONTINUE_EXECUTION, the system can restore the CPU registers to their state when the exception was raised. This is necessary so the thread can continue executing successfully.</P>
+<P><B> Figure 2  Correct SEH to Selectively Load DLLs</B></P>
+<P><BR></P>
+<PRE> /*************************************************************
+Module name: DemandLoadDll.c
+Written by:  Jeffrey Richter
+Purpose:     Demonstrates how to load a DLL and call 
+             functions in it on demand
+*************************************************************/
+
+
+#define STRICT
+#include &lt;windows.h&gt;
+
+
+//////////////////////////////////////////////////////////////
+
+
+// Here is where you declare the function address variables
+// for the functions that you wish to link to on demand.
+// Each address is offset from PFN_FIRSTINDEX which points
+// to address space that must raise an access violation 
+// when we attempt to execute it.  I have chosen an address
+// of 0xFFFF0000 which is just below 4GB.
+#define PFN_FIRSTINDEX   (0xFFFF0000)
+
+
+// Dynamically link to MessageBeep
+typedef BOOL (WINAPI *PFNMESSAGEBEEP)(UINT);
+PFNMESSAGEBEEP g_pfnMessageBeep = 
+   (PFNMESSAGEBEEP) (PFN_FIRSTINDEX + 0);
+
+
+// Dynamically link to MessageBox  (A/W)
+typedef int (WINAPI *PFNMESSAGEBOX)(HWND, 
+             LPCTSTR, LPCTSTR, int);
+PFNMESSAGEBOX g_pfnMessageBox = 
+   (PFNMESSAGEBOX) (PFN_FIRSTINDEX + 1);
+
+
+// Make sure that PFN_LASTINDEX is set to the
+// last function address index used above.
+#define PFN_LASTINDEX   (PFN_FIRSTINDEX + 1)
+
+
+//////////////////////////////////////////////////////////////
+
+
+// The DemandLoadDll_ExceptionFilter function changes a 
+// thread's program counter. We can restrict the amount
+// of CPU-dependent code by defining the PROGCTR macro below.
+#if defined(_X86_)
+#define PROGCTR(Context)  ((Context).Eip)
+#endif
+
+#if defined(_MIPS_)
+#define PROGCTR(Context)  ((Context).Fir)
+#endif
+
+#if defined(_ALPHA_)
+#define PROGCTR(Context)  ((Context).Fir)
+#endif
+
+#if defined(_PPC_)
+#define PROGCTR(Context)  ((Context).Iar)
+#endif
+
+#if !defined(PROGCTR)
+#error Module contains CPU-specific code; modify &amp; recompile.
+#endif
+
+
+//////////////////////////////////////////////////////////////
+
+
+// Macro that places double quotes around the argument
+#define Stringize(str)  #str
+
+// Macro for setting dynamic call function information
+// dwIndex:    offset from PFN_FIRSTINDEX
+// szDllName:  Name of DLL that contains the function
+// szFuncName: Name of function contained in the DLL
+// pfnProcVar: Name of variable to get the function's address
+#define DemandLoadDll_FuncInfo(dwIndex,   \
+   szDllName, szFuncName, pfnProcVar)     \
+case dwIndex:                             \
+   pszDllName   = __TEXT(szDllName);      \
+   pszFuncName  = Stringize(szFuncName);  \
+   ppfnFuncAddr = (PROC*) &amp;pfnProcVar;    \
+   break;
+
+// NOTE: Stringize above expands a function macro to its 
+// ANSI/Unicode equivalent.  For example, passing MessageBox
+// for szFuncName will cause either MessageBoxA or MessageBoxW
+// to be looked-up depending on whether UNICODE is defined
+// Of course, you can pass MessageBoxW for szFuncName which 
+// will always get the address of MessageBoxW
+
+
+//////////////////////////////////////////////////////////////
+
+
+// This exception filter determines if an attempted call 
+// is made to a dynamic call function and if so, loads 
+// the appropriate DLL, fixes up function address and 
+// calls the function.
+static LONG DemandLoadDll_ExceptionFilter (LPEXCEPTION_POINTERS pep) {
+
+   // Don't swallow exceptions we don't recognize
+   LONG lDisposition = EXCEPTION_CONTINUE_SEARCH;
+
+   // Get the address where we attempted the memory access
+   DWORD pvAttemptedAddress = 
+      pep-&gt;ExceptionRecord-&gt;ExceptionInformation[1];
+
+   // To resolve a dynamic function call, we need
+   // a DLL name, a function name, and a place to 
+   // get the resolved function address.
+   LPCTSTR pszDllName = NULL;
+   LPSTR pszFuncName  = NULL; // Always ANSI; never Unicode
+   PROC* ppfnFuncAddr = NULL;
+
+   // We can only handle access violations
+   if (EXCEPTION_ACCESS_VIOLATION != 
+       pep-&gt;ExceptionRecord-&gt;ExceptionCode)
+       return(lDisposition);
+
+   // If the address is outside the range of our function
+   // pointers, we don't know how to handle it
+   if ((pvAttemptedAddress &lt; PFN_FIRSTINDEX) || 
+       (pvAttemptedAddress &gt; PFN_LASTINDEX))
+      return(lDisposition);
+
+   // If there are any problems beyond this point, 
+   // execute our exception handler.
+   lDisposition = EXCEPTION_EXECUTE_HANDLER;
+
+   // Function addresses are initialized relative to 
+   // PFN_FIRSTINDEX so we know which function to resolve
+   switch (pvAttemptedAddress - PFN_FIRSTINDEX) {
+      DemandLoadDll_FuncInfo(0, "User32", 
+                             MessageBeep, g_pfnMessageBeep);
+      DemandLoadDll_FuncInfo(1, "User32", 
+                             MessageBox, g_pfnMessageBox);
+   }
+
+   // Now that we know how to get the function address, get it
+   if (pszDllName != NULL) {
+
+      // If the DLL is not loaded, load it
+      HMODULE hinstDll = GetModuleHandle(pszDllName);
+      if (hinstDll == NULL) 
+         hinstDll = LoadLibrary(pszDllName);
+
+      if (hinstDll != NULL) {
+
+         // Get the address of the function
+         *ppfnFuncAddr = GetProcAddress(hinstDll, pszFuncName);
+
+          if (*ppfnFuncAddr != NULL) {
+
+             // We fixed up the address should we ever call 
+             // this function again. But for this call, the 
+             // thread's PC points to the wrong address; we 
+             // need to change PC so that this call succeeds.
+             PROGCTR(*pep-&gt;ContextRecord) = (DWORD) *ppfnFuncAddr;
+
+             // Continue execution from our new IP address
+             lDisposition = EXCEPTION_CONTINUE_EXECUTION;
+          }
+      }
+   }
+   return(lDisposition);
+}
+
+
+//////////////////////////////////////////////////////////////
+
+
+int WINAPI WinMain (HINSTANCE hinstExe, 
+   HINSTANCE hinstExePrev, LPSTR szCmdLine, int nCmdShow) {
+
+   // Place an SEH frame at the top of the thread so that
+   // dynamically called functions work properly
+  __try {
+
+     // Dynamically call MessageBox(A/W)
+     g_pfnMessageBox(NULL, "Here is a message box", 
+                     "DLL loaded on demand", MB_OK);
+
+     // Dynamically call MessageBeep
+     g_pfnMessageBeep(MB_OK);
+
+     // Dynamically call MessageBox(A/W) again
+     g_pfnMessageBox(NULL, "Here is another message box", 
+                     "DLL already loaded", MB_OK);
+   }
+  __except(DemandLoadDll_ExceptionFilter( GetExceptionInformation())) {
+
+     // We get in here only if a DLL cannot be 
+     // found for a dynamically called function
+     MessageBox(NULL, __TEXT("Dynamic function call failed."),
+                __TEXT("DemandLoadDll"), MB_OK);
+  }
+
+  return(0);
+}
+
+
+///////////////////////// End of File /////////////////////////
+</PRE>
+<P>A filter can examine this CONTEXT structure to see the exact register values when the violation was raised. You should always avoid directly referring to this structure (if possible) because CPU registers have different names on different CPU platforms. If you reference a member in this structure, you're writing CPU-dependent code that will require modifications if you build your application on other CPU platforms.</P>
+<P>However, if you don't care about CPU independence, not only can you examine the members in this structure but you can also change them. If you change a member, the thread will restart when the filter returns EXCEPTION_CONTINUE_EXECUTION, but the registers will have the modified values. So, to solve your problem, you need to change the program counter member in the structure to g_pfnMessageBeep before returning EXCEPTION_CONTINUE_EXECUTION from the filter. When you do this, the thread will continue its execution from the MessageBeep function rather than from address 0x00000000.</P>
+<P>In <B>Figure 2</B>, you'll see the solution to CPU dependence. All I do is create a PROGCTR macro that abstracts the program counter register on the different CPU platforms supported by Windows NT. When Windows NT is ported to another CPU platform, the source code will only require a tiny change to make it work.</P>
+<P><font size="6" face="verdana,arial,helvetica">Q</font>I am writing an ISAPI DLL that creates several worker threads when my DllMain function receives a DLL_PROCESS_ATTACH notification. These worker threads run in the background as long as my ISAPI DLL is loaded. When my ISAPI DLL is unloaded, I need to terminate my threads gracefully or the code executed by these threads will just disappear and access violations will be raised.</P>
+<P>I use a manual-reset event kernel object to signal the worker threads to terminate. Currently, I call SetEvent when my DllMain function receives a DLL_PROCESS_DETACH notification, then I call WaitForMultipleObjects, passing in all my worker thread handles. However, the call to WaitForMultipleObjects never returns, which seems strange to me because my worker threads do seem to see the signaled event and terminate. What is causing this deadlock in my DLL and how can I prevent it?</P>
+<P><I>Lucy Gooding</I></P>
+<P>Via the Internet</P>
+<P><font size="6" face="verdana,arial,helvetica">A</font>First, let's just remind everybody that ISAPI is part of the Microsoft® Internet Information Server (IIS). This question is a variation of the problem I discussed in my December 1994 column. In that column I discussed how the system serializes all calls to DllMain functions in a process. This means that, when your DllMain receives the DLL_PROCESS_DETACH notification, no other threads can execute code in any other DllMain functions, including yours. So, when you call SetEvent, the worker threads are trying to terminate but they can't completely terminate until every DLL's DllMain function receives a DLL_THREAD_DETACH notification. Since the worker threads can't terminate, your call to WaitForMultipleObjects never returns and you have deadlocked the threads.</P>
+<P>The essence of your problem is that you need to terminate the worker threads just before your DLL gets a DLL_PROCESS_DETACH notification. Here is what I propose: create your DLL as usual but modify your DLL_PROCESS_ATTACH processing so it increments the usage count of your DLL (see <B>Figure 3</B>). I do this by calling the IncrementLibraryUsageCount function (implemented inside my DllWork.c file). By incrementing the usage count of the DLL, it won't be unloaded when IIS calls FreeLibrary. This stops the problem of your DLL code going away while your threads keep running. (It introduces the problem that your DLL never gets unloaded, but I'll solve that problem in a moment.) Export an additional function, called ShutdownLibrary, from the DLL. This function will simply call SetEvent to signal your event object to terminate the worker threads and then return.</P>
+<P><B> Figure 3  Multithreaded Usage Counts in a DLL</B></P>
+<P>DllWork.c</P>
+<P><BR></P>
+<PRE> /*************************************************************
+Module name: DllWork.c
+Written by:  Jeffrey Richter
+Purpose:     A DLL that creates multiple threads when loaded
+*************************************************************/
+
+
+#define STRICT
+#include &lt;Windows.h&gt;
+#define DLLWORKAPI __declspec(dllexport)
+#include "DllWork.h"
+
+
+//////////////////////////////////////////////////////////////
+
+
+// The handle of this DLL Module
+HINSTANCE g_hinstDll;
+
+// Event used to signal when threads should terminate
+HANDLE g_hEventTerminate;
+
+
+//////////////////////////////////////////////////////////////
+
+
+DWORD WINAPI ThreadFunc (LPVOID lp) {
+   WaitForSingleObject(g_hEventTerminate, INFINITE);
+   DebugBox("Worker thread is terminating", "DllWork");
+   FreeLibraryAndExitThread(g_hinstDll, 0);
+   return(0);  // Never executes but makes the compiler happy
+}
+
+
+//////////////////////////////////////////////////////////////
+
+
+void ShutdownLibrary() {
+   // Notify the worker threads to shutdown
+   SetEvent(g_hEventTerminate);
+}
+
+
+//////////////////////////////////////////////////////////////
+
+
+void SomeFunc() {
+   MessageBox(NULL, "Doing something", 
+              "SomeFunc in DllWork", MB_OK);
+}
+
+
+//////////////////////////////////////////////////////////////
+
+
+void IncrementLibraryUsageCount(HINSTANCE hinst, int nCount) {
+   TCHAR szModuleName[_MAX_PATH];
+   GetModuleFileName(hinst, szModuleName, _MAX_PATH);
+   while (nCount--) LoadLibrary(szModuleName);
+}
+
+
+//////////////////////////////////////////////////////////////
+
+
+BOOL WINAPI DllMain (HINSTANCE hinstDll, 
+   DWORD fdwReason, LPVOID fImpLoad) {
+
+   int nThread;
+   const int nMaxWorkerThreads = 2;
+
+   switch (fdwReason) {
+   case DLL_PROCESS_DETACH:
+      DebugBox("Dll unloading", "DllWork");
+      break;
+
+   case DLL_THREAD_ATTACH:
+   case DLL_THREAD_DETACH:
+      break;
+
+   case DLL_PROCESS_ATTACH:
+      DebugBox("Dll loading", "DllWork");
+
+      // Save this module's handle
+      g_hinstDll = hinstDll;
+
+      // When signaled, this event tells the 
+      // worker threads when to terminte
+      g_hEventTerminate = CreateEvent(NULL, TRUE, FALSE, NULL);
+
+      // Create the worker threads
+      nThread = 0;
+      for (; nThread &lt; nMaxWorkerThreads; nThread++) {
+         DWORD dwThreadId;
+         CloseHandle(CreateThread(NULL, 0, 
+                                  ThreadFunc, 0, 0, &amp;dwThreadId));
+      }
+
+      // Increment this module's usage count so that it is
+      // not freed while threads are still executing its code
+      IncrementLibraryUsageCount(hinstDll, 
+                                 nMaxWorkerThreads - 1);
+      break;
+   }
+
+   return(TRUE);  // Successful initialization
+}
+
+
+///////////////////////// End of File ////////////////////////
+</PRE>
+<P>DllWork.h</P>
+<P><BR></P>
+<PRE> /*************************************************************
+Module name: DllWork.h
+Written by:  Jeffrey Richter
+Purpose:     A DLL that creates multiple threads when loaded
+*************************************************************/
+
+
+// If this file is included by DllWork source code modules,
+// DLLWORKAPI will be defined as '__declspec(dllexport)
+// All other EXEs and DLLs will import these functions
+#ifndef DLLWORKAPI
+#define DLLWORKAPI __declspec(dllimport)
+#endif
+
+
+//////////////////////////////////////////////////////////////
+
+
+// Function prototypes
+DLLWORKAPI void ShutdownLibrary();
+DLLWORKAPI void SomeFunc();
+
+
+//////////////////////////////////////////////////////////////
+
+
+// Useful macro for debugging
+#ifdef _DEBUG
+#define DebugBox(szText, szCaption) \
+   MessageBox(NULL, szText, szCaption, MB_OK)
+#else
+
+#define DebugBox(szText, szCaption)
+
+#endif
+
+
+///////////////////////// End of File ////////////////////////
+</PRE>
+<P>Just before your thread functions return, place a call to FreeLibraryAndExitThread. This counters your call to IncrementLibraryUsageCount. This way, as your worker threads terminate, each one will decrement the usage count on the DLL. Eventually, one of the worker threads will decrement the usage count to 0 and the DLL will be unloaded from the IIS address space. Since this function also terminates the thread, you don't have to worry about the thread continuing to run after the DLL's code has been unloaded. Finally, remove any calls to WaitForMultipleObjects from your DllMain's DLL_PROCESS_DETACH processing so this code executes only when all of the worker threads have terminated and the DLL is really being unloaded.</P>
+<P>Now that I moved the shutdown code from the DLL_PROCESS_DETACH processing to the ShutdownLibrary function, I'm sure you're wondering how ShutdownLibrary will be called since IIS doesn't know anything about it. The answer lies in another DLL; you must create a very small stub DLL like the one shown in <B>Figure 4</B>. This stub DLL needs only a DllMain function that processes DLL_PROCESS_DETACH notifications. When it receives this notification, you'll want to call the ShutdownLibrary function contained in your main DLL. You make this work by telling IIS that the stub DLL, not your main DLL, is your ISAPI DLL. When IIS calls LoadLibrary to load the stub DLL, the OS loader automatically loads your worker DLL because the stub DLL implicitly links to it by calling ShutdownLibrary.</P>
+<P><B> Figure 4  Forwarding Functions Through a Stub DLL</B></P>
+<P>DllStub.c</P>
+<P><BR></P>
+<PRE> /*************************************************************
+Module name: DllStub.c
+Written by:  Jeffrey Richter
+Purpose:     Stub DLL that contains only a DllMain function 
+             and function forwarders to functions in DllWork.
+*************************************************************/
+
+
+#define STRICT
+#include &lt;Windows.h&gt;
+#include "..\DllWork\DllWork.h"
+
+
+//////////////////////////////////////////////////////////////
+
+
+// Function forwarders to functions in DllWork
+#pragma comment(linker, "/export:SomeFunc=DllWork.SomeFunc")
+
+
+//////////////////////////////////////////////////////////////
+
+
+BOOL WINAPI DllMain (HINSTANCE hinstDll, 
+   DWORD fdwReason, LPVOID p) {
+
+   switch (fdwReason) {
+   case DLL_PROCESS_ATTACH:
+      DebugBox("Dll loading", "DllStub");
+      break;
+
+   case DLL_THREAD_ATTACH:
+   case DLL_THREAD_DETACH:
+      break;
+
+   case DLL_PROCESS_DETACH:
+      // When this DLL is detached, tell the DllWork DLL
+      // to shut itself down cleanly
+      ShutdownLibrary();
+      DebugBox("Dll unloading", "DllStub");
+      break;
+   }
+
+   return(TRUE);  // Successful initialization
+}
+
+
+///////////////////////// End of File ////////////////////////</PRE>
+<P>When IIS calls FreeLibrary, passing the handle of the stub DLL, the stub DLL will get a DLL_PROCESS_DETACH notification and call the worker DLL's ShutdownLibrary function to set the event. At this point, the worker threads will begin terminating. However, they won't be able to enter any DllMain functions until the thread in the stub's DllMain returns. This is OK. In fact, the stub DLL will probably get unloaded from the process's address space almost immediately, but the worker DLL will stay in memory until all of the worker threads have terminated completely.</P>
+<P>There is one last problem. Since IIS loads the stub DLL instead of the worker DLL, it will try to call functions that are in the stub DLL. At first the solution seemed obvious; put stub functions in the stub DLL and let them call the real functions in the worker DLL. I hated this solution because it meant more work, but then I remembered a little feature about linking: function forwarders.</P>
+<P>A function forwarder is an entry in a DLL's export table that redirects a function call to another function in another DLL. For example, if you run the Visual C++® DumpBin utility on the Windows NT Kernel32.dll, you'll see a part of the output that looks like this:</P>
+<P> </P>
+<P><BR></P>
+<PRE> C:\winnt\system32&gt;DumpBin -Exports Kernel32.dll
+     (some output omitted)
+360  167   HeapAlloc (forwarded to
+                      NTDLL.RtlAllocateHeap)
+361  168   HeapCompact  (000128D9)
+362  169   HeapCreate  (000126EF)
+363  16A   HeapCreateTagsW  (0001279E)
+364  16B   HeapDestroy  (00012750)
+365  16C   HeapExtend  (00012773)
+366  16D   HeapFree (forwarded to NTDLL.RtlFreeHeap)
+367  16E   HeapLock  (000128ED)
+368  16F   HeapQueryTagW  (000127B8)
+369  170   HeapReAlloc (forwarded to
+                        NTDLL.RtlReAllocateHeap)
+370  171   HeapSize (forwarded to NTDLL.RtlSizeHeap)
+     (remainder of output omitted)</PRE>
+<P> </P>
+<P>This output shows four forwarded functions. Whenever your application calls HeapAlloc, HeapFree, HeapReAlloc, or HeapSize, your executable is dynamically linked with Kernel32.dll. When you invoke your executable, the loader loads Kernel32.dll and sees that there are forwarded functions that are actually contained inside NTDLL.dll, so the loader also loads the NTDLL.dll module. When your executable calls HeapAlloc, it is actually calling the RtlAllocateHeap function inside NTDLL.dll. The HeapAlloc function does not actually exist anywhere in the system!</P>
+<P>If you call</P>
+<P> </P>
+<P><BR></P>
+<PRE> GetProcAddress(GetModuleHandle("Kernel32"),
+               "HeapAlloc");</PRE>
+<P> </P>
+<P>GetProcAddress looks in Kernel32's export table, sees that HeapAlloc is a forwarded function, and calls GetProcAddress recursively looking for RtlAllocateHeap inside NTDLL.dll's export table. </P>
+<P>Because of the way function forwarders work, all I have to do is place function forwarders inside my stub DLL. The easiest way to do this is using a pragma directive as shown at the top of <B>Figure 4</B>.</P>
+<P> </P>
+<P><BR></P>
+<PRE> // Function forwarders to functions in DllWork
+#pragma comment(linker, "/
+                export:SomeFunc=DllWork.SomeFunc") </PRE>
+<P> </P>
+<P>See <B>Figure 5</B> for a diagram showing how forwarding works. This pragma tells the linker that the stub DLL should export a function called SomeFunc, but that the actual implementation for the function is in a function SomeFunc contained in the DllWork.dll. You'll have to have one pragma line for each function exported by your worker DLL for IIS to call your functions correctly.</P>
+<P><img src="win32qa5.gif"></P>
+<P><B> Figure 5  Function Forwarding in an ISAPI DLL</B></P>
+<P>Have a question about programming in Win32? Send it to Jeffrey Richter at v-jeffrr@microsoft.com. </P>
+<P><I>This article is reproduced from Microsoft Systems Journal. Copyright </I>©<I> 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P><I>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</I></P>
+<P></P></font></body></HTML>

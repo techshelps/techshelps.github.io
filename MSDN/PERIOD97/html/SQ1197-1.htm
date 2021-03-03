@@ -1,0 +1,311 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>A Brief History of Time and Freespace: Part 1 </title>
+
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000>
+<font face="verdana,arial,helvetica" size="2"><form name=x><object name=iv classid="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016">
+</object></form>
+<h1>A Brief History of Time and Freespace: Part 1</h1>
+<p>
+<i>Paul Munkenbeck</i></p>
+<p>
+<i>"How can I tell how much freespace is really left in this database?" This is a common question asked by SQL Server DBAs. Paul's article attempts to explain why it's one of the mysteries of the universe, and why you don't really need to know a precise answer anyway! Part 1 of this series looks at database space allocation and all the utilities provided with SQL Server for monitoring space in a database. </i></p>
+<p>
+I've recently been trying to set up a procedure for monitoring freespace in some of my production databases and have found myself frequently frustrated with the inconsistency and inaccuracy of the utilities provided with SQL Server. </p>
+<p>
+Concurrently, I've been reading (well, looking at the pictures in) Stephen Hawking's immensely popular book, <i>A Brief History of Time</i>. This deals with the physics of the universe since the Big Bang and touches on the theories of relativity, quantum mechanics, the evolution of stars, and black holes. </p>
+<p>
+I've been struck by the similarities between the problems faced by physicists attempting to unravel the secrets of the cosmos and those of DBAs trying to determine how soon their own databases will go <i>bang</i>.</p>
+<p>
+In Part 1 of this series, I'll look at all the utilities provided with SQL Server for monitoring space in a database. In a future issue, Part 2 will describe a freespace utility that I've developed myself. <i>[No, faithful readers, we won't make you wait for Part 2 to download Paul's utility.-Ed.]</i></p>
+<p>
+Why do we need to know how much space a database is using? I believe there are three reasons, which I call the three F's: freespace, fragmentation, and physical (phonetic "f"!) size:
+<ul>
+<li>
+Freespace: If you can measure freespace, you can predict if there's enough room to avoid the dreaded 1105 error message: "Can't allocate space for object . . .".<br><br></li>
+<li>
+Fragmentation: The degree of fragmentation in the physical layout of the data can point to a possible reason for performance degradation.<br><br></li>
+<li>
+Physical size: Knowing the real amount of space occupied by the data is useful for estimating how much space is needed to move or copy the database elsewhere.<p>
+In this article, I'll concentrate on what <i>I</i> feel to be the most important of the three-freespace. After all, it's the only one that's likely to set off your pager at two o'clock in the morning! A database is like a universe in that it's formed in a mysterious event like the Big Bang and usually involves creation followed by rapid expansion when the initial data is loaded. There are three possibilities for the final state of the universe: it might continue to increase in size forever, it might settle down to an equilibrium with matter being removed at the same rate it's created, or it might eventually shrink back down to its initial size. 
+<p>
+If you're lucky, your database will be like the steady state model and you'll never need to worry about it growing too large. In my experience, however, most SQL Server applications leave the archiving procedures to be tackled in "the next phase" of development, so they're of the expansive variety. For me, the shrinking version of a database is rarest of all. (Nor do I ever seem to be able to get DBCC SHRINKDB to reduce my databases by more than a few megabytes! Perhaps I should dig into that MSKB article Q141163 that discusses these issues. But then Hawking is more, well, mind-expanding.)
+</li>
+</ul>
+<h1>Dualities</h1>
+<p>
+In the first part of the 20th century, scientists tried to figure out whether light was made up of particles or waves. The subsequent development of quantum mechanics included the theory of the duality of light, showing that both viewpoints are, in fact, correct. It occurred to me that databases also can be viewed in two ways-physically and logically. See <font face="MyriaMM_565 SB 600 NO">Table 1</font> for other dualities (two ways of looking at two databases on two devices).</p>
+<p>
+<b>Table 1. Records for two databases in sysusages.</b></p>
+<table cols=5>
+<tr valign=top>
+<td width=86><b>Database</b></td>
+<td width=180><b>Segments mapped to this slice</b></td>
+<td width=168><b>Starting page # in DB (logical)</b></td>
+<td width=174><b># pages in slice</b></td>
+<td width=150><b>Slice start page address (physical)</b></td>
+</tr>
+<tr valign=top>
+<td width=86><u>dbid</u></td>
+<td width=180><u>segmap</u></td>
+<td width=168><u>lstart</u></td>
+<td width=174><u>size</u></td>
+<td width=150><u>vstart</u></td>
+</tr>
+<tr valign=top>
+<td width=86>X</td>
+<td width=180>default, system &amp; log</td>
+<td width=168>1</td>
+<td width=174>3072</td>
+<td width=150>device A page 1</td>
+</tr>
+<tr valign=top>
+<td width=86>Y</td>
+<td width=180>default &amp; system</td>
+<td width=168>1</td>
+<td width=174>5120</td>
+<td width=150>device B page 1</td>
+</tr>
+<tr valign=top>
+<td width=86>Y</td>
+<td width=180>log</td>
+<td width=168>5121</td>
+<td width=174>2048</td>
+<td width=150>device A page 3073</td>
+</tr>
+<tr valign=top>
+<td width=86>X</td>
+<td width=180>default, system &amp; log</td>
+<td width=168>3073</td>
+<td width=174>1024</td>
+<td width=150>device A page 5121</td>
+</tr>
+</table><br>
+<p>
+The operating system sees data in the physical point of view. SQL Server databases are stored on physical objects called <i>devices</i>. A device is an operating system file, such as MYDEVICE.DAT, made up of bits and bytes. A block of 2,048 bytes (2K) is known as a <i>page</i>. When a device is defined to SQL Server, it's given a unique device number and a unique name such as MyFirstDevice. Also, the 2K pages on a device are numbered in physical order starting with 1. </p>
+<p>
+The logical view of a database also depends on these 2K pages. All information is held in relational tables stored as rows and columns on these pages. A database usually occupies many thousands of pages grouped together logically. The logical sequence of pages within a database doesn't necessarily coincide with its physical numbering. Therefore, a separate logical numbering scheme is implemented. Within a database itself, only the logical or "local" page number is used to address a page. This means the database can be moved to another physical position within its SQL Server or even to another server entirely. </p>
+<p>
+The physical and logical page-numbering systems are correlated in a system table in the master database, <i>master..sysusages</i>, which records all the separate "slices" of a database. Because subatomic particles have properties that are so counter-intuitive, physicists have started to use nonsense terms such as <i>quark</i>, <i>charm</i>, and <i>flavor</i> to name or describe them. The SQL Server documentation doesn't really have a name for the pieces of a database represented by entries in <i>sysusages</i>. I tried to think of an everyday name based on <i>sysusage</i>, but the best I could come up with was <i>sausage</i>. This seemed a bit too ridiculous, but it did lead me to think of the word <i>slice</i> instead. A slice of a database is a set of contiguous physical pages on the same device that all belong to one database. Table 1 shows an example of entries in <i>sysusages</i>. </p>
+<p>
+The <i>sysusages</i> table really holds pointers to the objects, but I've expanded these for clarity to show the names of the objects to which they point. The example is of two databases, X and Y, on two devices, A and B, and each database is stored in two slices. To visualize all these database dualities, see <font face="MyriaMM_565 SB 600 NO">Figure 1</font>.</p>
+<p>
+<img src="sq1197f1.gif" border=0></p>
+<p>
+<b>Figure 1. More physical vs. logical dualities.</b></p>
+<h2>Slices and segments</h2>
+<p>
+The <i>sysusages</i> table is very useful because it holds the size of each slice. These can be summed up to give the total database size:</p>
+<pre><code>SELECT SUM(size) 
+FROM master..sysusages 
+WHERE dbid = DB_ID(X)
+</code></pre>
+<p>
+Table 1 shows another piece of useful information that <i>sysusages</i> records. It lists which segments can be placed on which devices, or rather which <i>slices</i>. What exactly is a segment? It's a way of grouping together those objects in a database that need to be treated in a similar way physically. Its most common use is to keep the database transaction log separate from the rest of the data. </p>
+<p>
+Segments also can be used to control the placement of user objects on separate devices. In the past, this technique has been used to put indexes on separate disks from their tables. This can have performance benefits. </p>
+<p>
+Today, faster disks have much improved perform-ance, and technologies such as striping and RAID have offered greater benefits such as fault tolerance. With these features, there is less point in having user control over physical placement, and the use of database segments has declined.  </p>
+<p>
+However, when a new database is created, SQL Server still places the objects on three segments by default: 
+<ul>
+<li>
+The system segment (type 0) holds the system tables.<br><br></li>
+<li>
+The logsegment (type2 ) holds the transaction log.<br><br></li>
+<li>
+The default segment (type 1) holds all other objects.<p>
+The sp_helpsegment procedure will show you which segments are defined in your database. In the <i>sysusages</i> example in Figure 1, database X has its log and data combined on the same device, whereas database Y has its log on a separate device. 
+</li>
+</ul>
+<h1>Allocation units and extents </h1>
+<p>
+It's important to understand the way that space is allocated to segments, because improper space for a segment causes the dreaded 1105 error message. When a database is created, its total size is reserved as slices in <i>sysusages</i>. Space is actually allocated to the database from these slices in contiguous sets of 256 2K pages. These 512K (.5M) chunks are called allocation units. An allocation unit can hold only those segments that have been mapped to its device. The sp_helpdb procedure will show all the devices in your database and which segments they have been mapped to.</p>
+<p>
+Within an allocation unit, space is managed in groups of eight (2K) pages. These 16K chunks are called extents. Each extent is reserved for the use of only one database object. An index is considered to be a different object from its table. A small table with only one row will have an extent of eight pages reserved for it, but of those pages, only one can be used. The terms "reserved" and "used" will become important later. </p>
+<h2>Structure of <i>sysusages</i></h2>
+<p>
+As you've already seen, SQL Server stores information about the space allocated to a database in the <i>sysusages</i> table in the master database. Within each user database is another system table, named <i>sysusages, </i>which breaks down space utilization by database object.</p>
+<p>
+In <i>sysusages</i> there's an entry for each table and index in the database, with a unique key of table id (<i>id</i>) and index id (<i>indid</i>). An interesting fact about <i>sysusages</i> is that both user and system tables are recorded in it. So details about the log are held in the entry for the system table <i>syslogs</i>. Each table in the database has the following:
+<ul>
+<li>
+Either one row (<i>indid=1</i>) for its clustered index or one row (<i>indid=0</i>) for the table itself if it has no clustered index.<br><br></li>
+<li>
+One row (<i>indid=2-254</i>) for each non-clustered index. <br><br></li>
+<li>
+One row (<i>indid=255</i>) for all the text or image data (if any) associated with the table. <p>
+At this point it's worth noting an important detail about <i>sysindexes-</i>that for performance reasons, it has been partially denormalized. Two of the columns on the row describing the table object (indid=0 or 1) are actually summary fields containing totals for the table plus all its indexes (entries for indids 0 to 254):
+</li>
+<li>
+<i>Reserved</i>-the number of pages in the extents reserved for the objects. <br><br></li>
+<li>
+<i>Used</i>-the number of these pages actually in use.<p>
+Perversely, the value for the text/image data (indid=255) is <i>not</i> included in the summary row. The entries for the non-clustered indexes (indid=2-254) are still there, and these contain values for "reserved" and "used," but just for that index. So to calculate the total number of pages in extents allocated to the database, you could issue this query:
+<pre><code>select sum(reserved) 
+from sysindexes
+where indid in (0,1,255)
+</code></pre>
+<p>
+You certainly don't want to write a query that just summed up the value of <i>reserved</i> or <i>used</i> across the whole of <i>sysindexes</i>. Because of the summary row, this would result in double-counting the space used by the non-clustered indexes. However, it's easy to forget this-later you'll see that even Microsoft's programmers have fallen afoul of it! 
+<p>
+Other columns are held in <i>sysusages</i>, and some of these are relevant for space management:
+</li>
+<li>
+<i>segment</i>-the id of the segment on which this object is placed.<br><br></li>
+<li>
+<i>rows</i>-the number of rows in an object.<br><br></li>
+<li>
+<i>dpages</i>-the number of used pages in the data or index leaf-level. <br><br></li>
+<li>
+<i>rowpage</i>-maximum number of rows per page, and so on.</li>
+</ul>
+<h1>Maintenance of <i>sysusages</i></h1>
+<p>
+Unfortunately, the data in <i>sysusages</i> isn't always accurate. The values for rows, dpages, used, and reserved are generated when a table or index is created. These values are kept up-to-date automatically only for the object's summary row (indid=0 or 1) and text/image row (indid=255). To save processing time, however, non-clustered index entries aren't maintained automatically. It's particularly well-known that <i>sysusages</i> is inaccurate if a non-clustered index is dropped. Because these indexes are often a significant size, this is an important consideration.</p>
+<p>
+Even for those values that are kept up-to-date auto-matically, the <i>sysusages</i> table is actually updated only when a checkpoint is processed in the database. Finally, in SQL Server 6.0, the used and reserved values aren't always accurate for tables with image data updated by DB-Lib calls (see MSKB article Q150892 for details).</p>
+<h2>Correcting <i>sysusages</i></h2>
+<p>
+There are, of course, ways to resolve these inaccuracies in the <i>sysusages</i> table values before they're used in calcula-tions. However, these methods aren't without some cost:
+<ul>
+<li>
+Always run a CHECKPOINT in the database before using <i>sysusages</i>. This is fast and ensures that any recent changes are reflected in <i>sysusages</i>. <br><br></li>
+<li>
+Run a DBCC CHECKTABLE or DBCC CHECKDB if you suspect that the values in <i>sysusages</i> have become inaccurate. CHECKDB just runs a CHECKTABLE against all the tables in a database. As well as checking internal pointers, it will also correct any inaccurate <i>sysusages</i> values, but only for the summary entries and not for the non-clustered index rows. <br><br></li>
+<li>
+Alternatively (and best of all), run a DBCC UPDATEUSAGE. This checks and corrects all <i>sysusages</i> entries. It can also take some time on large databases, but in my experience UPDATEUSAGE is slightly faster than CHECKTABLE. <p>
+However, all the DBCC commands mentioned here might take some time to run, because they have to scan the tables and indexes. They might also reduce concurrency as they take a shared table lock while doing this. Also, the <i>syslogs</i> entry in <i>sysusages</i> is a special case. It's corrected only when the database is in single-user mode and <i>syslogs</i> is mentioned explicitly, such as DBCC CHECKTABLE(<i>syslogs</i>) or DBCC UPDATEUSAGE(<i>syslogs</i>). 
+<p>
+There's an interesting parallel with Schrödinger's uncertainty principle, which states that there's a limit to how much we can find out about an elementary particle because of our inability to measure both its speed and position at the same time. The very act of measuring one property will affect the value of the other. Unless our database is in single-user mode, any changes to the <i>syslogs</i> entries in <i>sysusages</i> would themselves be logged, thus changing the size of the log!
+</li>
+</ul>
+<h1>How big is space?</h1>
+<p>
+Several utilities can report the space used or available in a database. Some of these can take a long time because they gather the information by scanning the database. Others run much faster by using the information in <i>sysusages</i>, but can therefore provide only a "quick, rough estimate" (to quote the Transact-SQL online help). Obviously, the accuracy of their results depends on the current accuracy of the values in <i>sysusages</i> itself. However, even taking this into account, there isn't much consistency in the results of these utilities, and it isn't surprising that DBAs get confused!</p>
+<p>
+To demonstrate this, I've included a brief summary of each utility. Before starting on this, it's worth reviewing some definitions of freespace. At the bottom of <font face="MyriaMM_565 SB 600 NO">Figure 2</font> is a diagram of a database, which shows two concepts of freespace:</p>
+<p>
+<img src="sq1197f2.gif" border=0></p>
+<p>
+<b>Figure 2. Annotated sample from sp_spaceused.</b></p>
+<ul>
+<li>
+Unallocated (sometimes <i>unreserved</i>) space, which is all the space that hasn't yet been allocated to an object. <br><br></li>
+<li>
+Available space, which consists of all this plus any pages that have been reserved for an object but haven't yet been used.<p>
+Some utilities use the latter, which is fairly optimistic because it assumes that any unused pages will be available when more space is needed. Other utilities base their results on the former concept and are therefore more pessimistic. Personally, I prefer a third definition that's actually more realistic, but it's probably the most pessimistic! None of the Microsoft utilities use it, so I'll leave it for now and explain it in Part 2 of this article series. 
+<p>
+I have run each utility on my msdb database. For purposes of comparison, I've tried to convert the results into a consistent form. For this I've chosen to be optimistic and to calculate the "available" space.
+</li>
+</ul>
+<h1>Enterprise Manager's Database Edit</h1>
+<p>
+The Database tab in the Edit Database part of the SQL Enterprise Manager provides a summary of space availability calculated from <i>sysusages</i>. There's also a facility to run DBCC UPDATEUSAGE, which is activated from the "Recalculate.." button. If the data and log are on separate devices, then separate figures are given for each. </p>
+<p>
+Results are displayed in megabytes and rounded to two decimal places. Here are the numbers for my msdb database:</p>
+<pre><code>Data space available  = 0.86M
+Log space available   = 2.00M
+Total space available = 2.86M
+</code></pre>
+<p>
+However, there's a known bug in this calculation for some releases of SQL Server. Andrew Zanevsky devoted his February 1996 column ("A Stored Procedure You Can't Trust") to the issue, and MSKB article Q135300 describes more details about problems associated with the partial denormalization mentioned earlier (whereby all the <i>sysusages</i> rows are added up despite the fact that some of them already contain summary values). This results in double-counting the used pages of non-clustered indexes, and it therefore produces a lower figure for availability than it should.</p>
+<h2>sp_spaceused</h2>
+<p>
+The sp_spaceused stored procedure can calculate space usage either for a specific table or the whole database, and there's also an option (@updateusage=true ) to first run DBCC UPDATEUSAGE. Figure 2 shows the meaning of some of the values output by sp_spaceused when run against my msdb database. The diagram first shows the results for the database as a whole, and then for just one table. In this example it's the <i>syslogs</i> table-in other words, it's showing the space used by the database transaction log. Because I'm one of the "confused" DBAs that I referred to earlier, I tend to keep this diagram pinned up on the wall so I can refer to it easily! You'll find a copy of it in Word 7.0 format along with my FREESPAC.SQL utility in this month's Subscriber Downloads, available at www.pinpub.com/sqlpro. </p>
+<p>
+As you can see, the first line of the results contains "headline" figures for database size and unallocated space. The database size is calculated from <i>sysusages</i>, and there isn't a breakdown between data and log, even if they're on separate devices. You'll have to run sp_helpdb if you want this detail. The unallocated space figure is calculated from the <i>sysusages</i> "reserved" value (the number of 16K extents in use). </p>
+<p>
+The second line of the output gives a breakdown of this reserved value, showing how it's split among data, indexes, and unused pages. These values are calculated from the <i>sysusages</i> "used" values (the number of 2K pages in use). When run against a single table, only the second row of results is returned. It shows how much space that particular table is using, and how much unused space is available before another extent must be obtained for it. </p>
+<p>
+There are several ways to calculate available space from the sp_spaceused output. The most consistent way is to add the <i>data</i> and <i>index_size</i> columns, give a <i>used pages value</i>, and then subtract this from <i>database_size</i>. </p>
+<p>
+If the database has separate data and log devices, then the calculation of availability is more complicated, because you need both the database results and the <i>syslogs</i> results. The data space "data" and "index_size" are calculated as the difference between the respective values for the database as a whole and <i>syslogs</i>. My msdb database has a 2M data device and a 2M log device. The calculation of availability goes as follows:
+<ul>
+<li>
+Data Space Available = 2M - ((1014K -2K) + (100K -0K)) = <b>0.91M</b><br><br></li>
+<li>
+Log Space Available  = 2M - (2K +0K) = <b>2.00M </b>(to two decimals)<br><br></li>
+<li>
+Total Space Available = 4M - (1014K + 100K) = <b>2.91M </b><p>
+It would be easier to write a query against <i>sysusages</i> directly! However, you'll hear more about that in Part 2 of this series.
+</li>
+</ul>
+<h1>DBCC CHECKALLOC and DBCC NEWALLOC</h1>
+<p>
+Several DBCC options analyze database structures, most of which provide some information on space utilization. DBCC CHECKALLOC checks all the allocation units in a database (see <font face="MyriaMM_565 SB 600 NO">Figure 3</font>). Each allocation unit in the database is listed-in this example, msdb has eight. For each allocation unit, the number of extents and number of used pages are given. The "# of extent" count is equivalent to the "reserved" column in <i>sysusages</i>. There is a total line at the bottom, but no analysis of separate data and log utilization. From the example given for my 4M msdb database: Total Space Available = 4M - (576 2K pages)  = <b>2.88M.</b></p>
+<p>
+<img src="sq1197f3.gif" border=0></p>
+<p>
+<b>Figure 3. Screen output after all allocation units in the database have been checked by DBCC CHECKALLOC.</b></p>
+<p>
+DBCC NEWALLOC is a more extensive utility intended to supersede CHECKALLOC. The final part of its output is similar to CHECKALLOC, but it seems to count some of the used pages differently (I suspect these are for the log). (See <font face="MyriaMM_565 SB 600 NO">Figure 4</font>.) The first part of the NEWALLOC output lists each table in the database and shows details of its index entries in <i>sysusages</i>. Here's the one for <i>syslogs</i> that shows the log is using just seven pages: </p>
+<p>
+<img src="sq1197f4.gif" border=0></p>
+<p>
+<b>Figure 4. Screen output after running the DBCC NEWALLOC utility.</b></p>
+<pre><code>*****************************************************
+TABLE: syslogs        OBJID = 8
+INDID=0 FIRST=1798    ROOT=1807   DPAGES=7SORT=0
+Data level: 0.  7 Data  Pages in 1 extents.
+TOTAL # of extents = 0
+*****************************************************</code></pre>
+<p>
+See if you can follow the space availability calculation, which is derived in the same way as for the sp_spaceused output described earlier:
+<ul>
+<li>
+Data space availability = 2M - (579 - 7) 2K pages  = <b>0.88M</b><br><br></li>
+<li>
+Log space availability = 2M - 7 2K pages = <b>1.98M</b><br><br></li>
+<li>
+Total space availability = 4M - 579 2K pages = <b>2.87M</b></li>
+</ul>
+<h1>DBCC CHECKTABLE and DBCC CHECKDB</h1>
+<p>
+DBCC CHECKTABLE and CHECKDB are used primarily to check the internal pointers between rows and pages in a database. As part of the output, they can show log segment utilization but don't give enough details to calculate freespace for the data component. The analysis includes counts of the numbers of rows and data pages. These will be used to correct the values in <i>sysusages</i> if there are discrepancies. </p>
+<p>
+However, there are no counts of index pages, so this is only for the entry for the clustered index or the table itself if it has no clustered index. The lack of index analysis is also the reason why it's impossible to determine overall freespace for the data component of the database.</p>
+<p>
+DBCC CHECKTABLE runs against a single table, whereas CHECKDB combines this process across all tables of the database. The output for the <i>syslogs</i> table includes an additional couple of lines in the output that calculate space utilization for the log segment (see <font face="MyriaMM_565 SB 600 NO">Figure 5</font>). </p>
+<p>
+<img src="sq1197f5.gif" border=0></p>
+<p>
+<b>Figure 5. The output for the syslogs table.</b></p>
+<p>
+The final value on the line for "space used" is a percentage calculated as the number of data pages used in syslogs divided by the total number of pages in the log segment and rounded to two decimal places. This appears to be accurate, but unfortunately, something goes wrong in the calculation of freespace. As you can see from this, the results for my msdb database show there's more freespace (2.03M) on the log segment than it was originally created with! </p>
+<h2>DBCC SQLPERF(LOGSPACE) </h2>
+<p>
+There's a counter for log space utilization within Performance Monitor. This is based on DBCC SQLPERF(LOGSPACE). This utility actually gives results for all the databases on the server, but the counter gives each database as a separate instance. </p>
+<pre><code>Database Name  Log Size (MB) Log Space Used (%) Status      
+-------------- ------------- ------------------ ------ 
+msdb             2.0           0.68359375         0           
+pubs             0.0           0.0                1           
+tempdb           0.0           0.0                1           
+model            0.0           0.0                1           
+master           0.0           0.0                1           
+</code></pre>
+<p>
+The value for Log Space Used (%) is calculated from the number of data pages used in <i>syslogs</i> expressed as a percentage of the total number of pages in the log segment. This is exactly the same calculation as in DBCC CHECKTABLE(<i>syslogs</i>), but the result isn't rounded at all. (You get a feeling that it <i>must</i> be accurate with so many decimal places, though, don't you?) You can calculate the space remaining on the log segment as follows: Log space availability =  (100 - 0.68359375) * 2.0M = <b> 1.99M</b>.</p>
+<h2>MSKB Q163036 </h2>
+<p>
+To complement the Performance Monitor counter for log utilization, the MSKB article Q163036 offers code for a user-defined counter to monitor freespace in the data component. It works by first calculating the total database size in 2K pages from all <i>sysusages</i> slices except those that hold the logsegment. It then determines the total number of reserved pages from <i>sysusages</i>. For my msdb database, it gives these results:</p>
+<pre><code>dbsize              allocatedpages      %
+------------------- ------------------- ---
+1024                952                 92
+</code></pre>
+<p>
+Because the unused pages aren't included in this, it isn't possible to calculate the available space and compare it with output from the other utilities. </p>
+<h2>Stay tuned</h2>
+<p>
+In Part 2 of this series, I'll describe a utility I designed to monitor unused space in a database. It takes a different approach to measuring freespace and gives me a better feel for when I need to worry about the database crashing with the dreaded 1105 error. s</p>
+<p>
+Download MUNKFREE.ZIP at www.pinpub.com/sqlpro</p>
+<p>
+<b><i>Paul Munkenbeck has been a DBA for more than 10 years. He has worked on all types of databases, from desktop to multi-gigabyte mainframe systems. He was first exposed to Microsoft SQL Server as a database consultant on a project early in 1995, and he loved it so much he's now the DBA for a leading UK real estate company that uses SQL Server as its strategic operational database. munkie@compuserve.com, 101502.2537@compuserve.com.</i></b></p>
+</font></BODY>
+</HTML>

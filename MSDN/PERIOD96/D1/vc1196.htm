@@ -1,0 +1,198 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Use Win32 to Optimize Memory and File I/O Management (November)</title>
+
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000>
+
+<font face="verdana,arial,helvetica" size="2"><h1>Use Win32 to Optimize Memory and File I/O Management </h1>
+<p>
+Pete Bosch</p>
+<p>
+<i>One of the fun things about programming for Windows 95 and NT is that their robust subsystems can make your job easier. The Win32 API provides some great built-in functionality to accelerate your applications and give them sophisticated cross-process communication capability. This article will show you how.</i></p>
+<p>
+FILE input/output (I/O) is one of the great bottlenecks in computer programming. In its simplest form, it’s a long blocking call. In a more complex form, you may have to create a separate thread to perform I/O. Sometimes a separate I/O thread will introduce coherency problems that force you to wait until an operation finishes. For example, suppose your application performs a File Save command in a separate thread. You’ll need to make sure the user can’t execute a File Load on the file you’re trying to save. You can disable the File Load command while the Save thread is still running, but this prevents the user from loading anything at all. Surely there’s a better way.</p>
+<p>
+File I/O is also frequently used for communication between processes. In addition to performance concerns, interprocess communication (IPC) sometimes requires true bidirectional I/O channels. These can be difficult to establish and maintain using simple file I/O. IPC is further complicated when the communication isn’t stream oriented, or when there are more than two participants. Finally, the buffered nature of most file I/O means that the sending process must remember to flush the system frequently.</p>
+<p>
+However, you can improve your file I/O performance significantly through memory-mapped files and by letting Win32 manage file I/O, buffering, and caching. I’ll show you how, as well as how you can extend these techniques to share memory between two or more processes by letting the Win32 subsystem maintain cache coherency. I’ll also describe how a memory-mapped file can be used to persistently capture your program’s state information during runtime, which can enable some fairly sophisticated “post mortem” analysis, similar to the way one can selectively generate a core file in UNIX.</p>
+<h2>Persistent state for post mortems</h2>
+<p>
+UNIX has a construct known as a core file-a dying program’s last gasp, in which it writes its entire internal state to disk. This is an extremely valuable tool for doing a post mortem. The developer can attach a debugger to the core file and re-create the state of the entire program at the time of its death, something you can’t do under Win32 using Dr Watson or Spy. It would also be helpful to save as much of the program state as possible to a persistent file when the program closes. You can do this with a custom exit handler and a large set of serialization methods, but that’s a lot of work-have <i>you</i> ever done it? The system will offer to debug your crash as it’s happening, but your end user in the field probably won’t enjoy debugging your application on the telephone with you.</p>
+<h2>Your solution: Win32</h2>
+<p>
+Win32 includes a subsystem that performs all file I/O. You already use it indirectly with every file operation. By using its more advanced features, you can dramatically improve your program’s performance. One reason for this boost is that the subsystem works in kernel mode, not user mode. Mode switches consume a lot of expensive time. Therefore, if you give the kernel full control of I/O operations, your program won’t have to switch between user and kernel mode during a specific operation. The other reason for this performance boost is that at the user level, file reads and writes are really just cached memory operations. Actual file operations to disk are performed later in a separate thread by the Win32 memory manager. All of this is coordinated through a Win32 section object (SO).</p>
+<p>
+A Win32 SO is a kernel object (that is, a Win32 object, not C++ object) that you can create to represent a piece of memory. You can specify its read, write, and execution attributes (under Win95 only the read and write attributes are available), security attributes (under Win NT), caching strategy, permanent storage location, and even a textual name for reference. Best of all, because it’s a kernel object it can be made available to other processes, thus allowing you to expose to them to the same data you’re representing in your memory space. </p>
+<h2>SO fast?</h2>
+<p>
+Section objects are extremely fast for file I/O, because the only operation actually performed by the application is executed in memory. The operating system makes sure that data is written to disk (or in another process’ address space) by the time it’s needed. If you’ve been using a separate thread solely for file I/O, you have much to gain by using a section object instead. Because the operating system supplies the thread, it runs in kernel mode and therefore is faster. The operating system also handles the caching strategy. An additional benefit is that the operating system knows about all running processes and who might need access to your data. Because of this your program can allow the section object to be exposed to other processes. You simply write data to a place in memory and the other process reads it. To communicate in the opposite direction, the other process simply writes back for your application to read. Because the SO is a kernel object it can be used by many processes. This provides a very clean method for multicast communication. To prevent overwrites you’ll need to devise a strategy to ensure that each process is aware of changes. For example, if one process needs to notify the other process of a change, you may need to use an event to perform that notification, but that’s another article. </p>
+<h2>Turn on your GPS receiver</h2>
+<p>
+The region of memory described by a section object may not map to the same logical address in a different process. Pointers created in one process may have no meaning in another process. This presents some interesting challenges, which fall into two categories. First, how do you get the SO to map into the same address in different processes? Second, if different processes must share a linked list, how do you reconcile an SO with different base addresses that is <i>not</i> mapped to the same logical address in each process? While the details are beyond the scope of this article, a solution generally involves picking a “likely” empty address as the preferred base address. The process then either crosses its digits and hopes for success, or both processes perform an n-way negotiation in which one picks an address and both retry simultaneously to get the same mapping until all are successful. In fact, Win32 itself uses this technique, specifying a different preferred base address for each system DLL and then hoping for the best. (Since these system DLLs generally load before anything else, this is actually a pretty good technique.) </p>
+<p>
+There are several methods for reconciling dissimilar base addresses. The simplest is to use the __based keyword in Visual C++ to automatically accommodate a base and an offset in each pointer. Unfortunately, this approach is Microsoft specific. A more advanced technique is to store offset pointers from some consistent location in the list, then create pointers from the base and the offset with each access. The most sophisticated approach is to use smart pointers to perform the runtime address manipulation from the list.</p>
+<p>
+Let’s look at the memory architecture in Windows NT. Figure 1 shows how memory is divided by the operating system. Section I is protected. NT protects this area so NULL pointers always fire access violations. This is helpful in cases where integer variables are mistakenly treated as pointers. Section II is the private address space of a Win32 process. Section III is reserved to protect your system against pointers that might walk out of your address space. Section IV is reserved for the OS. As you can see, the Win NT memory architecture is clean, simple, and robust. Each process has its own assigned area and can’t easily trash the OS or another process. Now let’s look at Windows 95 (Figure 2).</p>
+<p>
+As with NT, Area A is protected so that NULL pointers fire access violations. Area B is reserved for Win16 &amp; DOS applications. If you want to clobber your 16-bit apps, write all over this section. Area C is the private process space of a Win32 process. Area D is shared by all Win32 processes. It holds memory-mapped files, shared DLLs, and 16-bit applications. This section seems like Win95’s Achilles’ Heel. A wayward 16-bit application can scribble all over anything in this space, bringing the most stable 32-bit application to its knees. Area E contains shared address space for VxDs, memory management, and file system code. Any Win32 application can wreak havoc on the operating system by overwriting this space and, if you’re lucky, simply locking the system up.</p>
+<p>
+Figures 1 and 2 show that the Windows 95 architecture is more complicated and less protected than the NT architecture. This was done, I believe, to satisfy the tighter system constraints placed upon Windows 95. It’s easier for a low-RAM system to meet performance requirements if different applications can share the same instances of DLLs, and so on. Unfortunately, rogue applications also have an easier time sending the operating system to lunch.</p>
+<p>
+<b>Figure 1. Windows NT memory architecture.</b></p>
+<p>
+<b>Figure 2. Windows 95 memory. architecture.</b></p>
+<p>
+Memory mapped files opened by different processes all share area D in Windows 95, whereas they map to separate copies of section II under NT. This suggests several interesting points. First, two processes that share the same memory mapped region in Windows 95 will share it at the same address, because area D is common to all processes. Under NT, each process will have a separate mapping of each shared memory mapped file. Thus, under NT there’s no guarantee that two mappings will occur at the same address. You might infer from this situation that shared implementations of linked list code (and other pointer-based methods) will be simpler under Windows 95 than under NT. This is probably true, if you know your application will never run on NT and you don’t mind a brutally broken application if it ever does! Second, you can see that if a process creates an SO under Windows 95, it can pass the base address to another process which can then access this memory immediately. Under Windows 95, this isn’t a problem unless one process deletes the SO (freeing the memory) and the other subsequently accesses it, raising an access violation. The point? Use one SO per process and assume different address mappings for each. Use this method for both operating systems. The code included on the Developer’s Disk will help you get there.</p>
+<h2>Memory classes</h2>
+<p>
+There are several abstractions of the memory management system. Malloc, free, new, and delete are the most abstract. First, let’s look inside what the memory manager does to understand what happens in a section object.</p>
+<p>
+There is 4G of address space per process. I’m sure you realize that’s just address space, not memory or anything like it. To use part of that address space, you first have to reserve it. There’s at least one page file on all NT systems that provides a place to hold sections of process address space that the processor isn’t currently using. For example, reserving a megabyte of memory consists of asking the operating system if there’s room in the page file for another megabyte of data. If there is, the OS grants the request and marks another megabyte of page file space as in use. Alternately, the requester can specify another file from which to get the paging swap space for a given reservation. The physical (usually hard disk) space used to hold swapped-out pages is called the backing store. Reserving memory simply involves verifying that there is sufficient backing store for an eventual commitment of that memory.</p>
+<p>
+For bookkeeping reasons, the operating system tracks the space allocated to a process in chunks. While the size of a chunk is processor dependent, all currently supported processors use 64K chunks. Thus, if you ask for 11 bytes, you’ll get 64K (or 128K, if you specify a base address from which 11 bytes spans two 64K blocks.)</p>
+<p>
+After reserving memory, you must let the system know when you’re actually ready to use the space to hold data. This is called committing memory. Committing memory tells the system to begin tracking details such as the cache status and its location in the backing store. If you try to access memory before it has been committed you’ll get an access violation. The smallest unit of commitment is called a page; as with allocation granularity, page size is processor dependent. All NT processors except the Alpha AXP use 4K pages. The Alpha uses 8K pages.</p>
+<p>
+The working<i> set</i> of a process is that set of pages which is guaranteed to be loaded in physical memory when the threads associated with the process are running. A process clearly must have some of its code in physical memory in order to run. How much is enough and how much is too much? The answer to these questions is the Working Set Size (WSS). Each process initially gets a default WSS of 32 pages. The Virtual Memory Manager (VMM) tunes the set size for each process after initialization to minimize the overall page-fault rate.</p>
+<p>
+Whew! So let’s see<font face="Symbol"><span style="font-family:symbol">&#190;</span></font>if enough is available, address space is allotted to reserved memory in the backing store pagefile. Reserved memory is set to committed memory, again in the backing store. To become part of the working set of a process, committed memory is moved from the backing store to physical memory. On top of that, there are usually two levels of physical cache RAM in addition to the system RAM, so two more levels of commitment must occur before the processor can actually load your data. It’s a pretty cool system<font face="Symbol"><span style="font-family:symbol">&#190;</span></font>and one that leaves a lot of room for optimization!</p>
+<h2>Section objects</h2>
+<p>
+Let’s return to the section object. As we already know, a section object is a kernel object that refers to an address range. A section object is typically created in three steps, during which the user describes access specifiers, a sharing mode, caching instructions, a location for the backing store (page file or application-specific file), a character string name, and possibly a preferred address range. After successful creation, the process is left with a handle and an address range. Writing to the address range causes the data to be maintained in the backing store for that address range, which can be a permanent user file. This provides very fast file I/O. The handle can also be inherited by a thread’s children, or an unrelated thread or process may find the section object using its character string name. Once the section object has been acquired by one or more other processes, they may read or write (assuming appropriate permissions) to that memory, thereby affecting communication with the originating process and each other. </p>
+<p>
+As I said, a section object is created in three stages. The first opens or creates a file, if a separate backing store is desired. The second stage creates a file mapping object, a kernel object that maintains information on the memory using CreateFileMapping. The third stage maps a view of the file, using MapViewOfFile or MapViewOfFileEx. I’ll look briefly at each of these and then describe how these three stages are used in the sample application. </p>
+<h2>Getting creative</h2>
+<p>
+A memory mapped file must first be created or opened. CreateFile does this with this signature:</p>
+<pre><font face="Courier New" size="3">HANDLE CreateFile(
+    LPCTSTR lpFileName,
+    DWORD dwDesiredAccess,
+    DWORD dwShareMode,
+    LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+    DWORD dwCreationDistribution,
+    DWORD dwFlagsAndAttributes,
+    HANDLE hTemplateFile
+   );</font></pre>
+<p>
+Let’s focus on the first six arguments. The filename is the name of the file to use for the backing store. The access and share mode arguments are derived from a more general argument at the top level. We’ll allow the specification of a security attribute, but default it to NULL. The creation distribution and flags and attributes will also be specified.</p>
+<p>
+The second step in creating a section object is to create a file mapping using, not surprisingly, CreateFileMapping:</p>
+<pre><font face="Courier New" size="3">HANDLE CreateFileMapping(
+    HANDLE hFile,
+    LPSECURITY_ATTRIBUTES lpFileMappingAttributes,
+    DWORD flProtect,
+    DWORD dwMaximumSizeHigh,
+    DWORD dwMaximumSizeLow,
+    LPCTSTR lpName
+   );</font></pre>
+<p>
+You pass the file handle from the call to CreateFile to the first argument, reuse the security attributes, and derive the protection attributed from a more general argument at the top level. For this code, set the dwMaximumSizeHigh argument to zero, effectively limiting the size of the mappable file to 4G. (It would otherwise be 18E<font face="Symbol"><span style="font-family:symbol">&#190;</span></font>that’s Exabytes, or, to put it another way, 2 to the 64th bytes, which equals 16 GigaGigabytes. As someone put it back in 1984 with the introduction of the 640K memory model, “No one will ever need that much address space.” Remember, you heard it here first!)</p>
+<h2>View to a map</h2>
+<p>
+The third stage in creating a section object is to map a view of the file into memory using the signature that follows. Pass the file mapping object’s handle from the call to CreateFileMapping to the first argument, and again derive the access attributes from a more general argument at the top level. Assume that the user wants to map the entire file into memory, so the file offsets will be set to zero and the number of bytes to map will either be supplied by the program or derived from the file size. The base address may be supplied by the program, if desired: </p>
+<pre><font face="Courier New" size="3">LPVOID MapViewOfFileEx(
+    HANDLE hFileMappingObject,
+    DWORD dwDesiredAccess,
+    DWORD dwFileOffsetHigh,
+    DWORD dwFileOffsetLow,
+    DWORD dwNumberOfBytesToMap,
+    LPVOID lpBaseAddress
+   );&#09;</font></pre>
+<p>
+Having introduced the three stages of creating a section object, let’s abstract these stages into two much simpler steps and provide an API that you can attach to a memory map that’s already open. In good form, the first step will construct the C++ object and the second will create the section object. The APIs for these two stages follow:</p>
+<dl>
+<dt>
+ </dt>
+<dd>
+<pre><font face="Courier New" size="3">CMemMap( void );</font></pre>
+</dd>
+</dl>
+<p>
+This constructor is nice and clean<font face="Symbol"><span style="font-family:symbol">&#190;</span></font>there’s no possibility of failure and no return value. The tricky stuff is buried in the next API, the Create call, which <i>can</i> return a failure: </p>
+<dl>
+<dt>
+ </dt>
+<dd>
+<pre><font face="Courier New" size="3">LPVOID Create( 
+    DWORD dwMaximumSize,
+    LPCTSTR lpFileName = NULL,
+    LPVOID lpBaseAddress = NULL,
+    LPCTSTR lpMappingName = NULL,
+    DWORD dwMemMapAccess 
+           = MMA_SHARED | MMA_READ | MMA_WRITE,
+    DWORD dwCreationDistribution 
+                            = MMCD_CREATE_ALWAYS,
+    DWORD dwFlagsAndAttributes = MMFA_NORMAL,
+    LPSECURITYATTRIBUTES lpSecurityAttributes
+                                           = NULL
+);</font></pre>
+</dd>
+</dl>
+<p>
+Let me explain the arguments and their possible values, and offer some suggestions and pitfalls regarding their use:</p>
+<p>
+<b>dwMaximumSize</b>-Stores how much memory you’ll need in your memory map. This is a required argument, although if you’re asking to map an existent file into memory, then this value will be ignored and the entire file will be mapped into memory.</p>
+<p>
+<b>lpFileName</b>-The name of the physical disk file from which you expect to derive your backing store. If you pass in NULL, then the system’s page file is used and the dwCreationDistribution and dwFlagsAndAttributes arguments have no effect. If you specify an existing filename, the entire file will be mapped into memory if possible.</p>
+<p>
+<b>lpBaseAddress</b>-The address at which you would like your memory map to begin. If you pass in NULL, the operating system will pick an address for you. Make sure that you check the return value from the Create call to see if you actually got the address you requested.</p>
+<p>
+<b>lpMappingName</b>-The textual name that the kernel will use to identify your memory map, and that other processes will use to get a handle to your map. If you don’t intend to share your map between processes you can leave this string NULL. This name will be global within the kernel, so if you use it, make sure that it’s truly unique. A memory map named “MemoryMap1” might be bad, whereas “PinnacleMemMapArticle_MemoryMap1” would probably be okay. If your program asks to establish a memory map under a name that already exists, then the Create call will fail.</p>
+<p>
+<b>dwMemMapAccess</b>-Describes the way you want the memory map to be accessed. It will determine the access and share modes of both the file and the file mapping. It’s an OR’ed combination of MMA_SHARED, MMA_READ, and MMA_WRITE.</p>
+<p>
+<b>dwCreationDistribution</b>-Specifies when the file should be opened and when a new file should be created. It can have the values MMCD_CREATE_ALWAYS, MMCD_OPEN_EXISTING, MMCD_CREATE, and MMCD_OPEN_ALWAYS. </p>
+<p>
+<b>MMCD_CREATE_ALWAYS</b>-Will create a new file regardless of whether one existed.</p>
+<p>
+<b>MMCD_OPEN_EXISTING</b>-Will open a file if it exists; otherwise it will fail.</p>
+<p>
+<b>MMCD_CREATE</b>-Must create the file and will fail if the file already exists. </p>
+<p>
+<b>MMCD_OPEN_ALWAYS</b>-Will open a file if it exists; otherwise it will create a new file.</p>
+<p>
+<b>dwFlagsAndAttributes</b>-Specifies several behavioral attributes of the backing store file, which can be OR’ed together. MMFA_HIDDEN creates a hidden file. </p>
+<p>
+<b>MMFA_DELETE_ON_CLOSE</b>-Creates a temporary file. If neither of these behaviors is desired, use MMFA_NORMAL.</p>
+<p>
+<b>LpSecurityAttributes</b>-Accepts a pointer to a Windows NT SECURITY_ATTRIBUTES structure. If you’re running Windows 95, don’t worry about this. If you’re running Windows NT and don’t know about this, pass a NULL pointer. The section object will have the same security attributes as the process creating it. This is probably good enough. If not, look for an article in the near future on the NT security model.</p>
+<p>
+The function’s return value is the base address of the memory map. Make sure you check this, because if the call fails, this returns NULL. So there you have it. Two calls, and you’ve got a memory map that you can use for IPC or fast file I/O. The CMemoryMap’s destructor takes care of unmapping the memory and closing the file. </p>
+<p>
+One more API function, Flush, allows you to force a memory map to be written immediately to its backing store. As with the rest of the APIs, it’s pretty simple-if it succeeds it returns TRUE; if it fails it returns FALSE.</p>
+<pre><font face="Courier New" size="3">BOOL Flush( void );</font></pre>
+<h2>Exploring the sample applications</h2>
+<p>
+Creating a memory mapped file for faster disk I/O is simple. Call the constructor, then call Create with the desired permissions, access, and creation distribution. Using a memory mapped file is as simple as writing to the memory described by the base address and mapping size. When the CMemMapFile object goes out of scope, it will be flushed and the file and all handles will be closed for you. Because the memory mapped file behaves just like memory, it can be cast to a structure or used inside an object to provide space for the object’s primitive variables. Data stored in such structures or objects will be persistent and will survive a crash, unless the operating system itself locks up. The first sample application, MM_FileIO, shows how to use the CMemMapFile for File I/O. The program is straightforward; it creates a file, populates it with data, and closes. Next, it opens the created file, reverses it in memory, and then closes. All operations on the file are performed as memory operations.</p>
+<p>
+To create a shared memory region for IPC takes four steps. First, execute the constructor to create a CMemMapFile object. Second, execute the Create call on the first object, making sure to provide a unique character string name in the lpMappingName argument. In another thread, possibly in another process, construct another CMemMapFile object, and call Create on the second CMemMapFile with the same unique name you used in step two. From that point on both threads may talk to the same piece of memory, keeping in mind that, at least in Windows NT, they may not actually be at the same address. </p>
+<p>
+The second sample application, MM_IPC, is a console program with two modes. The first mode is called Checker. In Checker mode, MM_IPC creates a million-integer memory mapping, populates it, and then starts monitoring it for changes. The second mode, Scrambler, attaches to an existent CMemMapFile, and starts changing its values in the memory map. Scrambler mode changes memory and Checker mode changes it back. The idea is that two or more copies of the executable are run, some in Checker mode and some in Scrambler mode. Two batch files, CHECKER.BAT and SCRAMBLER.BAT, execute MM_IPC with the appropriate command switches to set the corresponding mode. Run each batch file at least once and you’ll see the IPC in action. Of course the sample code also includes the CMemoryMap class. This code will do well as is for simple IPC and memory mapping, as shown in the example, and will serve as an excellent base for more advanced constructs such as a mailbox with notification. s</p>
+<p>
+<i>Pete Bosch is a software developer and architect at General Electric Medical Systems. He has been developing for Windows since MSVC++ 1.0, and for UNIX systems since long before that. PBosch@ExecPC.com.</i></p>
+<P align="center"><a
+    href="http://www.pinpub.com/vbd/"><img src="Pinnacle.gif"
+    border="0" width="216" height="72"></a></p>
+    <P align="center"><strong>To find out more about
+    Visual C++ Developer and Pinnacle Publishing, visit their
+    website at</strong>: <a href="http://www.pinpub.com/vbd/"><strong>http://www.pinppub.com/vcd/</strong></a></p>
+    <P align="center"><font size="1">Note: This is not
+    a Microsoft Corporation website. <br>
+    Microsoft is not responsible for its content.</font></p>
+    <p><font size="1">This article is reproduced from the
+    November 1996 issue of Visual C++ Developer. Copyright
+    1996, by Pinnacle Publishing, Inc., unless otherwise noted.
+    All rights are reserved. Visual C++ Developer is an
+    independently produced publication of Pinnacle Publishing,
+    Inc. No part of this article may be used or reproduced in any
+    fashion (except in brief quotations used in critical articles
+    and reviews) without prior consent of Pinnacle Publishing,
+    Inc. To contact Pinnacle Publishing, Inc., please call
+    (800)&nbsp;788-1900 or (206)&nbsp;251-1900.</font></p>
+</font></BODY>
+</HTML>

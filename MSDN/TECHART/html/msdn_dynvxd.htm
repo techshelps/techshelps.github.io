@@ -1,0 +1,173 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Enhancing WDEB386 with External Debugger Commands</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_dynvxd"></a></sup>Enhancing WDEB386 with External Debugger Commands</h1>
+<p>
+Manfred Schluttenhofer, Microsoft Corporate Support, Central Europe<br>
+With support from Ruediger R. Asche, Microsoft Developer Network Technology Group</p>
+<p>
+October 9, 1995</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="4471">
+</OBJECT><a href="javascript:sample1.Click()">Click to open or copy the files in the VDYNDEBD sample application for this technical article.</a></p>
+<h2>Abstract</h2>
+<p>
+This article discusses three VxD-related features: writing dynamically loadable VxDs for the Microsoft® Windows® 95 operating system, loading such VxDs using the Win32® application programming interface (API), and supplying external WDEB386 commands in a VxD. These features are illustrated by VDYNDEBD, which is a VxD written for Windows 95. Although VxDs for Windows 95 may be written in C or C++, VDYNDEBD is written in assembly language to keep the source code as small as possible. The article assumes that you know how virtual device drivers for Windows 3.1 work.</p>
+<h2>Making Your VxD Dynamically Loadable</h2>
+<p>
+There are two ways to load a VxD that is dynamically loadable:
+<ul type=disc>
+<li>
+From a Win32® application, using the <b>CreateFile</b> function. In this article, we will look at this technique.<br><br></li>
+<li>
+From another VxD, using the VXDLDR_LoadDevice service. A 16-bit, Microsoft® Windows®-based application and a real-mode MS-DOS® application can use this service by using the VXDLDR's application programming interface (API) entry point. (Please refer to the Callback sample in the Microsoft Developer Network Library for additional information on this technique.)</li>
+</ul>
+<p>
+The two techniques are not equivalent. When a Win32 application opens a handle to the VxD, the Win32 virtual device (VWIN32) uses the VXDLDR's LoadDevice service, and then sends a W32_DEVICEIOCONTROL notification message to the loaded VxD.</p>
+<p>
+Consequently, to make your VxD dynamically loadable, the control procedure of your virtual device has to handle at least two system control messages: SYS_DYNAMIC_DEVICE_INIT and SYS_DYNAMIC_DEVICE_EXIT. If your VxD can be opened from inside a Win32 application, the control procedure must also handle the W32_DEVICEIOCONTROL notification as described in the "Handling the WIN32_DEVICEIOCONTROL Message" section below. It is probably a good idea for your VxD to handle the WIN32_DEVICEIOCONTROL message in any case, just to be prepared to be called from a Win32 application.</p>
+<p>
+The VDYNDEBD control procedure handles this minimal set of notifications:</p>
+<pre><code>BeginProc VdyndebD_Control
+ &nbsp;&nbsp; Control_Dispatch SYS_DYNAMIC_DEVICE_INIT, VdyndebD_Dynamic_Init
+ &nbsp;&nbsp; Control_Dispatch SYS_DYNAMIC_DEVICE_EXIT, VdyndebD_Dynamic_Exit
+ &nbsp;&nbsp; Control_Dispatch W32_DEVICEIOCONTROL, VdyndebD_DeviceIOControl
+ &nbsp;&nbsp; clc
+ &nbsp;&nbsp; ret
+EndProc VdyndebD_Control&nbsp; 
+</code></pre>
+<h3>Handling the SYS_DYNAMIC_DEVICE_INIT Message</h3>
+<p>
+The SYS_DYNAMIC_DEVICE_INIT message will be sent only once (namely, when the VxD is loaded), so you may put the code and the data used while processing this message in discardable segments. Any initialization necessary for the VxD should be done in this handler. To succeed in the initialization, EAX should be set to 1, and the carry flag should be cleared before returning from this handler. Here's an example:</p>
+<pre><code>BeginProc VdyndebD_Dynamic_Init
+ &nbsp;&nbsp; mov eax, 1
+ &nbsp;&nbsp; clc
+ &nbsp;&nbsp; ret
+EndProc VdyndebD_Dynamic_Init
+</code></pre>
+<h3>Handling the SYS_DYNAMIC_DEVICE_EXIT Message</h3>
+<p>
+SYS_DYNAMIC_DEVICE_EXIT is the last message the VxD receives when it is unloaded. All necessary cleanup should be done in this handler. As in the SYS_DYNAMIC_DEVICE_INIT message, EAX should be set to 1, and the carry flag should be cleared before returning from this handler. For example:</p>
+<pre><code>BeginProc VdyndebD_Dynamic_Exit
+ &nbsp;&nbsp; mov eax, 1
+ &nbsp;&nbsp; clc
+ &nbsp;&nbsp; ret
+EndProc VdyndebD_Dynamic_Exit
+</code></pre>
+<h3>Handling the W32_DEVICEIOCONTROL Message</h3>
+<p>
+The W32_DEVICEIOCONTROL message is sent to the VxD right after the SYS_DYNAMIC_DEVICE_INIT message, when the first Win32 application opens a handle to the VxD. Unlike SYS_DYNAMIC_DEVICE_INIT, the message is sent again for each application that opens the VxD and for each application that closes the VxD. To distinguish between control codes, you need to check the <i>dwIoControl</i> member of the <b>DIOCParams</b> structure that ESI points to when the VxD receives this message. The value of <i>dwIoControl</i> is set to DIOC_OPEN when the VxD is opened, and to DIOC_CLOSEHANDLE when it is closed. Application-specific initialization and cleanup can be done here.</p>
+<p>
+To succeed in a request to open, your VxD must set EAX to 0, and the carry flag must be cleared before returning. Upon returning from a request to close, EAX must be set to VXD_SUCCESS, and the carry flag must be cleared. When a Win32 application calls a VxD-defined I/O control function using the <b>DeviceIoControl</b> API, the VxD will receive another W32_DEVICEIOCONTROL message. This technique is not discussed in this article; however, your VxD should be prepared by setting EAX to 50 (ERROR_NOT_SUPPORTED) and clearing the carry flag for unsupported <i>dwIoControl</i> values before it returns. For example:</p>
+<pre><code>BeginProc VdyndebD_DeviceIOControl
+ &nbsp;&nbsp; mov&nbsp; eax, [esi+12]
+ &nbsp;&nbsp; cmp&nbsp; eax, DIOC_OPEN
+ &nbsp;&nbsp; jz&nbsp;&nbsp; short DeviceIOControlOpen
+ &nbsp;&nbsp; cmp&nbsp; eax, DIOC_CLOSEHANDLE
+ &nbsp;&nbsp; jz&nbsp;&nbsp; short DeviceIOControlCloseHandle
+ &nbsp;&nbsp; mov&nbsp; eax, 50
+
+  DeviceIOControlDone:
+ &nbsp;&nbsp; clc
+ &nbsp;&nbsp; ret
+
+  DeviceIOControlOpen:
+ &nbsp;&nbsp; xor&nbsp; eax, eax
+ &nbsp;&nbsp; jmp&nbsp; short DeviceIOControlDone
+
+  DeviceIOControlCloseHandle:
+ &nbsp;&nbsp; mov&nbsp; eax, VXD_SUCCESS
+ &nbsp;&nbsp; jmp&nbsp; short DeviceIOControlDone
+EndProc VdyndebD_DeviceIOControl
+</code></pre>
+<h2>Loading Your VxD Using the Win32 API</h2>
+<p>
+More than one application can open and close a dynamically loadable VxD. No matter how many applications open the VxD, it will be loaded into memory only once: The VxD will be loaded into memory when the first application opens it, and it will be unloaded after all applications that opened the VxD have closed it. The sample source code accompanying this article includes a simple Win32 application called LOADVXD, which can be used to load and unload the VDYNDEBD sample VxD. To open a dynamically loadable virtual device driver from within a Win32 application, you should use the Win32 <b>CreateFile</b> function. The <i>lpFileName</i> parameter to the <b>CreateFile</b> call should point to a string in the form "\\.\<i>vxdname</i>," where <i>vxdname</i> is the actual filename of the VxD to be opened. The <i>dwDesiredAccess</i>, <i>dwShareMode</i>, <i>pSecurityAttributes</i>, and <i>hTemplateFile</i> parameters do not matter when opening a VxD and may, therefore, be set to 0. The <i>dwCreationDistribution</i> parameter should be set to OPEN_EXISTING, and <i>dwFlagsAndAttributes</i> should be set to FILE_FLAG_DELETE_ON_CLOSE. For example:</p>
+<pre><code>HANDLE hVxD = 0;
+
+hVxD = CreateFile("\\\\.\\VDYNDEBD.VXD", 0, 0, NULL, OPEN_EXISTING,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; FILE_FLAG_DELETE_ON_CLOSE, 0);
+</code></pre>
+<p>
+To close the previously opened VxD, simply call the Win32 <b>CloseHandle</b> function with the handle returned by <b>CreateFile</b>. For example: </p>
+<pre><code>CloseHandle(hVxD);
+</code></pre>
+<h2>Supplying External Debugger Commands</h2>
+<p>
+Every virtual device driver can supply external commands (.DOT commands) that kernel-mode debuggers such as WDEB386 can use, by handling the Debug_Query system control message. When the user enters the command ".<i>vxdname</i>" (where <i>vxdname</i> is the actual name of the VxD) in the debug terminal, the control procedure of the VxD will receive a Debug_Query message. Here is an example of a control procedure that handles this message:&nbsp; </p>
+<pre><code>BeginProc VdyndebD_Control
+ &nbsp;&nbsp; Control_Dispatch Debug_Query, VdyndebD_DebugQuery
+ &nbsp;&nbsp; clc
+ &nbsp;&nbsp; ret
+EndProc VdyndebD_Control
+</code></pre>
+<h3>Handling the Debug_Query Message</h3>
+<p>
+While processing the Debug_Query control message, a VxD may use the <b>Trace_Out</b> macro to send a menu with options to the debug terminal. The virtual machine manager provides services such as <b>In_Debug_Chr</b> and <b>Is_Debug_Chr</b> to read from the debug terminal. Using the <b>Trace_Out</b> macro and these services, you can easily perform tasks specific to the kind of device your VxD is dealing with, and provide information that would not be available otherwise. For example:</p>
+<pre><code>BeginProc VdyndebD_DebugQuery
+ &nbsp;&nbsp; Trace_Out " "
+ &nbsp;&nbsp; Trace_Out "*** VDYNDEBD DEBUG INFORMATION ***"
+ &nbsp;&nbsp; Trace_Out " "
+ &nbsp;&nbsp; Trace_Out "[1] Option 1"
+ &nbsp;&nbsp; Trace_Out "[2] Option 2"
+ &nbsp;&nbsp; Trace_Out "[3] Option 3"
+ &nbsp;&nbsp; Trace_Out " "
+ &nbsp;&nbsp; Trace_Out "Please select an option: ", nocrlf
+
+ &nbsp;&nbsp; VMMcall In_Debug_Chr
+
+ &nbsp;&nbsp; Trace_Out " "
+ &nbsp;&nbsp; Trace_Out " "
+ &nbsp;&nbsp; jz&nbsp;&nbsp; short DebugDone
+ &nbsp;&nbsp; cmp&nbsp; al, '1'
+ &nbsp;&nbsp; jz&nbsp;&nbsp; short DebugOption1
+ &nbsp;&nbsp; cmp&nbsp; al, '2'
+ &nbsp;&nbsp; jz&nbsp;&nbsp; short DebugOption2
+ &nbsp;&nbsp; cmp&nbsp; al, '3'
+ &nbsp;&nbsp; jz&nbsp;&nbsp; short DebugOption3
+ &nbsp;&nbsp; Trace_Out "Invalid VDYNDEBD debug option"
+ &nbsp;&nbsp; Trace_Out " "
+
+  DebugDone:
+ &nbsp;&nbsp; clc
+ &nbsp;&nbsp; ret
+
+  DebugOption1:
+ &nbsp;&nbsp; Trace_Out "VDYNDEBD debug option 1"
+ &nbsp;&nbsp; Trace_Out " "
+ &nbsp;&nbsp; jmp&nbsp; short DebugDone
+
+  DebugOption2:
+ &nbsp;&nbsp; Trace_Out "VDYNDEBD debug option 2"
+ &nbsp;&nbsp; Trace_Out " "
+ &nbsp;&nbsp; jmp&nbsp; short DebugDone
+
+  DebugOption3:
+ &nbsp;&nbsp; Trace_Out "VDYNDEBD debug option 3"
+ &nbsp;&nbsp; Trace_Out " "
+ &nbsp;&nbsp; jmp&nbsp; short DebugDone
+EndProc VdyndebD_DebugQuery
+</code></pre>
+<h2>Further Reading</h2>
+<p>
+For a complete description of the functions, services, macros, and messages described above, see the Microsoft Windows 95 Device Driver Kit (DDK) documentation in the Microsoft Development Library. Some details, such as the description of the W32_DEVICEIOCONTROL system control message, are not included in the DDK but can be found in the Win32 Software Development Kit (SDK), also in the Development Library.</p>
+<p>
+The following articles provide other useful information on related topics:</p>
+<p>
+Asche, Ruediger R. <a href="msdn_chicvxd.htm">"What's New in Windows 95 for VxD Writers?"</a> April 1994. (Development Library, Technical Articles)</p>
+<p>
+Oney, Walter. "Extend Your Application with Dynamically Loaded VxDs Under Windows 95." <i>Microsoft Systems Journal</i> 10 (May 1995). (MSDN Library, Books and Periodicals)</p>
+</BODY>
+</HTML>

@@ -1,0 +1,394 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Under the Hood</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  Under the Hood</H1><P>Matt Pietrek</P>
+<P>Matt Pietrek is the author of <I>Windows 95 System Programming Secrets</I> (IDG Books, 1995). He works at Nu-Mega Technologies Inc., and can be reached at 71774.362@compuserve.com.</P>
+<P>In my March and April 1996 columns, I described the Windows NT¨ performance data and how you can get information like process lists and memory statistics from it. As part of those columns, I devised a set of C++ classes that allow you to enumerate through the convoluted performance data structures. I just recently learned that there's a much easier way to get at some of that information; this month, I'll dig into some of the functionality in PSAPI.DLL, an SDK component that's finally getting its chance to shine with Windows NT 4.0.</P>
+<P>If you have the Windows NT 3.51 SDK, check out the PFMON sample in \win32sdk\mstools\samples\sdktools\image\winnt\pfmon. The PFMON program uses PSAPI.DLL to gather information about the working set of the process. What you don't see in the PFMON sample code is that PSAPI.DLL has functions for easily enumerating processes and modules within a process and for obtaining memory statistics for a process. In some ways, PSAPI.DLL is the Windows NT equivalent of the TOOLHELP32 functions from Windows¨ 95. Alas, the H file necessary to use all the functions in PSAPI.DLL wasn't included with the Windows NT 3.51 SDK. With Windows NT 4.0, PSAPI.DLL is used by other Win32¨ SDK components (such as APIMON.EXE) so PSAPI.DLL now has a proper H file (PSAPI.H) and is redistributable. </P>
+<P>Looking under the hood of PSAPI.DLL for a second, you'll find that it's a fairly small DLL. That's because it relies on the NtQuerySystemInformation, NtQueryInformationProcess, and NtQueryVirtualMemory functions from NTDLL.DLL to do the real work. While you could call these functions directly, they're subject to change. PSAPI.DLL <BR>is intended to be the standard way for getting at this information.</P>
+<P>At the topmost level, PSAPI has sets of functions for retrieving the following information:</P>
+<UL><LI> A list of process IDs</LI><LI>Information about the modules in a process</LI><LI>A list of device drivers</LI><LI>Process memory usage</LI><LI>Pages faulted into a process space</LI><LI>Memory mapped files in use by a process</LI></UL><P>I'll focus on just the first four sets of functions. In a future column, I'll describe the last two.</P>
+<P> </P>
+<H2><A NAME="sec0"></A>  Process Information</H2><P>When working with processes, the first PSAPI function you're likely to use is EnumProcesses. This function fills in an array of DWORDs (supplied by you) with the IDs of all the processes in the system. Since you probably don't know ahead of time how many processes there are, it's a good idea to give EnumProcesses a large array of DWORDs. Afterwards, you can use the cbNeeded field to tell how many entries in the array were actually filled (for example, cbNeeded / sizeof(DWORD)).</P>
+<P>Frankly, a program that prints out process IDs ("2 4 7 11 16...") isn't going to make anybody swoon. Some effort on your part is needed to take those process IDs and make something useful out of them. Your secret weapon is the OpenProcess function, which takes a process ID and returns a process handle. With a process handle, you're ready to party! In fact, many PSAPI functions require process handles.</P>
+<P>One slightly messy part of getting process handles is deciding what sort of access you need. On my first attempt to use PSAPI, I tried to use PROCESS_ALL_ACCESS, which is every possible flag with every possible access right. While this worked on some processes, OpenProcess failed on some of the critical system processes, such as CSRSS. Trying the opposite approach, I tried passing a minimal PROCESS_QUERY_INFORMATION value to OpenProcess. While that allowed me to open additional process handles, some of the PSAPI functions were unable to work with just those access rights. What finally worked for the largest number of processes were PROCESS_QUERY_INFORMATION and PROCESS_VM_READ. This is because the Windows NT operating system allows a user-level program to use those values for almost every process on the system. Remember, call CloseHandle with your process handles when you're done with them.</P>
+<P>Once you get a process handle, what can PSAPI do for you? For starters, EnumProcessModules will give you a list of the HMODULEs in a specified process. Like the EnumProcesses function, EnumProcessModules fills an array for you and sets the cbNeeded output parameter to indicate how many HMODULEs it placed into the array. While a list of HMODULEs is a good start, you're still not out of the woods yet. Remember, these HMODULEs are most likely from some process other than you, so you can't use these HMODULEs with functions like GetModuleFileName.</P>
+<P>While a masochistic programmer could use ReadProcessMemory to find out about an out-of-process HMODULE, there's really no need to do this. GetModuleBaseName takes a process handle and an HMODULE and fills in a buffer with the base name of a module (like "KERNEL32.DLL"). A related function, GetModuleFileNameEx, takes the same parameters but returns the full path to the module (for example, "C:\WINNT\SYSTEM32\KERNEL32.DLL"). As with just about any Win32 function that works with strings, there are both ANSI and UNICODE versions of GetModuleBaseName and GetModuleFileNameEx. The absence or presence of #define UNICODE determines which version is used.</P>
+<P>The final module-related function in PSAPI.DLL is GetModuleInformation, which takes a process handle and HMODULE and fills in a MODULEINFO structure. The MODULEINFO structure contains the base load address of the module (lpBaseOfDll), the amount of linear address space it takes up (SizeOfImage), and the address of its entry point (EntryPoint). A module's entry point is the location called during process and thread startup and shutdown. While not exactly the same as the DllMain function, it's a close enough approximation for most people. GetModuleInformation doesn't do anything difficult; the load address of a module is the same as the HMODULE, and the SizeOfImage and EntryPoint information comes straight out of a module's Portable Executable (PE) header in memory.</P>
+<P> </P>
+<H2><A NAME="sec1"></A>  Device Driver Information</H2><P>In some ways, device drivers and program modules (DLLs and EXEs) are similar in that they're both based on PE files. However, while each process has its own private list of loaded modules, device drivers are global. Thus, PSAPI.DLL has separate functions for grabbing the list of device drivers and obtaining the names of the drivers.</P>
+<P>EnumDeviceDrivers is similar to the EnumProcesses function except that it returns a list of load addresses for each device driver instead of filling in an array of process IDs. Also, as with EnumProcesses, you rely on the cbNeeded parameter to determine how many device drivers it reported on.</P>
+<P>The parallels between the process and device driver functions continue with the driver name functions. GetDeviceDriverBaseName takes a driver load address as input and fills in a buffer with the base name of the driver (for example, "WIN32K.SYS"). GetDeviceDriverFileName returns the full path to the device driver's file (for example,"C:\WINNT\SYSTEM32\WIN32K.SYS"). As you'd expect, there are both ANSI and UNICODE versions of these functions.</P>
+<P> </P>
+<H2><A NAME="sec2"></A>  Process Memory Usage</H2><P>The final function is GetProcessMemoryInfo, which takes a process handle as input and fills in a structure with information about the process's memory statistics. This structure, defined in PSAPI.H, is called PROCESS_MEMORY_COUNTERS. The first structure member (cb) is filled in with the size of the structure. The meaning of the second structure member (PageFaultCount) is fairly obvious.</P>
+<P>The remaining fields in the PROCESS_MEMORY_COUNTERS struct are the current and peak consumption of memory in the following categories: working set, paged pool, nonpaged pool, and pagefile. The working set is the amount of memory physically mapped into the process context at a given time. The paged and nonpaged pools are system memory areas. Memory in the paged pool can be paged to disk as necessary, while nonpaged memory will always be present. The pagefile usage represents how much memory is set aside in the system swapfile for the process; it essentially represents how much memory has been committed by the process. However, committing memory is not the same as making it physically present. I will cover the working set capabilities in detail in a future column.</P>
+<P> </P>
+<H2><A NAME="sec3"></A>  The PSAPIDEM Program</H2><P>To show how to use some of the PSAPI functions, I wrote PSAPIDEM (see <B>Figure 1</B>). As you can see from <B>Figure 2</B>, the main window of PSAPIDEM is a dialog box with two tree controls and a couple of buttons. (I figured it was time to break down and learn how to use tree controls!) The upper tree control lists all of the processes in the system along with the process ID and name (if available). The lower tree view contains a list of the running device drivers. The Refresh button forces an update on both tree views, while the About and Exit buttons should be self-explanatory.</P>
+<P><B> Figure 1  PSAPIDEM.CPP</B></P>
+<P><BR></P>
+<PRE> //=======================================
+// PSAPIDEM - Matt Pietrek 1996
+// Microsoft Systems Journal, August 1996
+// FILE: PSAPIDEM.CPP
+//=======================================
+#include &lt;windows.h&gt;
+#include &lt;commctrl.h&gt;
+#pragma hdrstop
+#include "psapi.h"
+#include "psapidem.h"
+
+// Helper function prototypes
+void Handle_WM_COMMAND(HWND hDlg, WPARAM wParam, LPARAM lParam);
+void Handle_WM_INITDIALOG(HWND hDlg);
+void Handle_WM_CLOSE( HWND hDlg );
+BOOL CALLBACK PSApiDemDlgProc( HWND, UINT, WPARAM, LPARAM );
+HTREEITEM TVAppendString( HWND hWnd, HTREEITEM hTi, PSTR psz );
+void GetSetPositionInfoFromRegistry( BOOL fSave, POINT *lppt );
+
+// ======================= String literals ===============================
+char gszRegistryKey[] = "Software\\WheatyProductions\\PSAPIDEM";
+
+char g_AboutMsgTxt[] =
+"PSApiDem shows processes and device driver information obtained "
+"with PSAPI.DLL, from the Win32 SDK";
+
+char g_AboutTitleTxt[] = "PSApiDem - Matt Pietrek 1996, for MSJ";
+
+// ======================= Start of code ===============================
+
+void AddProcessDetails( HWND hWnd, HTREEITEM hTreeItem, HANDLE hProcess )
+{
+    //
+    // Fills in the details for one specific process
+    //
+
+    HMODULE hMods[1024];
+    DWORD cbNeeded;
+
+    //
+    // Get a list of all the HMODULEs in this process.  Add a "Module"
+    // subnode, and add the full path for each HMODULE to it.
+    // 
+    if ( EnumProcessModules(hProcess, hMods, sizeof(hMods), &amp;cbNeeded) )
+    {
+        HTREEITEM hTiModules = TVAppendString( hWnd, hTreeItem, "Modules" );
+    
+        for ( unsigned i = 0; i &lt; (cbNeeded / sizeof(HMODULE)); i++ )
+        {
+            char szModName[MAX_PATH];
+            char szItem[MAX_PATH+64];
+
+            // Get the full path to the module's file
+            if ( GetModuleFileNameEx( hProcess, hMods[i], szModName,
+                                      sizeof(szModName)))
+            {
+                wsprintf( szItem, "%s (0x%08X)", szModName, hMods[i] );
+                TVAppendString( hWnd, hTiModules, szItem );
+            }
+        }
+    }
+
+    //
+    // Next, use PSAPI.DLL to collect information about the memory usage
+    // of the process.  Add a "Memory" node to the process, and add
+    // subnodes for each field in the PROCESS_MEMORY_COUNTERS structure.
+    //
+    PROCESS_MEMORY_COUNTERS pmc;
+    
+    if ( GetProcessMemoryInfo( hProcess, &amp;pmc, sizeof(pmc)) )
+    {
+        char szItem[128];
+        HTREEITEM hTiMem = TVAppendString( hWnd, hTreeItem, "Memory" );
+
+        wsprintf( szItem, "%s 0x%08X", "PageFaultCount", pmc.PageFaultCount );
+        TVAppendString( hWnd, hTiMem, szItem );
+        wsprintf( szItem, "%s 0x%08X", "PeakWorkingSetSize",
+                  pmc.PeakWorkingSetSize );
+        TVAppendString( hWnd, hTiMem, szItem );
+        wsprintf( szItem, "%s 0x%08X", "WorkingSetSize", pmc.WorkingSetSize );
+        TVAppendString( hWnd, hTiMem, szItem );
+        wsprintf( szItem, "%s 0x%08X", "QuotaPeakPagedPoolUsage",
+                  pmc.QuotaPeakPagedPoolUsage );
+        TVAppendString( hWnd, hTiMem, szItem );
+        wsprintf( szItem, "%s 0x%08X", "QuotaPagedPoolUsage",
+                  pmc.QuotaPagedPoolUsage );
+        TVAppendString( hWnd, hTiMem, szItem );
+        wsprintf( szItem, "%s 0x%08X", "QuotaPeakNonPagedPoolUsage",
+                  pmc.QuotaPeakNonPagedPoolUsage );
+        TVAppendString( hWnd, hTiMem, szItem );
+        wsprintf( szItem, "%s 0x%08X", "QuotaNonPagedPoolUsage",
+                  pmc.QuotaNonPagedPoolUsage );
+        TVAppendString( hWnd, hTiMem, szItem );
+        wsprintf( szItem, "%s 0x%08X", "PagefileUsage", pmc.PagefileUsage );
+        TVAppendString( hWnd, hTiMem, szItem );
+        wsprintf( szItem, "%s 0x%08X", "PeakPagefileUsage",
+                  pmc.PeakPagefileUsage );
+        TVAppendString( hWnd, hTiMem, szItem );
+    }
+
+    //
+    // Finally, use the KERNEL32 GetProcessTimes function to see how much
+    // time the process has spent in user and kernel modes.  Add this
+    // information (in milliseconds) to the process node
+    //
+    FILETIME ftCreate, ftExit, ftKernel, ftUser;
+    
+    if ( GetProcessTimes( hProcess, &amp;ftCreate, &amp;ftExit, &amp;ftKernel, &amp;ftUser));
+    {
+        // Horrible, disgusting hack!  The two lines below basically grab the
+        // contents of a FILETIME structure and store it in a 64 bit integer.
+        LONGLONG tUser64 = *(LONGLONG *)&amp;ftUser;
+        LONGLONG tKernel64 = *(LONGLONG *)&amp;ftKernel;
+        DWORD tUser, tKernel;
+
+        // The LONGLONGs contain the time in 100 nanosecond intervals (now
+        // there's a useful unit of measurement...).  Divide each of them by
+        // 10000 to convert into milliseconds, and store the results in a
+        // DWORD.  This means that the max time before overflowing is around
+        // 4 Million seconds (about 49 days)
+        tUser = (DWORD)(tUser64 / 10000);
+        tKernel = (DWORD)(tKernel64 / 10000);
+
+        // Format the user and kernel times, and add to the process node
+        char szItem[128];
+        wsprintf( szItem, "User mode: %u ms", tUser );
+        TVAppendString( hWnd, hTreeItem, szItem );
+        wsprintf( szItem, "Kernel mode: %u ms", tKernel );
+        TVAppendString( hWnd, hTreeItem, szItem );
+    }
+}
+
+void AddProcessToList( HWND hWnd, DWORD processID )
+{
+    //
+    // Adds the process name and ID to the treeview control, then calls
+    // AddProcessDetails to fill in the details about the process
+    //
+
+    char szProcessName[MAX_PATH] = "unknown";
+    char szItemString[MAX_PATH+64];
+    
+    HANDLE hProcess = OpenProcess(  PROCESS_QUERY_INFORMATION |
+                                    PROCESS_VM_READ,
+                                    FALSE, processID );
+    if ( hProcess )
+    {
+        HMODULE hMod;
+        DWORD cbNeeded;
+        
+        if ( EnumProcessModules( hProcess, &amp;hMod, sizeof(hMod), &amp;cbNeeded) )
+        {
+            GetModuleBaseName( hProcess, hMod, szProcessName,
+                               sizeof(szProcessName) );
+        }
+    }
+    
+    wsprintf( szItemString, "%s (ID:%u)", szProcessName, processID );
+
+    HTREEITEM hTiProcess = TVAppendString( hWnd, TVI_ROOT, szItemString);
+
+    if ( hProcess &amp;&amp; hTiProcess )
+        AddProcessDetails( hWnd, hTiProcess , hProcess );
+            
+    CloseHandle( hProcess );
+}
+
+void UpdateProcessList( HWND hDlg )
+{
+    //
+    // Clears the treeview, obtains a list of process IDs, and shows them
+    //
+    
+    // Get the treeview's HWND, then clear it
+    HWND hWnd = GetDlgItem(hDlg,IDC_TREE_PROCESS);
+    TreeView_DeleteAllItems( hWnd );
+
+    // Get the list of process IDs
+    DWORD aProcesses[1024], cbNeeded;
+    if ( !EnumProcesses( aProcesses, sizeof(aProcesses), &amp;cbNeeded ) )
+        return;
+    
+    // Calculate how many process IDs were returned
+    DWORD cProcesses = cbNeeded / sizeof(DWORD);
+
+    // Spit out the information for each ID
+    for ( unsigned i = 0; i &lt; cProcesses; i++ )
+        AddProcessToList( hWnd, aProcesses[i] );
+}
+
+void UpdateDriverList( HWND hDlg )
+{
+    //
+    // Clears the treeview, obtains a list of drivers, and shows them
+    //
+
+    // Get the treeview's HWND, then clear it
+    HWND hWnd = GetDlgItem( hDlg, IDC_TREE_DRIVERS );
+    TreeView_DeleteAllItems( hWnd );
+
+    // Get the list of device driver base addresses
+    PVOID aDrivers[1024];
+    DWORD cbNeeded;
+    if ( !EnumDeviceDrivers( aDrivers, sizeof(aDrivers), &amp;cbNeeded ) )
+        return;
+    
+    // Calculate how many drivers were returned
+    DWORD cDrivers = cbNeeded / sizeof(aDrivers[0]);
+    
+    // Spit out the information for each driver
+    for ( unsigned i = 0; i &lt; cDrivers; i++ )
+    {
+        char szBaseName[MAX_PATH]= "";
+        char szDriverFileName[MAX_PATH] = "";
+
+        // Get the driver's base name
+        if ( GetDeviceDriverBaseName( aDrivers[i], szBaseName,
+                                      sizeof(szBaseName) ) )
+        {
+            char szItem[MAX_PATH+64];
+            
+            wsprintf( szItem, "%s (0x%08X)", szBaseName, aDrivers[i] );
+            HTREEITEM hTiDriver = TVAppendString( hWnd, TVI_ROOT, szItem );
+        
+            // Get the full path to the driver
+            GetDeviceDriverFileName( aDrivers[i], szDriverFileName, 
+                                     sizeof(szDriverFileName) );
+            TVAppendString( hWnd, hTiDriver, szDriverFileName );
+        }
+    }
+}
+
+void RefreshViews( HWND hDlg )
+{
+    UpdateProcessList( hDlg );  // Should be self-explanatory!
+    UpdateDriverList( hDlg );
+}
+
+// ======================= Start of UI code ===============================
+
+int PASCAL WinMain( HANDLE hInstance, HANDLE hPrevInstance,
+                    PSTR lpszCmdLine, int nCmdShow )
+{
+    // Gotta do this for those lovely tree view controls
+    InitCommonControls();
+    
+    // Bring up the user interface (A dialog box?  What a surprise!)
+    DialogBox(  hInstance, MAKEINTRESOURCE(IDD_PSAPIDEM_DLG),
+                0, (DLGPROC)PSApiDemDlgProc );
+    return 0;
+}
+
+BOOL CALLBACK PSApiDemDlgProc(HWND hDlg,UINT msg,WPARAM wParam,LPARAM lParam)
+{
+    //
+    // The dialog procedure for the main window
+    //
+    switch ( msg )
+    {
+        case WM_COMMAND:
+            Handle_WM_COMMAND( hDlg, wParam, lParam ); return TRUE;
+        case WM_INITDIALOG:
+            Handle_WM_INITDIALOG( hDlg ); return TRUE;
+        case WM_CLOSE:
+            Handle_WM_CLOSE( hDlg ); break;
+        // let everything else fall through
+    }
+    return FALSE;
+}
+
+void Handle_WM_COMMAND( HWND hDlg, WPARAM wParam, LPARAM lParam )
+{
+    switch ( LOWORD(wParam) )
+    {
+        case IDC_BUTTON_REFRESH: RefreshViews( hDlg ); break;
+        case IDC_BUTTON_EXIT: Handle_WM_CLOSE( hDlg ); break;
+        case IDC_BUTTON_ABOUT:
+            MessageBox( hDlg, g_AboutMsgTxt, g_AboutTitleTxt, MB_OK );
+            break;
+    }
+}
+
+void Handle_WM_INITDIALOG(HWND hDlg)
+{
+    // Get the window coordinates where the program was last running
+    // and move the window to that spot.
+    POINT pt;
+    GetSetPositionInfoFromRegistry( FALSE, &amp;pt );
+    SetWindowPos(hDlg, 0, pt.x, pt.y, 0, 0,
+                 SWP_NOSIZE | SWP_NOREDRAW | SWP_NOZORDER | SWP_NOACTIVATE);
+
+    RefreshViews( hDlg );   // Fill tree views with initial values
+}
+
+void Handle_WM_CLOSE( HWND hDlg )
+{
+    // Save off the window's X,Y coordinates for next time
+    RECT rect;
+    GetWindowRect( hDlg, &amp;rect );
+    GetSetPositionInfoFromRegistry( TRUE, (LPPOINT)&amp;rect );
+    EndDialog(hDlg, 0);
+}
+
+HTREEITEM TVAppendString( HWND hWnd, HTREEITEM hTi, PSTR psz )
+{
+    //
+    // A helper function that appends a string to the end of the list
+    // of subnodes under a specified node (hTi).
+    //
+    TV_INSERTSTRUCT tvis;
+    memset( &amp;tvis, 0, sizeof(tvis) );
+    
+    tvis.hParent = hTi;
+    tvis.hInsertAfter = TVI_LAST;
+    tvis.item.mask = TVIF_TEXT;
+    tvis.item.pszText = psz;
+    
+    return TreeView_InsertItem( hWnd, &amp;tvis );  
+}
+
+void GetSetPositionInfoFromRegistry( BOOL fSave, POINT *lppt )
+{
+    //
+    // Function that saves or restores the coordinates of a dialog box
+    // in the system registry.  Handles the case where there's nothing there.
+    //
+    HKEY hKey;
+    DWORD dataSize, err, disposition;
+    char szKeyName[] = "DlgCoordinates";
+    
+    if ( !fSave )               // In case the key's not there yet, we'll
+        lppt-&gt;x = lppt-&gt;y = 0;  // return 0,0 for the coordinates
+
+    // Open the registry key (or create it if the first time being used)
+    err = RegCreateKeyEx( HKEY_CURRENT_USER, gszRegistryKey, 0, 0,
+                          REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS,
+                          0, &amp;hKey, &amp;disposition );
+    if ( ERROR_SUCCESS != err )
+        return;
+
+    if ( fSave )            // Save out coordinates
+    {
+        RegSetValueEx( hKey, szKeyName, 0, REG_BINARY,
+                       (PBYTE)lppt, sizeof(*lppt) );
+    }
+    else                    // read in coordinates
+    {
+        dataSize = sizeof(*lppt);
+        RegQueryValueEx( hKey, szKeyName, 0, 0, (PBYTE)lppt, &amp;dataSize );
+    }
+}</PRE>
+<P></P>
+<P><img src="hood2.gif"></P>
+<P><B> Figure 2  PSAPIDEM</B></P>
+<P>In the process tree view, the UpdateProcessList function obtains a list of processes with the EnumProcesses function. For each process, the code calls AddProcessToList, passing the process ID. AddProcessToList in turn calls OpenProcess for the process ID; if there's a name next to the process ID, AddProcessToList obtained that value by calling EnumProcessModules to get just the first HMODULE for the process. PSAPIDEM takes this first HMODULE and passes it to GetModuleBaseName to get the process name. If OpenProcess failed, the tree view shows just the process ID. On my machine, the only two processes that I can't open are Idle and CSRSS. These processes have access restrictions so user-level code can't open them.</P>
+<P>If there's a + button next to a process name, you can click it to expand that node out into module, memory, and timing information for the selected process. The information under the modules node is obtained by calling EnumProcessModules (again), this time grabbing the entire list of HMODULEs. PSAPIDEM passes each of those modules in turn to GetModuleFileNameEx. The information under the memory node of a process is simply a listing of all the values in a PROCESS_MEMORY_COUNTERS structure. You get this information with a call to GetProcessMemoryInfo. </P>
+<P>The final piece of process-related information PSAPIDEM shows is the total time spent in user and kernel modes. To get this information I used GetProcessTimes, which is a KERNEL32 function, not a PSAPI.DLL function. I figured, what the heck, I've already got a process handle open so why not show everything I can. This code is complicated by the fact that the information is returned in a FILETIME structure, which is two DWORDs expressing time in units of a hundred nanoseconds. A bit of contorted code converts these values into something more reasonable, like milli–seconds.</P>
+<P>To populate the bottom tree-view control, the UpdateDriverList function first calls EnumDeviceDrivers to obtain an array of load addresses for all the running drivers. Next, the code iterates through each driver, calling GetDeviceDriverBaseName, and puts the results at the root of the tree view. For each device driver, the code also calls GetDeviceDriverFileName and puts the resulting string under the appropriate driver node in the tree.</P>
+<P> </P>
+<H2><A NAME="sec4"></A>  Conclusion</H2><P>This wraps up my whirlwind tour of PSAPI functions. These functions provide a quick and easy way under Windows NT to get system-level information such as process, module, and device driver lists. There are other functions in PSAPI that I haven't touched upon, mainly the working set-related functions. In a future column I'll go over what these other functions can do for you.</P>
+<P>Have a question about programming in Windows? Send it to Matt at 71774.362@compuserve.com</P>
+<P><I>This article is reproduced from Microsoft Systems Journal. Copyright </I>©<I> 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P><I>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</I></P>
+<P></P></font></body></HTML>

@@ -1,0 +1,204 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>ISAPI Applications Security Issues</title>
+<style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000 dir=ltr>
+<h1><a name="isapiapplicationssecurityissues"></a>ISAPI Applications Security Issues</h1>
+<p>
+IIS offers FTP, Gopher and HTTP server capabilities, each running as an NT service. An NT service is a running process that is, potentially, started at system startup and may be running while users log on and off the machine. It appears to be part of the system services. As a process, it must run in the security context of some NT user account. Depending on the type of the service, the account may be a generic, privileged system account, or a specific account with particular rights. We know from the previous section that IIS runs under the almighty system user account. For other services, like some of the Microsoft BackOffice servers (Exchange or SQL), it's recommended that they are installed and run under a separate 'service' account to which the 'log on as service' privilege is added. In general, this is a good idea for these other servers since you then have finer control over the access rights of your services by just adding or removing membership to appropriate groups.</p>
+<p>
+Unlike the other BackOffice servers, the 'normal mode' of operation of the IIS involves the access of server-based, operating-system-managed resources on behalf of remote client requests. We already know that the IIS accomplishes this securely through impersonation.</p>
+<p>
+Let's now take a look at how this impersonation happens and what APIs are available under NT in order to exercise finer control on the thread's access rights.</p>
+<p>
+By default, under NT, a newly created thread inherits the security context of its parent process. Access rights to resources accessed by the thread are checked against the process account. In a typical server like the IIS, the server process may have created a pool of worker threads to which it parcels out each request for servicing. Each worker thread services a request, perhaps producing a response to be sent back to the client and then is ready to process the next client request that has been queued. Now, each client request may require access to data (files or objects) that are accessible only to its corresponding user account. Since the server must access data on behalf of a variety of users, with different access rights, two avenues are open:</p>
+<ul type=disc>
+<li>
+The server process runs as a super-privileged account (with full access rights to all the user's resources)<br><br></li>
+<li>
+The server process 'impersonates' each client before accessing any resources on its behalf</li>
+</ul>
+<p>
+The first method is very dangerous! A bug in the server process, or a rogue request (depending on how general the request is and what checks and balances have been implemented) may allow an unauthorized user access to somebody else's private data. This method is also inconsistent with the Windows NT security model that we have discussed previously.</p>
+<p>
+Fortunately, Win32 provides a number of API calls that support the second method allowing us much finer control over who accesses what.</p>
+<p>
+The basic principle at work here, one that system components of NT adhere to, too, is this corollary of the general security model:</p>
+<p class=indent>
+Before accessing system resources on behalf of a user, assume the identity of that user.</p>
+<p>
+In this way, the server thread has exactly the same access rights as a process started by the logged on client (well, almost, since the impersonated user may not have access to networked resources). These rights are stored with the thread specific Security Access Token. These rights are checked against the ACL for the resources in question by the NT security reference monitor and access is granted or denied. Thus security decisions are kept centralized and protected within the NT executive, deep inside the kernel. The access model is also simplified since all access is reduced to the level of a process instantiated by a logged on user. </p>
+<p>
+Let's look at some of the relevant functions from the security API before we go through an example of how we can use this from within our ISAPI extensions. The security API is large and complex and outside the scope of this chapter—the following subset, however, is sufficient to solve the problem at hand.</p>
+<pre><code>BOOL OpenThreadToken( HANDLE ThreadHandle,
+                      DWORD DesiredAccess,
+                      BOOL OpenAsSelf,
+                      PHANDLE pTokenHandle );</code></pre>
+<p>
+<b><code>OpenThreadToken()</code></b> opens the Security Access Token associated with the thread identified by the thread handle. As we've discussed before, this access token encapsulates the security context of the current thread, or its parent process, and can be potentially modified and then used in order to change the security context of a running thread—either the same one, or another one. This token is the key to 'impersonation'. The function returns <b><code>TRUE</code></b> on success.</p>
+<p>
+Let's take a look at the parameters:</p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=blue width=141><b>Parameter</b></td>
+<td class=blue width=380><b>Meaning</b></td>
+</tr>
+<tr valign=top>
+<td width=141><b><code>ThreadHandle</code></b></td>
+<td width=380>This is a handle to the thread for which we want to get the security information. This implies that the calling thread must have permissions to inquire about the <b><code>ThreadHandle</code></b> thread.<p>
+Thread handles are returned by the <b><code>CreateThread()</code></b> call that creates a new thread. A running thread may get at its handle by invoking <b><code>GetCurrentThread()</code></b> . </p>
+<p>
+&nbsp;(Actually <b><code>GetCurrentThread()</code></b> returns a 'pseudohandle' that the thread can use to specify itself wherever a thread handle is required. If a proper thread handle is required, e.g. to pass to other threads to refer to the current thread, then <b><code>DuplicateHandle()</code></b> must be invoked on the pseudohandle.)</p>
+</td>
+</tr>
+<tr valign=top>
+<td width=141><b><code>DesiredAccess</code></b></td>
+<td width=380>This specifies an access mask with the requested types of access to the thread access token. As any other object in the system, the access token has a discretionary access control list (DACL) against which the <b><code>DesiredAccess</code></b> is checked.</td>
+</tr>
+<tr valign=top>
+<td width=141><b><code>OpenAsSelf</code></b></td>
+<td width=380>This is an important parameter. If set to <b><code>TRUE</code></b>, the access check to decide whether access to the thread token will be granted or not, is done against the security context of the calling process. If the value is <b><code>FALSE</code></b>, the access check is against the calling thread security context.<p>
+In other words, if the thread belongs to a server process running under a privileged account, passing <b><code>TRUE</code></b> will perform the check against the privileged account, while a <b><code>FALSE</code></b> will result in a check against the current security context of the thread. If the thread is already impersonating a user account with fewer privileges, the check may fail.</p>
+</td>
+</tr>
+<tr valign=top>
+<td width=141><b><code>PTokenHandle</code></b></td>
+<td width=380>This is a pointer to a handle. If the call is successful, it will be set to a handle to an open access token to the thread. When the token is no longer necessary, the handle should be closed with <b><code>CloseHandle()</code></b>.<p>
+The access rights implied by the token depend on the <b><code>DesiredAccess</code></b> parameter; that is, it may not encapsulate the complete set of rights for the thread. </p>
+</td>
+</tr>
+</table><br>
+<p>
+Here are some of the most important values for the <b><code>DesiredAccess</code></b> parameter</p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=blue width=180><b><code>DesiredAccess</code> Value</b></td>
+<td class=blue width=341><b>Meaning</b></td>
+</tr>
+<tr valign=top>
+<td width=180><b><code>TOKEN_ADJUST_PRIVILEGES</code></b></td>
+<td width=341>Required to change the privileges specified in the access token.</td>
+</tr>
+<tr valign=top>
+<td width=180><b><code>TOKEN_DUPLICATE</code></b></td>
+<td width=341>Required in order to duplicate an access token.</td>
+</tr>
+<tr valign=top>
+<td width=180><b><code>TOKEN_QUERY</code></b></td>
+<td width=341>Required in order to inquire about the contents of an access token.</td>
+</tr>
+<tr valign=top>
+<td width=180><b><code>TOKEN_IMPERSONATE</code></b></td>
+<td width=341>Required in order to get an access token that can then be used by a process or thread to impersonate the user with the rights that the access token represents.</td>
+</tr>
+</table><br>
+<p>
+An almost identical function is available in order to capture the access token of a process:</p>
+<pre><code>BOOL OpenProcessToken( HANDLE ProcessHandle,
+                       DWORD DesiredAccess,
+                       PHANDLE pTokenHandle );</code></pre>
+<p>
+If we now want to modify the privileges associated with the token, for example, in order to enable a the thread or process to perform a system shutdown, we must use the <b><code>AdjustTokenPrivileges()</code></b> function. Note that the function can't add new privileges to the access token but only enable or disable existing privileges. </p>
+<p>
+The main parameters are the token handle in question, an array of the new privileges we want (we can specify whether we want them enabled or disabled), and a pointer to an array to set to the current set of privileges (so that we can revert to it after we're done).</p>
+<pre><code>BOOL AdjustTokenPrivileges( HANDLE TokenHandle,
+                            BOOL DisableAllPrivileges,
+                            PTOKEN_PRIVILEGES NewPriv,
+                            DWORD PreviousBufferLen,
+                            PTOKEN_PRIVILEGES PreviousPriv,
+                            PDWORD RequirdPreviousBufferLen );</code></pre>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=blue width=187><b>Parameter</b></td>
+<td class=blue width=328><b>Meaning</b></td>
+</tr>
+<tr valign=top>
+<td width=187><b><code>TokenHandle</code></b></td>
+<td width=328>Handle to the access token to be modified.</td>
+</tr>
+<tr valign=top>
+<td width=187><b><code>DisableAllPrivileges</code></b></td>
+<td width=328>If set to <b><code>TRUE</code></b>, all privileges are revoked.</td>
+</tr>
+<tr valign=top>
+<td width=187><b><code>NewPriv</code></b></td>
+<td width=328>Pointer to a <b><code>TOKEN_PRIVILEGES</code></b> structure. This contains a counter and an array of <b><code>LUID_AND_ATTRIBUTES</code></b> structures. Each one of these contains just two members: a locally unique identifier (LUID) for the privilege and a Boolean flag to be set to <b><code>TRUE</code></b> if the privilege should be enabled and to <b><code>FALSE</code></b> otherwise.</td>
+</tr>
+<tr valign=top>
+<td width=187><b><code>PreviousBufferLen</code></b></td>
+<td width=328>The size of the buffer passed in the <b><code>PreviousPriv</code></b> argument. <p>
+The calling code must have allocated an array large enough to hold the <b><code>PreviousPriv</code></b> <b><code>TOKEN_PRIVILEGES</code></b> structure, if we want to keep hold of the current privileges before they get modified. If the size isn't sufficient, the last argument is set to the required buffer size and the call fails.</p>
+</td>
+</tr>
+<tr valign=top>
+<td width=187><b><code>PreviousPriv</code></b></td>
+<td width=328>If not set to <b><code>NULL</code></b>, it should point to an allocated buffer of size <b><code>PreviousBufferLen</code></b></td>
+</tr>
+<tr valign=top>
+<td width=187><b><code>RequirdPreviousBufferLen</code></b></td>
+<td width=328>Set to the size of the required buffer pointed to by <b><code>PreviousPriv</code></b> that can hold the current privileges.</td>
+</tr>
+</table><br>
+<p>
+The function will return <b><code>TRUE</code></b> if it has managed to modify at least some of the requested privileges.</p>
+<p>
+Let's go now through an example where the thread in question must set the system time. Since this is a privileged operation, the thread must first attempt to adjust its privileges to include the <b><code>SE_SYSTEMTIME_NAME</code></b> privilege, change the time and then revert back to disabling the privilege.</p>
+<pre><code>HANDLE      hToken;      // handle to thread token
+TOKEN_PRIVILEGES   tp;      // structure to hold the privileges array
+
+// Get the current thread access token
+if ( !OpenThreadToken( GetCurrentThread(),      // current thread handle
+         TOKEN_ADJUST_PRIVILEGES   // we want to modify the access token privileges
+         |  TOKEN_QUERY,      // ask for the existing privileges
+         TRUE,  // access check against the process
+         &amp; hToken) )
+   // error handling</code></pre>
+<p>
+We now need to get the LUID for the system time change privilege. A privilege has a well-known name, an LUID (which is unique on one machine while the system is up—but not necessarily between reboots) and a display string that is meaningful to the end user (in this case, for example, it could be 'Change system time'). We need to look up the LUID for this session, given the text string representing the well-known privilege name. The LUID is assigned to the first <b><code>LUID_AND_ATTRIBUTES</code></b> array of the token privilege structure.</p>
+<pre><code>LookupPrivilegeValue( NULL,      // system name – NULL for the local system
+   SE_SHUTDOWN_NAME,   // string with privilege in question
+   &amp; tp.Privileges[0].Luid );      // pointer to 64-bit LUID</code></pre>
+<p>
+Enable the privilege in the token privilege structure.</p>
+<pre><code>tp.PrivilegeCount = 1;
+tp.Privileges [0].Attributes = SE_PRIVILEGE_ENABLED;</code></pre>
+<p>
+We're now ready to attempt to adjust our thread privileges. For this example, we won't be interested in the current privilege set.</p>
+<pre><code>AdjustTokenPrivileges( hToken,   // token handle
+      FALSE,      // do not disable all
+      &amp; tp,      // new token privilege structure
+      0,      // not interested in current structure
+      NULL,      // same here
+      NULL );      // same here</code></pre>
+<p>
+Now we check whether all requested modifications have taken place. Checking whether the return value is <b><code>TRUE</code></b> isn't enough, since the function will succeed even for partial modifications. We need to invoke <b><code>GetLastError()</code></b> which will return <b><code>ERROR_SUCCESS</code></b> if all modifications succeeded and <b><code>ERROR_NOT_ALL_ASSIGNED</code></b> otherwise.</p>
+<pre><code>if ( GetLastError() != ERROR_SUCCESS )
+   // handle error</code></pre>
+<p>
+The coast is clear! Let's change the system time!</p>
+<pre><code>SYSTEMTIME   t;
+
+GetSystemTime( &amp;t );
+t.wHour += 1;   // add one hour to current time!
+if ( ! SetSystemTime( &amp;t ) )
+   // handle error</code></pre>
+<p>
+We now need to disable the change system time privilege to bring things back to the default state.</p>
+<pre><code>tp.Privileges[0].Attributes =  0;   // disable it
+AdjustTokenPrivileges( hToken,   // token handle
+      FALSE,      // do not disable all
+      &amp; tp,      // token privilege structure reverting to original state
+      0,      // not interested in current structure
+      NULL,      // same here
+      NULL );      // same here
+
+if ( GetLastError() != ERROR_SUCCESS )
+   // handle error</code></pre>
+<p>
+Let's move on now to the core subject of impersonation.</p>
+</BODY>
+</HTML>

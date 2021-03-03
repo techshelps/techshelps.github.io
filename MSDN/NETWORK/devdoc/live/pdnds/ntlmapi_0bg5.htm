@@ -1,0 +1,302 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Determining the Validating Server on Windows 95</title>
+<link disabled rel=stylesheet href=../../backsdk3.css>
+<style type="text/css">
+@import url(../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h2><a name="_win32_determining_the_validating_server_on_windows_95"></a>Determining the Validating Server on Windows 95</h2>
+<p>
+<b>Windows 95 and Windows 98</b></p>
+<p>
+The code sample in this topic demonstrates how to determine the validating server on Windows 95, using the Net functions.</p>
+<p>
+Determining the Windows NT Domain server that validate a user's logon password from a Windows 95 or Windows 98 workstation is an involved task. On Windows NT, the 32-bit <a href="ntlmapi_07zj.htm"><b>NetWkstaUserGetInfo</b></a> function determines the validating server. The function uses level 1 to return a <a href="ntlmapi_0l82.htm"><b>WKSTA_USER_INFO_1</b></a> structure. The <b>wkui1_logon_server</b> member will contain a pointer to a Unicode string containing the validating server. </p>
+<p>
+On Windows 95 and Windows 98, there is no 32-bit function that will return the same information. You must use the 16-bit Net functions to retrieve the same information. The functions are exported from NETAPI.DLL. The link libraries are included with the 16-bit version of Microsoft® Visual C++ ( version 1.5<i>x</i> ).</p>
+<p>
+Use the following basic steps to determine the validating server:
+<ol>
+<li>
+Determine the user's logon domain using <a href="ntlmapi_6msv.htm"><b>NetWkstaGetInfo</b></a>.</li>
+<li>
+Find the Primary Domain Controller (PDC) using <a href="ntlmapi_5grp.htm"><b>NetGetDCName</b></a>.</li>
+<li>
+Get the user information from the PDC for comparison to the Backup Domain Controller (BDC) data using <a href="ntlmapi_8g6n.htm"><b>NetUserGetInfo</b></a>.</li>
+<li>
+Get a list of BDCs using the <b>NetServerEnum2</b> function.</li>
+<li>
+Loop through the list of BDCs, using <b>NetUserGetInfo</b> to retrieve the specific user information, comparing each last logon time, searching for the greatest value.</li>
+</ol>
+<p>
+The largest last logon value will be the latest logon time, this will be the last server to validate the user's logon password.</p>
+<p>
+The following short 16-bit program illustrates how to determine the validating server for a Windows 95 user.</p>
+<p>
+You must use the LAN.H and the NETAPI.LIB files distributed with the SDK to work. The user must be certain that the directories for the .H and .LIB files are in the search path for the project.</p>
+<p>
+Global Variables:
+<ul>
+<li>
+<b>Users</b>. Pointer to the <a href="ntlmapi_69de.htm"><b>USER_INFO_11</b></a> structure that contains user information about the <i>username</i> derived from the Wksta array. The elements of interest: <br>
+usi11_last_logon - seconds since Jan 1, 1970. Time that this server last validated this user's logon password.</li>
+<li>
+<b>Wksta</b>. Pointer to the <b>WKSTA_INFO_10 </b>structure that contains information about the WFW workstation. This structure is filled first and the information placed therein is used to get additional information.The domain name is used to get a list of BDCs that will be queried for user data. The <i>username</i> is the element that will qualify the user data request. The information of interest:<br>
+<i>wki10_username</i> - the current logged-on user.<br>
+<i>wki10_logon_domain</i> - the domain the user logged onto.</li>
+<li>
+<b>Servers</b>. List of backup domain controllers for the user's logon domain. Each server in the array will be queried for information about the current logged-on user as described in the user's variable comments.</li>
+</ul>
+<pre><code>*/
+#include &lt;windows.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;time.h&gt;
+#define INCL_NET 
+#include &lt;lan.h&gt;
+//
+// Constant definitions
+//
+#define LEVEL_01 1
+#define LEVEL_11 11
+#define LEVEL_10 10
+#define LEVEL_00 0
+
+#define SMALL_BUFFER 1024
+#define MEDIUM_BUFFER 4*1024
+#define SERVER_NAME  50
+//
+// Buffer allocation.  Just doing it global for simplicity
+//
+LPSTR bdcNames[SMALL_BUFFER];
+LPSTR UserData[MEDIUM_BUFFER];
+LPSTR WrkSta[SMALL_BUFFER];
+LPSTR pdcName[SERVER_NAME];
+LPSTR servername[SERVER_NAME]; 
+//
+// Create a structure to hold the current server and the logon time
+// So the values are together.
+//
+typedef struct svr_usr {
+        LPSTR server;
+        long logon_time;
+        } SVR_USR;
+//
+// Create typedefs for the larger structure names to shorten 
+// the number of chars to type.
+//
+typedef struct user_info_11  USER11;
+typedef struct wksta_info_10 WORK10;
+typedef struct wksta_info_1 WORK01;
+typedef struct server_info_100 SERVER100;
+typedef struct tm TIMER;
+//
+// Declare pointers so the buffers returned from the system
+// APIs can be caste to the appropriate value.
+//
+TIMER  *lpTime;
+USER11  far *Users;
+WORK10  far *Wksta;
+SERVER0 far *Servers;
+WORK01  far *Wksta01;
+
+char * lpszTime;
+
+//
+// Declare some short values for use with the LAN Man APIs
+//
+unsigned short svrEntries;
+unsigned short svrRead;
+unsigned short usrEntries;
+unsigned short wkstaEntries;
+//
+// Setup a temp var to use as a loop control var
+//
+unsigned short i;
+
+char Message[256];
+//
+// define a global var to hold the validating server and the time
+// the user last logged in.
+//
+SVR_USR validate = { NULL, 0 };
+//
+// Global var for the return value of the LAN Man API used in
+// error checking.
+//
+DWORD netRet;
+//
+// Bogus WinMain so you can step through the example in VC 1.52
+// debugger.
+//
+int PASCAL WinMain(hInstance, hPrevInstance, lpCmdLine, nCmdShow)
+HANDLE hInstance;                /* current instance         */
+HANDLE hPrevInstance;            /* previous instance        */
+LPSTR lpCmdLine;                 /* command line             */
+int nCmdShow;                    /* show-window type (open/icon) */
+{
+   //
+   // First, Get the workstation information using NetWkstaGetInfo
+   // at level 10.  This will return the Domain the user logged into
+   //
+   netRet = NetWkstaGetInfo( NULL,     // This workstation
+                             LEVEL_10, // Level of Info requested.
+                             (char far *)WrkSta,   // Buffer
+                             SMALL_BUFFER,
+                             &amp;wkstaEntries); // Expecting only 1 entrie
+                             
+   if( netRet != NERR_Success )
+   {
+      //
+      // A network error occured.  Print it to the stdout
+      //
+      sprintf(Message,"ERROR: NetWkstaGetInfo API Failed. Error Code: %d\n", netRet);
+      MessageBox( NULL, Message, "NetWkstaGetInfo Error", MB_OK);
+      return(0);
+   }
+   //
+   // Success, we have workstation information.
+   // Now we must retrieve the backup domain controllers and the
+   // primary domain controller to check to see when the user last
+   // logon was validated. 
+   // The argument list is set as follows:
+   //  Execute on the local machine ( NULL )
+   //  Pass the domain name of interest (Wksta[0].wki10_logon_domain)
+   //  Pass a buffer to receive the domain controller name
+   //  Pass the size of the DC name buffer
+   // 
+   Wksta = (WORK10 *)WrkSta;
+   netRet = NetGetDCName( NULL,  
+                          Wksta[0].wki10_logon_domain,
+                          (char far *)pdcName,
+                          SERVER_NAME);
+   if(netRet != NERR_Success )
+   {
+      //
+      // Could not locate a PDC.  Something is wrong, terminate Prog.
+      //
+      sprintf(Message,"ERROR: NetGetDCName API Failed. Error Code: %d\n", netRet);
+      MessageBox( NULL, Message, "NetGetDCName Error", MB_OK);
+      return(0);
+   }
+   //
+   // We have the primary domain controller. Lets query it for the
+   // users information, then store it temprarily for comparison
+   // to the BDC's (Backup Domain Controller) data.
+   //
+   //
+   netRet = NetUserGetInfo( (char far *)pdcName,  // Execute on the PDC
+                            Wksta[0].wki10_username, // User's name
+                            LEVEL_11,
+                            (char far *)UserData, // Put strucs here
+                            SMALL_BUFFER,
+                            &amp;usrEntries); // expecting only one entry
+   if( netRet != NERR_Success )
+   {
+       // 
+       // No user account on the PDC.  Something does not jive.
+       // terminate program.
+       //
+      sprintf(Message,"ERROR: NetUserGetInfo API Failed on PDC. Error Code: %d\n", netRet);
+      MessageBox( NULL, Message, "NetUserGetInfo Error", MB_OK);
+      return(0);
+   }
+   //
+   // Set the structure so that the PDC is the starting validating server
+   //
+   validate.server =  (char far *)pdcName;
+   Users = (USER11 * )UserData;
+   validate.logon_time = Users[0].usri11_last_logon;
+   //
+   // Now retrieve all of the BDC's
+   //
+   netRet = NetServerEnum2(  NULL,
+                             LEVEL_00,
+                             (char far *)bdcNames,
+                             SMALL_BUFFER,
+                             &amp;svrRead,
+                             &amp;svrEntries,
+                             SV_TYPE_DOMAIN_BAKCTRL,
+                             Wksta[0].wki10_logon_domain);
+                             
+   if( netRet != NERR_Success )
+   {
+      //
+      // OOPS, no BDC's.  That could be an error
+      //
+      sprintf(Message,"ERROR: NetServerEnum2 API Failed. Error Code: %d", netRet);
+      MessageBox( NULL, Message, "NetServerEnum2", MB_OK);
+      return( 0 );
+   }
+   //
+   // Great, we have a list of backup domain controllers 
+   // if svrEntries &gt; 1.
+   //
+   // Loop through the list checking to the last logon time against the
+   // one currently stored in validate.logon_time
+   //
+   Servers =( SERVER0 * )bdcNames;
+   for( i = 0; i &lt; svrEntries; i++ )
+   {
+       //
+       // Must add the \\ to the names returned from NetServerEnum()
+       //
+       _fstrcpy( (LPSTR)servername,"\\\\");
+       _fstrcat( (LPSTR)servername,Servers[i].sv0_name);
+       netRet = NetUserGetInfo( (LPSTR)servername,  // Execute on a BDC
+                               Wksta[0].wki10_username, // User's name
+                               LEVEL_11,
+                               (char far *)UserData,
+                               SMALL_BUFFER,
+                               &amp;usrEntries); // expecting only one entry
+       Users = (USER11 *)UserData;
+       if( netRet == NERR_Success )
+       { 
+          //
+          // Great, we found a user entry on this BDC.  Compare his
+          // last logon time to the stored time.  Replace the stored time
+          // if the time is greater.
+          // Replace the servername so the time and the server match.
+          //
+          if( Users[0].usri11_last_logon &gt; validate.logon_time)
+          {
+             validate.server = (char far *)&amp;Servers[i];
+             validate.logon_time = Users[0].usri11_last_logon;
+          } 
+          else if( Users[0].usri11_last_logon == validate.logon_time )
+          { 
+             //
+             // Just to let you know that this could indicate a problem
+             //
+             sprintf(Message,"Values are the same. %ls %ls", Servers[i].sv0_name, validate.server);
+             MessageBox( NULL, Message, "HMMMM...........",MB_OK);
+          }
+       }
+    } 
+    //
+    // Convert the time in seconds to the a time structure for display and
+    // build the output string.
+    //                        
+    lpTime = gmtime( &amp;validate.logon_time);
+    lpszTime = asctime( lpTime );
+    _fstrcpy((LPSTR)Message, (LPSTR)"Username: ");
+    _fstrcat((LPSTR)Message, (LPSTR)Wksta[0].wki10_username);
+    _fstrcat((LPSTR)Message, (LPSTR)"\nLast Logon: ");
+    _fstrcat((LPSTR)Message, (LPSTR)lpszTime);
+    _fstrcat((LPSTR)Message, (LPSTR)"Logon Server: ");
+    _fstrcat((LPSTR)Message, (LPSTR)validate.server);
+    //
+    // Display the information.
+    //
+    MessageBox(NULL,Message,"Logon Validation Information", MB_OK);
+    return(0);
+}
+ </code></pre>
+<p>&nbsp;</p></body>
+</HTML>

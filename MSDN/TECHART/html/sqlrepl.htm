@@ -1,0 +1,109 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Architectural Overview of Replication</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+<h1>Architectural Overview of Replication</h1>
+<p>
+The complexities of replicating data in a large enterprise, among numerous database servers and applications, can be daunting. Microsoft has adopted a publishing metaphor to simplify replication implementation.</p>
+<p>
+To install replication on SQL Server 6.5, you can set server options to indicate the role of the server in the replication topology, create publications (metadata defining the objects to be replicated), and create subscriptions to those publications. For more information about installing replication, see the<i> Microsoft SQL Server Administrator's Companion</i>.</p>
+<p>
+Once subscriptions have been established, INSERT, UPDATE, and DELETE statements against the tables contained in the publication are marked "for replication" in the publishing database transaction log. At a scheduled interval, these transactions are collected by a special SQL Executive task known as the Log Reader and placed in an internal store-and-forward queue known as the Distributor. These transactions are then applied, maintaining consistency of ordering, to the subscribing databases by another SQL Executive task called the distribution task.</p>
+<p>
+<img src="sqlrepl1.gif" border=0></p>
+<h3>Transactional Consistency</h3>
+<p>
+Microsoft SQL Server 6.5 uses a store-and-forward approach to replication that ensures transactional consistency. If data modifications to the publisher are halted at any time and replication is allowed to complete, each subscriber is assured of a data set that matches the publishing database and is arrived at by the same path as the publishing database. This is crucial in most instances because you want your replicated data received at each subscriber to be identical to transactions applied directly against the local server.</p>
+<p>
+Other replication models that rely heavily on conflict resolution can achieve results that are not consistent with those that would have been reached had all transactions been applied at a single server. One server's transaction can be selected as the loser in a conflict resolution scheme and is discarded or overridden by the winner's transaction. Subsequent transactions originating from the "losing" server may have been dependent on the effects of the discarded transactions. The result is that while all servers in the topology will converge on a common data set, true consistency can be lost. </p>
+<p>
+SQL Server 6.5 transactional replication provides the capacity to alter replicated commands through special stored procedures. When you establish a specific replication article, you can specify that you want all INSERT statements translated into a custom procedure before they are sent to subscribers. In this way, you take advantage of the queued ordering of transactions, yet have the flexibility to alter how modifications are delivered to subscribers.</p>
+<p>
+The application characteristics involved in choosing one of these options, and instructions for setting up both standard transactional replication and custom procedures, are discussed later in this paper.</p>
+<h3>Snapshots and Synchronization</h3>
+<p>
+In some cases, the business problem domain addressed by an application constrains edits to a single site or master. When the need to distribute updates to other sites occurs infrequently and the total size of the published data is reasonably small, a complete refresh of the subscribing database is appropriate. SQL Server 6.5 supports these scenarios optimally through <i>snapshot </i>replication, also referred to as a <i>scheduled table refresh</i>.</p>
+<p>
+With snapshot replication, an image of the published tables' schema and data is placed in temporary storage by the SQL Executive Sync task. The schema and data set are stored in the replication working directory, as specified when publishing is first configured. </p>
+<p>
+The synchronization (or snapshot) task begins by setting a read-lock on all tables (articles) included in a publication and then creates the schema and data files necessary to synchronize a subscriber with the publisher. The task then appends rows to the <b>MSjobs</b> and <b>MSjob_commands</b> tables in the distribution database. These commands indicate where to locate the synchronization files that include a schema (.sch) file for each replicated article and the current image of the data set (<b>bcp</b> files for native, SQL Server-to-SQL Server replication and character mode for heterogeneous subscriptions).</p>
+<p>
+Entries in the <b>MSjob_commands</b> table are made for each article in the publication. These commands include ordered references to any specified precreation script, the schema script file, and the current image of the data set. The <b>MSjobs</b> table is updated with a command referencing the subscriber's synchronization task. This data is later used by the distribution task to actually perform the synchronization with the subscriber. The read-lock obtained at the beginning of the synchronization process is then released for each published table.</p>
+<p>
+The synchronization commands are applied to the target subscriber by the distribution task on its next execution cycle. Schema files are represented as Transact-SQL statements and are converted by the distribution task during application to non-SQL Server subscribers as needed.</p>
+<p>
+Snapshot replication is also used in conjunction with most log-based, transactional replication scenarios to force delivery of an initial snapshot to the subscriber, ensuring that its database is consistent with the publisher prior to beginning the flow of other transactions. The same synchronization task is used when automatic synchronization or initial synchronization is requested when a transactional publication is established.</p>
+<p>
+Whenever the distribution task applies a snapshot of a publication to a subscriber, it takes out a shared table lock (SH-TAB) on the subscriber. No explicit or escalated exclusive lock can be taken out on the affected tables while the snapshot is applied so it is wise to schedule synchronization tasks to execute during off-peak database activity.</p>
+<p>
+<img src="sqlrepl2.gif" border=0></p>
+<h3>Log Reader</h3>
+<p>
+The log reader task runs continuously or at specified intervals under SQL Executive. It reads transactions from the publisher's log that have been marked for replication. This is the same database log used for transaction tracking and recovery during normal SQL Server operation. Transactions to be replicated are moved in batches to the distribution database where they are forwarded to each subscriber. </p>
+<p>
+The log reader, running continuously, polls the transaction log for new transactions to be replicated using an internal timestamp. Transactions are read from the log in batches of 100 by default. This batch size is configurable by adding a <b>-b</b> (TransactionBatchSize) option to the task definition. Altering the batch size can have performance benefits in some replication scenarios. For guidelines on altering this and other configuration options, see "Performance and Scaling," later in this paper.</p>
+<p>
+After reading the transactions, the log reader inserts them into the store-and-forward queue in the distribution database. There is a one-to-one correspondence between transactions on the publisher and jobs at the distribution database. A single transaction stored in <b>MSjobs</b> can consist of many commands and each command can be broken up along a 255-byte boundary in the <b>MSjob_commands</b> table. Once the entire read batch of transactions has been successfully written to the distribution database, it is committed and the distribution task forwards them to each configured subscriber. This CommitBatchSize (<b>-c</b>) is also a configurable parameter for the log reader task.</p>
+<p>
+After copying the transactions to the distribution database, the log reader updates the timestamp for the last transaction processed and the task repeats at the specified interval.</p>
+<p>
+The log reader task uses the system stored procedure <b>sp_replcmds</b> to get the next set of commands marked for replication from the log. The <b>sp_repltrans</b> stored procedure initializes replication counters on the server and is executed when the log reader task is launched. Following the commit of each batch of commands to the subscriber, the log reader calls <b>sp_repldone</b> to mark where replication was last completed.</p>
+<p>
+<img src="sqlrepl3.gif" border=0></p>
+<h3>Distributor</h3>
+<p>
+As new publications are established, a distribution task is added on the distributor. There is one distribution task for every publisher/subscriber database pair. </p>
+<p>
+The distribution task, like the other replication tasks, runs on demand or at specified intervals under SQL Executive. It establishes connections to the distributor and the subscriber and applies the appropriate transactions, based on the subscription definition, against the subscribing database. Transactions are "pushed" to the subscriber in batches of 100 by default. This batch size is configurable by adding a <b>-b</b> (JobBatchSize) option for the task definition. </p>
+<p>
+<img src="sqlrepl4.gif" border=0></p>
+<p>
+The distribution task obtains information about the last transaction successfully distributed for a subscription from the subscriber's <b>MSlast_job_info</b> table in the subscription database. Using a transaction identifying timestamp stored there, the distribution task proceeds to harvest transactions and commands from the distribution database and apply them to the subscriber. Following the successful application of the transactions, the entire batch is committed to the subscriber and the distributor updates <b>MSlast_job_info</b> to reflect the current state of delivery. Recall that the distribution agent is responsible for delivering snapshots in addition to INSERT, UPDATE, and DELETE transactions. The common queued storage and serialization of the application of both classes of replicas ensures transactional consistency in replication.</p>
+<h3>System Tables and Distribution Database Schema</h3>
+<p>
+The system tables used to manage Microsoft SQL Server 6.5 replication are maintained in locations specific to their use.</p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=25%><b>Database</b></td>
+<td class=label width=75%><b>Role in Replication</b></td>
+</tr>
+<tr valign=top>
+<td width=25%>master</td>
+<td width=75%>Stores server-specific data including server names, remote login mappings, and published database references.</td>
+</tr>
+<tr valign=top>
+<td width=25%>msdb</td>
+<td width=75%>Stores task management data and task execution history.</td>
+</tr>
+<tr valign=top>
+<td width=25%>publishing database</td>
+<td width=75%>Each published database stores the definition of its publications and the articles included in each publication.</td>
+</tr>
+<tr valign=top>
+<td width=25%>distribution</td>
+<td width=75%>Maintains history on replication activity in addition to serving as the central, reliable queue for distribution of replicated transactions.</td>
+</tr>
+</table><br>
+<p>
+<b>master</b></p>
+<p>
+<img src="sqlrepl5.gif" border=0></p>
+<p>
+<b>msdb</b></p>
+<p>
+<img src="sqlrepl6.gif" border=0></p>
+<p>
+<b>user (publishing database)</b></p>
+<p>
+<img src="sqlrepl7.gif" border=0></p>
+<p>
+<b>user (subscribing database)</b></p>
+<p>
+<img src="sqlrepl8.gif" border=0></p>
+</BODY>
+</HTML>

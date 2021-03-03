@@ -1,0 +1,433 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Managing Object Lifetimes in OLE Automation</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_oalife"></a></sup>Managing Object Lifetimes in OLE Automation</h1>
+<p>
+Douglas Hodges</p>
+<p>
+Created: August 25, 1994<br>
+Revised: January 20, 1995</p>
+<h2>Abstract</h2>
+<p>
+The techniques and lessons that have been learned in dealing with Compound Document scenarios can be applied to the scenarios involving OLE Automation. See the document "Managing Object Lifetimes in OLE" by Douglas Hodges for a thorough discussion of managing object lifetimes involving Compound Document scenarios.</p>
+<h2>Managing the Root of an OLE Automation Object Model</h2>
+<p>
+The root objects exposed through an OLE Automation Object Model must deal with the same object life-time complexities as the root document object in a Compound Document linking scenario. These objects will typically need to deal with a combination of weak and strong references. In addition, these objects will need to deal with a combination of both internally and externally generated strong references. Thus, in order to properly handle all shutdown scenarios, these objects will need to manage the weak and strong references on their own. The root objects exposed through OLE Automation will need to:
+<ul type=disc>
+<li>
+Maintain two counts (<i>cRef </i>and <i>cLock</i>).<br><br></li>
+<li>
+Implement <b>IExternalConnection</b> in order to track strong references from external connections.<br><br></li>
+<li>
+Manage the user properly with a strong reference.<br><br></li>
+<li>
+Register in the ROT with a weak registration (for document object).<br><br></li>
+<li>
+Call <b>RegisterActiveObject</b> with a weak registration (for application object).</li>
+</ul>
+<h2>Types of Applications</h2>
+<p>
+There are three basic types of applications:
+<ul type=disc>
+<li>
+<i>Multiple Document Interface </i>(MDI) applications can manage many document objects in a single instance of the application. An MDI application may or may not support running multiple instances of the application.<br><br></li>
+<li>
+<i>Old-style Single Document Interface </i>(SDI) applications can manage only a single document object at a time, but can support closing one document and then opening another document without starting another instance of the application. SDI applications should always support running multiple instances of the application at the same time.<p class=tl>
+WRITE.EXE and PBRUSH.EXE are examples of this type of SDI application. Such an SDI application has separate abstractions for the application object and the document object. Over its lifetime a single application object may manage many document objects, but it has the windowing user interface (UI) restriction that only a single document object can be open (or more precisely, <i>visible</i>) at a time.</P><p class=tl>
+The fact that the application object and the document object are separate abstractions to the user is significant and distinguishes this type of <i>old-style </i>SDI application from what I refer to as a <i>new-style </i>SDI application<i>.</i> The application and the document object are exposed as separate abstractions to the user in the exposed Automation Object Model of an old-style SDI application. From an object lifetime implementation point of view, an old-style SDI application is identical to an MDI application; the same strategies are used to track strong references on the application object and the document objects. In this discussion all comments referring to MDI also apply to an old-style SDI application except where specially noted.</P></li>
+<li>
+<i>New-style Single Document Interface </i>(SDI) applications move away from the "application-centric" model and present a "document-centric" model. These applications manage only a single document object. The difference from an old-style SDI application is that they do not support closing one document and then opening another document without starting a another instance of the application; instead, the File.New or File.Open<i> </i>commands launch a new instance of the application to handle the new document. These SDI applications always support running multiple instances of the application at the same time. These new-style SDI applications have a single object abstraction. These applications simplify the implementation of object lifetime by only having to deal with the shutdown of a single document object and do not have to deal with the interactions of multiple documents and the application object.</li>
+</ul>
+<h2>Exposing an Object Model for an MDI Application (and Also for an Old-Style<i> </i>SDI Application)</h2>
+<p>
+An MDI application exposes two root-level objects that need this special handling: an <i>application object</i> and a <i>document object</i>. These two objects are clearly distinct abstractions in an MDI application. An MDI application is required to have a one CLSID/ProgID to identify the class of its <i>application object</i> and a different CLSID/ProgID to identify the class of its <i>document object</i>. For example, Microsoft® Excel 5.0 exposes the following application object class: </p>
+<pre><code>CLSID
+{00020841-0000-0000-C000-000000000046} = Microsoft Excel 5.0 Application
+ProgID = Excel.Application.5
+</code></pre>
+<p>
+Microsoft Excel 5.0 also exposes the following two document object classes:</p>
+<pre><code>CLSID
+{00020810-0000-0000-C000-000000000046} = Microsoft Excel 5.0 Worksheet
+ProgID = Excel.Sheet.5
+{00020811-0000-0000-C000-000000000046} = Microsoft Excel 5.0 Chart
+ProgID = Excel.Chart.5
+</code></pre>
+<p>
+Using these CLSIDs, an automation driver can launch and connect to the MDI application or directly instantiate a document object without directly dealing with the application object. In order to enable an automation driver to connect to a running instance of a document object, the automation application registers its document object in the ROT, typically with a FileMoniker. In order to allow automation drivers to connect to the currently running instance of the application object, the automation application registers its application object using the <b>RegisterActiveObject</b><i> </i>API. This API actually registers the application object in the ROT using the application's CLSID as the Moniker.</p>
+<p>
+The most complex part of dealing with an MDI application and OLE Automation is the combination of user-created documents and programmatically created documents and deciding whether the user is in control of the application. Ideally, if the application is launched by OLE Automation, used invisibly, and then released, the application should shut down. On the other hand, if the application is initially launched by OLE Automation and then made visible, it is not completely clear whether the application should shut down. It should be possible to programmatically launch the application, create a document, make it visible, and then have the document continue to run after the automation script terminates. It should also be possible to programmatically launch the application, create a document, make it visible, close the document, and then have the application shut down.</p>
+<p>
+The ideal goal is that if two automation drivers are executing against the same OLE Automation object, they should not interfere with each other with regard to object lifetime issues. For example, Driver 1 should be able to launch the automation object application and start executing. Meanwhile, Driver 2 should be able to connect to the same object. Then when Driver 1 terminates and releases the automation object, Driver 2 should successfully continue running. Later, when Driver 2 terminates and releases the object, the automation application should shut down.</p>
+<p>
+In order to give the programmer using Visual Basic® for Applications complete control over the shutdown of the MDI application, the following methods and properties are needed on the application object and document object:</p>
+<p class=dt>
+Document.Visible Property</p>
+<p class=indent>
+This property controls whether the document is visible. If <i>Visible</i> = TRUE, then the document is made visible; otherwise the document is hidden. If the document is left in the visible state when all programmatic references are released, the document will remain running and visible. If the document is hidden when the last programmatic reference is released, the document will close. If there are unsaved changes when the hidden document is closing after its final release, these changes are thrown away without prompting the user. The programmer using Visual Basic for Applications should explicitly handle saving the document by either calling <i>Save/SaveAs</i> or by explicitly closing the document with the <i>Close(saveChanges, fileName) </i>method. When the document is being made visible, the application MDI frame window is also made visible if it is not already so. The <i>Application.UserControl </i>property is not automatically set when making a document visible; it must be explicitly set by the programmer. When the document is being hidden, the application MDI frame window will also be hidden unless there is another visible document open or the user is in control of the application (that is, <i>Application.UserControl = TRUE</i>).</p>
+<p class=dt>
+<i>Document.Close(saveChanges, fileName)</i></p>
+<p class=indent>
+Forces the document object to close. The parameters control whether unsaved changes are saved or discarded. This method will forcibly break any programmatic connections to the document. If instead the programmer wants to take the document away visibly from the user (from the user's point of view the document is closed) but <i>not</i> break programmatic references to the document, the <i>Document.Visible </i>property should be set to FALSE instead.</p>
+<p class=dt>
+Application.Visible Property</p>
+<p class=indent>
+This property controls whether the application MDI frame window is visible. If <i>Visible</i> = TRUE, the application MDI frame window is made visible; otherwise the application is hidden. Setting the<i> Visible</i> property does not automatically set the <i>UserControl</i> property. The <i>Visible</i> property can only be set to FALSE if the <i>Application.UserControl </i>property is FALSE and there are no visible documents open; if the user is in control of the application or there are visible documents open, setting the application <i>Visible</i> property to FALSE has no effect. The programmer must either explicitly hide/close each document individually or use the <i>Application.Quit()</i> method.</p>
+<p>
+Another option, instead of having the VBA programmer control visibility with a <i>Visible </i>property, is to use the next three <i>Show </i>and <i>Hide </i>methods:</p>
+<p class=dt>
+Document.Visible Readonly Property</p>
+<p class=indent>
+This property indicates whether the document is currently visible. If <i>Visible</i> = TRUE, the document is visible; otherwise the document is hidden. The property is read only. The <b>Show()</b> method should be used to make a document visible. The <b>Hide()</b> method should be used to make a document invisible.</p>
+<p class=dt>
+Document.Show(Boolean GiveUserControlOfApp)</p>
+<p class=indent>
+This method makes a document object become visible to the user. This will also make the application MDI frame window visible too, if it is not already so. When making the document object visible, the programmer must decide whether to give the user control over the lifetime of the application. If the <i>GiveUserControlOfApp</i> parameter is TRUE, the application will not shut down after the last document is closed; it will remain running and visible, under the control of the user. If the <i>GiveUserControlOfApp</i> parameter is FALSE and no other document has given the user control of the application, the application <i>will</i> shut down after the last document is closed.</p>
+<p class=indent>
+Setting the <i>GiveUserControlOfApp</i> parameter to TRUE is used when the programmer wants to programmatically bring up a document just as if it had been done by the user via the File.New or File.Open commands. On the other hand, <i>GiveUserControlOfApp </i>= FALSE<i> </i>should be used when the programmer wants to bring up a document, make it visible, use it programmatically, later hide and release it, and then have the application shut down as long as there is no other reason to stay running (in particular, if the user has not opened another document). Even if the document is already visible, the <i>GiveUserControlOfApp</i> parameter will still take effect to give the user control over the application if necessary.</p>
+<p class=dt>
+Document.Hide()</p>
+<p class=indent>
+This method makes a document object become invisible to the user. If the document is already hidden, this method has no effect. When a document is hidden it will automatically close when the last programmatic reference to it releases. The programmer must take care to save the document if there are unsaved changes. If there are unsaved changes after the last connection to the hidden document is released, the document will close without saving; the invisible document will not prompt the user to save changes. If the application is not under the control of the user, the application <i>will</i> shut down after the last document is closed.]</p>
+<p class=dt>
+Application.UserControl Property</p>
+<p class=indent>
+This property indicates whether the user has control over the application. If <i>UserControl</i> = TRUE, the application will remain running and visible after the last document is closed; if <i>UserControl = </i>FALSE, the application will hide after the last document is closed. If there are no documents existing and the application is hidden when the last programmatic reference to any object in the application is released, the application will shut down. If the user launches the application from the Program Manger or the user creates or opens a document with the File.New or File.Open commands, the <i>Application.UserControl</i> property is set to TRUE. If a document is created programmatically, the programmer must explicitly set the <i>Application.UserControl</i> property when making the document visible, depending on whether the programmer wants the application to automatically shut down when the document is closed.</p>
+<p class=dt>
+Application.Quit()</p>
+<p class=indent>
+Takes control of the application away from the user. This method has the same effect as the user issuing a File.Exit<i> </i>command<i> </i>from the menu. All visible documents will be closed. If there are visible documents open with unsaved changes, the user is prompted to save each document individually. The application will be hidden from the user and the <i>UserControl </i>property set to FALSE. If there are no more invisible documents being used programmatically (for example, an object in-place active in another container), the application itself will shut down. Otherwise the application will remain running invisibly until these final invisible documents are released.</p>
+<h2>Exposing an Object Model for a New-Style SDI Application</h2>
+<p>
+The <i>document</i> and the <i>application </i>of a new style SDI application are presented as a single abstraction in the Object Model. The user sees these as indistinguishable, just as the user sees only one window for the document. An SDI application does <i>not</i> register any object using the <i>RegisterActiveObject</i> API. Also, an SDI application does not have to deal with the complexity of deciding whether the user is in control of the application. The shutdown logic only has to deal with the document object. If the document is left visible after being launched by OLE Automation, the document remains running under the control of the user. If the document object is invisible at the time the last programmatic reference releases, the document object will shut down. This is managed by maintaining weak and strong references on the document and by treating the fact that the document is visible as a strong reference on behalf of the user.</p>
+<p>
+In order to give the programmer complete control over the shutdown of the SDI application, the following methods and properties are needed on the document object:</p>
+<p class=dt>
+Document.Close(saveChanges, fileName)</p>
+<p class=indent>
+Forces the document object to close. The parameters control whether unsaved changes are saved or discarded. This method will forcibly break any programmatic connections to the document. If instead the programmer wants to take the document away visibly from the user (from the user's point of view the document is closed) but <i>not</i> break programmatic references to the document, the document should instead be hidden by setting the <i>Document.Visible</i> property to FALSE.</p>
+<p class=dt>
+Document.Visible Property</p>
+<p class=indent>
+This property indicates whether the document is currently visible. If <i>Visible</i> = TRUE, the document is visible; otherwise the document is hidden. For an SDI document object this property can be read/write. It is not required to use a <b>Show()</b><i> </i>method to make a document visible because it is not necessary to deal with user control of the application. It would be perfectly reasonable to still have <b>Show()</b><i> </i>and <b>Hide()</b> methods on the document in addition to this property.</p>
+<h2>Exposing Sub-Objects Through OLE Automation</h2>
+<p>
+The same strategy that is used for managing pseudo-objects should be applied to the subobjects exposed through an OLE Automation object model. Objects that are exposed as part of an Object Model to OLE Automation implement an interface called <i>IDispatch</i>.<i> </i>Through methods on the IDispatch interface, an OLE Automation driver can invoke methods and get/set properties of the object. The IDispatch implementation as well as any <i>dual interfaces</i> and <i>dispinterfaces</i> (see the <i>OLE 2 Programmer's Reference, Vol. 2</i> for more information on OLE Automation) exposed by a subobject should be organized in a COM object that treats all of its references as strong. Whenever there is a reference to the Automation subobject, the subobject should hold a lock on its parent object.</p>
+<h2>OLE Automation Creation Scenarios</h2>
+<h3>Instantiating an MDI Application object with CreateObject Statement</h3>
+<p>
+Visual Basic for Applications code:</p>
+<pre><code>Dim x as Object
+Set x = CreateObject("Excel.Application")
+' do some actions
+' Release the object (or let it fall out of scope)
+Set x = Nothing
+</code></pre>
+<p>
+The above code fragment results in the following OLE API calls:</p>
+<pre><code>ClassIDFromProgID("Excel.Application", &amp;clsid)
+CoCreateInstance(clsid,...)
+</code></pre>
+<p>
+The call to <b>CoCreateInstance</b> causes the Microsoft Excel application to be launched with "/Automation -Embedding" on the command line. (The "-Embedding" switch is added by the OLE libraries as part of launching a LocalServer application by <b>CoCreateInstance</b>. The "/Automation" switch is added by Microsoft Excel itself by the standard conventions of OLE Automation. It is included as part of the "LocalServer = c:\excel\excel /Automation" registration key in the CLSID section of the REGDB for the application.) As part of its launch sequence, Excel must register its application class object before yielding. The application class object will be registered as REGCLS_SINGLEUSE with the <b>CoRegisterClassObject</b> API. (Microsoft Excel also registers class objects for its Excel.Sheet and Excel.Chart Document classes. These classes are registered as REGCLS_MULTIUSE.) OLE will connect to the application class object and call <b>IClassFactory::CreateInstance</b>. Microsoft Excel will then return the object that exposes its application level <i>IDispatch</i> interface. Microsoft Excel will also register its application object in the ROT by calling the <b>RegisterActiveObject</b> API. It is important that this registration is made as a weak registration by passing the REGOBJ_TABLEWEAK flag.</p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;By default the <b>RegisterActiveObject</b> API registers the object with a strong reference. In 32-bit OLE the REGOBJ_TABLEWEAK flag has been defined to allow the registration to be weak. (See the 32-bit <i>OLE 2 Programmer's Reference</i>.). In 16-bit OLE it would be necessary to organize a separate COM identity for the object passed to <b>RegisterActiveObject</b> in order to deal with the fact that the registration is strong.</p>
+<p>
+The following picture shows the state of the Microsoft Excel application after the launch sequence is complete:</p>
+<p>
+<img src="oalife_1.gif" border=0></p>
+<p>
+In this scenario, the instance of Microsoft Excel started by the <b>CreateObject</b> call should shut down when the single strong reference to the application object is released. The "Set app = Nothing" line causes the external reference to the application object to be released. If the Microsoft Excel application does not shut down, this results in an orphaned instance of Microsoft Excel running invisibly. The only way to get rid of this instance is to reboot or use a process killer application (not something most end-users are familiar with). </p>
+<h3>Instantiating an MDI Document Object with CreateObject Statement</h3>
+<p>
+Visual Basic for Applications code:</p>
+<pre><code>Dim x as Object
+Set x = CreateObject("Excel.Sheet")
+' do some actions
+' Release the object (or let it fall out of scope)
+Set x = Nothing
+</code></pre>
+<p>
+The above code fragment results in the following OLE API calls:</p>
+<pre><code>ClassIDFromProgID("Excel.Sheet", &amp;clsid)
+CoCreateInstance(clsid,...)
+</code></pre>
+<p>
+The call to <b>CoCreateInstance</b> causes the Microsoft Excel application to be launched with " -Embedding" on the command line. As part of its launch sequence, Microsoft Excel must register its Sheet Document class object before yielding. This class object will be registered as REGCLS_MULTIUSE with the <b>CoRegisterClassObject</b> API because Microsoft Excel is an MDI application. Microsoft Excel also registers its Chart class object. Microsoft Excel, however, will <i>not </i>register its application class in this case. OLE will connect to the Sheet Document class object and call <b>IClassFactory::CreateInstance</b>. Microsoft Excel will then return the object that exposes its Sheet Document level <i>IDispatch</i> interface. Microsoft Excel will also register its Sheet object in the ROT by calling <b>IRunningObjectTable::Register</b>.</p>
+<p>
+The following picture shows the state of the Microsoft Excel application after the launch sequence is complete:</p>
+<p>
+<img src="oalife_2.gif" border=0></p>
+<p>
+In this scenario the instance of Microsoft Excel started by the <b>CreateObject</b> call should shut down when the single strong reference to the Sheet Document object is released. The Sheet Document should hold a strong reference on the application. When the strong reference on the Sheet object is released, the Sheet will execute its Close method. This will then lead to the Sheet being destroyed. In its destructor, the document will release its lock on the application object. This will then cause the Microsoft Excel application to shut down.</p>
+<h3>Instantiating an MDI Application Object with <i>New</i> Declaration</h3>
+<p>
+Visual Basic for Applications code:</p>
+<pre><code>Dim x as New Excel.Application
+ ' do some actions
+' Release the object (or let it fall out of scope)
+Set x = Nothing
+</code></pre>
+<p>
+The above code fragment results in the following OLE API calls:</p>
+<pre><code>ClassIDFromProgID("Excel.Application", &amp;clsid)
+CoCreateInstance(clsid, ...)
+</code></pre>
+<p>
+In this scenario a new instance of the application will always be launched even if the application is already running. This method of instantiating an object with the "<i>New</i>" syntax is functionally equivalent to the <b>CreateObject</b> statement.</p>
+<h3>Connecting to an MDI Application Object with GetObject(, "progID") Statement</h3>
+<p>
+Visual Basic for Applications code:</p>
+<pre><code>Dim x as Object
+Set x = GetObject(, "Excel.Application")
+' do some actions
+' Release the object (or let it fall out of scope)
+Set x = Nothing
+</code></pre>
+<p>
+The above code fragment results in the following OLE API calls:</p>
+<pre><code>ClassIDFromProgID("Excel.Application", &amp;clsid)
+GetActiveObject(clsid)
+</code></pre>
+<p>
+The <b>GetActiveObject</b> API looks for an application object registered with <i>clsid </i>in the RunningObjectTable. The <b>RegisterActiveObject</b><i> </i>API is used to register an application object in the ROT. Note that in this scenario the Visual Basic for Applications expression <i>GetObject(, "Excel.Application")</i> will fail unless the Microsoft Excel application is already running and registered in the ROT. If the Microsoft Excel application is not already running, a new instance will <i>not</i> be launched.</p>
+<h3>Instantiating an MDI Application Object with GetObject("", "progID") Statement</h3>
+<p>
+Visual Basic for Applications code:</p>
+<pre><code>Dim x as Object
+Set x = GetObject("", "Excel.Application")
+' do some actions
+' Release the object (or let it fall out of scope)
+Set x = Nothing
+</code></pre>
+<p>
+The above code fragment results in the following OLE API calls:</p>
+<pre><code>ClassIDFromProgID("Excel.Application", &amp;clsid)
+CoCreateInstance(clsid, ...)
+</code></pre>
+<p>
+This variation of the <b>GetObject</b> syntax varies from the previous scenario in that a new instance of the application will always be launched even if the application is already running. This variation is equivalent to a <b>CreateObject</b> statement.</p>
+<h3>Instantiating an Document Object with GetObject("filename") Statement</h3>
+<p>
+Visual Basic for Applications code: </p>
+<pre><code>Dim x as Object
+Set x = GetObject("c:\foo.xls")
+' do some actions
+' Release the object (or let it fall out of scope)
+Set x = Nothing
+</code></pre>
+<p>
+The above code fragment results in the following OLE API calls:</p>
+<pre><code>MkParseDisplayName("c:\foo.xls", &amp;mk)
+mk.BindToObject()
+</code></pre>
+<p>
+This variation of the <b>GetObject</b> call uses moniker binding to connect to the object. Typically the argument passed to <b>GetObject</b> will be a filename and the <b>MkParseDisplayName</b> API will return a <i>FileMoniker. </i>If the document object is already running, the running instance of the document will be located via the ROT. If the document object is not already running, a new instance of the object's server application will be launched, and the application will be told to open the corresponding file. To support this scenario, the object server application must register the document in the ROT with a FileMoniker and must implement an <i>IPersistFile</i> interface.</p>
+<h3>Instantiating an Document Object with GetObject("filename", "progID") Statement</h3>
+<p>
+Visual Basic for Applications code:</p>
+<pre><code>Dim x as Object
+Set x = GetObject("c:\foo.xls", "Excel.Sheet")
+' do some actions
+' Release the object (or let it fall out of scope)
+Set x = Nothing
+</code></pre>
+<p>
+The above code fragment results in the following OLE API calls:</p>
+<pre><code>ClassIDFromProgID("Excel.Application", &amp;clsid)
+CoCreateInstance(clsid, ...)
+QueryInterface(IID_IPersistFile, &amp;pObj)
+pObj-&gt;Load("c:\foo.xls")
+</code></pre>
+<p>
+This variation of the <b>GetObject</b> syntax varies from the previous scenario in that a new instance of the application will always be launched even if the document is already open in a running instance of the application. In this case Moniker binding is not used, and the ROT is ignored. The <i>IPersistFile</i> interface is still used to command the application to open the file.</p>
+<h3>Navigating to a Sub-Object Through OLE Automation</h3>
+<pre><code>Dim app as Object, wb as Object, ws as Object
+Set app = CreateObject("Excel.Application")
+Set wb = app.Workbooks.Add
+Set ws = wb.Worksheets(1)
+Set app = Nothing
+' This call should work even though app object is released
+wb.Worksheets(1).Cells(1, 1).Value = 10
+Set wb = Nothing
+' This call should work even though wb and app object are released
+ws.Cells(2, 2).Value = 20
+</code></pre>
+<p>
+In this scenario the Microsoft Excel application is explicitly launched and then a Workbook is created. The application object is released when <i>Set app = Nothing</i>, but the Workbook reference (<i>wb</i>) and the Worksheet reference (<i>ws</i>) remain. The <i>wb</i> and <i>ws</i> references should remain valid and the application should not shut down because the Workbook should hold a lock on the application. Even after the <i>wb</i> reference is released, the application should remain running with the <i>ws</i> reference still valid. The Worksheet is a sub-object (or pseudo-object) of the Workbook. The programmatic reference (from OLE Automation via <i>ws</i>) to the Worksheet should cause the Worksheet to hold a lock on the Workbook, which holds a lock on the application. Finally, when the <i>ws</i> reference goes out of scope, everything should shut down.</p>
+<h2>Key OLE Automation Scenarios</h2>
+<h3>Scenario 1</h3>
+<h4>Initial State: </h4>
+<p>
+Word application not running</p>
+<h4>VBA Code:</h4>
+<pre><code>Dim app as Object
+Set app = CreateObject("Word.Application")
+' Release the object (or let it fall out of scope)
+Set app = Nothing
+</code></pre>
+<h4>Result: </h4>
+<ul type=disc>
+<li>
+Word application launches invisibly.<br><br></li>
+<li>
+Word application shuts down.</li>
+</ul>
+<h3>Scenario 2</h3>
+<h4>Initial State: </h4>
+<p>
+Word application running</p>
+<h4>Visual Basic for Applications Code::</h4>
+<pre><code>Dim app as Object
+Set app = CreateObject("Word.Application")
+' Release the object (or let it fall out of scope)
+Set app = Nothing
+</code></pre>
+<h4>Result: </h4>
+<ul type=disc>
+<li>
+Second instance of Word application launches invisibly.<br><br></li>
+<li>
+Second instance of Word application shuts down.</li>
+</ul>
+<h3>Scenario 3</h3>
+<h4>Initial State: </h4>
+<p>
+Word application not running</p>
+<h4>Visual Basic for Applications Code:</h4>
+<pre><code>Dim app as Object
+Set app = CreateObject("Word.Application")
+' Make app visible but do not set UserControl
+app.Visible = True
+' Release the object (or let it fall out of scope)
+Set app = Nothing
+</code></pre>
+<h4>Result: </h4>
+<ul type=disc>
+<li>
+Word application launches invisibly.<br><br></li>
+<li>
+Word application becomes visible.<br><br></li>
+<li>
+Word application shuts down.</li>
+</ul>
+<h3>Scenario 4</h3>
+<h4>Initial State: </h4>
+<p>
+Word application not running</p>
+<h4>Visual Basic for Applications Code::</h4>
+<pre><code>Dim app as Object
+Set app = CreateObject("Word.Application")
+' Make app visible and set UserControl
+app.Visible = True
+app.UserControl = True
+' Release the object (or let it fall out of scope)
+Set app = Nothing
+</code></pre>
+<h4>Result: </h4>
+<ul type=disc>
+<li>
+Word application launches invisibly.<br><br></li>
+<li>
+Word application becomes visible.<br><br></li>
+<li>
+Word application stays running and visible after program terminates.</li>
+</ul>
+<h3>Scenario 5</h3>
+<h4>Initial State: </h4>
+<p>
+Word application not running</p>
+<h4>Visual Basic for Applications Code:</h4>
+<pre><code>Dim app as Object
+Dim doc as Object
+Set app = CreateObject("Word.Application")
+' Create a new Document object
+Set doc = app.Documents.Add(Visible=FALSE)
+' Release the objects (or let it fall out of scope)
+Set doc = Nothing
+Set app = Nothing
+</code></pre>
+<h4>Result: </h4>
+<ul type=disc>
+<li>
+Word application launches invisibly.<br><br></li>
+<li>
+A new Word document is created invisibly.<br><br></li>
+<li>
+Word document closes without saving or prompting the user.<br><br></li>
+<li>
+Word application shuts down.</li>
+</ul>
+<h3>Scenario 6</h3>
+<h4>Initial State: </h4>
+<p>
+Word application not running</p>
+<h4>Visual Basic for Applications Code:</h4>
+<pre><code>Dim app as Object
+Dim doc as Object
+Set app = CreateObject("Word.Application")
+' Create a new Document object
+Set doc = app.Documents.Add(Visible=False)
+' Make doc visible and set app.UserControl
+doc.Visible = True
+app.UserControl = True
+' Release the objects (or let it fall out of scope)
+Set doc = Nothing
+Set app = Nothing
+</code></pre>
+<h4>Result: </h4>
+<ul type=disc>
+<li>
+Word application launches invisibly.<br><br></li>
+<li>
+A new Word document is created invisibly.<br><br></li>
+<li>
+Word document and the MDI application windows are made visible.<br><br></li>
+<li>
+Word document and application remain running and visible. The user has control of the application, thus later when the user closes the document, the application will remain running.</li>
+</ul>
+<h3>Scenario 7</h3>
+<h4>Initial State: </h4>
+<p>
+Word application not running</p>
+<h4>Visual Basic for Applications Code:</h4>
+<pre><code>Dim app as Object
+Dim doc as Object
+Set app = CreateObject("Word.Application")
+' Create a new Document object
+Set doc = app.NewDocument()
+' Make doc visible but do not set app.UserControl
+doc.Visible = True
+'&lt;@&gt; Manipulate doc here...
+' Make doc invisible again
+doc.Visible = False
+' Release the objects (or let it fall out of scope)
+Set doc = Nothing
+Set app = Nothing
+</code></pre>
+<h4>Result: </h4>
+<ul type=disc>
+<li>
+Word application launches invisibly.<br><br></li>
+<li>
+A new Word document is created invisibly.<br><br></li>
+<li>
+Word document and the MDI application windows are made visible.<br><br></li>
+<li>
+Word document is hidden. There are two cases to consider:<ul type=disc>
+<li>
+CASE 1: The user did not create/open any documents while the application was visible. In this case the application <i>UserControl</i> property will still be FALSE, and the application will be hidden when the document is hidden. The application and the document will both shut down when the programmatic references to them are released. Any unsaved changes will be thrown away <i>without</i> prompting the user. An invisible application should <i>not</i> prompt the user.<br><br></li>
+<li>
+CASE 2: The user did create/open a document while the application was visible. In this case the application <i>UserControl</i> property will be TRUE, and the application will <i>not</i> be hidden when the document is hidden. The programmatically created document will shut down when the programmatic references to it are released. The Word application and the user-created document will remain running and visible.</li>
+</ul>
+</li>
+</ul>
+</BODY>
+</HTML>

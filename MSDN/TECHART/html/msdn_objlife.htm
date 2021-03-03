@@ -1,0 +1,1584 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Managing Object Lifetimes in OLE</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_objlife"></a></sup>Managing Object Lifetimes in OLE</h1>
+<p>
+Douglas Hodges</p>
+<p>
+Created: August 25, 1994<br>
+Revised: November 18, 1994</p>
+<h2>The Problem</h2>
+<p>
+Managing the lifetimes of objects is easy when every object is written by the same programmer and everything runs within a single application. In this situation the programmer can do anything he wants. There does not need to be any formalized conventions of how the lifetimes of objects are managed. The programmer knows exactly when a particular object is no longer needed and can directly free the object whenever he wants (for example, by calling <b>delete pObj</b>).</p>
+<p>
+The problem becomes an order of magnitude more complex when the application runs as its own process (let's say single-threaded, for simplicity) and is built up of a set of components that are written by separate organizations. In this case an individual programmer cannot make assumptions about how/when a particular component/object (in this discussion I will use these terms rather freely interchangeably) is able to be destroyed. To solve this problem, OLE uses a standard mechanism called reference counting. With reference counting, basically, rules are established as to when the <i>refcount</i> of an object must be incremented and when it must be decremented; and further, it is defined that whenever an object has a positive refcount, the object's memory must remain valid. When the object's refcount transitions to zero the object may then be destroyed and its memory/resources freed. The main principle behind these rules is to allow a client of an interface to be guaranteed that he will not GP Fault when he dereferences the pointer. If the application runs as a standard application started by the user and later shut down by the user, then reference counting objects is all that is required to manage the lifetime of objects within the process (assuming there are no reference counting bugs!).</p>
+<p>
+The problem becomes an additional order of magnitude more complex when there are connections between objects in different processes (similar issues would apply to connections between objects in different threads, however, for this discussion I will only concentrate on single-threaded processes). OLE introduces many scenarios that involve communication between objects in different processes:
+<ul type=disc>
+<li>
+Embedding container and embedded object running in different processes (for example, a Microsoft® Excel object embedded in a Word document)<br><br></li>
+<li>
+Linking client and a link source object running in different processes (for example, a Word document linked to a range of Microsoft Excel file "c:\foo.xls!R1C1:R2C3"),<br><br></li>
+<li>
+OLE Automation driver and automation server object running in different processes (e.g. VB4 driving Visio).</li>
+</ul>
+<p>
+In these scenarios, the lifetime of the object that has connections from outside of its process must be managed properly. These scenarios cannot be solved by using reference counts alone. These are the scenarios that are the subject of this discussion.</p>
+<h3>Organization of This Document</h3>
+<p>
+I begin first with a explanation of why simple reference counting (AddRef/Release) is not sufficient to manage these scenarios. I will use one of the key scenarios involving Compound Documents to illustrate the basic problem. I will try to build up the scenario slowly, showing only enough detail to make my point. Often in the diagrams I will leave out details that I think will only distract the reader from the main point. Next I will discuss, in general terms, the basic strategy for handling these scenarios involving remote connections. I will concentrate on how the closing of a top-level object or document should be managed. I will discuss the remote mechanism used by OLE and how OLE tries to automatically handle these scenarios on behalf of the object. I will explain when OLE's automatic built-in mechanism works and when it is necessary to actively manage the problem. Initially I will ignore the detail of the difference between organizing the shutdown of the <i>application</i> versus the shutdown of the <i>document/object</i>. Later I will add the complexity of managing the application. I will discuss what the <i>ideal</i> shutdown behaviors are for the various styles of applications that we have (for example, SDI vs. MDI). I will then show a strategy of implementing these behaviors. Appendix B consists of sample code that implements the techniques discussed in this paper.</p>
+<h3>Definition of Terms</h3>
+<p>
+There is a lot of OLE terminology that I will use in this paper. It is best if the reader has a good general understanding of OLE and the Component Object Model (COM) before trying to tackle the subject discussed in this paper. But in order to assist the reader, following are definitions of some of the key terms and concepts that will be used in this discussion:</p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=28%><b>Term</b></td>
+<td class=label width=72%><b>Definition</b></td>
+</tr>
+<tr valign=top>
+<td width=28%>Compound Document</td>
+<td width=72%>Refers to application documents that can embed, link, or be embedded. These are the classic scenarios for traditional OLE. These scenarios are governed by standard user model guidelines. A Microsoft Excel object embedded in a Word document is a typical example of a Compound Document scenario. This term is used to distinguish from the more general object uses of OLE and COM.</td>
+</tr>
+<tr valign=top>
+<td width=28%>LocalServer object</td>
+<td width=72%>Object implemented with a server EXE.</td>
+</tr>
+<tr valign=top>
+<td width=28%>InprocServer object</td>
+<td width=72%>Object implemented with a server DLL.</td>
+</tr>
+<tr valign=top>
+<td width=28%>CLSID</td>
+<td width=72%>GUID (globally unique identifier) used to identify a class of an OLE object.</td>
+</tr>
+<tr valign=top>
+<td width=28%>IID</td>
+<td width=72%>GUID used to identify an interface.</td>
+</tr>
+<tr valign=top>
+<td width=28%>QI</td>
+<td width=72%>[<i>verb</i>] Abbreviation for <i>QueryInterface</i>. This is used as a verb as in the sentence, "You must first <i>QI</i> for interface <b>IOleContainer</b> and then call the method <b>IOleContainer::LockContainer</b>."</td>
+</tr>
+<tr valign=top>
+<td width=28%>COM identity</td>
+<td width=72%>A single COM object that is defined by the set of interfaces that can be retrieved via <b>IUnknown::QueryInterface</b> and that accept remote connections from clients in other processes. All of the interfaces in this set must return the same<i> IUnknown</i>* pointer if QI'ed for <b>IID_IUnknown</b>. This IUnknown* pointer represents the identity of the object to OLE. The notion of a COM identity is fundamental to the principles of OLE "remoting." In the shipping versions of OLE 2, a single COM identity can only live in <i>one</i> process. In the future this restriction may be lifted. An object that is able to accept remote connections is defined as a COM identity that lives in a particular process. All clients that establish a remote connection to an object get a special object that acts as a stand-in for the real object in the client's process. This stand-in object is called a <i>proxy</i> or <i>handler</i>. Each handler has a communication link back to the original object. A handler object cannot have remote connections connected to it. When a pointer to a handler object is passed to a third process, the destination process gets a new handler that is also connected with the real object in the original process. Thus a handler object is not considered to be a COM identity.</td>
+</tr>
+<tr valign=top>
+<td width=28%>Marshaling an interface pointer</td>
+<td width=72%>The act of passing an interface pointer from one process to another. In the act of marshaling an interface pointer, a proxy/stub pair is created if they do not already exist.</td>
+</tr>
+<tr valign=top>
+<td width=28%>Proxy/stub</td>
+<td width=72%>A special object pair that is used to manage the low-level details of "remoting" a particular interface. These objects handle the marshaling of parameters and return values for each method of the interface from one process to another. The proxy lives in the client's (caller's) process, and the stub lives in the object's (callee's) process.</td>
+</tr>
+<tr valign=top>
+<td width=28%>Handler or object handler</td>
+<td width=72%>A special object that acts as a stand-in for a real object in a client process.</td>
+</tr>
+<tr valign=top>
+<td width=28%>DefHandler</td>
+<td width=72%>The special implementation of a handler provided by OLE that is used by practically every LocalServer object that supports the Compound Document interfaces: <i>IOleObject</i>, <i>IDataObject</i>, <i>IViewObject</i>, and so on.</td>
+</tr>
+<tr valign=top>
+<td width=28%>ProxyManager</td>
+<td width=72%>The special implementation of a handler provided by OLE that is used when remoting general objects that do not support the Compound Document object interfaces: <i>IOleObject</i>, <i>IDataObject</i>, <i>IViewObject</i>, and so on. The ProxyManager manages all client-side aspects of a remote connection to an object. A ProxyManager is used as part of the implementation of the DefHandler.</td>
+</tr>
+<tr valign=top>
+<td width=28%>StubManager</td>
+<td width=72%>A special object implemented by OLE that manages all remote connections to a particular COM identity. The StubManager lives in the process of the object. The StubManager holds references to the object.</td>
+</tr>
+<tr valign=top>
+<td width=28%>Pseudo-object</td>
+<td width=72%>An object that is a sub-piece of a larger whole object. Pseudo-objects often do not have their own identifiable storage. They cannot live independently of the whole object.</td>
+</tr>
+</table><br>
+<h2>Why Is Reference Counting Not Enough?</h2>
+<p>
+In order to illustrate why reference counting is not sufficient, I would like to use one of the key scenarios involving Compound Documents in OLE: a<i> silent-update</i> of a link to an embedded object. This was a driving scenario for OLE 2 that was not possible with OLE 1. Let me build up this scenario in stages.</p>
+<h3>Visio Object Embedded in Word</h3>
+<p>
+Consider that I have a Visio object embedded in a Word document called FOO.DOC. Both Visio and Word are implemented using .EXEs. In this scenario, Visio is the embedded object and, in OLE lingo<i>,</i> is implemented as a LocalServer (that is, an .EXE rather than a .DLL). The document FOO.DOC is the embedding container and is managed by the Word application. The following picture shows the in-memory data structures at the time when the Word document is launched by the user and the Visio object is running.</p>
+<p>
+<img src="objlife_1.gif" border=0></p>
+<h3>Visio Object Embedded in Word as Link Source</h3>
+<p>
+Continuing with the same example, now consider that the Visio object embedded in FOO.DOC is the source of a link in a third document, say a Microsoft Excel worksheet called BAR.XLS. The user might create such a link by taking the following steps:
+<ol>
+<li>
+Open the FOO.DOC<i> </i>Word document.<br><br></li>
+<li>
+Activate the Visio object.<br><br></li>
+<li>
+Select the Edit SelectAll command.<br><br></li>
+<li>
+Select the Edit Copy command.<br><br></li>
+<li>
+Open the BAR.XLS Microsoft Excel spreadsheet.<br><br></li>
+<li>
+Select the Edit PasteLink command.</li>
+</ol>
+<p>
+Assume that the link in Microsoft Excel is set as a manual link. This means that updates to the link will only occur when the user explicitly requests them using the Update Now<i> </i>button of Microsoft Excel's Links<i>... </i>dialog. If the user requests to update the link at a time when neither Word or Visio is running, then in the process of completing the update operation, both Word and Visio applications will be launched. The link will get an update of data from the Visio object and both Word and Visio will shut down (or at least this is how it is supposed to work!). The complete operation should take place invisibly to the user. This operation is referred to as the silent-update<i> </i>operation<i>. </i>At the mid-point of the update operation, Microsoft Excel has an external reference directly to the Visio object but does not have any reference to the Word document. The presence of the connection from Microsoft Excel to Visio needs to hold Word and the FOO.DOC<i> </i>document running. Later, the act of Microsoft Excel releasing its connection to the Visio object should cause both Visio and Word to shut down. </p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;OLE 2 uses an object called a <i>Moniker</i> to identify a link source. OLE 2’s Link object stores a Moniker as part of its persistent state. When it is time for the Link object to connect to the link source object, a process called <i>Moniker binding </i>takes place. For this purpose, Monikers implement an <b>IMoniker::BindToObject</b> method. There are different types of Monikers and each performs its <b>BindToObject</b> operation in a different manner. OLE 2 provides three useful Moniker implementations that are used in this scenario: <i>FileMoniker, ItemMoniker</i>,<i> </i>and <i>CompositeMoniker</i>. The link source in this example is identified with a <i>CompositeMoniker</i> composed of a <i>FileMoniker</i> (“FOO.DOC”) constructed with an <i>ItemMoniker</i> (the name given by Word to identify the Visio object—perhaps <i>Object1</i>). The Moniker binding process in this case would first proceed by launching Word and asking it to open the FOO.DOC file. Next, Word would be asked to load and run the object named <i>Object1</i>. Finally, a pointer to the Visio object would be returned to the Link object in the Microsoft Excel process.</p>
+<p>
+The following picture shows the in-memory data structures at the time when Microsoft Excel is connected to the Visio object:</p>
+<p>
+<img src="objlife_2.gif" border=0></p>
+<p>
+In this scenario the Visio object has references or connections from both its embedding container (FOO.DOC) and from its linking client (BAR.XLS). Visio must realize that when the reference from the linking client is released, it should shut down. A simple call to<i> </i><b>IUnknown::Release</b> would decrement the Visio object's reference count from 2 to 1. The reference from the embedding container would remain and prevent the Visio object from shutting down. We do not want the reference from the embedding container to hold the object alive; thus, we need the Visio object to realize that the strength of the reference from the linking client is somehow different from the reference from its embedding container.</p>
+<h2>The Solution</h2>
+<p>
+In order to solve this problem we introduce the notion of <i>weak</i> and <i>strong</i> references.</p>
+<h3>Weak vs. Strong References</h3>
+<p>
+A strong reference (sometimes also called a <i>lock) </i>holds an object alive and running. As long as a strong reference to an object exists, the object is not supposed to shut down. Note that this is different from merely ensuring that the memory pointed to by the interface pointer remains valid; in the case of a LocalServer object, a strong reference not only keeps the memory of the Handler valid, but also keeps the LocalServer .EXE running.</p>
+<p>
+Other references are considered weak. The presence of weak references is not enough to stop an object from shutting down. The container/embedded object relationship is analogous to a parent/child relationship. The nature of a parent/child relationship is that if a child is being used by a client, then the parent is required to stay running. The child cannot live independently of the parent. Thus whenever there is a strong reference on a child, the child holds a strong reference on the parent. But if the child is not being used by a client, then the simple existence of the child should not hold the parent alive. This implies that in a normal state it is important for the parent <i>not</i> to hold a strong reference on the child; the parent must hold a weak reference on the child. </p>
+<p>
+Let us now return to our linking scenario. The OLE Link in the Microsoft Excel application holds a strong reference on the Visio object. The reference from the Word embedding container is considered weak (in this scenario the ClientSite is the parent and the VisioObject is the child). When the link releases its strong reference on the Visio object, the Visio object will shut down because there are no other strong references.</p>
+<p>
+<img src="objlife_3.gif" border=0></p>
+<p>
+In the diagram, <i>cRef </i>indicates the total count of references (the sum of both weak and strong references) and <i>cLock </i>indicates the count of strong references. In order to properly manage a shutdown in the scenario above, an object needs to maintain two counts. When a strong reference is added, both <i>cRef </i>and <i>cLock </i>are incremented. When a weak reference is added, a simple <b>IUnknown::Addref</b> is made that increments only <i>cRef. </i>The primary purpose for maintaining these two counts is so that the object can sense the transition of these counts to zero. When the count of strong references, <i>cLock</i>,<i> </i>transitions to zero, the object invokes its <i>Close </i>method. In its Close method the object performs all actions necessary to "encourage" its total reference count to go to zero. This will include such actions as revoking from the <i>Running Object Table</i>, sending <i>OnClose</i> notification, closing any internal <i>pseudo-objects</i>, and disconnecting any remaining remote (external) connections. When the total reference count, <i>cRef</i>, transitions to zero, the memory for the object itself is destroyed.</p>
+<h3>Running Object Holds Strong Reference on Container</h3>
+<p>
+In our silent update scenario, it is necessary for the Word document to stay running for the duration of the update operation. We have already accounted for why the Visio object stays running due to the presence of the strong reference from the Microsoft Excel linking client. But what holds the Word document itself alive? During the update operation, there is not a direct reference from the Microsoft Excel application to the Word document. In order to solve this problem, OLE requires that an embedded object hold its embedding container alive while it is running. OLE automatically takes care of this on behalf of LocalServer (EXE) object implementations. OLE's DefHandler arranges to hold the embedding container alive while the object's LocalServer application is running. When the DefHandler receives an <i>OnClose</i> notification informing it that the LocalServer application has shut down, it releases its lock on the embedding container. An InprocServer (DLL) object that allows remote connections (that is, it does not specify OLEMISC_CANTLINKINSIDE) must take care of this on its own. A running embedded object can add a strong reference to its embedding container by making the following calls:</p>
+<pre><code>IOleClientSite::GetContainer(ppOleContainer)
+IOleContainer::LockContainer(fLock)
+</code></pre>
+<p>
+In the following picture we add the detail of the DefHandler and the lock on the container on behalf of the running embedded object.</p>
+<p>
+<img src="objlife_4.gif" border=0></p>
+<h3>Registering in the Running Object Table</h3>
+<p>
+In order to allow a potential linking client to connect to an existing running instance of an object rather than attempting to launch a second instance, OLE provides a system maintained table called the running object table (ROT for short). Objects that want to allow potential clients to connect to the current instance will register themselves in the ROT. For the duration that an object is registered in the ROT, the ROT holds a reference to the object. The object can control whether this is a weak or a strong registration with flags passed to the <b>IRunningObjectTable::Register</b> method. By default the registration contributes a weak reference. If the ROTFLAGS_REGISTRATIONKEEPSALIVE flag is specified, the registration creates a strong reference. In the standard Compound Document scenarios, an object should register itself in the ROT with a weak registration. For example, in our link to the Visio embedding scenario, both the Word document and the Visio object would register themselves with a weak registration in the ROT. Registration in the ROT is necessary to allow clients to connect to the running instance of the object, but we do not want the act of being registered in the ROT to keep the object from shutting down.</p>
+<p>
+The following picture adds the detail of the Word document and the Visio object registering in the ROT to our linking to an embedded Visio object scenario.</p>
+<p>
+<img src="objlife_5.gif" border=0></p>
+<p>
+In the case pictured, the Visio object and the Word document are running invisibly (that is, not under user control); they were launched programmatically to service two linking clients. The Visio object should not shut down until both linking clients have released their strong references. When these two references are released, the strong count will transition to zero and the Visio object will invoke its Close method. In this method the object will revoke from the ROT, which will cause the reference from the ROT to be released, and the Visio object will send OnClose notification, which will cause the DefHandler to release its reference to the object. The total reference count will then go to zero and the Visio object will destroy itself. When the DefHandler receives the OnClose notification it will also call <b>IOleContainer::LockContainer</b>(FALSE) to release its strong reference on the Word document container. The Word document's strong count will transition to zero, and the document will invoke its Close method. As part of its Close method the Word document will revoke itself from the ROT, thus causing its total reference count to transition to zero. The Word document will then perform its final destruction.</p>
+<h3>Remote (or External) Connections</h3>
+<p>
+The act of passing a pointer to an interface across process, typically as an out parameter of another method call, causes the interface pointer to be marshaled into the other process. This work is handled as part of the Remote Procedure Call (RPC) mechanism used by OLE. It is not necessary to have a complete, detailed understanding of this process. We only need to have a general understanding of the structures that result after a successful marshaling of an interface pointer has finished. (If you want more information on RPC in OLE and the process of marshaling interface pointers, please refer to the<i> OLE 2 Programmer’s Reference, Vol. 1</i> or the OLE 2.0 specification, section 4.7.) It is not possible for a client process to have a direct memory pointer to the interface of an object living in another process. Instead, the client ends up with a direct memory pointer to a <i>Proxy</i> object or <i>Handler</i> object that acts as a stand-in for the real object in the client's process. This proxy has an RPC communication link to a structure called a <i>Stub</i> in the process of the object<i>.</i> One object may support more than one interface. For each remoted interface there is a proxy/stub pair. In order to coordinate the multiple proxies and stubs, OLE uses a <i>ProxyManager </i>in the process of the client and a <i>StubManager</i> in the process of the object. </p>
+<p>
+<img src="objlife_6.gif" border=0></p>
+<p>
+For general COM objects, the ProxyManager object is used directly as the handler for the object in the process of the client. For most OLE Compound Document objects, the ProxyManager is an internal sub-piece of OLE's DefHandler. The DefHandler is built as an aggregate of three pieces:
+<ul type=disc>
+<li>
+A main controlling piece<br><br></li>
+<li>
+A piece that manages a data cache and supports drawing the object when the LocalServer is not running<br><br></li>
+<li>
+An instance of a ProxyManager to manage the remote connection to the real object</li>
+</ul>
+<p>
+<img src="objlife_7.gif" border=0></p>
+<p>
+The StubManager acts as the common point of connection for all external references to the object. The StubManager in turn holds "Addref"ed pointers to one or more of the object's interfaces. In 16-bit OLE the communication mechanism used between the proxies and stubs was called <i>LRPC</i> and was based on a protocol involving posted and sent Window messages. In 32 bit OLE, the LRPC mechanism has been replaced by the DCE RPC communication protocol. In the future, this DCE RPC mechanism will be extended to support Distributed OLE (that is, RPC across machines).</p>
+<p>
+For one particular COM object identity, there can be at most one StubManager. OLE enforces object identity by always "QueryInterface"ing for IUnknown and then mapping a particular IUnknown* pointer to a particular StubManager. In OLE 2.0, a particular COM identity can live in only one process. The StubManager for that COM identity lives in the same process as the object. If a pointer to that object needs to be remoted to another process, then a Handler or ProxyManager will be created to act as the stand-in for the object in that destination process. For a particular COM identity, there will be at most one associated ProxyManager/Handler in a particular client process. This uniqueness of one ProxyManager for one object in one process and one StubManager for one object living only in the object's original process is part of the fundamental principles of OLE and COM.</p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;In 16-bit OLE 2.0 and in the shipping version of 32-bit OLE for Windows NT™ 3.5, all COM objects must live in the single thread that calls <b>OleInitialize</b>. Only one thread may call <b>OleInitialize</b>. A particular COM object, however, can only live in one particular thread. This is known as the <i>apartment model</i>. In the next version of Windows NT it may be possible to have one COM identity participate in more than one thread of a process. This manner of dealing with objects is called <i>free-threading</i>.</p>
+<h3>Relying on the StubManager to Manage Strong/Weak References</h3>
+<p>
+The StubManager manages the notion of strong references and weak references. It maintains both the count of strong references and the count of total references, <i>cLock</i> and <i>cRef</i>. An object that wants to rely on the StubManager for managing strong/weak references only maintains a single reference count (<i>cRef</i>). On the transition of this count to zero, the object destroys itself. The object must make sure to perform all necessary clean-up in its destructor method, including revoking from the ROT if necessary. The default implementation for the StubManager is to release all pointers it holds to the real object when the count of strong references transitions to zero. At this point the StubManager is a zombie because it no longer has a connection to the object. This will normally cause the real object to get its final release, which then causes it to destroy itself. The destructor code for the object should take care of any necessary clean-up, including revoking from the ROT and sending any OnClose notifications. This will eventually cause the final reference count on the StubManager to transition to zero, upon which the StubManager will destroy itself.</p>
+<p>
+Notice that in the sequence just described, because the object is relying on the StubManager to manage the weak and strong counts, the object does not get a call to its Close method. It simply gets its final release, upon which it calls its destructor. If the object is implemented in this style, because of this scenario, it is required for the object to be prepared to execute its shutdown clean-up code either from a direct call to its Close method <i>or</i> when it enters its destructor directly without a prior call to Close. We will see later how this scenario causes problems and in fact can result in a data loss for the user.</p>
+<p>
+The following picture adds the detail of the StubManager for the Visio embedded object to our Visio linking scenario (the StubManager is depicted by the small circle). The StubManager for the Word document object and the ClientSite object are omitted from the drawing so as not to overcomplicate the drawing. In this drawing, the Visio object is relying on its StubManager to manage the weak and strong counts. Thus, the Visio object only maintains a single count (<i>cRef</i>). (In following sections we will see why it is not necessarily the best idea for the embedded object to rely on its StubManager to manage the weak and strong counts. An alternate strategy involving <b>IExternalConnection</b> is a better strategy.)</p>
+<p>
+<img src="objlife_8.gif" border=0></p>
+<p>
+The original intent of OLE's StubManager was to shield the object developer from having to deal with two counts. The goal was to make it so that an object implementation only had to deal with one count of total references. The object would only have to notice the transition of the total reference count to zero and then destroy itself. In many cases, this works fine. In particular, this often works fine for objects meeting one or more of the following descriptions:
+<ul type=disc>
+<li>
+Objects that do not need to register in the ROT<br><br></li>
+<li>
+Objects that do not have a mixture of both weak and strong references (that is, objects that only have either all strong references or all weak references)<br><br></li>
+<li>
+Objects that are sub-pieces of a whole object, <i>pseudo-objects</i><br><br></li>
+<li>
+Objects that do not have a mixture of in-process and remote references<br><br></li>
+<li>
+Objects that do not need to manage the notion of being visible and under the control of the user</li>
+</ul>
+<p>
+In the next sections, we will see cases where strong references are generated internally within an application; these are strong references that are not caused by the remote connections to the StubManager. We have already discussed one case of an internally generated strong reference: the lock that a running embedded object holds on its container. The call that the object makes to <b>IOleContainer::LockContainer</b><i> </i>(actually, the call is made by the DefHandler on behalf of a LocalServer—an in-proc server must make this call on its own) informs the container directly; the StubManager does not know about the strong reference (unless the container calls <b>CoLockObjectExternal</b>).<i> </i>These internally generated strong references lead to cases where relying on OLE's StubManager to manage the weak and strong references is insufficient. These problematic cases often result in shutdown failures and, in some cases, result in data loss for the user.</p>
+<h3>Managing the User as a Strong Reference</h3>
+<p>
+In the discussion of our Visio linking scenario thus far, I have always discussed the case where Word was launched invisibly and programmatically by the silent-update operation. If, on the other hand, the Visio object and the Word document had already been running and visible to the user when the manual link in Microsoft Excel was updated, then we would <i>not </i>want the Visio object and the Word document to shut down. The link in Microsoft Excel should silently connect to the Visio object, get its update, and then release its strong reference, while the Visio object should remain running because it is under the control of the user. In order to accomplish this, we manage the fact that the object is visible to the user, and thus under the control of the user, by adding a strong reference on behalf of the user. This is an example of an internally generated strong reference that the StubManager does not know about. The act of a link client connecting and disconnecting behind the scenes should not cause a document or object that the user is editing to suddenly shut down. The following picture illustrates this strong reference on behalf of the user. (To simplify the drawing the StubManager has been omitted.)</p>
+<p>
+<img src="objlife_9.gif" border=0></p>
+<p>
+If an object is locked on behalf of the user because it is visible, then the object will only shutdown if the user issues File Close<i> </i>command<i>. </i>In the previous example, the Visio object would only shut down if the user either issued a File Close<i> </i>command on the Visio object directly or issued File Close<i> </i>on the Word document. As part of the shutdown process of an embedding container, the container must call <b>IOleObject::Close</b> on each embedding.<i> </i>If, at the time of the update operation, only the FOO.DOC Word document was visible to the user and the Visio object was not running at all, the following would occur:
+<ul type=disc>
+<li>
+OLE would connect to the running instance of the FOO.DOC document via the ROT.<br><br></li>
+<li>
+OLE would ask Word to run the Visio object invisibly to the user. This would cause the handler of the Visio object to hold the lock on the Word container.<br><br></li>
+<li>
+The pointer to the Visio object would be marshaled back to the link in Microsoft Excel's process, resulting in a strong reference on the Visio object due to the remote connection.<br><br></li>
+<li>
+The link would request its update of data from the Visio object.<br><br></li>
+<li>
+After the update operation was finished, the link would release its connection to the Visio object, thus releasing the strong reference.<br><br></li>
+<li>
+In this case, because there is no strong reference on the Visio object on behalf of the user, the Visio object would shut down.<br><br></li>
+<li>
+The lock on the Word container would be released, but because the user holds a lock on the Word document, the Word document would remain running and visible.</li>
+</ul>
+<p>
+<img src="objlife_10.gif" border=0></p>
+<p>
+By standard conventions for OLE Compound Documents, when the user issues the File Close command, the document/object is forced to shut down even if link clients are currently connected. The same is true when the <b>IOleObject::Close</b><i> </i>method is called. An explicit call to Close, either by the user or programmatically, will typically break any outstanding locks and force a shutdown of the object. The implementation of Close by a typical Compound Document application calls <b>CoDisconnectObject</b> at the end to force all remote connections to disconnect. This will break even a programmatic silent update operation in progress. (It would be possible to only send the OnClose notification and <i>not</i> forcibly tear down remote connections in a object’s Close implementation. In theory all external connections should clean up themselves. When the OnClose notification is received by Compound Document Link clients, the OLE Link object will always disconnect. Presumably the other external connections are present for some programmatic purpose. When these other programmatic operations are finished, they too will disconnect. Thus the external connections should automatically clean up properly, but standard Compound Document object implementations tend to be somewhat conservative and pessimistic—not trusting other client implementations to be done properly. Given the history of some of our application implementations, this pessimism is somewhat warranted.)</p>
+<h3>Managing Pseudo-Objects</h3>
+<p>
+Another scenario that contributes internally generated strong references is the management of pseudo-objects. Some objects allow remote connections to sub-pieces of their structure. For example, a word processor may allow clients to link to bookmarks; a spreadsheet may allow clients to link to named ranges. These type of sub-objects, which represent sub-pieces of a whole object, are referred to as <i>pseudo-objects</i>. A <i>pseudo-object</i> often does not have its own identifiable storage. Pseudo-objects cannot live independently. They depend on their parent (whole) object to stay running. As such, pseudo-objects need to implement a locking strategy similar to embedded objects. While the pseudo-object is running, it holds a strong reference on its parent/whole object. The reference from the parent object to the pseudo-object is considered weak (that is, it does not hold the pseudo-object alive). Pseudo-objects, however, are implemented privately as part of the whole object. It is not necessary for OLE to specify interfaces to control the coordination of pseudo-objects. Pseudo-objects are able to use special knowledge of the whole object in order to call private methods and/or access private state. In addition, because the whole object and the pseudo-object are implemented privately together, it is possible for the whole object to hold a "non-Addref"ed<i> </i>pointer to the pseudo-object.</p>
+<p>
+A common strategy for managing pseudo-objects is to implement a COM object for the pseudo-object which considers any reference as a strong reference. As such, the weak reference from the parent object is managed as a "non-Addref"ed pointer. Using this strategy, pseudo-objects only need to maintain a single reference count because there is not a combination of both weak and strong pointers—all pointers being considered strong. Such pseudo-objects hold a strong reference on their parent object while they have a non-zero reference count. When the reference count of the pseudo-object transitions to zero, the pseudo-object releases its strong reference on its parent. </p>
+<p>
+<img src="objlife_11.gif" border=0></p>
+<h3>Managing Weak and Strong References Yourself</h3>
+<p>
+There are some very important scenarios where it is not sufficient to allow OLE's StubManager to manage the strong vs. weak reference counts. These scenarios can result in data loss for the user and, most often, serious shutdown problems where the object server becomes orphaned invisibly to the user and never shuts down. Some of these scenarios include the following:
+<ol>
+<li>
+Top-level embeddable OLE object that supports linking to itself or its sub-pieces (that is, any embeddable OLE object that does not specify OLEMISC_CANTLINKINSIDE). This is particularly important for objects that also support in-place editing.<br><br></li>
+<li>
+Top-level embeddable OLE object that supports OLE Automation.<br><br></li>
+<li>
+Top-level file-based OLE object/document that supports linking to its sub-pieces (<i>pseudo-objects</i>).<br><br></li>
+<li>
+Top-level file-based OLE object/document that supports OLE Automation over itself and its sub-pieces (<i>pseudo-objects</i>).</li>
+</ol>
+<p>
+The first two scenarios can result in data loss if the embedded object happens to have unsaved changes at a time when the strong count on its StubManager transitions to zero. On this transition the StubManager releases its references to the object, thus becoming a zombie. The object then is unable to have its modified data saved back to its container. When the object calls <b>IOleClientSite::SaveObject</b>, the subsequent call of <b>IPersistStorage::Save</b> from its container cannot get through because the StubManager is a zombie. This scenario can easily occur if a silent update occurs at a time when an in-place object is UIDeactivated. (To help avoid this data loss, an in-place container should hold its embedding locked (that is, call <b>OleLockRunning</b>) when it in-place activates the object. It can release this lock when it wants to close the object.)</p>
+<p>
+Scenarios 3 and 4 involve the coordination of a combination of both externally generated locks and internally generated locks. The externally generated locks are the result of external connections that connect through the StubManager. The internally generated locks are the result of locks on behalf of pseudo-objects, locks on behalf of the user, and locks on behalf of running embeddings (<b>IOleContainer::LockContainer</b> calls). In order to properly manage all of the scenarios, it is required that one piece of code know about all of the locks. There are basically two strategies:
+<ul type=disc>
+<li>
+Have the StubManager manage the total lock count and thus inform the StubManager of all internally generated locks. In this case the object only maintains a single reference count. The <b>CoLockObjectExternal</b> API can be used to communicate internal locks to the StubManager.<br><br></li>
+<li>
+Manage the lock count yourself and have the StubManager inform you of all of the external locks. In this case the object maintains two counts: strong reference count and total reference count.</li>
+</ul>
+<p>
+I prefer the second strategy of explicitly tracking the strong and weak references rather than relying on the StubManager. (This is particularly true for 32-bit OLE, where if an object implements <b>IExternalConnection</b>, the StubManager will never become a zombie. This is particularly important because it means that it is possible to directly increment/decrement the strong lock count maintained in the object for internally generated locks (for example, locks on behalf of the user and locks on behalf of pseudo-objects). It is no longer necessary to pass all locks through the StubManager by calling <b>CoLockObjectExternal</b> as it was with 16-bit OLE 2. Thus, with 32-bit OLE, it becomes unnecessary to ever have to call <b>CoLockObjectExternal</b>.)</p>
+<p>
+The <b>IExternalConnection</b> interface allows an object to track the number of external connections:
+<ul type=disc>
+<li>
+AddConnection<br><br></li>
+<li>
+ReleaseConnection</li>
+</ul>
+<p>
+By implementing the <b>IExternalConnection</b> interface, the object will be informed by the StubManager of all strong external connections. The object can combine this with the count of strong references originating from internal sources in order to have an accurate count of all strong references.</p>
+<p>
+The following events can all contribute strong references on an object:
+<ul type=disc>
+<li>
+<b>IExternalConnection::AddConnection</b><br><br></li>
+<li>
+<b>IOleContainer::LockContainer</b>(TRUE)<br><br></li>
+<li>
+Object becoming visible and thus locked on behalf of the user<br><br></li>
+<li>
+Creation of a pseudo-object holds a lock on its parent object (see the section "Managing Pseudo-Objects").</li>
+</ul>
+<p>
+The implementation of each of the above would be to call a common, private <b>Document::Lock</b>(TRUE, 0) method. For the Lock(TRUE) case, this method would increment the total count of locks (<i>cLock</i>) and call <b>IUnknown::Addref</b> to increment the total reference count (<i>cRef</i>) of the document.</p>
+<p>
+The following events can all release a strong reference on an object:
+<ul type=disc>
+<li>
+<b>IExternalConnection::ReleaseConnection</b><br><br></li>
+<li>
+<b>IOleContainer::LockContainer</b>(FALSE)<br><br></li>
+<li>
+Object becoming invisible and thus being unlocked on behalf of the user<br><br></li>
+<li>
+Destruction of a pseudo-object releases its lock on its parent object</li>
+</ul>
+<p>
+The implementation of each of the above would be to call a common, private <b>Document::Lock</b>(FALSE, <b>fLastUnlockCloses</b>) method. For the Lock(FALSE) case, this method would decrement the total count of locks (<i>cLock</i>). If this count transitions to zero and <b>fLastUnlockCloses</b> is TRUE, then the document's close method is called. Finally, in order to balance the previous Addref call, <b>IUnknown::Release</b> would be called. If this release call causes the total reference count to transition to zero, then the document will be destroyed.</p>
+<p>
+By explicitly tracking the external connections with <b>IExternalConnection</b>, the data loss situation of the first two scenarios above can be avoided by the object detecting when it is about to shut down, at a point when the StubManager is still connected. This means that the call to <b>IOleClientSite::SaveObject</b> is invoked at a point when the subsequent <b>IPersistStorage::Save</b> method call will succeed.</p>
+<h3>Managing Embedded Objects and Containers</h3>
+<p>
+The scenario of&nbsp; the embedded object and the embedding container is the principal scenario for OLE Compound documents. The relationship between the embedding and the container is an example of a parent-child relationship. In this scenario the parent/container has ultimate control over its children/embeddings. </p>
+<p>
+The following diagram shows the methods involved in managing the OLE Compound Document Container-Embedding relationship:</p>
+<p>
+<img src="objlife_12.gif" border=0></p>
+<p>
+Objects implement the following methods:
+<ul type=disc>
+<li>
+<b>interface IOleObject</b><ul type=disc>
+<li>
+SetClientSite<br><br></li>
+<li>
+Close</li>
+</ul>
+</li>
+<li>
+<b>interface IRunnableObject</b> (implemented by object handlers and InprocServers only)<ul type=disc>
+<li>
+Run<br><br></li>
+<li>
+IsRunning<br><br></li>
+<li>
+LockRunning<br><br></li>
+<li>
+SetContainedObject</li>
+</ul>
+</li>
+</ul>
+<p>
+Containers implement the following methods:
+<ul type=disc>
+<li>
+<b>interface IOleClientSite</b><ul type=disc>
+<li>
+GetContainer</li>
+</ul>
+</li>
+<li>
+<b>interface IOleContainer</b><ul type=disc>
+<li>
+LockContainer</li>
+</ul>
+</li>
+</ul>
+<p>
+The container at any time should be able to command an embedded object to shut down. The container of course holds an "Addref"ed pointer to its embedding. The presence of this Addref guarantees that the container will not GP Fault when it dereferences this pointer. Simply releasing this "Addref"ed pointer is not sufficient to command an object to shut down; there may be other references to the object, so releasing this pointer will not necessarily cause the object's reference count to go to zero. The object may, for example, be registered in the running object table (ROT) and/or may have connections from one or more linking clients. These will also contribute reference counts on the object. Thus the container needs a special way to command the object to shut down. For this purpose OLE introduces the<i> </i><b>IOleObject::Close</b><i> </i>method.</p>
+<p>
+In addition, the container needs a way to force the object to go running. In the case of an object implemented with a LocalServer, this forces the object's EXE server to be launched. The <b>IRunnableObject::Run</b> method is used for this purpose. The <b>OleRun</b><i> </i>API is a simple helper that "QueryInterface"s for the <b>IRunnableObject</b> interface and then calls the Run method. The container can determine whether an object is running by calling <b>IRunnableObject::IsRunning</b><i> </i>or by using the helper API <b>OleIsRunning</b>. Normally the reference from the container to the embedded object needs to be considered weak. In the case of a LocalServer, the container holds a pointer to an object handler (normally OLE's DefHandler) loaded in its process. When the object goes running, the LocalServer EXE is launched and a remote connection is established between the handler and the LocalServer. Initially all remote connections are established as strong references by OLE. The embedding container needs a way to inform the object's handler that it is being used in the context of an embedding relationship and not being used, for example, in the context of a remote link connection. This forces the connection with the LocalServer to be made weak. The embedding container informs the object handler that it is a contained object by calling <b>IRunnableObject::SetContainedObject</b> or by using the helper API <b>OleSetContainedObject</b>. This method is not important for InprocServers. If the container wants to temporarily force an embedded object to stay running for special reasons, the container can add a strong reference on the object by calling <b>IRunnableObject::LockRunning</b><i> </i>or by using the helper API <b>OleLockRunning</b>. For example, an in-place container should hold its embedded objects locked running when it "UIDeactivate"s them. The in-place container wants to force the objects to stay running so they can be reactivated quickly.</p>
+<h2>Managing the Application</h2>
+<p>
+Thus far we have discussed how to manage weak and strong references on the top-level document object to control when the document should close. Similar techniques are used to manage the shutdown of the LocalServer application itself. There are three basic types of applications:
+<ul type=disc>
+<li>
+<i>Multiple Document Interface </i>(MDI) applications can manage many document objects in a single instance of the application. An MDI application may or may not support running multiple instances of the application.<br><br></li>
+<li>
+<i>Old-style Single Document Interface </i>(SDI) applications can manage only a single document object at a time but can support closing one document and then opening another document without starting another instance of the application. SDI applications should always support running multiple instances of the application at the same time. WRITE.EXE and PBRUSH.EXE are examples of this type of SDI application. Such an SDI application has separate abstractions for the application object and the document object. Over its lifetime a single application object may manage many document objects with the windowing UI restriction that only a single document can be open at a time. The fact that the application object and the document object are separate abstractions to the user is significant and distinguishes this type of <i>old-style </i>SDI application from what I refer to as a <i>new-style </i>SDI application<i>.</i> The application and the document object are exposed as separate abstractions to the user in the exposed Automation Object Model of an old-style SDI application. From an object lifetime implementation point of view, an old-style SDI application is identical to an MDI application; the same strategies are used to track strong references on the application object and the document objects. In this discussion all comments referring to MDI also apply to an old-style SDI application except where specially noted.<br><br></li>
+<li>
+<i>New-style Single Document Interface </i>(SDI) applications move away from the "application-centric" model and present a "document-centric" model. These applications manage only a single document object. The difference from old-style SDI applications is that they do not support closing one document and then opening another document without starting a another instance of the application; instead, the File New and File Open<i> </i>commands launch a new instance of the application to handle the new document. These SDI applications always support running multiple instances of the application at the same time. These new-style SDI applications have a single document object abstraction. These applications simplify the implementation of object lifetime by only having to deal with the shutdown of a single document object and do not have to deal with the interactions of multiple documents and the application object.</li>
+</ul>
+<p>
+The <b>CoCreateInstance</b><i> </i>API is used to create objects in OLE/COM. An application implements a special COM object called a <i>ClassObject</i>, which implements the <b>IClassFactory</b> interface in order to allow OLE to create instances of the type of object that the application supports. The <b>CoCreateInstance</b> API first launches the application with a "<i>-Embedding</i>" argument on the command line. The application must create and initialize its ClassObject and call the <b>RegisterClassObject</b> API <i>before</i> yielding. Depending on the type of application, it will specify one of the following flags on its call to <b>RegisterClassObject</b>: 
+<ul type=disc>
+<li>
+REGCLS_SINGLEUSE—old-style or new-style SDI application that can create only one object instance<br><br></li>
+<li>
+REGCLS_MULTIPLEUSE—MDI application that can create multiple object instances</li>
+</ul>
+<p>
+The following factors contribute to the shutdown logic for both MDI and old-style SDI applications:
+<ul type=disc>
+<li>
+<i>cDoc</i>—The count of documents or objects being managed by the application. The application should not shut down if a document/object exists.<br><br></li>
+<li>
+<i>fUserCtrl</i>—Flag indicating whether the user is in control of the application. Once the user gains control of the application, the application can only be shut down explicitly by the user. In this way, this flag needs to be maintained as a latch; once the user <i>latches</i> control, the user must explicitly exit the application. If the user directly launches the application or if the user creates a document via File New or File Open, the user should latch control of the application.<p class=tl>
+(Note that this lock on behalf of the user on the application object is managed as a latch. The lock on behalf of the user on a document that we have previously discussed is not managed as a latch. Whenever a document is visible, it is locked on behalf of the user. The application, however, is only locked on behalf of the user if the user launched the application or the user opened a file.)</P></li>
+<li>
+<i>cLockServer</i>—The count of direct calls to <b>IClassFactory::LockServer</b>. A client can tell an object server to stay running by calling the LockServer method on the class object. This is normally only useful with REGCLS_MULTIPLEUSE type class objects, which can be used to create multiple object instances.<br><br></li>
+<li>
+<i>cExtConn</i>—The count of external connections directly to the application object. If the application object supports interfaces that may be passed to remote clients, the application should not shut down while connections exist. These could be remote connections for any purpose. It is common for applications that support OLE Automation to expose a top-level application abstraction as part of their object model to remote clients.</li>
+</ul>
+<p>
+It is best to manage the application shutdown logic in terms of an application object that maintains a count of strong references or locks. The above-mentioned factors contribute strong locks on the application object. When the count of strong locks transitions to zero, the application should shut down. This is exactly analogous to how locks (or strong references) are used to control the closing logic for a document/object. </p>
+<p>
+If the application object does not allow external connections, we do not have to deal with a combination of weak and strong references. This simplifies things somewhat. All references to the object are then considered strong, so we only need to maintain a single count. If, for example, the application exposes the application object remotely through OLE Automation by calling the <b>RegisterActiveObject</b> API, this object will need to manage both weak and strong references; this object will need to maintain two counts (<i>cLock</i> and <i>cRef</i>).<i> </i>The application object should be registered with a weak registration by passing the proper flag to the <b>RegisterActiveObject</b> API. </p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;By default the <b>RegisterActiveObject</b> API registers the object with a strong reference. In 32-bit OLE the <i>REGOBJ_TABLEWEAK</i> flag has been defined to allow the registration to be weak. (See the 32-bit <i>OLE 2 Programmer’s Reference</i>.). In 16-bit OLE it would be necessary to organize a separate COM identity for the object passed to <b>RegisterActiveObject</b> in order to deal with the fact that the registration is strong.</p>
+<h3>Ideal Shutdown Behavior for an MDI Application</h3>
+<p>
+The following are requirements that characterize the ideal shutdown behavior for an MDI application ("ideal" behavior as defined by the standard conventions for Compound Documents as originally intended by OLE):
+<ul type=disc>
+<li>
+If the application is launched directly by the user (either by double clicking a program icon in the Program Manager or by double clicking a document icon in the File Manager), it should only shut down if the user issues a File Exit command. The user latches control of the application.<br><br></li>
+<li>
+If the application is launched by OLE to service an embedded object, the application should launch invisibly and wait for commands from OLE. (OLE will launch the application with “-Embedding” on the command line for an embedded object. Initially the application does not know why it has been launched; it could be to service an embedded object or a linked object. The application knows that it is servicing an embedded object when either <b>IPersistStorage::InitNew</b> or <b>IPersistStorage::Load</b><i> </i>is called.) The application should launch initially not under user control. Later OLE will use the class object to create an object. The application and the object should still be invisible.<p class=tl>
+When the container calls <b>IOleObject::DoVerb</b>, depending on the capabilities of the container and the object, the object will either activate in-place or open up in its own window (in OLE 1 fashion). If the object activates in-place, the object application should remain invisible. If the object opens, the embedded object MDI application frame window is also made visible. Opening an embedded object should not cause the user to latch control of the application. (An acceptable compromise behavior is to latch user control of the application whenever the application window is made visible. Thus in this case, when an embedded object is made to go visible in open mode, the application will not shut down when the object is closed. On the other hand, if the object is activated in-place and the object application window is never made visible, the object application <i>should</i> shut down when the object is closed.)</P><p class=tl>
+Later when the object is closed the embedded object application should shut down. The application should shut down even if it is visible because the user did not latch control of the application. Thus when the embedded object is closed, the application must check to see if there is any other reason to stay running (that is, any strong locks remaining on the application). If not, the application should shut down. Any of the following events would cause the object to close:</P><ul type=disc>
+<li>
+If the user issues File Close in the embedded object application, the embedded object should close, the embedded object application should exit, and the focus for the user should return to the embedding container document. If the object is dirty, it should automatically save itself back to the embedding container without prompting the user. In order to cause the save operation, the object should call <b>IOleClientSite::SaveObject</b>, which will cause the embedding container to immediately call <b>IPersistStorage::Save</b> back to the object. The user calling File Close forces the object to close; this should break all existing locks on the object or document. The object or document should close even if it is currently connected to remote clients.<br><br></li>
+<li>
+If the user issues a File Exit command, the behavior is essentially the same as the File Close scenario. In addition, however, all open embedded objects and documents should be closed. The user should be prompted to save changes if any top-level documents are dirty.<br><br></li>
+<li>
+If the user closes the embedding container document, the embedded object should close. In this situation the embedding container should call <b>IOleObject::Close</b> on the embedded object.</li>
+</ul>
+</li>
+<li>
+If the application is initially launched by OLE and later made visible with an open embedded object, and later if the user creates a user document with File New or File Open, the user <i>should</i> latch control of the application. The application should <i>not</i> shut down when the embedded object is closed. This is true even if the user closes the user document first and then closes the embedded object; the application should remain running and visible. The order in which the documents are closed has no effect on whether the user has latched control of the application. The mere action of the user opening or creating a document latches user control of the application. At this point it is just as if the user had launched the application in the first place.<br><br></li>
+<li>
+If the application is initially launched by OLE to service an in-place active embedded object, the application should remain invisible. If subsequently a second embedded object is activated in open mode, the application frame window should become visible but the user should not latch control of the application. If the open object is closed either by the container or by the user (with File Close or<i> </i>File Exit in the object application), the object application should return to the invisible state with the in-place active object still running. Thus the FileExit command should do the following:<ul type=disc>
+<li>
+It should hide the application window and unlock the user control latch.<br><br></li>
+<li>
+It should cycle through the objects/documents that are under the control of the user (that is, visible) and force them to close.<br><br></li>
+<li>
+But, it should <i>not</i> force invisible objects that are being used programmatically (for example, an object that is in-place active in another container) to close.</li>
+</ul>
+<p class=tl>
+It is therefore possible that if there are currently invisible objects being used programmatically, the application will not actually shut down when the user chooses File Exit. It will only return to the hidden, <i>not-under-user-control</i> state.</P></li>
+<li>
+If the application is initially launched by the user and then the user activates an object supported by the application in-place in another document, when the user chooses File Exit the application should become invisible but remain running with the in-place active object still valid.<br><br></li>
+<li>
+If the application is initially launched by OLE in order to service a file-based document as the source of a link, when the link source document is made visible (for example, the user double clicks an OLE link object in the link client document), then the user should latch control of the application. In this scenario, the application launch sequence starts out identically to the embedded object scenario. The application is launched with "-Embedding" on the command line. (An OLE 1 container will launch the application with “-Embedding Filename” on the command line for a linked object. An OLE 2 container will launch the application with “-Embedding” on the command line only. Initially the application does not know why it has been launched; it could be to service an embedded object or a linked object. The application knows that it is servicing an linked object when <b>IPersistFile::Load</b> is called instead of <b>IPersistStorage::Load</b>.)<p class=tl>
+The application should launch invisibly and register its class object. Next <b>IClassFactory::CreateInstance</b> will be called to instantiate an object. Later, if <b>IOleObject::DoVerb</b> is called to make the object visible, the user should latch control of the application because the object/document is a file-based object. </P><p class=tl>
+OLE's process for activating a link is to travel to the link source and result in the same state as if the user had navigated to the same point by starting with the File Manager. If the user had launched the link source document directly from the File Manager, the user would have latched control of the application; thus in this activation of a link, the user should also latch control. This scenario is treated as if the user had "logically" opened the document.</P></li>
+</ul>
+<h3>Ideal Shutdown Behavior for a New-Style SDI Application</h3>
+<p>
+A new-style SDI application is characterized by the following behavior: When the user chooses File New or File Open, a new document window appears and becomes the active window; the current document window remains running with the old document. This is the new style of application intended to be <i>document-centric </i>rather than <i>application-centric</i>. This behavior is new in comparison with the Windows 3.1 Paintbrush and Write-style SDI applications. The main difference between a new-style SDI application and an MDI application from an object lifetime point of view is that an SDI application does not expose distinct abstractions for an <i>application</i> and an <i>object</i>; they both are presented as a single abstraction to the user. The user sees the document/object and the "application" window as one thing. Thus we do not need to manage a concept of <i>latching control of the application</i> for an SDI application. We only need to manage when the document/object should close. When the document is visible, it is locked on behalf of the user. When the document is hidden or closed, it is unlocked on behalf of the user.</p>
+<p>
+The following requirements describe the <i>ideal</i> shutdown behavior for a new-styleSDI application (that is, ideal behavior as defined by the standard conventions for Compound <i>document</i>s as originally intended by OLE):
+<ul type=disc>
+<li>
+If the application is launched directly by the user (either by double clicking a program icon in the Program Manager or by double clicking a document icon in the File Manager), it should only shut down if the user chooses File Close.<br><br></li>
+<li>
+If the application is launched by OLE to service an embedded object, the application should launch invisibly and wait for commands from OLE. Later, OLE will use the class object to create an object. The application and the object should still be invisible. When the container calls <b>IOleObject::DoVerb</b>, depending on the capabilities of the container and the object, the object will either activate in place or open up in its own window (in OLE 1 fashion). Later, when the object is closed, the embedded object application should shut down. Any of the following events would cause the object to close:<ul type=disc>
+<li>
+If the user chooses File Close in the embedded object application, the embedded object should close, the embedded object application should exit, and the focus for the user should return to the embedding container document. If the object is dirty, it should automatically save itself back to the embedding container without prompting the user. In order to cause the save operation, the object should call <b>IOleClientSite::SaveObject</b>, which will cause the embedding container to immediately call <b>IPersistStorage::Save</b> back to the object. The user calling File Close forces the object to close; this should break all existing locks on the object or document. The object or document should close even if it is currently connected to remote clients.<br><br></li>
+<li>
+If the user closes the embedding container document, the embedded object should close. In this situation the embedding container should call <b>IOleObject::Close</b> on the embedded object.</li>
+</ul>
+</li>
+<li>
+If the application is initially launched by OLE in order to service a file-based document as the source of a link, then if the link source document is made visible the document should not close when the link client disconnects because the document is visible to the user. In this scenario, the application launch sequence starts out identically to the embedded object scenario. The application is launched with "-Embedding" on the command line. The application should launch invisibly and register its class object. Next, <b>IClassFactory::CreateInstance</b> will be called to instantiate an object. Later, if <b>IOleObject::DoVerb</b> is called to make the object visible, a lock would be made on the document on behalf of the user. <p class=tl>
+OLE's user model for activating a link is to travel to the link source and result in the same state as if the user had navigated to the same point by starting with the File Manager. This scenario is treated as if the user had "logically" opened the document.</P></li>
+</ul>
+<h3>Managing the ClassObject</h3>
+<p>
+It is best to implement the ClassObject as a separate object from the application object. In this way the reference counts held on the ClassObject as a result of calling the <b>RegisterClassObject</b> API do not interfere with the logic of when to shut down. The existence of these references should not be allowed to hold the application alive. The references should ideally be considered as weak references with regard to application shutdown, but unfortunately the ClassObject Table holds strong references. Also, the ClassObject Table contributes an indeterminate number of references on the ClassObject. By implementing the ClassObject as a separate object we do not have to deal with the references on the ClassObject with regard to application shutdown. At application InitInstance time, the ClassObject should be created and registered; during application termination (that is, when the <i>application</i> object destructor is called), the ClassObject should be revoked.</p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;Holding onto a pointer to an application's ClassObject does not hold the application alive. If a client wants to hold the application associated with a ClassObject alive, it must call <b>IClassFactory::LockServer</b>.</p>
+<p>
+The following picture shows the Visio application after the <i>Open </i>verb (<i>IOleObject::DoVerb</i>) has been executed on a Visio object embedded in a Word document. The Visio application has been launched by OLE to service the object. The object has been made visible and thus is locked on behalf of the user. Because the application was launched by OLE, the user does not have a lock on the application. This picture shows the detail of the Visio embedding's ClassObject and application object:</p>
+<p>
+<img src="objlife_13.gif" border=0></p>
+<h2>Appendix A: Implementing Object Lifetime Management</h2>
+<p>
+The following diagram shows the key methods and attributes maintained on the application and document objects in order to properly implement object lifetime management:</p>
+<p>
+<img src="objlife_14.gif" border=0></p>
+<p>
+Appendix B gives sample code for an old-style SDI application that implements proper object lifetime management.</p>
+<h2>Appendix B: Sample Source Code</h2>
+<pre><code>class Capp : IUnknowm
+{
+public:
+ &nbsp;&nbsp; CApp();
+ &nbsp;&nbsp; ~CApp() {};
+ &nbsp;&nbsp; ULONG AddRef(void);
+ &nbsp;&nbsp; ULONG Release (void);
+ &nbsp;&nbsp; HRESULT QueryInterface (REFIID riid,LPVOID FAR* lplpUnk);
+ &nbsp;&nbsp; void Show(BOOL fGiveUserCtrl);
+ &nbsp;&nbsp; void Hide(void);
+ &nbsp;&nbsp; void HideIfNoReasonToStayVisible(void);
+ &nbsp;&nbsp; DWORD Lock(BOOL fLock, BOOL fLastUnlockCloses);
+ &nbsp;&nbsp; BOOL CloseAllDocsAndExit(BOOL fForceEndSession);
+ &nbsp;&nbsp; void DocLockApp(void);
+ &nbsp;&nbsp; void DocUnlockApp(LPDOCUMENT lpOutlineDoc);
+ &nbsp;&nbsp; BOOL AppInitInstance(HINSTANCE hInst);
+ &nbsp;&nbsp; BOOL OleInitInstance(HINSTANCE hInst);
+ &nbsp;&nbsp; void TerminateApplication(void);
+ &nbsp;&nbsp; BOOL ParseCmdLine(LPSTR lpszCmdLine, int nCmdShow);
+ &nbsp;&nbsp; BOOL RegisterClassFactory(void);
+ &nbsp;&nbsp; void RevokeClassFactory(void);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+implementations:
+ &nbsp;&nbsp; struct CClassFactory : IClassFactory 
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; public:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CClassFactory (LPAPP pApp)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_lpApp = pApp;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_cRef = 0;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD(QueryInterface) (REFIID riid, void **ppvObject);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD_(ULONG,AddRef)(void);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD_(ULONG,Release)(void);
+ &nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD(CreateInstance)(IUnknown *pUnkOuter, REFIID riid, void **ppvObject);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD(LockServer)(BOOL fLock);&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; 
+ &nbsp;&nbsp; private:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; LPAPP&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_lpApp;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp; m_cRef;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // total ref count for ClassFactory
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // NOTE: CClassFactory treated as separate COM
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; identity from the CApp COM object
+#if defined( _DEBUG )
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp; m_cSvrLock;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // total count of LockServer locks&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // (for debugging purposes only)
+#endif
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; friend CApp;
+ &nbsp;&nbsp; };
+ &nbsp;&nbsp; DECLARE_NC(CApp, CClassFactory)
+ &nbsp;&nbsp; CClassFactory&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_ClassFactory;
+shared_state:
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_cRef;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // total ref count for app
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_cStrongRef;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // total strong reference count
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp; NOTE: if all refs are considered strong
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // on App then we only need one count: m_cRef
+ &nbsp;&nbsp; BOOL&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_fUserCtrl;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Is user in cotrol of App?
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_cDoc;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // total count of open documents
+ &nbsp;&nbsp; BOOL&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_fAppClosing;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // recursion guard
+ &nbsp;&nbsp; DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_dwRegClassFac;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // value returned by CoRegisterClassObject
+ &nbsp;&nbsp; LPDOCUMENT&nbsp; m_pDocument;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // main SDI document visible to user
+};
+
+class FAR CDocument : IUnknown
+{
+public:
+ &nbsp;&nbsp; CDocument();
+ &nbsp;&nbsp; ~CDocument();
+ &nbsp;&nbsp; ULONG AddRef(void);
+ &nbsp;&nbsp; ULONG Release (void);
+ &nbsp;&nbsp; HRESULT QueryInterface(REFIID riid,LPVOID FAR* lplpUnk);
+ &nbsp;&nbsp; DWORD Lock(BOOL fLock, BOOL fLastUnlockCloses);
+ &nbsp;&nbsp; BOOL Close(DWORD dwSaveOption);
+ &nbsp;&nbsp; void Show(void);
+ &nbsp;&nbsp; void Hide(BOOL fShutDown);
+implementations:&nbsp;&nbsp;&nbsp; // Nested Classes.
+ &nbsp;&nbsp; struct CDocPersistFileImpl : IPersistFile 
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; public:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CDocPersistFileImpl(LPDOCUMENT pDocument)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_pDocument&nbsp;&nbsp;&nbsp; = pDocument; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // *** IUnknown methods ***
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD(QueryInterface) ( REFIID riid, LPVOID FAR* ppvObj);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD_(ULONG,AddRef) (void);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD_(ULONG,Release) (void);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // *** IPersist methods ***
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD(GetClassID) ( LPCLSID lpClassID);
+</code></pre>
+<p>
+&nbsp;&nbsp;&nbsp;&nbsp;</p>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;// *** IPersistFile methods ***
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD(IsDirty) (void) ;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD(Load) ( LPCOLESTR lpszFileName, DWORD grfMode) ;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD(Save) ( LPCOLESTR lpszFileName, BOOL fRemember) ;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD(SaveCompleted) ( LPCOLESTR lpszFileName) ;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD(GetCurFile) ( LPOLESTR *lplpszFileName) ;
+ &nbsp;&nbsp; private:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; LPDOCUMENT m_pDocument;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; int&nbsp; m_cRef;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // interface specific ref count.
+ &nbsp;&nbsp; };
+ &nbsp;&nbsp; struct CDocExternalConnectionImpl : IExternalConnection 
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; public:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CDocExternalConnectionImpl(LPDOCUMENT pDocument)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_pDocument = pDocument; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // *** IUnknown methods ***
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD(QueryInterface) ( REFIID riid, LPVOID FAR* ppvObj);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD_(ULONG,AddRef) (void)&nbsp; ;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD_(ULONG,Release) (void) ;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // *** IExternalConnection methods ***
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD_(DWORD, AddConnection) ( DWORD extconn, DWORD reserved) ;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; STDMETHOD_(DWORD, ReleaseConnection) ( DWORD extconn, DWORD reserved, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BOOL fLastReleaseCloses) ;
+ &nbsp;&nbsp; private:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; LPDOCUMENT m_pDocument;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; int&nbsp;&nbsp; m_cRef;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // interface specific ref count.
+ &nbsp;&nbsp; };
+ &nbsp;&nbsp; DECLARE_NC(CDocument, CDocPersistFileImpl)
+ &nbsp;&nbsp; DECLARE_NC(CDocument, CDocExternalConnectionImpl)
+shared_state:
+ &nbsp;&nbsp; CDocPersistFileImpl&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_PersistFile;
+ &nbsp;&nbsp; CDocExternalConnectionImpl&nbsp;&nbsp;&nbsp; m_ExternalConnection;
+ &nbsp;&nbsp; LPAPP&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_pApp;
+ &nbsp; HWND&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_hwnd;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // client area window for the Doc
+ &nbsp; int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_docInitType;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // is doc new or loaded from a file?
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_cRef;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // total ref count for document
+ &nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_cStrongRef;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // total strong reference count
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp; this is the total combination of:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; IExternalConnection locks,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; IOleContainer::LockContainer locks,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; and internal generated locks
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp; when this count transitions to 0
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp; and fLastUnlockCloses==TRUE, then
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp; CDocument::Close is called to
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //&nbsp; close the document.
+#if defined( _DEBUG )
+ &nbsp;&nbsp; ULONG&nbsp; m_cCntrLock;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // total count of LockContainer locks&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //(for debugging purposes only)
+ &nbsp;&nbsp; ULONG&nbsp; m_cExtConn;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // total count of IExternalConnection locks
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //(for debugging purposes only)
+#endif
+ &nbsp;&nbsp; BOOL&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_fDocClosing;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // recursion guard
+ &nbsp;&nbsp; OLECHAR&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_szFileName[256];&nbsp; // associated file; "(Untitled)" if none
+ &nbsp; LPOLESTR&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_lpszDocTitle;&nbsp;&nbsp;&nbsp;&nbsp; // name of doc to appear in window title
+ &nbsp;&nbsp; DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_dwRegROT;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // key if doc registered as running
+ &nbsp;&nbsp; LPMONIKER&nbsp; m_lpFileMoniker;&nbsp;&nbsp;&nbsp; // moniker if file-based/untitled doc
+};
+
+/* CDocument::Lock
+** ---------------
+**&nbsp;&nbsp;&nbsp; Lock/Unlock the Doc object. if the last lock is unlocked and
+**&nbsp;&nbsp;&nbsp; fLastUnlockReleases == TRUE, then the Doc object will shut down
+**&nbsp;&nbsp;&nbsp; (ie. it will recieve its final release and its refcnt will go to 0).
+*/
+DWORD CDocument::Lock(BOOL fLock, BOOL fLastUnlockCloses)
+{
+ &nbsp;&nbsp; DWORD cLock;
+ &nbsp;&nbsp; if (fLock) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cLock = ++m_cStrongRef;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AddRef();&nbsp;&nbsp;&nbsp; // released later when Lock(FALSE) called
+ &nbsp;&nbsp; } else&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if ( m_cStrongRef &gt; 0 ){
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --m_cStrongRef;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }else{
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AssertSz (m_fDocClosing, "Doc::Lock(FALSE) called with m_cStrongRef == 0");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return 0;&nbsp;&nbsp;&nbsp; // all locks already released
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cLock = m_cStrongRef;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if( m_cStrongRef == 0 &amp;&amp; fLastUnlockCloses )
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Close(OLECLOSE_NOSAVE);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Discard changes; user must explicitly do save
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Release();
+ &nbsp;&nbsp; }
+ &nbsp; return cLock;
+}
+</code></pre>
+<pre><code>// CDocument::IOleContainer::LockContainer
+STDMETHODIMP NC(CDocument,CDocOleContainerImpl)::LockContainer(BOOL fLock)
+{
+#if defined( _DEBUG )
+ &nbsp; if (fLock) {
+ &nbsp;&nbsp;&nbsp;&nbsp; ++m_pDocument-&gt;m_cCntrLock;
+ &nbsp; } else {
+ &nbsp;&nbsp;&nbsp;&nbsp; Assert(--m_pDocument-&gt;m_cCntrLock &gt;= 0);
+ &nbsp; }
+#endif&nbsp; // _DEBUG
+ &nbsp; /* OLE2NOTE: in order to hold the document alive we call
+ &nbsp; **&nbsp;&nbsp;&nbsp; CDocument::Lock to add a strong reference to our Doc
+ &nbsp; **&nbsp;&nbsp;&nbsp; object. this will keep the Doc alive when all other external
+ &nbsp; **&nbsp;&nbsp;&nbsp; references release us. whenever an embedded object goes
+ &nbsp; **&nbsp;&nbsp;&nbsp; running a LockContainer(TRUE) is called. when the embedded
+ &nbsp; **&nbsp;&nbsp;&nbsp; object shuts down (ie. transitions from running to loaded)
+ &nbsp; **&nbsp;&nbsp;&nbsp; LockContainer(FALSE) is called. if the user issues File.Close
+ &nbsp; **&nbsp;&nbsp;&nbsp; the document will shut down in any case ignoring any
+ &nbsp; **&nbsp;&nbsp;&nbsp; outstanding LockContainer locks because forceably breaks any
+ &nbsp; **&nbsp;&nbsp;&nbsp; existing strong reference counts. This guarantees that
+ &nbsp; **&nbsp;&nbsp;&nbsp; the Doc object gets its final release (ie. cRefs goes to 0).
+ &nbsp; */
+ &nbsp; m_pDocument-&gt;Lock(fLock, TRUE /* fLastUnlockReleases */);
+ &nbsp; return NOERROR;
+}
+
+// CDocument::IExternalConnection::AddConnection
+STDMETHODIMP_(DWORD) NC(CDocument,CDocExternalConnectionImpl)::AddConnection(
+ &nbsp;&nbsp;&nbsp;&nbsp; DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; extconn,
+ &nbsp;&nbsp;&nbsp;&nbsp; DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; reserved
+)
+{
+ &nbsp;&nbsp; if( extconn &amp; EXTCONN_STRONG ) {
+#ifdef _DEBUG
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_pDocument-&gt;m_cExtConn++;
+#endif
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return m_pDocument-&gt;Lock(TRUE, 0);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; return 0;
+}
+
+// CDocument::IExternalConnection::ReleaseConnection
+STDMETHODIMP_(DWORD) NC(CDocument,CDocExternalConnectionImpl)::ReleaseConnection(
+ &nbsp;&nbsp;&nbsp;&nbsp; DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; extconn,
+ &nbsp;&nbsp;&nbsp;&nbsp; DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; reserved,
+ &nbsp;&nbsp;&nbsp;&nbsp; BOOL&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fLastUnlockCloses
+)
+{
+ &nbsp; if( extconn &amp; EXTCONN_STRONG ) {
+#ifdef _DEBUG
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Assert(--m_pDocument-&gt;m_cExtConn &gt;= 0);
+#endif
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return m_pDocument-&gt;Lock(FALSE, fLastUnlockCloses);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; return 0;
+}
+</code></pre>
+<pre><code>/* CDocument::Show
+ * ---------------
+ *
+ *&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Show the window of the document to the user.
+ */
+void CDocument::Show()
+{
+ &nbsp;&nbsp; if (FInShow())
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+ &nbsp;&nbsp; 
+ &nbsp;&nbsp; AssertSz(m_docInitType != DOCTYPE_UNKNOWN, "can't show unitialized document\r\n");
+ &nbsp;&nbsp; if (m_docInitType == DOCTYPE_UNKNOWN)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+ &nbsp;&nbsp; SetFInShow();
+ &nbsp;&nbsp; // OLE2NOTE: while the document is visible, we do NOT want it to be
+ &nbsp;&nbsp; // prematurely destroyed when a linking client disconnects. thus
+ &nbsp;&nbsp; // we must inform OLE to hold an external lock on our document.
+ &nbsp;&nbsp; // this arranges that OLE holds at least 1 reference to our
+ &nbsp;&nbsp; // document that will NOT be released until we release this
+ &nbsp;&nbsp; // external lock. later, when the document window is hidden, we
+ &nbsp;&nbsp; // will release this external lock.
+ &nbsp;&nbsp; if (!IsWindowVisible(m_hwnd)) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // make document window visible and make sure it is not minimized
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ShowWindow(m_hwnd, SW_SHOWNORMAL);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Lock(TRUE , 0);&nbsp;&nbsp;&nbsp; // Lock the document on behalf of the user
+ &nbsp;&nbsp; }
+#if defined( OLE_SERVER )
+ &nbsp;&nbsp; if (m_docInitType == DOCTYPE_EMBEDDED &amp;&amp; m_lpOleClientSite != NULL) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* OLE2NOTE: we must also ask our container to show itself if
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; it is not already visible and to scroll us into view. we
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; must make sure to call this BEFORE showing our server's
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; window and taking focus. we do not want our container's
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; window to end up on top.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_lpOleClientSite-&gt;ShowObject();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* OLE2NOTE: if we are an embedded object and we are not
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; in-place active in our containers window, we must inform our
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; embedding container that our window is opening.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; the container must now hatch our object.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (! m_fInPlaceActive)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_lpOleClientSite-&gt;OnShowWindow(TRUE);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* OLE2NOTE: the lifetime of our document is controlled by our
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; client and NOT by the user. we are not an independent
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; file-level object. we simply want to show our window here.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; if we are not in-place active (ie. we are opening
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; our own window), we must make sure our main app window is
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; visible. we do not, however, want to give the user
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; control of the App window; we do not want App::Show
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; to lock the App on behalf of the user.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (! IsWindowVisible(m_pApp-&gt;m_hWndApp) || IsIconic(m_pApp-&gt;m_hWndApp)) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (! m_fInPlaceActive)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_pApp-&gt;Show(FALSE /* fGiveUserCtrl */);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SetFocus(m_hwnd);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; } else
+#endif&nbsp; // OLE_SERVER
+ &nbsp;&nbsp; {&nbsp;&nbsp; // DOCTYPE_NEW || DOCTYPE_FROMFILE
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* we must make sure our app window is visible. because the
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; document is a top-level file-based document, we do want
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; the user to latch control of the app window. 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_pApp-&gt;Show(TRUE /* fGiveUserCtrl */);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; // make document window visible and make sure it is not minimized
+ &nbsp;&nbsp; ShowWindow(m_hwnd, SW_SHOWNORMAL);
+ &nbsp;&nbsp; SetFocus(m_hwnd);
+ &nbsp;&nbsp; ClearFInShow();
+}
+</code></pre>
+<pre><code>/* CDocument::Hide
+ * ---------------
+ *
+ *&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Hide the window of the document from the user.
+ *&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; take away the control of the document by the user.
+ */
+void CDocument::Hide(BOOL fShutdown)
+{
+ &nbsp;&nbsp; if (! IsWindowVisible(m_hwnd))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+ &nbsp;&nbsp; // OLE2NOTE: the document is now being hidden, so we must release
+ &nbsp;&nbsp; // the external lock made when the document was made visible.
+ &nbsp;&nbsp; // if this is a shutdown situation (fShutdown==TRUE), then OLE
+ &nbsp;&nbsp; // is instructed to release our document. if this is that last
+ &nbsp;&nbsp; // external lock on our document, thus enabling our document to
+ &nbsp;&nbsp; // complete its shutdown operation. If This is not a shutdown
+ &nbsp;&nbsp; // situation (eg. in-place server hiding its window when
+ &nbsp;&nbsp; // UIDeactivating or IOleObject::DoVerb(OLEVERB_HIDE) is called),
+ &nbsp;&nbsp; // then OLE is told to NOT immediately release the document.
+ &nbsp;&nbsp; // this leaves the document in an unstable state where the next
+ &nbsp;&nbsp; // Lock/Unlock sequence will shut the document down (eg. a
+ &nbsp;&nbsp; // linking client connecting and disconnecting).
+ &nbsp;&nbsp; if (IsWindowVisible(m_hwnd)) 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Lock(FALSE , fShutdown);&nbsp;&nbsp;&nbsp;&nbsp; // Unlock the document on behalf of the user
+ &nbsp;&nbsp; ShowWindow(m_hwnd, SW_HIDE);
+ &nbsp;&nbsp; // OLE2NOTE: if there are no more documents visible to the user.
+ &nbsp;&nbsp; // and the app itself is not under user control, then
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // it has no reason to stay visible. we thus should hide the
+ &nbsp;&nbsp; // app. we cannot directly destroy the app, because it may be
+ &nbsp;&nbsp; // validly being used programatically by another client
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // application and should remain running. it should simply be
+ &nbsp;&nbsp; // hidded from the user.
+ &nbsp;&nbsp; m_pApp-&gt;HideIfNoReasonToStayVisible();
+}
+
+/* CDocument::Close
+ * ----------------
+ *
+ * Close active document. If modified, prompt the user if
+ * he wants to save.
+ *
+ *&nbsp; Returns:
+ *&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; FALSE -- user canceled the closing of the doc.
+ *&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; TRUE -- the doc was successfully closed
+ */
+BOOL CDocument::Close(DWORD dwSaveOption)
+{
+ &nbsp;&nbsp; BOOL fAbortIfSaveCanceled = (dwSaveOption == OLECLOSE_PROMPTSAVE);
+ &nbsp;&nbsp; LPUNKNOWN pUnk;
+ &nbsp;&nbsp; if (m_fDocClosing)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return TRUE;&nbsp;&nbsp;&nbsp; // Closing is already in progress
+ &nbsp;&nbsp; if (! CheckSaveChanges(&amp;dwSaveOption) &amp;&amp; fAbortIfSaveCanceled)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return FALSE;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // cancel closing the doc
+ &nbsp;&nbsp; m_fDocClosing = TRUE;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // guard against recursive call
+ &nbsp;&nbsp; /* OLE2NOTE: in order to have a stable app and doc during the
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; process of closing, we intially AddRef the App and Doc ref
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; cnts and later Release them. These initial AddRefs are
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; artificial; they simply guarantee that these objects do not
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; get destroyed until the end of this routine.
+ &nbsp;&nbsp; */
+ &nbsp;&nbsp; m_pApp-&gt;AddRef();
+ &nbsp;&nbsp; AddRef();
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* OLE2NOTE: force all OLE objects to close. this forces all
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; OLE object to transition from running to loaded. we can
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; NOT exit if any embeddings are still running.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; if an object can't be closed and this close operation was
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; started by the user, then we will abort closing our document.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (! CloseAllOleObjects(OLECLOSE_NOSAVE) &amp;&amp; fAbortIfSaveCanceled) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Release();&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // release artificial AddRef above
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_pApp-&gt;Release();&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // release artificial AddRef above
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ClearFObjClosing();&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // clear recursion guard
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return FALSE;&nbsp;&nbsp; // Closing is aborted
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; }
+#if defined( INPLACE_SVR )
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* OLE2NOTE: if the server is currently in-place active we must
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; deactivate it now before closing
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ServerDoc_DoInPlaceDeactivate((LPSERVERDOC)lpOleDoc);
+#endif
+ &nbsp;&nbsp; /* OLE2NOTE: Revoke the object from the Running Object Table.
+ &nbsp;&nbsp; */
+ &nbsp;&nbsp; OleStdRevokeAsRunning(&amp;m_dwRegROT);
+ &nbsp;&nbsp; /* OLE2NOTE: if the user is in control of the document, the user
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; accounts for one refcnt on the document. Closing the
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; document is achieved by releasing the object on behalf of
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; the user. if the document is not referenced by any other
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; clients, then the document will also be destroyed. if it
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; is referenced by other clients, then it will remain until
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; they release it. it is important to hide the window and call
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; IOleClientSite::OnShowWindow(FALSE) BEFORE sending OnClose
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; notification.
+ &nbsp;&nbsp; */
+ &nbsp;&nbsp; Hide(TRUE);
+#if defined( OLE_SERVER )
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; LPSERVERDOC lpServerDoc = (LPSERVERDOC)lpOleDoc;
+ &nbsp;&nbsp;&nbsp;&nbsp; LPSERVERNAMETABLE lpServerNameTable =
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (LPSERVERNAMETABLE)((LPDOCUMENT)lpOleDoc)-&gt;m_lpNameTable;
+ &nbsp;&nbsp;&nbsp;&nbsp; /* OLE2NOTE: force all pseudo-objects to close. this informs all
+ &nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; linking clients of pseudo-objects to release their PseudoObj.
+ &nbsp;&nbsp;&nbsp;&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp; ServerNameTable_CloseAllPseudoObjs(lpServerNameTable);
+ &nbsp;&nbsp;&nbsp;&nbsp; /* OLE2NOTE: send last OnDataChange notification to clients
+ &nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; that have registered for data notifications when object
+ &nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; stops running (ADVF_DATAONSTOP), if the data in our
+ &nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; object has ever changed. it is best to only send this
+ &nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; notification if necessary.
+ &nbsp;&nbsp;&nbsp;&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp; if (lpServerDoc-&gt;m_lpDataAdviseHldr) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (lpServerDoc-&gt;m_fSendDataOnStop) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ServerDoc_SendAdvise((LPSERVERDOC)lpOleDoc,OLE_ONDATACHANGE,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL,&nbsp;&nbsp; /* lpmkDoc -- not relevant here */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ADVF_DATAONSTOP);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* OLE2NOTE: we just sent the last data notification that we
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; need to send; release our DataAdviseHolder. we SHOULD be
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; the only one using it.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OleStdVerifyRelease((LPUNKNOWN)lpServerDoc-&gt;m_lpDataAdviseHldr,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OLESTR("DataAdviseHldr not released properly"));
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lpServerDoc-&gt;m_lpDataAdviseHldr = NULL;
+ &nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp; // OLE2NOTE: inform all of our linking clients that we are closing.
+</code></pre>
+<pre><code>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if (lpServerDoc-&gt;m_lpOleAdviseHldr) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ServerDoc_SendAdvise(
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (LPSERVERDOC)lpOleDoc,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OLE_ONCLOSE,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL,&nbsp;&nbsp; /* lpmkDoc -- not relevant here */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* advf -- not relevant here */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; );
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* OLE2NOTE: OnClose is the last notification that we need to
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; send; release our OleAdviseHolder. we SHOULD be the only
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; one using it. this will make our destructor realize that
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; OnClose notification has already been sent.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OleStdVerifyRelease(
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (LPUNKNOWN)lpServerDoc-&gt;m_lpOleAdviseHldr,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OLESTR("OleAdviseHldr not released properly") );
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lpServerDoc-&gt;m_lpOleAdviseHldr = NULL;
+ &nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp; /* release our Container's ClientSite. */
+ &nbsp;&nbsp;&nbsp;&nbsp; if(lpServerDoc-&gt;m_lpOleClientSite) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OleStdRelease((LPUNKNOWN)lpServerDoc-&gt;m_lpOleClientSite);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lpServerDoc-&gt;m_lpOleClientSite = NULL;
+ &nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp; }
+#endif
+ &nbsp;&nbsp; if (m_lpSLStm) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pUnk = (LPUNKNOWN)m_lpSLStm;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_lpSLStm = NULL;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OleStdRelease(pUnk);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; if (m_lpStg) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pUnk = (LPUNKNOWN)m_lpStg;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_lpStg = NULL;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OleStdRelease(pUnk);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; if (m_lpFileMoniker) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pUnk = (LPUNKNOWN)m_lpFileMoniker;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_lpFileMoniker = NULL;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OleStdRelease(pUnk);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; /* OLE2NOTE: this call forces all external connections to our
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; object to close down and therefore guarantees that we receive
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; all releases associated with those external connections.
+ &nbsp;&nbsp; */
+ &nbsp;&nbsp; CoDisconnectObject((LPUNKNOWN)&amp;m_Unknown, 0);
+ &nbsp;&nbsp; Assert(m_cExtConn == 0);
+ &nbsp;&nbsp; Assert(m_cCntrLock == 0);
+ &nbsp;&nbsp; // force any other LockContainer and internal locks to break
+ &nbsp;&nbsp; while (m_cStrongRef &gt; 0)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Lock(FALSE, TRUE);
+ &nbsp;&nbsp; Release();&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // release artificial AddRef above
+ &nbsp;&nbsp; m_pApp-&gt;Release();&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // release artificial AddRef above
+ &nbsp;&nbsp; return TRUE;
+}
+</code></pre>
+<pre><code>/* CDocument::Init
+ * ---------------
+ *
+ *&nbsp; Initialize the fields of a new Document object. The object is initially
+ *&nbsp; not associated with a file or an (Untitled) document. This function sets
+ *&nbsp; the docInitType to DOCTYPE_UNKNOWN. After calling this function the
+ *&nbsp; caller should call:
+ *&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 1. CDocument::InitNewFile to set the Document to (Untitled)
+ *&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 2. CDocument::LoadFromFile to associate the Document with a file.
+ *&nbsp; This function creates a new window for the document.
+ *
+ *&nbsp; NOTE: the window is initially created with a NIL size. it must be
+ *&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sized and positioned by the caller. also the document is initially
+ *&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; created invisible. the caller must call CDocument::ShowWindow
+ *&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; after sizing it to make the document window visible.
+ */
+BOOL CDocument::Init(
+ &nbsp;&nbsp; LPAPP&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pApp, 
+ &nbsp;&nbsp; HINSTANCE&nbsp;&nbsp;&nbsp;&nbsp; hInst, 
+ &nbsp;&nbsp; LPFRAME&nbsp;&nbsp;&nbsp;&nbsp; pCFrame, 
+ &nbsp;&nbsp; HWND&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hwndFrame)
+{
+ &nbsp;&nbsp; ...
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; m_pApp = pApp;
+ &nbsp;&nbsp; m_pCFrame = pCFrame;
+ &nbsp;&nbsp; // OLE2NOTE: an in-place contanier MUST use
+ &nbsp;&nbsp; // WS_CLIPCHILDREN window style for the window
+ &nbsp;&nbsp; // that it uses as the parent for the server's
+ &nbsp;&nbsp; // in-place active window so that its
+ &nbsp;&nbsp; // painting does NOT interfere with the painting
+ &nbsp;&nbsp; // of the server's in-place active child window.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; m_hwnd = CreateWindowEx( WS_EX_ACCEPTFILES,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DOCWNDCLASS,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WS_CLIPCHILDREN | WS_CLIPSIBLINGS | WS_CHILDWINDOW,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0, 0,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0, 0,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hwndFrame,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (HMENU)1,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hInst,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL);
+ &nbsp;&nbsp; Assert(m_hwnd);
+ &nbsp;&nbsp; if(! m_hwnd) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_pApp-&gt;ErrorMessage(ErrMsgDocWnd);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return FALSE;
+ &nbsp;&nbsp; }
+ &nbsp; SetWindowLong(m_hwnd, 0, (LONG) this);
+ &nbsp;&nbsp; m_docInitType&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = DOCTYPE_UNKNOWN;
+#if defined( _DEBUG )
+ &nbsp;&nbsp; m_cCntrLock&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = 0;
+ &nbsp;&nbsp; m_cExtConn&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = 0;
+#endif
+ &nbsp;&nbsp; m_cRef&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = 0;
+ &nbsp;&nbsp; m_cStrongRef&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = 0;
+ &nbsp;&nbsp; m_pApp-&gt;DocLockApp();
+ &nbsp;&nbsp; ...
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; return TRUE;
+}
+</code></pre>
+<pre><code>/* CDocument::~CDocument
+ * ---------------------
+ *
+ *&nbsp; Destructor for a document.
+ *&nbsp; Unlock the lock that a document holds on the application.
+ */
+void CDocument::~CDocument()
+{
+ &nbsp;&nbsp; if (FObjDestroying())
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;&nbsp;&nbsp;&nbsp;&nbsp; // doc destruction is in progress
+ &nbsp;&nbsp; // OLE2NOTE: in order to guarantee that the application does not
+ &nbsp;&nbsp; // prematurely exit before the destruction of the document is
+ &nbsp;&nbsp; // complete, we intially AddRef the App refcnt later Release it.
+ &nbsp;&nbsp; // This initial AddRef is artificial; it simply guarantees that
+ &nbsp;&nbsp; // the app object does not get destroyed until the end of this routine.
+ &nbsp;&nbsp; m_pApp-&gt;AddRef();
+ &nbsp;&nbsp; DestroyWindow(m_hwnd);
+ &nbsp;&nbsp; ...
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp; /*****************************************************************
+ &nbsp; ** OLE2NOTE: each document addref's the app object in order to&nbsp; **
+ &nbsp; **&nbsp;&nbsp;&nbsp; guarentee that the app does not shut down while the doc&nbsp;&nbsp; **
+ &nbsp; **&nbsp;&nbsp;&nbsp; is still open. since this doc is now destroyed, we will&nbsp;&nbsp; **
+ &nbsp; **&nbsp;&nbsp;&nbsp; release this refcnt now. if there are now more open&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **
+ &nbsp; **&nbsp;&nbsp;&nbsp; documents AND the app is not under the control of the&nbsp;&nbsp;&nbsp;&nbsp; **
+ &nbsp; **&nbsp;&nbsp;&nbsp; user (ie. launched by OLE) then the app will revoke its&nbsp;&nbsp; **
+ &nbsp; **&nbsp;&nbsp;&nbsp; ClassFactory. if there are no more references to the&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **
+ &nbsp; **&nbsp;&nbsp;&nbsp; ClassFactory after it is revoked, then the app will shut&nbsp; **
+ &nbsp; **&nbsp;&nbsp;&nbsp; down. this whole procedure is triggered by calling&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **
+ &nbsp; **&nbsp;&nbsp;&nbsp; OutlineApp_DocUnlockApp.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **
+ &nbsp; *****************************************************************/
+ &nbsp;&nbsp; m_pApp-&gt;DocUnlockApp(this);
+ &nbsp;&nbsp; m_pApp-&gt;Release();&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // release artificial AddRef above
+}
+
+/* CApp::Show
+ * ----------
+ *
+ *&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Show the window of the app to the user.
+ *&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; make sure app window is visible and bring the app to the top.
+ *&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; IF fGiveUserCtrl == TRUE
+ *&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; THEN give the user the control over the lifetime of the app.
+ */
+void CApp::Show(BOOL fGiveUserCtrl)
+{
+ &nbsp;&nbsp; /* OLE2NOTE: while the application is visible and under user
+ &nbsp; **&nbsp;&nbsp;&nbsp; control, we do NOT want it to be prematurely destroyed when
+ &nbsp; **&nbsp;&nbsp;&nbsp; the user closes a document. thus we must inform OLE to hold
+ &nbsp; **&nbsp;&nbsp;&nbsp; an external lock on our application on behalf of the user.
+ &nbsp; **&nbsp;&nbsp;&nbsp; this arranges that OLE holds at least 1 reference to our
+ &nbsp; **&nbsp;&nbsp;&nbsp; application that will NOT be released until we release this
+ &nbsp; **&nbsp;&nbsp;&nbsp; external lock. later, when the application window is hidden, we
+ &nbsp; **&nbsp;&nbsp;&nbsp; will release this external lock.
+ &nbsp; */
+ &nbsp; if (fGiveUserCtrl &amp;&amp; ! m_fUserCtrl) {
+ &nbsp;&nbsp;&nbsp;&nbsp; m_fUserCtl = TRUE;
+ &nbsp;&nbsp;&nbsp;&nbsp; Lock(TRUE /* fLock */, 0 /* not applicable */);
+ &nbsp; }
+ &nbsp; m_pCFrame-&gt;Show(TRUE /*fShow*/, TRUE /*fTakefocus*/);
+ &nbsp; /* OLE2NOTE: because our app is now visible, we can enable the busy
+ &nbsp; **&nbsp;&nbsp;&nbsp; dialog. we should NOT put up any dialogs if our app is
+ &nbsp; **&nbsp;&nbsp;&nbsp; invisible.
+ &nbsp; */
+ &nbsp; EnableBusyDialogs(TRUE, TRUE);
+}
+</code></pre>
+<pre><code>/* CApp::Hide
+ * ----------
+ *
+ *&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Hide the window of the app from the user.
+ *&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Take away the control of the app by the user.
+ */
+void CApp::Hide()
+{
+#if defined( MDI_VERSION )
+ &nbsp; /* OLE2NOTE: the application is now being hidden, so we must release
+ &nbsp; **&nbsp;&nbsp;&nbsp; the external lock that was made on behalf of the user.
+ &nbsp; **&nbsp;&nbsp;&nbsp; if this is that last external lock on our application, thus
+ &nbsp; **&nbsp;&nbsp;&nbsp; enabling our application to complete its shutdown operation.
+ &nbsp; */
+ &nbsp; if (m_fUserCtrl) {
+ &nbsp;&nbsp;&nbsp;&nbsp; m_fUserCtrl = FALSE;
+ &nbsp;&nbsp;&nbsp;&nbsp; Lock(FALSE /*fLock*/, TRUE /*fLastUnlockReleases*/);
+ &nbsp; }
+#endif 
+ &nbsp; m_pCFrame-&gt;Show(FALSE /*fShow*/);
+ &nbsp; /* OLE2NOTE: because our app is now INVISIBLE, we must DISABLE the busy
+ &nbsp; **&nbsp;&nbsp;&nbsp; dialog. we should NOT put up any dialogs if our app is
+ &nbsp; **&nbsp;&nbsp;&nbsp; invisible.
+ &nbsp; */
+ &nbsp; EnableBusyDialogs(FALSE, FALSE);
+}
+
+/* CApp::HideIfNoReasonToStayVisible
+** ---------------------------------
+**
+** if there are no more documents visible to the user and the app
+**&nbsp;&nbsp;&nbsp; itself is not under user control, then it has no reason to stay
+**&nbsp;&nbsp;&nbsp; visible. we thus should hide the app. we cannot directly destroy
+**&nbsp;&nbsp;&nbsp; the app, because it may be validly being used programatically by
+**&nbsp;&nbsp;&nbsp; another client application and should remain running. the app
+**&nbsp;&nbsp;&nbsp; should simply be hidden from the user.
+*/
+void CApp::HideIfNoReasonToStayVisible()
+{
+#ifdef MDI_VERSION
+ &nbsp; if (m_fUserCtrl) {
+ &nbsp;&nbsp;&nbsp;&nbsp; return;&nbsp;&nbsp;&nbsp;&nbsp; // remain visible; user in control of app
+ &nbsp; }
+#endif
+ &nbsp; /* Because this is an SDI app, there is only one user document.
+ &nbsp; ** check if it is visible to the user. an MDI app would loop over
+ &nbsp; ** all open MDI child documents to see if any are visible.
+ &nbsp; */
+ &nbsp; if (m_pCDocument &amp;&amp; IsWindowVisible(m_pCDocument-&gt;GetHWnd()))
+ &nbsp;&nbsp;&nbsp;&nbsp; return;&nbsp;&nbsp;&nbsp;&nbsp; // remain visible; the doc is visible to the user
+ &nbsp; // if we reached here, the app should be hidden
+ &nbsp; Hide();
+}
+/* CApp::DocLockApp
+** ----------------
+**&nbsp;&nbsp;&nbsp; Add a lock on the App on behalf of the Doc. the App may not close
+**&nbsp;&nbsp;&nbsp; while the Doc exists.
+**
+**&nbsp;&nbsp;&nbsp; when a document is first created, it calls this method to
+**&nbsp;&nbsp;&nbsp; guarantee that the application stays alive (Init).
+**&nbsp;&nbsp;&nbsp; when a document is destroyed, it calls
+**&nbsp;&nbsp;&nbsp; DocUnlockApp to release this hold on the app.
+*/
+void CApp::DocLockApp()
+{
+ &nbsp; ++m_cDoc;
+ &nbsp; Lock(TRUE /* fLock */, 0 /* not applicable */);
+}
+/* CApp::DocUnlockApp
+** ------------------
+**&nbsp;&nbsp;&nbsp; Forget all references to a closed document.
+*/
+void CApp::DocUnlockApp(LPDOCUMENT lpOutlineDoc)
+{
+ &nbsp; /* forget pointers to destroyed document */
+ &nbsp; if (m_pCDocument == lpOutlineDoc)
+ &nbsp;&nbsp;&nbsp;&nbsp; m_pCDocument = NULL;
+ &nbsp; /* OLE2NOTE: when there are no open documents and the app is not
+ &nbsp; **&nbsp;&nbsp;&nbsp; under the control of the user then revoke our ClassFactory to
+ &nbsp; **&nbsp;&nbsp;&nbsp; enable the app to shut down.
+ &nbsp; **
+ &nbsp; **&nbsp;&nbsp;&nbsp; NOTE: data transfer documents (non-user documents) do NOT
+ &nbsp; **&nbsp;&nbsp;&nbsp; hold the app alive. therefore they do not Lock the app.
+ &nbsp; */
+ &nbsp;&nbsp; if (! lpOutlineDoc-&gt;FDataTransferDoc()){
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ULONG cDoc;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* OLE2NOTE: when there are no open documents and the app is not
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; under the control of the user then revoke our ClassFactory to
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; enable the app to shut down.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cDoc = --m_cDoc;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AssertSz (m_cDoc &gt;= 0, "DocUnlockApp called with cDoc == 0");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Lock(FALSE /* fLock */, TRUE /* fLastUnlockReleases */);
+ &nbsp;&nbsp; }
+}
+</code></pre>
+<pre><code>/* CApp::Lock
+** ----------
+**&nbsp;&nbsp;&nbsp; Lock/Unlock the App object. if the last lock is unlocked and
+**&nbsp;&nbsp;&nbsp; fLastUnlockCloses == TRUE, then the app object will shut down
+**&nbsp;&nbsp;&nbsp; (ie. it will recieve its final release and its refcnt will go to 0).
+*/
+DWORD CApp::Lock(BOOL fLock, BOOL fLastUnlockCloses)
+{
+ &nbsp;&nbsp; DWORD cLock;
+ &nbsp;&nbsp; if (fLock) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cLock = ++m_cStrongRef;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AddRef();&nbsp;&nbsp;&nbsp; // released later when Lock(FALSE) called
+ &nbsp;&nbsp; } else&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if ( m_cStrongRef &gt; 0 ){
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --m_cStrongRef;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }else{
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AssertSz (m_fAppClosing, "App::Lock(FALSE) called with m_cStrongRef == 0");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return 0;&nbsp;&nbsp;&nbsp; // all locks already released
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cLock = m_cStrongRef;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if( m_cStrongRef == 0 &amp;&amp; fLastUnlockCloses )
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CloseAllDocsAndExit();&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Release();
+ &nbsp;&nbsp; }
+ &nbsp; return cLock;
+}
+
+/* CApp::CloseAllDocsAndExit
+ * -------------------------
+ *
+ *&nbsp; Close all active documents and exit the app.
+ *&nbsp; Because this is an SDI, there is only one document
+ *&nbsp; If the doc was modified, prompt the user if he wants to save it.
+ *
+ *&nbsp; Returns:
+ *&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; TRUE if the app is successfully closed
+ *&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; FALSE if failed or aborted
+ *
+ * OLE2NOTE: we cannot directly
+ *&nbsp;&nbsp;&nbsp;&nbsp; destroy the App object. we can only take all
+ *&nbsp;&nbsp;&nbsp;&nbsp; necessary actions to ensure that our object receives
+ *&nbsp;&nbsp;&nbsp;&nbsp; all of its Releases from clients holding onto
+ *&nbsp;&nbsp;&nbsp;&nbsp; pointers (eg. closing all docs and flushing the
+ *&nbsp;&nbsp;&nbsp;&nbsp; clipboard) and then we must hide our window and wait
+ *&nbsp;&nbsp;&nbsp;&nbsp; actually for our refcnt to reach 0. when it reaches 0,
+ *&nbsp;&nbsp;&nbsp;&nbsp; our destructor (Destroy) will be called.
+ *&nbsp;&nbsp;&nbsp;&nbsp; each document addref's the app object in order to
+ *&nbsp;&nbsp;&nbsp;&nbsp; guarentee that the app does not shut down while the doc
+ *&nbsp;&nbsp;&nbsp;&nbsp; is still open. closing all docs, will release these
+ *&nbsp;&nbsp;&nbsp;&nbsp; refcnt's. if there are now more open documents AND the
+ *&nbsp;&nbsp;&nbsp;&nbsp; app is not under the control of the user (ie. launched by
+ *&nbsp;&nbsp;&nbsp;&nbsp; OLE) then the app will now shut down. the Release
+ *&nbsp;&nbsp;&nbsp;&nbsp; function executes this shut down procedure. after closing
+ *&nbsp;&nbsp;&nbsp;&nbsp; all docs, then releasing the user refcnt will force the
+ *&nbsp;&nbsp;&nbsp;&nbsp; app to shut down.
+ */
+BOOL CApp::CloseAllDocsAndExit(BOOL fForceEndSession)
+{
+ &nbsp; DWORD dwSaveOption = (fForceEndSession ? OLECLOSE_NOSAVE : OLECLOSE_PROMPTSAVE);
+ &nbsp;&nbsp; if (m_fAppClosing)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return TRUE;&nbsp;&nbsp;&nbsp; // Closing is already in progress
+ &nbsp;&nbsp; m_fAppClosing = TRUE;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // guard against recursive call
+ &nbsp; /* OLE2NOTE: in order to have a stable App object during the
+ &nbsp; **&nbsp;&nbsp;&nbsp; process of closing, we intially AddRef the App ref cnt and
+ &nbsp; **&nbsp;&nbsp;&nbsp; later Release it. This initial AddRef is artificial; it is
+ &nbsp; **&nbsp;&nbsp;&nbsp; simply done to guarantee that our App object does not
+ &nbsp; **&nbsp;&nbsp;&nbsp; destroy itself until the end of this routine.
+ &nbsp; */
+ &nbsp; AddRef();
+ &nbsp; /* Because this is an SDI app, there is only one document.
+ &nbsp; ** Close the doc. if it is successfully closed and the app will
+ &nbsp; ** not automatically exit, then also exit the app.
+ &nbsp; ** if this were an MDI app, we would loop through and close all
+ &nbsp; ** open MDI child documents.
+ &nbsp; */
+ &nbsp;&nbsp; if (! m_pCDocument-&gt;Close(dwSaveOption)) {
+ &nbsp;&nbsp;&nbsp;&nbsp; Release();
+ &nbsp;&nbsp;&nbsp;&nbsp; return FALSE;&nbsp;&nbsp;&nbsp;&nbsp; // User Aborted shutdown
+ &nbsp; }
+ &nbsp; Hide();
+ &nbsp; /* OLE2NOTE: this call forces all external connections to our
+ &nbsp; **&nbsp;&nbsp;&nbsp; object to close down and therefore guarantees that we receive
+ &nbsp; **&nbsp;&nbsp;&nbsp; all releases associated with those external connections.
+ &nbsp; */
+ &nbsp; CoDisconnectObject((LPUNKNOWN)&amp;m_Unknown, 0);
+ &nbsp; Release();&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // release artificial AddRef above
+ &nbsp; return TRUE;
+}
+/*************************************************************************
+** CApp::IClassFactory interface implementation
+*************************************************************************/
+STDMETHODIMP NC(CApp,CClassFactory)::QueryInterface(REFIID riid, LPVOID FAR* ppvObj)
+{
+ &nbsp;&nbsp; if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_IClassFactory))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *ppvObj = (LPVOID) this;
+ &nbsp;&nbsp; else {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *ppvObj = NULL;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return ResultFromScode(E_NOINTERFACE);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; ((IUnknown FAR*) *ppvObj)-&gt;AddRef();
+ &nbsp;&nbsp; return NOERROR;
+}
+</code></pre>
+<pre><code>STDMETHODIMP_(ULONG) NC(CApp,CClassFactory)::AddRef()
+{
+ &nbsp; return m_cRef++;
+}
+STDMETHODIMP_(ULONG) NC(CApp,CClassFactory)::Release()
+{
+ &nbsp;&nbsp; LONG cRef = --m_cRef;
+ &nbsp;&nbsp; 
+ &nbsp;&nbsp; // NOTE: the memory for this CClassFactory object is allocated as part of 
+ &nbsp;&nbsp; // the CApp object. It will be destroyed when the CApp object is destroyed.
+ &nbsp;&nbsp; 
+ &nbsp;&nbsp; Assert(cRef &gt;= 0);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return cRef;
+}
+
+STDMETHODIMP NC(CApp,CClassFactory)::CreateInstance (
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; LPUNKNOWN&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lpUnkOuter,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; REFIID&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; riid,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; LPVOID FAR*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lplpvObj)
+{
+ &nbsp;&nbsp; HRESULT&nbsp;&nbsp;&nbsp;&nbsp; hrErr;
+ &nbsp;&nbsp; /* OLE2NOTE: we must make sure to set all out parameters to NULL. */
+ &nbsp;&nbsp; *lplpvObj = NULL;
+ &nbsp;&nbsp; /*********************************************************************
+ &nbsp;&nbsp; ** OLE2NOTE: this is an SDI app; it can only create and support one
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; instance. After the instance is created, the OLE libraries
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; should not call CreateInstance again. it is a good practise
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; to specifically guard against this.
+ &nbsp;&nbsp; *********************************************************************/
+ &nbsp;&nbsp; if (m_lpApp-&gt;m_pCDocument != NULL)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return ResultFromScode(E_UNEXPECTED);
+ &nbsp;&nbsp; /* OLE2NOTE: create a new document instance. by the time we return
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; from this method the document's refcnt must be 1.
+ &nbsp;&nbsp; */
+ &nbsp;&nbsp; m_lpApp-&gt;m_pCDocument = m_lpApp-&gt;CreateDoc();
+ &nbsp;&nbsp; if (!m_lpApp-&gt;m_pDocument) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return ResultFromScode(E_OUTOFMEMORY);
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; /* OLE2NOTE: retrieve pointer to requested interface. the ref cnt
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; of the object after OutlineApp_CreateDoc is 0. this call to
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; QueryInterface will increment the refcnt to 1. the object
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; returned from IClassFactory::CreateInstance should have a
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; refcnt of 1 and be controlled by the caller. If the caller
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; releases the document, the document should be destroyed.
+ &nbsp;&nbsp; */
+ &nbsp;&nbsp; hrErr = m_lpApp-&gt;m_pDocument-&gt;QueryInterface(riid, lplpvObj);
+ &nbsp;&nbsp; return hrErr;
+}
+</code></pre>
+<pre><code>STDMETHODIMP NC(CApp,CClassFactory)::LockServer (BOOL fLock)
+{
+ &nbsp;&nbsp; HRESULT hrErr;
+#if defined( _DEBUG )
+ &nbsp;&nbsp; if (fLock) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ++m_cSvrLock;
+ &nbsp;&nbsp; } else {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* OLE2NOTE: when there are no open documents and the app is not
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; under the control of the user and there are no outstanding
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; locks on the app, then revoke our ClassFactory to enable the
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; app to shut down.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --m_cSvrLock;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AssertSz (m_cSvrLock &gt;= 0,"LockServer(FALSE) called with cLock == 0");
+ &nbsp;&nbsp; }
+#endif&nbsp; // _DEBUG
+ &nbsp;&nbsp; /* OLE2NOTE: in order to hold the application alive we call
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; CApp::Lock to add a strong reference to our app
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; object. this will keep the app alive when all other external
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; references release us. if the user issues File.Exit the
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; application will shut down in any case ignoring any
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; outstanding LockServer locks because lock are forcibly
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; broken in CloseAllDocsAndExitCommand. this will guarantee 
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; that the App object gets its final release (ie. cRefs goes to 0).
+ &nbsp;&nbsp; */
+ &nbsp;&nbsp; hrErr = m_lpApp-&gt;Lock( fLock, TRUE /* fLastUnlockReleases */);
+ &nbsp;&nbsp; return hrErr;
+}
+</code></pre>
+<pre><code>/* CApp:: ParseCmdLine
+** -------------------
+**&nbsp;&nbsp;&nbsp; Parse commandline arguments. Check if app is launched by OLE ("-Embedding").
+**&nbsp;&nbsp;&nbsp; If necessary register our class object with CoRegisterClassObject API.
+*/
+BOOL CApp::ParseCmdLine(LPSTR lpszCmdLine, int nCmdShow)
+{
+ &nbsp;&nbsp; char szFileName[256];
+ &nbsp;&nbsp; BOOL fStatus = TRUE;
+ &nbsp;&nbsp; BOOL fEmbedding = FALSE;
+ &nbsp;&nbsp; BOOL fFileNew = FALSE;
+ &nbsp;&nbsp; OLECHAR szUniStr[256];
+ &nbsp;&nbsp; szFileName[0] = '\0';
+ &nbsp;&nbsp; ParseCmdLine(lpszCmdLine, &amp;fEmbedding, &amp;fFileNew, (LPSTR)szFileName);
+ &nbsp;&nbsp; if(fEmbedding) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (szFileName[0] == '\0') {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*****************************************************************
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ** App was launched with /Embedding.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; We must register our ClassFactory with OLE, remain hidden
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; (the app window is initially created not visible), and
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; wait for OLE to call IClassFactory::CreateInstance
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; method. We do not automatically create a document as we
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; do when the app is launched by the user from the
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; FileManager. We must NOT make our app window visible
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; until told to do so by our container.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ** OLE2NOTE: Because we are an SDI app, we only register our
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; ClassFactory if we are launched with the /Embedding
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; flag WITHOUT a filename. an MDI app would ALWAYS
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; register its ClassFactory. it can handle multiple
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; objects at the same time, while an SDI application
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; can only handle a single embedded or file-based
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; object at a time.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *****************************************************************/
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fStatus = RegisterClassFactory();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return fStatus;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*****************************************************************
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ** App was launched with /Embedding &lt;Filename&gt;.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; We must create a document and load the file and
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; register it in the RunningObjectTable BEFORE we
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; enter our GetMessage loop (ie. before we yield).
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; One way to perform these tasks is to call the same
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; interface methods that OLE 2.0 calls for linking to a
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; file:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; IClassFactory::CreateInstance
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; IPersistFile::Load
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; We must NOT make our app window visible until told to
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; do so by our container. An application will be
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; launched in this manner by an OLE 1.0 application
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; link situation (eg. double clicking a linked object
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; or OleCreateLinkFromFile called).
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ** OLE2NOTE: Because we are an SDI app, we should NOT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; register our ClassFactory when we are launched with the
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; /Embedding &lt;Filename&gt; flag. our SDI instance can only
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; handle a single embedded or file-based object.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; an MDI app WOULD register its ClassFactory at all
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; times because it can handle multiple objects.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *****************************************************************/
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // allocate a new document object
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_pDocument = CreateDoc();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!m_pDocument) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return FALSE;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* OLE2NOTE: initially the Doc object is created with a 0 ref
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; count. in order to have a stable Doc object during the
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; process of initializing the new Doc instance,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; we intially AddRef the Doc ref cnt and later
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; Release it. This initial AddRef is artificial; it is simply
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; done to guarantee that a harmless QueryInterface followed by
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; a Release does not inadvertantly force our object to destroy
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; itself prematurely.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_pDocument-&gt;AddRef();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* OLE2NOTE: LoadFromFile will register our document
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; in the RunningObjectTable. this registration will
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; AddRef our document. therefore our document will not
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; be destroyed when we release the artificial AddRef
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; A2W (szFileName, szUniStr, 256);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fStatus = m_pDocument-&gt;LoadFromFile( (LPOLESTR)szUniStr);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_pDocument-&gt;Release(); // rel AddRef
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return fStatus;
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; /*****************************************************************
+ &nbsp;&nbsp; ** App was launched by the user (without /Embedding) and
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; therefore is marked to be under user control.
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; In this case, because we are an SDI app, we do NOT
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; register our ClassFactory with OLE. This app instance can
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; only manage one document at a time (either a user
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; document or an embedded object document). An MDI app
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; would register its ClassFactory here.
+ &nbsp;&nbsp; **
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; We must create a document for the user (either
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; initialized from a file given on the command line or
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; initialized as an untitled document. We must also make
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; our app window visible to the user.
+ &nbsp;&nbsp; *****************************************************************/
+ &nbsp;&nbsp; // allocate a new document object
+ &nbsp;&nbsp; m_pDocument = CreateDoc();
+ &nbsp;&nbsp; if (!m_pDocument){
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AssertSz(0, "CreateDoc Failure" );
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto error;
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; /* OLE2NOTE: initially the Doc object is created with a 0 ref
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; count. in order to have a stable Doc object during the
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; process of initializing the new Doc instance,
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; we intially AddRef the Doc ref cnt and later
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; Release it. This initial AddRef is artificial; it is simply
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; done to guarantee that a harmless QueryInterface followed by
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; a Release does not inadvertantly force our object to destroy
+ &nbsp;&nbsp; **&nbsp;&nbsp;&nbsp; itself prematurely.
+ &nbsp;&nbsp; */
+ &nbsp;&nbsp; m_pDocument-&gt;AddRef();
+ &nbsp;&nbsp; // show main app window
+ &nbsp;&nbsp; ShowWindow(m_hwndApp, nCmdShow);
+ &nbsp;&nbsp; UpdateWindow(m_hwndApp);
+ &nbsp;&nbsp; if(*szFileName) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (fFileNew)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // initialize the document from the specified file
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; A2W (szFileName, szUniStr, 256);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!m_pDocument-&gt;LoadFromFile(szUniStr))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AssertSz(0, "LoadFromFile Failure" );
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto error;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_pDocument-&gt;m_docInitType = DOCTYPE_NEW;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OLESTRCPY(m_pDocument-&gt;m_szFileName, UNTITLED);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_pDocument-&gt;m_lpszDocTitle = m_pDocument-&gt;m_szFileName;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_pDocument-&gt;SetTitle();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // initialize the document from the specified file
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; A2W (szFileName, szUniStr, 256);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!m_pDocument-&gt;LoadFromFile(szUniStr))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AssertSz(0, "LoadFromFile Failure" );
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto error;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; } // LoadfromFile
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; } // szFileName != NULL
+ &nbsp;&nbsp; else{
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // set the doc to an (Untitled) doc.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (! m_pDocument-&gt;InitNewFile()){
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AssertSz(0, "InitNewFile Failure" );
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto error;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; // position and size the new doc window
+ &nbsp;&nbsp; m_pDocument-&gt;Release();// rel AddRef above
+ &nbsp;&nbsp; m_pDocument-&gt;Show();
+ &nbsp;&nbsp; return fStatus;
+error:
+ &nbsp;&nbsp; ErrorMessage(ErrMsgNewOOM);
+ &nbsp;&nbsp; if (m_pDocument)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // rel artificial AddRef above
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_pDocument-&gt;Release();
+ &nbsp;&nbsp; return FALSE;
+}
+</code></pre>
+<pre><code>/* CApp::RegisterClassFactory
+ * --------------------------
+ *
+ * Register our app's ClassFactory with OLE.
+ *
+ */
+BOOL CApp::RegisterClassFactory()
+{
+ &nbsp; HRESULT hrErr;
+ &nbsp; if (m_dwRegClassFac)
+ &nbsp;&nbsp;&nbsp;&nbsp; return TRUE;&nbsp;&nbsp;&nbsp; // already registered
+ &nbsp; /******************************************************************
+ &nbsp; ** An SDI app must register its ClassFactory if it is launched
+ &nbsp; **&nbsp;&nbsp;&nbsp; for embedding (/Embedding command line option specified).
+ &nbsp; ** An MDI app must register its ClassFactory in all cases,
+ &nbsp; ******************************************************************/
+ &nbsp; hrErr = CoRegisterClassObject(
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CLSID_APP,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (LPUNKNOWN) &amp;m_ClassFactory,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CLSCTX_LOCAL_SERVER,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; REGCLS_SINGLEUSE,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;m_dwRegClassFac
+ &nbsp; );
+ &nbsp; if(hrErr != NOERROR) {
+ &nbsp;&nbsp;&nbsp;&nbsp; OleDbgOutHResult("CoRegisterClassObject returned", hrErr);
+ &nbsp;&nbsp;&nbsp;&nbsp; ErrorMessage(ErrMsgRegCF);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return FALSE;
+ &nbsp; }
+ &nbsp; return TRUE;
+}
+
+/* CApp::RevokeClassFactory
+ * ------------------------
+ *
+ * Revoke our app's ClassFactory.
+ *
+ */
+void CApp::RevokeClassFactory()
+{
+ &nbsp;&nbsp; if (m_dwRegClassFac) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CoRevokeClassObject(m_dwRegClassFac);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; m_dwRegClassFac = 0;
+ &nbsp;&nbsp; }
+}
+</code></pre>
+</BODY>
+</HTML>

@@ -1,0 +1,351 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Troubleshooting</title>
+<link disabled rel=stylesheet href=../../../../backsdk3.css>
+<style type="text/css">
+@import url(../../../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h2><a name="_troubleshooting"></a>Troubleshooting</h2>
+<p>
+SQL Server replication has been designed to require minimal user interaction. In most cases, once a subscription has been successfully established, and maintenance routines such as scheduled backup and replication cleanup have been configured, little or no user intervention is required. </p>
+<p>
+However, if your particular replication configuration experiences problems during initial setup or while running replication, review the following troubleshooting information. While not inclusive, this troubleshooting overview contains helpful hints and techniques for isolating and correcting problems that may arise during data replication.</p>
+<p>
+The following situations are discussed:
+<ul>
+<li>
+No subscription servers receiving changes</li>
+<li>
+One subscription server (of many) not receiving changes</li>
+<li>
+Transaction log on the publishing database filling up</li>
+<li>
+Transaction log on the publishing database is completely full</li>
+<li>
+Initial synchronization task not applied at subscription server</li>
+<li>
+Monitoring scheduled table refresh</li>
+<li>
+Deadlocks caused by replication processes</li>
+<li>
+Using ODBCPING.EXE to verify a connection</li>
+</ul>
+
+<h5><a name="_no_subscription_servers_receiving_changes"></a>No Subscription Servers Receiving Changes</h5>
+<p>
+The best way to troubleshoot a situation where no subscribers are receiving changes is to determine which of these two replication components has a problem:
+<ul>
+<li>
+The log reader task</li>
+<li>
+The distribution task</li>
+</ul>
+<p>
+To determine which component has a problem, first check whether the changes have been stored in the distribution database of the distribution server. The commands themselves can be viewed by examining the command column of the <i>MSjob_commands</i> table. </p>
+<p>
+<b>Note</b>  For security reasons, distribution tables are only accessible to the SA.</p>
+<p>
+In the distribution database, execute the following Transact-SQL statement:</p>
+<pre>SELECT command FROM MSjob_commands</pre>
+<p>
+If the changes to the replicated tables are not stored in the table, then the problem resides in the replication log reader task. If the changes are stored in the <i>command</i> column, then the problem resides in the distribution task.</p>
+<p>
+This result set can be further restricted by specifying in the SELECT statement both the <i>publisher_id</i> and <i>publisher_db</i> columns of the table. </p>
+<h5><img src="../../../../images/wedge.gif" border=0>&nbsp;&nbsp;&nbsp;&nbsp;To troubleshoot the log reader task</h5>
+<ol>
+<li>
+In the Server Manager window select the distribution server, then from the Tools menu choose Task Scheduling.</li>
+<li>
+In the Task Scheduling dialog box, select the appropriate log reader task and choose the Task History button.<p>
+The Task History is displayed for that log reader task. Review the history, then choose Close. The Task Scheduling dialog box returns. 
+<p>
+<b>Note</b>  If the log reader task is running in Auto Start mode, recent status may not be available.
+</li>
+<li>
+With the log reader task still highlighted, choose the Edit Task button.<p>
+The Edit Task dialog box appears.
+<p>
+<img src="images/ad15_855.gif" border=0>
+</li>
+<li>
+Under the Scheduling options, select Recurring and then select Change.<p>
+The Task Schedule dialog box appears.
+</li>
+<li>
+Within the Task Scheduling dialog select Occurs Daily, and then under Daily Frequency select Occurs every 1 Minute(s).</li>
+<li>
+Choose OK, then in the Edit Task dialog box that returns choose OK.</li>
+<li>
+In the Server Manager window, stop and restart SQL Executive.<p>
+To do this, click the right mouse button on the SQL Executive icon top, and then from the drop-down menu that appears choose Stop. Repeat this process, and choose Start.
+<p>
+This terminates the currently running autostart log reader task. The log reader will now run once every minute and record the appropriate status messages in the Task History (see step 2) to help you determine why it is not moving table changes to the distribution database.
+</li>
+</ol>
+<p>
+To troubleshoot the distribution task, follow the same steps outlined above for obtaining status for the log reader task, but focus on a distribution task instead. </p>
+<p>
+If subscribers are all failing on distribution of a replicated transaction, this can be repaired as follows:
+<ol>
+<li>
+For all associated distribution tasks, set the distribution task to Commit Every 1 Transaction. <p>
+To do this, open the Task Scheduling window, select the appropriate distribution task, and choose the Edit Task button. In the Edit Task dialog box that appears, change the <b>-c</b> parameter in the Command window to <b>-c1</b>.
+<p>
+Once the distribution task commits each individual transaction, it will fail on the specific transaction that is causing your problem.
+</li>
+<li>
+The <i>job_id</i> for this transaction can be obtained in two steps: <ul>
+<li>
+First, using the appropriate <i>publisher_id</i>, <i>publisher_db</i>, <i>subscriber_id</i>, and <i>subscriber_db</i>, select the maximum <i>job_id</i> from the <i>MSsubscriber_status</i> table in the distribution database. <p>
+This provides you with the maximum <i>job_id</i> that was successfully distributed. (This <i>job_id</i> is also available in the <i>MSlast_job_info</i> table on the subscription server.) 
+</li>
+<li>
+Second, select the minimum <i>job_id</i> from <i>MSsubscriber_jobs</i> that is larger than this number, once again using the appropriate <i>publisher_id</i>, <i>publisher_db</i>, <i>subscriber_id</i>, and <i>subscriber_db</i>. <p>
+This result will provide you with the <i>job_id</i> of the transaction that is failing.
+</li>
+</ul>
+</li>
+<li>
+Using a utility such as ISQL/w you may now select the command column of the failing transaction<pre>SELECT command FROM MSjob_commands
+WHERE publisher_id = '<i>publisher_id</i>'
+AND publisher_db = '<i>publisher_db</i>'
+AND job_id = '<i>job_id</i>'</pre>
+</li>
+<li>
+At this point there are three alternatives:<ul>
+<li>
+The administrator can use Transact-SQL statements to correct the command within the <i>MSjob_commands</i> table, allowing distribution to continue. <p>
+This should only be attempted by an individual well-versed in Transact-SQL. Applying an incorrect update to the distribution tables can result in unexpected data loss.
+</li>
+<li>
+The administrator can simply remove the command using the <b>sp_MSkill_job</b> stored procedure:<p>
+<b>sp_MSkill_job</b> <i>job_id</i>, <i>publisher</i>, <i>publisher_db</i>
+</li>
+<li>
+The administrator can manually correct and apply this transaction through a utility such as ISQL/w. The transaction can then be removed from the <i>MSjob_commands</i> table using <b>sp_MSkill_job</b>. <p>
+This allows further distribution to then continue automatically.
+</li>
+</ul>
+</li>
+</ol>
+
+<h5><a name="_one_subscription_server_.28.of_many.29_.not_receiving_changes"></a>One Subscription Server (of many) Not Receiving Changes</h5>
+<p>
+If only one subscription server is not receiving changes, there can be a problem with the distribution task. Troubleshoot the distribution task following the steps described in "No Subscription Servers Receiving Changes", earlier in this chapter.</p>
+<p>
+If a single subscription server is not receiving changes, also check for (and if necessary correct) the following error conditions:
+<ul>
+<li>
+Is the subscribing database available?</li>
+<li>
+Is the subscription server available?<p>
+Check the stoplight status indicator of this server in the Server Manager window of SQL Enterprise Manager, or in SQL Service Manager. Green indicates the SQL Server is running.
+<p>
+Another way to verify server availability is to establish a connection from the distribution server to the subscription server, using a utility such as ISQL/w.
+</li>
+<li>
+Has the replication login been removed from the subscription server?<p>
+If for some reason the <i>repl_publisher</i> login ID has been removed from the subscription server, the distribution task will experience a login failure.
+</li>
+<li>
+Is the distribution task waiting on a manual synchronization event?<p>
+Check the <i>MSlast_job_info</i> table in the subscription database of the subscription server. If this table contains entries in the publication, article and description columns, the distribution task is paused until a manual synchronization is accomplished. 
+<p>
+If this condition occurs, ensure that the file named in the description column of the <i>MSlast_job_info</i> table is applied to the subscription server, then use SQL Enterprise Manager to acknowledge the completion of the manual synchronization. This will enable the distribution task to begin sending changes to the subscription server. For more information about applying and acknowledging a manual synchronization, see Chapter 14, <a href="admn14_4kha.htm">Setting Up Replication</a>. 
+</li>
+</ul>
+
+<h5><a name="_transaction_log_on_the_publishing_database_filling_up"></a>Transaction Log on the Publishing Database Filling Up</h5>
+<p>
+If the transaction log of a publication database is filling up there is a problem with the log reader task. Troubleshoot the log reader task following the instructions provided in "No Subscription Servers Receiving Changes", earlier in this chapter. </p>
+<p>
+You can use the <b>sp_repltrans</b> and <b>sp_replcmds</b> stored procedures to help you determine whether there are replicated transactions residing within the transaction log that have not been moved into the tables of the distribution database.
+<dl>
+<dt>
+<b>sp_repltrans</b></dt>
+<dd>
+Returns a result set of all the transactions in the publication database transaction log that are marked for replication but that have not been marked as distributed. It returns a results set displaying the row identifier (RID, containing the page and row) and the timestamp for each nondistributed transaction.
+<p>
+If <b>sp_repltrans</b> returns no results, then there are no transactions available within the publication database transaction log for the log reader to move into the distribution database.
+</dd>
+<dt>
+<b>sp_replcmds</b></dt>
+<dd>
+Used when <b>sp_repltrans</b> returns a replicated transaction that is awaiting distribution. This stored procedure allows you to view the transactions that are currently not distributed (those transactions remaining in the transaction log that have not been sent to the distribution server). <b>sp_replcmds</b> returns article ID, partial command (true or false), and command, page, row, and timestamp.
+</dd>
+</dl>
+<p>
+For more information about <b>sp_repltrans</b> and <b>sp_replcmds</b>, see the <i>Microsoft SQL Server Transact-SQL Reference</i>.</p>
+
+<h5><a name="_transaction_log_on_the_publishing_database_is_completely_full"></a>Transaction log on the Publishing Database is Completely Full</h5>
+<p>
+If you are unable to resolve a problem with the log reader task, the transaction log of the publication database can become completely full. Replicated transactions that have not been moved into the distribution database may not be truncated from the transaction log. This can prevent you from truncating the transaction log of the publication database. If this occurs, two solutions can allow you to continue using the publication database.
+<ul>
+<li>
+Increase the size of the transaction log.<p>
+If you have available disk space, increase the space allocated to the log. Use SQL Enterprise Manager to expand the database onto additional log space, or use the ALTER DATABASE command or <b>sp_extendsegment</b> procedure to increase the size of the segment. For more information see Chapter 6, <a href="admn06_4nn7.htm">Managing Databases</a>. Also see the <i>Microsoft SQL Server Transact SQL Reference</i>.
+</li>
+<li>
+Clear the transaction log of non-distributed transactions.<p>
+If more transaction log space is not available, and if normal processing must continue within the publication database, then replicated transactions that have not been moved into the distribution database may be manually removed from the transaction log of the publication database.
+</li>
+</ul>
+<p>
+&nbsp;&nbsp;&nbsp;&nbsp;</p>
+<p class=indent1>
+<b>Note</b>  If non-distributed transactions are removed from the transaction log of the publication database, they will not be delivered to subscribing servers. All servers subscribing to publications within this database may need to re-synchronize to the published tables by unsubscribing and resubscribing.</p>
+<p class=indent1>
+To remove non-distributed transactions from the transaction log of the publication database, the system administrator must execute the following stored procedure, using the parameters shown: </p>
+<pre>sp_repldone 0, 0, NULL, 0, 0, 1</pre>
+<p class=indent1>
+This marks all replicated transactions as distributed. The transaction log may then be truncated by executing this statement:</p>
+<p class=indent1>
+<b>DUMP TRANSACTION</b> <i>database_name</i> <b>WITH NO_LOG</b></p>
+<p class=indent1>
+This allows normal processing to continue within the publication database.</p>
+<p class=indent1>
+Since you don't know which subscribers expect to receive the replicated data that was just truncated from the log, normally you should unsubscribe and resubscribe each subscriber to any publications in that database. This will force new initial synchronization events to occur.</p>
+
+<h5><a name="_initial_synchronization_task_not_applied_at_subscription_server"></a>Initial Synchronization Task Not Applied at Subscription Server</h5>
+<p>
+The best way to troubleshoot a situation where the initial synchronization has not been applied at a subscriber is to determine which of these two replication components has a problem:
+<ul>
+<li>
+The sync task</li>
+<li>
+The distribution task</li>
+</ul>
+<p>
+To determine which component has a problem, check to see if the sync events have been stored in the distribution database of the distribution server. The commands themselves can be viewed by examining the <i>command</i> column of the <i>MSjob_commands</i> table. </p>
+<p>
+If the sync events are not stored in the <i>command</i> column, then the problem resides in the sync task. If the changes are stored in the <i>command</i> column, then the problem resides in the distribution task. (Sync commands appears as <b>Sync</b>, followed by table and file information.)</p>
+<p>
+The following actions can help you troubleshoot a sync task:
+<ul>
+<li>
+Check the Task History for the appropriate sync task.<p>
+This can be checked in SQL Enterprise Manager by selecting the server, choosing Task Scheduling from the Tools menu, selecting the task, and choosing the Task History button.
+</li>
+<li>
+You can immediately test the initial synchronization event.<p>
+Select the appropriate sync task from the Task Scheduling window, and choose the Run Task button.
+</li>
+<li>
+If no history is available, check the scheduling frequency of the initial sync event. <p>
+Sync events are often scheduled to occur infrequently and during quiet processing periods. Scheduling information is displayed under the Frequency column in the Task List of the Task Scheduling window. For more detailed information, select the task and choose the Task Edit button.
+</li>
+<li>
+Check the setting for the replication working directory.<p>
+The initial sync task can fail when it does not have access to the replication working directory. This is a directory where all <b>bcp</b> image synchronization files for a publisher are stored. 
+<p>
+The working directory can be reviewed and modified in the SQL Enterprise Manager Replication Publishing dialog box. To access this dialog box, select the publication server from the Server Manager window, and from the Server menu, choose Replication Configuration/Publishing.
+</li>
+</ul>
+<p>
+To troubleshoot the distribution of an initial synchronization, you can perform the following tasks:
+<ul>
+<li>
+Audit logins for the subscription server.<p>
+Because an initial synchronization is often the first attempt by the distribution task to communicate with the subscription server, it can reveal login permission problems. By default, replication uses the login ID <i>repl_publisher</i> to log into the subscriber. 
+<p>
+You can set the subscription server to audit both successful and failed logins. To do this, select the subscription server in the Server Manager window; from the Server menu, choose Configurations; and in the Server Configuration window that appears, choose Security Options. Under Audit Level, select the check boxes for Successful Login and Failed Login.
+<p>
+<img src="images/ad15_856.gif" border=0>
+<p>
+Information concerning user logins will be written to the Windows NT Server application log and/or the SQL Server error log (depending on how logging has been configured on that server).
+</li>
+<li>
+Check to see if the replicated table has been created without the expected rows.<p>
+You can determine if the <b>bcp </b>portion of the distribution task has a problem by checking to see if the replicated table has been created without the expected rows. If this is the case, check in the working directory to ensure that the appropriate .TMP file has been created by the sync task.
+</li>
+<li>
+If the distribution task is failing while attempting to apply the initial <b>bcp </b>image, the administrator could use <b>bcp </b>to manually apply the appropriate .TMP file to the subscription server and then increment the <i>job_id</i> of the corresponding row in the <i>MSlast_job_info table</i>. <p>
+This allows the distribution task to bypass this operation and begin to apply the individual changes to the replicated table.
+</li>
+</ul>
+
+<h5><a name="_scheduled_table_refresh_failing"></a>Monitoring Scheduled Table Refresh</h5>
+<p>
+If you have set up an article to be replicated using scheduled table refresh, how can you determine whether the destination table on the subscriber has been updated? This can be checked by monitoring the <i>MSlast_job_info</i> table in the destination database. </p>
+<p>
+A table refresh will distribute at least two and sometimes three jobs. If the existing table is being deleted from or truncated, there are two jobs:
+<ul>
+<li>
+Delete or truncate the table</li>
+<li>
+<b>bcp</b> data into the table</li>
+</ul>
+<p>
+If you monitor <i>MSlast_job_info</i> on the subscriber and <i>job_id</i> increments by two, the table refresh was successful.</p>
+<p>
+If the existing table is being dropped, then there are three jobs:
+<ul>
+<li>
+Drop the table</li>
+<li>
+Create the table</li>
+<li>
+<b>bcp</b> data into the table</li>
+</ul>
+<p>
+If you monitor <i>MSlast_job_info</i> on the subscriber and <i>job_id</i> increments by three, the table refresh was successful.</p>
+
+<h5><a name="_deadlocks_caused_by_replication_processes"></a>Deadlocks Caused by Replication Processes</h5>
+<p>
+Under some conditions, deadlocks can occur between the log reader and distribution processes due to log reader page locks being escalated to an exclusive table lock. To avoid this, you can:
+<ul>
+<li>
+Decrease the <b>-c</b> <i>commitbatchsize</i> value for a log reader task, where <i>commitbatchsize </i>is the size of the commit batch. This determines how many transactions are placed in the distribution database before a commit can be issued against the distribution database. The default is 100.</li>
+<li>
+Add the <b>-b</b><i> jobbatchsize</i> option to the distribution task command,<i>,</i> where <i>jobbatchsize</i> is the maximum number of jobs to be read from the distribution database. The default behavior is to return all jobs. If there are many jobs, many locks are requested and lock escalation may be forced.</li>
+<li>
+If there are a number of distribution tasks, stagger the execution intervals for those tasks so that they do not typically occur simultaneously.</li>
+</ul>
+<p>
+For more information about using the log reader <b>-c</b> <i>commitbatchsize</i> option and the distribution <b>-b</b><i> jobbatchsize</i> option, see Chapter 16, <a href="admn16_5oab.htm">Scheduling Tasks</a>. </p>
+<p>
+You can also customize the lock escalation level by increasing the <b>LE threshold maximum</b> setting of <b>sp_configure</b>, allowing more page locks. This change is primarily useful on remote distribution servers. However, be aware that changing this option affects the entire server (not just the replication processes).</p>
+
+<h5><a name="_using_odbcping..exe_to_verify_a_connection"></a>Using ODBCPING.EXE to Verify a Connection</h5>
+<p>
+If replication between two servers is not functioning properly you can use the ODBCPING.EXE utility to check whether ODBC is properly installed (by connecting to a server using the ODBC SQL Server Driver). This utility is a 32-bit application that is stored in the \SQL60\BINN directory.</p>
+<h5><img src="../../../../images/wedge.gif" border=0>&nbsp;&nbsp;&nbsp;&nbsp;To verify ODBC connectivity</h5>
+<ul>
+<li>
+From a command prompt, type<p>
+<b>odbcping</b> <b>/S</b><i>servername</i> <b>/U</b><i>login_id</i> <b>/P</b><i>password</i>
+<p>
+where
+<dl>
+<dt>
+<i>servername</i></dt>
+<dd>
+Is the name of a server you will connect to.</dd>
+<dt>
+<i>login_id</i></dt>
+<dd>
+Is a valid login ID for that server.</dd>
+<dt>
+<i>password</i></dt>
+<dd>
+Is the password for that login ID.
+</dd>
+</dl>
+</li>
+</ul>
+<p>
+If the ODBC connection is established, this message is displayed:</p>
+<pre>CONNECTED TO SQL SERVER</pre>
+<p>
+If the ODBC connection cannot be established, this message is displayed:</p>
+<pre>COULD NOT CONNECT TO SQL SERVER
+</pre>
+<p>
+</p>
+<p>&nbsp;</p></body>
+</HTML>

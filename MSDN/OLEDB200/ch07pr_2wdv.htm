@@ -1,0 +1,252 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Getting and Setting BLOB Data with Storage Objects</title>
+<link disabled rel=stylesheet href=msdn_ie3.css>
+<style type="text/css">
+@import url(msdn_ie4.css);
+</style>
+</HEAD>
+<BODY>
+<FONT FACE="Verdana, Arial, Helvetica" SIZE="2">
+
+	<!--TOOLBAR_START-->
+	<!--TOOLBAR_EXEMPT-->
+	<!--TOOLBAR_END-->
+
+
+<h1><a name="oledbgetting_and_setting_blob_data_with_storage_objects"></a>Getting and Setting BLOB Data with Storage Objects</h1>
+<p>
+The following sections discuss how to bind, get, and set BLOB data using storage objects.</p>
+<h1>Binding BLOB Data as a Storage Object</h1>
+<p>
+To bind to BLOB data as a storage object, a consumer creates an accessor that includes a binding to the BLOB column. The consumer performs the following actions:
+<ol>
+<li>
+Sets the <i>wType</i> element of the DBBINDING structure for the BLOB column to DBTYPE_IUNKNOWN.<br><br></li>
+<li>
+Sets the <i>iid</i> element of the DBOBJECT structure in the binding to IID_ISequentialStream, IID_IStream, IID_IStorage, or IID_ILockBytes. If the consumer specifies an interface that is not supported by the provider, the provider returns E_NOINTERFACE when it validates the accessor; this can occur in <b>IAccessor::CreateAccessor</b> or a method that uses the accessor, such as <b>IRowset::GetData</b>. To determine which interfaces are supported by the provider, the consumer calls <b>IDBProperties::GetProperties</b> with the DBPROP_STRUCTUREDSTORAGE property.<br><br></li>
+<li>
+Sets the <i>dwFlags</i> element of the DBOBJECT structure in the binding. If the consumer specifies any invalid or unsupported flags, the provider returns DB_E_BADSTORAGEFLAG when it validates the accessor; this can occur in <b>CreateAccessor</b> or a method that uses the accessor, such as <b>GetData</b>.</li>
+</ol>
+<h1>Getting BLOB Data with Storage Objects</h1>
+<p>
+To get BLOB data using a storage object, a consumer performs the following actions:
+<ol>
+<li>
+Creates an accessor that includes a binding for the column. For more information, see "Binding BLOB Data as a Storage Object" earlier in this section.<br><br></li>
+<li>
+Calls <b>IRowset::GetData</b>, <b>IRowsetRefresh::GetLastVisibleData</b>, or <b>IRowsetUpdate::GetOriginalData</b> with this accessor. <p class=tl>
+The provider creates a storage object over the BLOB's data and returns a pointer to the requested storage interface (<b>ISequentialStream</b>, <b>IStream</b>, <b>IStorage</b>, or <b>ILockBytes</b>) on this object. If the provider supports only a single open storage object at a time and another storage object is open, the method returns a status of DBSTATUS_E_CANTCREATE for the column. </P></li>
+<li>
+Calls methods on the storage interface to get the BLOB's data, such as <b>ISequentialStream::Read</b>, <b>IStream::Read</b>, <b>ILockBytes::ReadAt</b>, or <b>IStorage::OpenStream</b>. If you use these methods to get character data, it is not null terminated.</li>
+</ol>
+<p>
+If the consumer calls <b>GetData</b>, <b>GetLastVisibleData</b>, or <b>GetOriginalData</b> multiple times for the BLOB column, the provider returns distinct pointers to storage interfaces on each call. This is similar to opening a file multiple times and returning a different file handle each time. It is the consumer's responsibility to call <b>Release</b> on each of these storage interfaces separately.</p>
+<p>
+For example, the following code binds to a BLOB column and uses <b>ISequentialStream::Read</b> to get the data:</p>
+<pre><code>#include&lt;oledb.h&gt;
+
+IRowset* pIRowset;
+IAccessor* pIAccessor;
+IMalloc* pIMalloc;
+
+int main() {
+ // Assume the consumer has a pointer (pIRowset) that points to the rowset. Create an
+ // accessor for the BLOB column. Assume it is column 1.
+
+ HACCESSOR&nbsp; hAccessor;
+ DBBINDSTATUS rgStatus[1];
+ DBOBJECT&nbsp;&nbsp; ObjectStruct;
+ DBBINDING&nbsp; rgBinding[1] = {
+  1,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Column 1
+  0,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Offset to data
+  0,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Ignore length field
+  sizeof(IUnknown *),&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Offset to status field
+  NULL,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // No type info
+  &amp;ObjectStruct,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Object structure
+  NULL,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Ignore&nbsp; binding extensions
+  DBPART_VALUE|DBPART_STATUS,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Bind value and status
+  DBMEMOWNER_CLIENTOWNED,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Consumer owned memory
+  DBPARAMIO_NOTPARAM,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Not a parameter
+  0,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Ignore size of data
+  0,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Reserved
+  DBTYPE_IUNKNOWN,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Type DBTYPE_IUNKNOWN
+  0,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Precision not applicable
+  0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Scale not applicable
+ } ;
+
+ // Set the elements in the object structure so that the provider creates a readable
+ // ISequentialStream object over the column. The consumer will read data from this
+ // object.
+ ObjectStruct.dwFlags = STGM_READ; 
+ ObjectStruct.iid&nbsp;&nbsp; = IID_ISequentialStream;
+
+ pIRowset-&gt;QueryInterface(IID_IAccessor, (void**) &amp;pIAccessor);
+ pIAccessor-&gt;CreateAccessor(DBACCESSOR_ROWDATA, 1, rgBinding,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sizeof(IUnknown *) + sizeof(ULONG), &amp;hAccessor, rgStatus);
+ pIAccessor-&gt;Release();
+
+ // Allocate memory for the returned pointer and the status field. The first
+ // sizeof(IUnknown*) bytes are for the pointer to the object and the next
+ // sizeof(ULONG) bytes are for the status.
+
+ void * pData = pIMalloc-&gt;Alloc(sizeof(IUnknown *) + sizeof(ULONG));
+
+ // Get the next row, get the pointer to ISequentialStream.
+ HROW * rghRows = NULL;
+ ULONG&nbsp; cRows;
+
+ pIRowset-&gt;GetNextRows(NULL, 0, 1, &amp;cRows, &amp;rghRows);
+ pIRowset-&gt;GetData(rghRows[0], hAccessor, pData);
+
+ // Read and process 5000 bytes at a time.
+ BYTE&nbsp; rgBuffer[5000];
+ ULONG cb;
+
+ if ((ULONG)((BYTE*)pData)[rgBinding[0].obStatus] == DBSTATUS_S_ISNULL) {
+  // Process NULL data
+ } else if ((ULONG)((BYTE *)pData)[rgBinding[0].obStatus] == DBSTATUS_S_OK) {
+  do {
+ &nbsp; (*((ISequentialStream **)pData))-&gt;Read(rgBuffer, sizeof(rgBuffer), &amp;cb);
+ &nbsp; if (cb &gt; 0) {
+ &nbsp;&nbsp; ; // Process data
+ &nbsp; }
+  } while (cb &gt;= sizeof(rgBuffer));
+ };
+
+ pIMalloc-&gt;Free(rghRows); 
+};
+</code></pre>
+<h1>Setting BLOB Data with Storage Objects</h1>
+<p>
+There are two ways a consumer can set BLOB data using a storage object:
+<ul type=disc>
+<li>
+<b>By writing data directly to the provider's storage object</b>—The provider creates a storage object over the BLOB column and returns a pointer to this storage object to the consumer. The consumer writes data directly to this storage object.<br><br></li>
+<li>
+<b>By passing a pointer to a consumer storage object</b>—The consumer creates a storage object containing the data and passes a pointer to this storage object to the provider. The provider then reads data from the consumer storage object and writes it to the BLOB column.</li>
+</ul>
+<h3>Writing Data Directly to the Provider's Storage Object</h3>
+<p>
+To write data directly to the provider's storage object, the consumer:
+<ol>
+<li>
+Creates an accessor that binds the value of the BLOB column. For more information, see "Binding BLOB Data as a Storage Object" earlier in this section.<br><br></li>
+<li>
+Calls <b>IRowset::GetData</b> with the accessor that binds the value of the BLOB column. <p class=tl>
+The provider creates a storage object over the BLOB's data and returns a pointer to the requested storage interface (<b>ISequentialStream</b>, <b>IStream</b>, <b>IStorage</b>, or <b>ILockBytes</b>) on this object. If the provider supports only a single open storage object at a time and another storage object is open, the method returns a status of DBSTATUS_E_CANTCREATE for the column.</P></li>
+<li>
+Calls a method on the storage interface to set data, such as <b>ISequentialStream::Write</b>, <b>IStream::Write</b>, or <b>ILockBytes::WriteAt</b>. Character data set with these methods is not null terminated.<p class=tl>
+If the storage object is transacted (that is, the STGM_TRANSACTED flag is set in the <i>dwFlags</i> element of the DBOBJECT structure in the binding), the storage object does not publish the changes to the containing rowset until the consumer calls <b>Commit</b> on the storage interface. If the storage object is not transacted (that is, the STGM_DIRECT flag is set), the storage object publishes the changes to the containing rowset when the consumer calls a method on the storage interface to set the changes. </P></li>
+</ol>
+<p>
+For a similar code example, see "Getting BLOB Data with Storage Objects" earlier in this section. The code for setting BLOB data is essentially the same, except that the consumer must set the <i>dwFlags</i> element of the <i>ObjectStruct</i> structure so that it can write to the storage object. Also, the consumer calls <b>ISequentialStream::Write</b> instead of <b>ISequentialStream::Read</b>.</p>
+<h3>Passing a Pointer to a Consumer Storage Object</h3>
+<p>
+To pass a pointer to its own storage object, the consumer:
+<ol>
+<li>
+Creates an accessor that binds the value of the BLOB column. For more information, see "Binding BLOB Data as a Storage Object" earlier in this section. <p class=tl>
+If the consumer's storage object exposes <b>ISequentialStream</b> and the provider needs to know the number of bytes of BLOB data that will be sent before any of the data is sent, this accessor must also bind the length of the BLOB column. For more information, see "<a href="ch07pr_778z.htm">Limitations of Storage Objects</a>" earlier in this chapter.</P></li>
+<li>
+Calls <b>IRowsetChange::SetData</b> or <b>IRowsetChange::InsertRow</b> with the accessor that binds the BLOB column. It passes a pointer to a storage interface on the consumer's storage object. </li>
+</ol>
+<p class=label>
+<b>Comments</b></p>
+<p>
+If the provider already has a storage object open over the BLOB's data, the method returns a status of DBSTATUS_E_CANTCREATE for the column. Otherwise, the provider copies the data from the consumer's storage object to the BLOB column. This is equivalent to the provider destroying the existing data, creating a new (empty) storage object over the BLOB column, repeatedly calling methods to read data from the consumer's storage object and write data to the storage object over the BLOB column, and, if the storage mode is transacted, committing the changes on the storage object over the BLOB column. Character data set in this manner is not null terminated.</p>
+<p>
+If the provider needs to know the number of bytes of BLOB data that will be sent before any of the data is sent, it retrieves this number with the <b>IStream::Stat</b>, <b>IStorage::Stat</b>, or <b>ILockBytes::Stat</b> method on the consumer's storage object (if the consumer's storage object exposes <b>IStream</b>, <b>IStorage</b>, or <b>ILockBytes</b>) or from the length part of the binding (if the consumer's storage object exposes <b>ISequentialStream</b>). If the consumer binds the length and the provider does not need to know this information or the consumer's storage object exposes <b>IStream</b>, <b>IStorage</b>, or <b>ILockBytes</b>, the provider ignores the bound length value.</p>
+<p>
+When the provider has finished using the consumer's storage object, it calls <b>IUnknown::Release</b> to release the pointer. After <b>SetData</b> or <b>InsertRow</b> returns, the provider must not hold any pointers or reference counts on the consumer's storage object. If the consumer wants to ensure access to its storage object after <b>SetData</b> returns, it must call <b>IUnknown::AddRef</b> on the pointer before calling <b>SetData</b>.</p>
+<p>
+To set the BLOB column to a zero-length value, the consumer sets the status flag to DBSTATUS_S_OK. It then either passes a null pointer (instead of a pointer to its own storage object) or passes a pointer to a storage object that contains no data. The provider sets the column to a zero-length value. This is different from setting the status value for the column to DBSTATUS_S_ISNULL. If the consumer sets the column value to NULL and then calls <b>GetData</b>, <b>GetData</b> returns a status value of DBSTATUS_S_ISNULL. If the consumer sets the column to a zero-length value and then calls <b>GetData</b>, <b>GetData</b> returns a pointer to a storage object that contains no data.</p>
+<p>
+For example, the following code passes a pointer to a different <b>ISequentialStream</b> object to <b>SetData</b> to overwrite the existing value:</p>
+<pre><code>#include&lt;oledb.h&gt;
+
+IRowsetChange *&nbsp;&nbsp; pIRowsetChange;
+IAccessor *&nbsp;&nbsp; pIAccessor;
+ISequentialStream * pISeqStr;
+HROW&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hrow;
+
+int main() {
+
+ // Assume the consumer has a pointer (pIRowsetChange) that points to the rowset and
+ // a pointer (pISeqStr) that points to an ISequentialStream object not in the
+ // rowset. Create an accessor for the BLOB column. Assume it is column 1.
+
+ HACCESSOR&nbsp; hAccessor;
+ DBBINDSTATUS rgStatus[1];
+ DBOBJECT&nbsp;&nbsp; ObjectStruct;
+ DBBINDING&nbsp; rgBinding[1] = {
+  1,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Column 1
+  0,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Offset to data
+sizeof(IUnknown*),   // obLength length field
+  
+  0,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Ignore status field
+  NULL,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // No type info
+  ObjectStruct,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Object structure
+  NULL,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Ignore binding extension
+  DBPART_VALUE|DBPART_LENGTH, // Bind value and length
+  DBMEMOWNER_CLIENTOWNED,&nbsp;&nbsp;&nbsp; // Consumer owned memory
+  DBPARAMIO_NOTPARAM,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Not a parameter binding
+  0,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Ignore maxlength
+  0,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Reserved
+  DBTYPE_IUNKNOWN,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Type DBTYPE_IUNKNOWN
+  0,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Precision not applicable
+  0,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Scale not applicable
+ };
+
+ // Set the elements in the object structure so that the provider creates a writable
+ // ISequentialStream object over the column.&nbsp; The provider will read data from the
+ // ISequentialStream object passed to SetData and write it to this object.
+ ObjectStruct.dwFlags = STGM_READ ;
+ ObjectStruct.iid&nbsp;&nbsp; = IID_ISequentialStream;
+
+ pIRowsetChange-&gt;QueryInterface(IID_IAccessor, (void**) &amp;pIAccessor);
+ pIAccessor-&gt;CreateAccessor(DBACCESSOR_ROWDATA, 1, rgBinding, sizeof(IUnknown *),
+pIAccessor-&gt;Release();
+
+//Setup pData row buffer
+BYTE* pData=(BYTE*)pIMalloc-&gt;Alloc(sizeof(IUnknown*)+sizeof(ULONG));
+
+//Value - pass ISequentialStream pointer to the provider
+*(ISequentialStream**)(pData+rgBinding[0].obVaule)=pISeqStr;
+//LENGTH - Some providers need to know the length of the stream ahead of time...
+*(ULONG*)(pData+rgBinding[0].oblength)=5000;
+
+//SetData - The provider will then do a ISequentialStream::Read
+//on the pISeqStr pointer passed in... pIRowsetChange-&gt;SetData(hrow, hAccessor, &amp;pISeqStr);
+return 0;
+} ;
+</code></pre>
+<h1>Getting and Setting BLOB Data with Storage Objects with Parameters </h1>
+<p>
+Consumers get and set BLOBs and OLE objects in command parameters in a manner similar to accessing BLOB columns. </p>
+<p>
+To get BLOB data using a storage object as output parameters, a consumer performs the following actions:
+<ol>
+<li>
+Calls <b>ICommandText::SetCommandText</b>, calls <b>ICommandPrepare::Prepare</b>, and calls <b>ICommandWithParameters::GetParameterInfo</b> to get information about parameters.<br><br></li>
+<li>
+Creates an accessor that includes a binding for the column. For more information, see "Binding BLOB Data as a Storage Object" earlier in this section.<br><br></li>
+<li>
+Calls <b>ICommand::Execute</b>, passing the accessor obtained in Step 2 in the hAccessor element of DBPARAMS. The storage object interface pointer will be returned in the value part of <i>pData</i>. The timing of the availability of the storage object depends on the value of the property DBPROP_OUTPUTPARAMETERAVAILABILITY.</li>
+</ol>
+<p>
+To set BLOB data using a storage object as input parameters, a consumer performs the following actions:
+<ol>
+<li>
+Calls <b>ICommandText::SetCommandText</b>, calls <b>ICommandPrepare::Prepare</b>, and calls <b>ICommandWithParameters::GetParameterInfo</b> to get information about parameters.<br><br></li>
+<li>
+Creates an accessor that includes a binding for the column. For more information, see "Binding BLOB Data as a Storage Object" earlier in this section.<br><br></li>
+<li>
+Builds the storage object.<br><br></li>
+<li>
+Calls <b>ICommand::Execute</b>, passing the accessor obtained in Step 2 and the storage object interface pointer from Step 3 in the hAccessor and value part of <i>pData</i> in DBPARAMS, respectively.</li>
+</ol>
+</font></BODY>
+</HTML>

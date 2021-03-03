@@ -1,0 +1,264 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Maximizing Database Concurrency and Consistency with Microsoft SQL Server</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_mdccsql"></a></sup>Maximizing Database Concurrency and Consistency with Microsoft SQL Server</h1>
+<p>
+Rick Vicik</p>
+<p>
+March 20, 1992</p>
+<h2>Abstract</h2>
+<p>
+Multiuser database applications encounter concurrency and consistency problems when multiple users try to access and/or update the same information at the same time. This article discusses the tradeoffs that must be made between concurrency and consistency when designing such applications, and explains how Microsoft® SQL Server (the Sybase® database server for PC networks) addresses these issues.</p>
+<h2>Overview</h2>
+<p>
+Designing applications for multiuser environments creates a new class of problems unknown to the single-user environment. Two complementary aspects of these problems are concurrency and consistency. Generally, increasing one decreases the other, with occasional exceptions.</p>
+<p>
+Three classic scenarios illustrate the duality of concurrency and consistency:
+<ol>
+<li>
+The <i>temporary update</i> problem occurs when one transaction is allowed to read the uncommitted updates of another. If the first transaction rolls back its updates, the second transaction may make decisions on data that is no longer available. The solution is to prevent access to uncommitted updates, increasing consistency at the expense of concurrency.<br><br></li>
+<li>
+The <i>lost update</i> problem occurs when two transactions simultaneously read and update the same data item. In this situation, the first update might be lost (even though access to uncommitted updates is prohibited) because the second update is based on the original value; the second update should be based on the value after the first update. An intent-to-update lock prevents this problem but reduces concurrency even more.<br><br></li>
+<li>
+The <i>incorrect summary</i> problem occurs when a transaction updates two items and the database is in an inconsistent state until both updates have completed (for example, moving an amount from one account to another). If a summarization transaction scans the same data while the update is in progress, amounts in transit may be missed or counted twice even if access to uncommitted updates is prohibited and intent-to-update locks are used. A read-lock on the results set of the summarization transaction eliminates the problem but also eliminates concurrent updates.</li>
+</ol>
+<p>
+A multiuser database must not allow interleaved transactions to interfere with one another and introduce inconsistencies into the database. If the interleaved execution of transactions is equivalent to any separate, serial execution of the same transactions, it is called <i>serializable</i> and is free from inconsistencies (see Bernstein, Philip A., Vassos Hadzilacos, and Nathan Goodman. <i>Concurrency Control and Recovery in Database Systems</i>. Reading, MA: Addison-Wesley, 1987). The three cases above are not serializable executions; their results cannot be reproduced by serial execution of the same transactions.</p>
+<p>
+The solutions to the three cases sacrifice concurrency for consistency. The following pages describe alternative solutions that provide as much consistency without sacrificing concurrency.</p>
+<h2>Avoiding Contention</h2>
+<p>
+There are four basic ways to avoid multiuser contention.</p>
+<h3>1. Atomic Update</h3>
+<p>
+In some cases, making changes with a single UPDATE statement (which defines the new value in terms of the old) rather than with separate READ and UPDATE statements eliminates the lost update problem. The best example is an inventory update transaction:</p>
+<pre>&nbsp;&nbsp;<code>UPDATE Inventory SET OnHand=OnHand-Shipped WHERE Item=123</code>
+</pre>
+<p>
+The lost update problem is eliminated with almost no reduction in concurrency. The chance of collisions with other users is minimal because UPDATE is an atomic operation. The row is actually locked for the duration of the UPDATE command, but all problems that typically accompany locking are eliminated because there is only one atomic request for locks.</p>
+<p>
+This approach has two requirements: It must be possible to specify the new value in terms of the old, and any additional conditions must be enforceable through the WHERE clause (or through rules, stored procedures, or triggers).</p>
+<p>
+For example, negative OnHand values can be prohibited by appending "AND OnHand&gt;=Shipped" to the WHERE clause. More complex conditions, such as a policy to make partial shipments, might require a trigger procedure:</p>
+<pre>&nbsp;&nbsp;<code>CREATE TRIGGER ON Inventory FOR UPDATE AS</code>
+<code> &nbsp; DECLARE @PartNo INT, @Amt INT</code>
+<code> &nbsp; WHILE EXISTS(SELECT * FROM Inventory WHERE OnHand&lt;0)&nbsp; BEGIN</code>
+<code> &nbsp;&nbsp;&nbsp;&nbsp; SELECT @PartNo=Part,@Amt=OnHand FROM Inventory WHERE </code>
+<code> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OnHand&lt;0</code>
+<code> &nbsp;&nbsp;&nbsp;&nbsp; UPDATE Inventory SET OnHand=0 WHERE PartNo=@PartNo</code>
+<code> &nbsp;&nbsp;&nbsp;&nbsp; INSERT BackOrder VALUES (@PartNo, -(@Amt) )</code>
+<code> &nbsp; END </code>
+</pre>
+<p>
+If the operation consists of more than one SQL statement, concurrency may decrease, but a stored procedure executed entirely on the server ties up resources for less time than an approach that involves a dialog between the server and the client application.</p>
+<h3>2. Replace Without Regard for Previous Value</h3>
+<p>
+A second way to avoid contention is to identify situations in which the new value is absolutely unrelated to the old value. In these cases, the new value can be written without reading the old value. A typical example is updating an address or a phone number. It does not matter what the old value was, and if two users update the same address or phone number, locking does not change the fact that the last update is going to win.</p>
+<p>
+In theoretical terms, no inconsistency is introduced because all possible outcomes of the interleaved execution of the two updates (A wins or B wins) can be reproduced by serial execution of the same two updates (A first and then B, or B first and then A).</p>
+<p>
+In such cases, the UPDATE command should alter only those columns that have actually changed, thus avoiding undoing updates made by other users, which would occur if the entire row were replaced.</p>
+<h3>3. Restrict the READSET</h3>
+<p>
+Another related technique is to include in the select list only those columns that are significant to the application. Instead of detecting updates by others through timestamps, save and compare the values of the selected columns. Changing the value of a column that is not used by the first application isn't a collision unless a dependency exists between the columns changed and the columns selected. In most real-world cases, greater concurrency can be achieved with little decrease in consistency.</p>
+<h3>4. Avoid Holding Locks for Extended Periods</h3>
+<p>
+To prevent the lost update problem, updated rows are inaccessible to other users during the transaction. To prevent the incorrect summary problem, rows selected by a repeatable-read transaction can be read but not updated by other users. Applications should release held rows as soon as possible to avoid unnecessary contention with other applications in relational databases. (The only way to release locks is to COMMIT.)</p>
+<p>
+If a row must be locked while waiting for user input, set a deadman timer in the application to guard against the user leaving the row locked indefinitely.</p>
+<h2>Browse Processing</h2>
+<p>
+Many interactive applications use a browse style of processing, in which the user scrolls forward and backward through the results set, performing occasional updates. Because most access is to read, not to update, locking the entire results set is unacceptable. Locking even one screenful can be too restrictive, especially if the data includes "hot spots."</p>
+<p>
+Read-locking the results set does not solve this problem because multiple potential update transactions can read-lock the same data items. None of the updaters will be able to update because the first attempted update blocks indefinitely and the second causes a deadlock.</p>
+<p>
+A better alternative to browse applications is optimistic concurrency control. Concurrency is increased because nothing is actually locked (so readers never wait), and consistency isn't reduced because updates that result in collisions are rejected. Because browsers update only a small fraction of what they view, collisions are infrequent. The drawback is that when a collision occurs, the update fails, and the application must take corrective action—by asking and updating anyway, by updating anyway and notifying, or by displaying the new data. Also, in a high-contention environment, many attempts may be necessary before the update succeeds.</p>
+<p>
+A collision may be detected either by comparing column values or through the use of timestamps. When the data is read the first time, the application must save the old data values or the old timestamp value. When an update is performed, some conditions are added to the WHERE clause to prevent the update if another user made any changes. If timestamps are used, only the timestamp must be checked; otherwise, all columns must be compared with their old values.</p>
+<p>
+Detecting update collisions by comparing column values is technically correct and provides more concurrency than timestamps, especially if only a few columns in the row are accessed. All columns on which decisions are based (either directly or indirectly) must be included. If many columns must be compared or if long <i>varchar</i> datatypes are involved, timestamps are more efficient. In Microsoft® SQL Server, columns defined as <i>text</i> or <i>image</i> have internal timestamps that are updated whenever the column is changed. The DB-Library <b>dbtxtimestamp</b> function can be used to access this timestamp and to detect changes in the value of the column. Changes in columns that are not <i>text</i> or <i>image</i> can be detected by comparing values or by using a row-level timestamp. A column with a <i>timestamp </i>datatype can be added to any table and is automatically updated when any column in the row is changed.</p>
+<p>
+Optimistic concurrency control requires an efficient mechanism to relocate the rows being updated. Although a unique key makes it possible to uniquely identify a row, performance will be unacceptable unless a clustered index exists.</p>
+<h3>SQL Server FOR BROWSE Option</h3>
+<p>
+When a SELECT statement with the FOR BROWSE option is issued in SQL Server, a temporary snapshot copy of the results set is made in <b>tempdb</b>. Other users can change the original data because the browser retrieves all data from the temporary copy. As a result, changes made by other users are not visible to the browser.</p>
+<p>
+The browser must use a separate database connection for updates. The first database connection is used to maintain position in the browse results set. If the browser did not retrieve data from a snapshot copy and if it performed updates through a second database connection, it could get into a lock collision with itself because SQL Server considers each database connection to be a separate user. The snapshot copy approach eliminates the lock-collision problem but results in the browser not being able to see his or her own updates. </p>
+<p>
+Concurrency control is done through timestamps. Only tables with a <i>timestamp</i> column can be browsed. SQL Server updates the <i>timestamp</i> column whenever a row is changed. When constructing an UPDATE statement, the browser must append the WHERE clause supplied by the DB-Library <b>dbqual</b> function. This WHERE clause includes the conditions necessary to relocate the row through the unique index as well as to detect changes in the timestamp, even if the <i>timestamp</i> and <i>index</i> columns were not included in the select list or in the view definition. The row need not be reread before the update. If the update returns error code 532, the browser knows that a collision has occurred and the update was rejected.</p>
+<p>
+A unique index is required for browsing to efficiently relocate the row being updated. The DB-Library <b>dbtabbrowse </b>function can be used to determine whether a particular table meets the browse requirements (but only after a SELECT with FOR BROWSE has been made).</p>
+<h3>Limitations of the SQL Server FOR BROWSE Option</h3>
+<p>
+The SQL Server FOR BROWSE option does not support those processing styles in which users see all updates. Updates are not visible because all data is retrieved from the snapshot copy of the results set that was made when the browse was initiated. The updates made by the browser are not automatically applied to the temporary copy, and they cannot be applied manually. As a result, aggregate statistics are not consistent. If the aggregates are derived from the temporary table, they do not include changes made by the browser; if derived from the original table, the aggregates are not consistent with the data being displayed.</p>
+<p>
+Update collisions are more likely to occur as the database is used more because the "before" timestamp values are taken from the snapshot that was made when the browse was first initiated. Eventually, another user will update one of the rows that the browser intends to update.</p>
+<h3>DB-Library Cursors</h3>
+<p>
+Version 4.2 of DB-Library provides an alternative browsing technique. Five new functions provide much of the functionality of the cursors available in other database engines. Because nothing was added to the SQL Server engine to support these DB-Library cursors, there are some limitations. On the other hand, version 4.2 cursors have many capabilities not found in conventional cursors, and, with a few simple changes to the engine, some of the restrictions can be lifted in a later release.</p>
+<p>
+The table (or tables) specified in the cursor declaration must have a unique index. This should not be a problem because good relational database design requires each table to have a primary key (which is, by definition, unique). A timestamp is not required, although it may improve the performance of optimistic concurrency control. Multiple cursors can be open at the same time on the same database connection, and extra database connections are not created "under the covers." The data is fetched from the actual tables, not from a snapshot copy. The techniques used to implement DB-Library cursors are those described in earlier versions of this article.</p>
+<p>
+Some of the features of DB-Library cursors not available in conventional cursors are the ability to scroll backward and the ability to scroll to either an absolute or a relative row number. The cursor can be more than one row wide. It is useful to set the cursor size to the number of rows displayed on a screen or buffered locally by the application program. A single fetch fills the array of application buffers. The locally buffered rows can be protected from the changes made by others in several ways: They can be locked, optimistic concurrency control can be used (through timestamp or through values), or a combination of optimistic concurrency control and locking can be used. An option also exists to control whether changes made by others can affect the membership and ordering of the results set dynamically.</p>
+<p>
+Updates are performed by modifying the data in the application program buffers and calling <b>dbcursor</b> with the UPDATE option for that row. If the page is locked (when fetched or by an explicit lock request), the update is guaranteed to succeed. If the page is not locked, optimistic concurrency control is used. If no <i>timestamp</i> column exists, optimistic concurrency control by values must be used.</p>
+<p>
+DB-Library cursors have some limitations. Retrieving by absolute row number is possible only within the keyset (the set of key values that are buffered in the client by DB-Library). The SELECT statement must not contain FOR BROWSE, SELECT INTO, COMPUTE, or COMPUTE BY. A fully dynamic cursor cannot be declared with ORDER BY, GROUP BY, HAVING, or UNION.</p>
+<h3>Reserving Resources</h3>
+<p>
+In applications designed to control the allocation of a resource (such as airline seats), the user may need to enter a lot of data after the desired item is selected; yet there is no guarantee that the resource is not already allocated by another user who types faster. In a high-contention environment, several attempts may be required to successfully allocate the resource, resulting in wasted typing.</p>
+<p>
+Placing a read-lock on the selected item eliminates the possibility of another user updating that item but, if many users are competing for the same item, others might acquire read-locks on the same item, thus preventing any of them from updating it. The first user attempting to update the item would be blocked indefinitely. The second user attempting to update it would cause a deadlock, and one of the participants would be terminated.</p>
+<p>
+In SQL Server, the solution to the reserving resources problem described above is to perform a BEGIN TRAN followed by an immediate null update (<b>set c1=c1</b>) to the selected item. This prevents other users from accessing the item until the transaction commits and is the technique used by DB-Library cursors. If the application requires a new row to be inserted, the application should insert the row with all NULL or default values (except for the key) in order to reserve the slot for the row. The application should then update the row with the rest of the information after the user types it. If the table has columns with rules, the dummy row will be difficult to create unless the rules are known.</p>
+<p>
+In other databases, it may be possible to reselect the data with an explicit intent-to-update lock that allows other users to read but not update the data. The difference between a read-for-update lock and a normal read-lock is that only one user can place a read-for-update lock on a particular data item at any time.</p>
+<p>
+With either kind of locking, the lost update problem can still occur unless additional precautions are taken. Either the data must be reselected after being locked (and all decisions and derivations performed with the reselected data) or the null update or reselect can use a WHERE clause which checks that the data has not changed by comparing values or timestamps.</p>
+<h2>User Interface Technique</h2>
+<p>
+A possible design for the user interface of a highly interactive browse application using DB-Library cursors is as follows:
+<ol>
+<li>
+Declare a cursor with a cursor width equal to the number of rows displayed on the screen and with the optimistic concurrency control option.<br><br></li>
+<li>
+When the user indicates intent to update by moving the cursor to a particular row displayed on the screen and begins to overtype the data, do not echo the keystroke.<ul type=disc>
+<li>
+When the transaction begins, the transaction must set a <b>dblib</b> timeout and then call <b>dbcursor</b> with the LOCK option for the row that the user is modifying.<br><br></li>
+<li>
+If the lock request succeeds, the row has not been modified, so echo the keystroke. When the user has finished modifying the row, call <b>dbcursor</b> with the UPDATE option for that row, and then commit.<br><br></li>
+<li>
+If another user has modified the row, the lock request fails. Do not echo the keystroke, but instead call <b>dbcursor</b> with REFRESH for that row, and then display the new data (with a warning message).</li>
+</ul>
+</li>
+</ol>
+<p>
+When an update collision occurs, the user loses at most the keystroke that was not echoed. After the first keystroke is echoed, the user has control of the row, and the update can't fail because of a collision with another user. The application sets a deadman timer to prevent the row from being held indefinitely if the user leaves the workstation after seizing the row but before committing it.</p>
+<h2>Summarization Consistency</h2>
+<h3>Incorrect Summary Problem Revisited</h3>
+<p>
+The incorrect summary problem can occur when multistep updates are interleaved with summarization processing. Amounts in transit may be missed or counted twice.</p>
+<p>
+One possible solution is to lock the entire table during the summarization process. This increases consistency at the expense of a great reduction in concurrency.</p>
+<h3>Serializable Execution</h3>
+<p>
+The incorrect summary problem illustrates a subtle point about consistency and serializable execution. If the update transaction changes only data that has already been processed by the summarization transaction, the result is the same as running the summarization followed by the update. If the update transaction changes only data that has not yet been processed by the summarization transaction, the result is the same as running the update followed by the summarization. Although there are differences in the end results, these differences are not due to interference between the two transactions (because only one is executed at a time). When the update changes both data that has and data that hasn't already been processed by the other transaction (in the same logical unit of work), the end result cannot be reproduced by any possible serial execution of the same two transactions (update and then summarize, or summarize and then update). The end result has been influenced by the interference between the two transactions. If two transactions run in an interleaved fashion, but the end results are identical to running them one at a time, the results have not been influenced by the interleaved execution. This is the origin of the technical term <i>serializable execution.</i></p>
+<p>
+If the update transaction changes data that has already been processed and data that has not yet been processed that are not in the same logical unit of work, it is really two separate update transactions. The result is equivalent to running first the updates that affect data not yet processed and then the summarization transaction, followed by the updates that affect data already processed.</p>
+<h3>HOLDLOCK and Repeatable Read</h3>
+<p>
+In SQL Server, the HOLDLOCK option causes share locks to be held until commit time. This provides more concurrency than read-locking the entire table because other transactions can update accounts that have not yet been processed by the summarization transaction, but no updates are permitted on accounts already processed by the summarization transaction until it completes.</p>
+<p>
+Allowing updates to process against accounts that have not yet been read is logically equivalent to allowing those updates to run before the summarization report begins and then prohibiting updates while it runs. Retaining read-locks on data that has been processed provides the same degree of consistency as locking the entire table, and it allows more concurrency. In SQL Server, the HOLDLOCK option not only prevents updates and deletes, but also inserts that intrude on the results set of the summarization transaction. Thus, HOLDLOCK provides repeatable-read consistency, including protection against "phantom inserts."</p>
+<h3>Read-Only Isolation</h3>
+<p>
+Some databases provide a feature that reduces the contention between summarization transactions and update transactions by using information in the rollback log. When access to an uncommitted update is attempted, the summarization transaction is presented with the data item as it existed before the update, instead of being forced to wait until the update transaction commits.</p>
+<p>
+Because the "before-image" of all updated data items is retained until commit time to support transaction backout, no additional overhead is incurred until a collision actually occurs. When a collision occurs, the database must read the before-image from the rollback log and reconstruct the data as though a temporary rollback were being performed. The before-image must now be retained until both the update and the read transactions commit. A long-running reader can end up holding a lot of before-images in the rollback log.</p>
+<p>
+Any access to before-image data must be read-only. If updates were allowed, the temporary update problem would occur.</p>
+<h2>Deadlocks and Timeouts</h2>
+<p>
+Detection of deadlocks should be immediate; a timeout period or polling isn't needed. A process waiting for a lock held by another process is not a deadlock (although it may become one). When the WAITFOR chain becomes a loop, a deadlock occurs. Deadlock detection by polling is inefficient, and deadlock detection by timeout ignores the possibility that a process may be waiting for a legitimate reason.</p>
+<p>
+SQL Server does not detect deadlocks by polling or timeouts; it looks for loops in the WAITFOR chain. When a loop is detected, SQL Server terminates the participant that has the least processing time invested. Any updates are rolled back, and the application receives a 1205 error.</p>
+<p>
+If no deadlock occurs, the application requesting the locked data does not receive any results until the lock is released. There is no default timeout period, so if no timeout period was specified with <b>dbsettime</b>, the application waits indefinitely. If the application sets a timeout period, it can regain control periodically and ask the user whether to continue waiting. The application can cancel the current database operation with <b>dbcancel</b> if the user decides not to wait any longer.</p>
+<p>
+The only way to test whether an item is locked is to set a short timeout period and attempt to access the item. If a timeout occurs, the item is probably locked.</p>
+<h3>Deadlock Avoidance</h3>
+<p>
+Some standard techniques exist to avoid deadlocks. The most effective approach is to lock only one thing at a time. It is impossible to have a circular WAITFOR chain with only one item. Another technique that prevents deadlocks is never to wait for locks. Deadlocks are also impossible if all locks are obtained in an atomic operation at the beginning of a transaction. If all the locks cannot be obtained, any that were obtained are released. Another approach is to have all applications obtain locks in the same order (usually alphabetically by item name).</p>
+<p>
+Using the four techniques described earlier to avoid multiuser contention reduces the possibility of deadlocks because fewer items are locked, locks are requested as a group, and locks are held as briefly as possible.</p>
+<p>
+In a relational database, the application does not have direct control over how and when locks are obtained. If a single SQL statement causes locks to be obtained on several tables, the application has no way to control the order in which they are obtained. Even a SQL statement that references a single row in a single table may cause multiple locks to be taken if indexes are involved. As a result, using these techniques reduces the possibility of deadlocks but cannot eliminate them.</p>
+<h3>Handling Deadlocks and Timeouts</h3>
+<pre><code>#include &lt;setjmp.h&gt;
+LOGINREC&nbsp; *login;
+DBPROCESS&nbsp; *dbproc;
+int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; msg_handler();
+int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; err_handler();
+static int deadlock=FALSE,timeout=FALSE,retries=0;
+jmp_buf retry;
+main()
+{
+ &nbsp; login = dblogin();
+ &nbsp; DBSETLUSER(login,"sa");
+ &nbsp; dbproc = dbopen(login, "server");
+ &nbsp; dbmsghandle(msg_handler);
+ &nbsp; dberrhandle(err_handler);
+ &nbsp; dbsettime(5);
+
+  retry: setjmp (retry);
+ &nbsp; if( retries&gt;5 )&nbsp; return;
+ &nbsp; dbcmd(dbproc,"select command from helpsql");
+ &nbsp; dbsqlexec(dbproc);
+ &nbsp; test_exception(); </code>   <code> &nbsp; </code>
+<code> &nbsp; while( dbresults(dbproc) != NO_MORE_RESULTS ) {</code>
+<code> &nbsp;&nbsp;&nbsp; while( dbnextrow(dbproc) != NO_MORE_ROWS ) {</code>
+<code> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .</code>
+<code> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .</code>
+<code> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .</code>
+<code> &nbsp;&nbsp;&nbsp; }</code>
+<code> &nbsp;&nbsp;&nbsp; test_exception();</code>
+<code> &nbsp; }</code>
+<code> &nbsp;&nbsp;&nbsp; test_exception();</code>
+<code>}</code>
+
+<code>int test_exception()</code>
+<code>{</code>
+<code>  if( timeout ) {</code>
+<code> &nbsp;&nbsp; timeout=FALSE;</code>
+<code> &nbsp;&nbsp; dbcancel(dbproc);</code>
+<code> &nbsp;&nbsp; printf("Command timed out, retrying\n");</code>
+<code> &nbsp;&nbsp; retries++;</code>
+<code> &nbsp;&nbsp; longjmp (retry,0);</code>
+<code>  }</code>
+<code>  else if( deadlock ) {</code>
+<code> &nbsp;&nbsp; deadlock=FALSE;</code>
+<code> &nbsp;&nbsp; printf("Deadlock, retrying\n");</code>
+<code> &nbsp;&nbsp; retries++;</code>
+<code> &nbsp;&nbsp; longjmp (retry,0);</code>
+<code>  }</code>
+<code>  return(0);</code>
+<code>}</code>
+
+<code>int msg_handler(dbproc, msg, state, sev, text)</code>
+<code>DBPROCESS *dbproc;</code>
+<code>DBINT&nbsp;&nbsp;&nbsp;&nbsp; msg;</code>
+<code>int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; state;</code>
+<code>int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sev;</code>
+<code>char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *text;</code>
+<code>{</code>
+<code> &nbsp; if( msg==1205 )&nbsp; deadlock=TRUE;</code>
+<code> &nbsp; printf("SQL Server error %ld, sev %d: %s\n",msg, sev, text );</code>
+<code> &nbsp; return(DBNOSAVE);</code>
+<code>}</code>
+
+<code>int err_handler(dbproc, sev, dberr, oserr, dberrstr, oserrstr)</code>
+<code>DBPROCESS&nbsp;&nbsp; *dbproc;</code>
+<code>int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sev;</code>
+<code>int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dberr;</code>
+<code>int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; oserr;</code>
+<code>char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *dberrstr;</code>
+<code>char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *oserrstr;</code>
+<code>{</code>
+<code> &nbsp; if( dberr==10024 )&nbsp; timeout=TRUE;</code>
+<code> &nbsp; else {</code>
+<code> &nbsp;&nbsp;&nbsp; printf("DB-LIB Error %d,\n%s\n",dberr,dberrstr);&nbsp; </code>
+<code> &nbsp;&nbsp;&nbsp; if( oserr&gt;0 )</code>
+<code> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printf("OS Error %d,\n%s\n",oserr,oserrstr);</code>
+<code> &nbsp; }</code>
+<code> &nbsp; return(INT_CANCEL);</code>
+<code>}</code>
+</pre>
+</BODY>
+</HTML>

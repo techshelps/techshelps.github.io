@@ -1,0 +1,96 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Converting C-API Add-Ins to 32-bit Microsoft Excel</TITLE><META HTTP-EQUIV="CONTENT-TYPE" CONTENT="text/html; charset= iso-8859-1"><style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><body bgcolor="#FFFFFF" link=#003399 vlink=#996699>
+	<FONT FACE="Verdana, Arial, Helvetica" SIZE="2"><FONT FACE="Verdana, Arial, Hevetica" SIZE="2">
+
+<H1 CLASS="title">Converting C-API Add-Ins to 32-bit Microsoft Excel</H1><P CLASS="t">The files included in this article will help you to build compiled add-ins for the 32-bit (Intel x86 family) versions of Microsoft Excel (Microsoft Excel 7.0 for Windows 95 and Microsoft Excel 5.0 for Windows NT). The article includes the C-API files Xlcall32.lib and Xlcall.h. Xlcall32.dll is also required, and is installed in your Windows system folder when you install Microsoft Excel.</P>
+<P><OBJECT id=sample1 type="application/x-oleobject"
+classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Office 95 Samples">
+<PARAM name="Item2" value="4805">
+</OBJECT><a href="javascript:sample1.Click()">
+Click to open or copy the CAPI project files</A></P><P CLASS="t"></P>
+<H3>Conversion Notes</H3>
+<P CLASS="t">1. The 32-bit versions of the Visual C++ compiler (versions 2.0, 2.1, 2.2, and 4.0) changed the __export keyword to __declspec(dllexport). Use this keyword on your function declarations that are called from Microsoft Excel. For example:</P>
+<P CLASS="spacing"><BR></P>
+<PRE><FONT FACE="Courier" SIZE="2">__declspec(dllexport) int TestFunction(int iArg)
+{
+    ...
+}</FONT></PRE>
+<P CLASS="t">There are some issues related to using __declspec(dllexport) in 32-bit versions of Visual C++. For more information, see "Exporting PASCAL-Like Symbols in 32-bit DLLs" later in this article.</P>
+<P CLASS="t">2. Ensure that Xlcall32.dll is in your Windows system folder.</P>
+<P CLASS="t">3. Xlcall.h is the same file that you used in the older (16-bit) C-API.</P>
+<P CLASS="t">4. Closely examine parameters, variables, and return values declared as type int in your C/C++ code. In C/C++ code the size of an int depends on the system and/or compiler. Win16 defined an int to be 16-bits, or the same as a short int or short. In Microsoft Excel the short int code used with REGISTER() is "H" or "I". Win32 defines an int to be 32-bits, or the same as a long int or long, and the Microsoft Excel registration code is "J".</P>
+<P CLASS="t">System-dependent int sizing may cause a problem with internal structure sizes and numeric overflows, but in most cases it doesn't affect the program. Because, however, Microsoft Excel does not support a system-dependent int parameter or return value type, Microsoft Excel will have a problem with carelessly written Win16 code that is recompiled for Win32. Plain int parameters and return values are expanded to 32-bits, which effectively changes the registration type code from "H" to "J". Calling an incorrectly declared procedure may result in incorrect results or a protection fault. There are two solutions to this problem:</P>
+<UL><LI>    Leave the C/C++ code alone (it still uses system-dependent plain int) and conditionalize your calls to REGISTER() to be aware of the current operating system platform. On Win16 the type codes use 16-bit "H" and "I" codes, and on Win32 the type codes use the 32-bit "J" value.</LI><LI>    Leave the XLM code alone and instead clean up the C/C++ variable declarations. All int parameters and return values are modified to be either a short int or a long int as required. The same REGISTER() type code can then be used on either platform.</LI></UL><P CLASS="t">5. The C-API xlGetHwnd call that retrieve the main window handle of Microsoft Excel is problematic because sizeof(HWND) on Win32 is a long but the field used to receive the HWND parameter in the XLOPER structure is a short. Consequently the high word of the actual Microsoft Excel HWND is truncated. To work around this problem call xlGetHwnd to get the low word of the actual hwnd, then iterate the list of top-level windows and look for a match with the returned low word. This code illustrates the technique:</P>
+<P CLASS="spacing"><BR></P>
+<PRE><FONT FACE="Courier" SIZE="2">typedef struct _EnumStruct {
+    HWND        hwnd;
+    unsigned short    wLoword;
+} EnumStruct;
+
+#define CLASS_NAME_BUFFER    50
+
+BOOL CALLBACK EnumProc(HWND hwnd, EnumStruct * pEnum)
+{
+    // first check the class of the window. Must be "XLMAIN"
+    char rgsz[CLASS_NAME_BUFFER];
+    GetClassName(hwnd, rgsz, CLASS_NAME_BUFFER);
+    if (!lstrcmpi(rgsz, "XLMAIN")) {
+        // if that hits, check the loword of the window handle
+        if (LOWORD((DWORD) hwnd) == pEnum-&gt;wLoword) {
+            pEnum-&gt;hwnd = hwnd;
+            return FALSE;
+        }
+    }
+
+    // no luck - continue the enumeration
+    return TRUE;
+}
+
+BOOL GetHwnd(HWND * pHwnd)
+{
+    XLOPER x;
+
+    if (Excel4(xlGetHwnd, &amp;x, 0) == xlretSuccess) {
+        EnumStruct enm;
+        
+        enm.hwnd = NULL;
+        enm.wLoword = x.val.w;
+
+        EnumWindows((WNDENUMPROC) EnumProc, (LPARAM) &amp;enm);
+        
+        if (enm.hwnd != NULL) {
+            *pHwnd = enm.hwnd;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}</FONT></PRE>
+<H3>Exporting PASCAL-Like Symbols in 32-bit DLLs</H3>
+<P CLASS="t">This section is taken from Microsoft Product Support Services Knowledgebase article Q140485.</P>
+<P CLASS="t">Microsoft Visual C++, 32-bit Edition, versions 2.0, 2.1, 2.2, 4.0 There is no _pascal keyword in the 32-bit editions of Visual C++. Instead the Windef.h header file has PASCAL defined as __stdcall. This creates the correct style calling convention for the function (the called function cleans up the stack) but decorates the function name differently. So, when __declspec(dllexport) is used (in a DLL, for example), the decorated name is exported instead of the desired PASCAL style name, which is undecorated and all uppercase.</P>
+<P CLASS="t">PASCAL name decoration is simply the undecorated symbol name in uppercase letters. __stdcall name decoration prefixes the symbol name with an underscore (_) and appends the symbol with an at sign (@) character followed by the number of bytes in the argument list (the required stack space). Therefore, when you declare the following function:</P>
+<P CLASS="spacing"><BR></P>
+<PRE><FONT FACE="Courier" SIZE="2">   int  __stdcall func (int a, double b)</FONT></PRE>
+<P CLASS="t">it is decorated as:</P>
+<P CLASS="spacing"><BR></P>
+<PRE><FONT FACE="Courier" SIZE="2">   _func@12</FONT></PRE>
+<P CLASS="t">The C calling convention (__cdecl) decorates the name as _func, whereas the desired PASCAL style name is FUNC.</P>
+<P CLASS="t">To get the decorated name set the Generate Mapfile option in the Linker General category setting.</P>
+<P CLASS="t">Use of __declspec(dllexport) does the following:</P>
+<P CLASS="t">If the function is exported with C calling convention (_cdecl), it strips the leading underscore (_) when the name is exported.</P>
+<P CLASS="t">If the function being exported does not use the C calling convention (for example, __stdcall ), it exports the decorated name.</P>
+<P CLASS="t">So to simulate PASCAL name decoration and calling conventions, you must have the "Called Function stack clean-up" provided by using __stdcall and the undecorated uppercase name.</P>
+<P CLASS="t">Because there is no way to override who does the stack clean up, you must use __stdcall. To undecorate names with __stdcall, you must specify them by using aliases in the EXPORTS section of the .def file. This is shown below for the following function declaration:</P>
+<P CLASS="spacing"><BR></P>
+<PRE><FONT FACE="Courier" SIZE="2">   int  __stdcall MyFunc (int a, double b);
+   void __stdcall InitCode (void);</FONT></PRE>
+<P CLASS="t">In the .def file:</P>
+<P CLASS="spacing"><BR></P>
+<PRE><FONT FACE="Courier" SIZE="2">   EXPORTS
+      MYFUNC=_MyFunc@12
+      INITCODE=_InitCode@0
+</FONT></PRE></FONT>
+</FONT></BODY></HTML>

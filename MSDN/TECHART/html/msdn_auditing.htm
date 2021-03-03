@@ -1,0 +1,302 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Auditing, or the Other Side of Security</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><a name="msdn_auditing"></a>Auditing, or the Other Side of Security</h1>
+<p>
+Ruediger R. Asche<br>
+Microsoft Developer Network Technology Group</p>
+<p>
+July 31, 1995</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="4413">
+</OBJECT><a href="javascript:sample1.Click()">Click to open or copy the files in the CLIAPP/SRVAPP sample applications.</a></p>
+<h2>Abstract</h2>
+<p>
+Following up on my article series on Microsoft® Windows NT™ security (see <a href="msdn_seccpp.htm">"Windows NT Security in Theory and Practice"</a> and associated articles in the MSDN Library), this article shows how you can incorporate auditing within the <b>CSecureableObject</b> C++ class hierarchy. I discuss the necessary steps for turning on auditing on a Windows NT machine and explain how to programmatically generate audit log entries for system-provided and private securable objects.</p>
+<p>
+CLIAPP/SRVAPP, a sample application suite that consists of a database client and server, illustrates the concepts introduced in this article.</p>
+<h2>Introduction</h2>
+<p>
+As I mentioned in the article <a href="msdn_seccpp.htm">"Windows NT Security in Theory and Practice,"</a> the Microsoft® Windows NT™ security application programming interface (API) has two major purposes: to protect objects and to monitor object access. So far in this article series, we have discussed the first aspect, that is, how to protect objects from unauthorized access. This article will deal with the second issue: how to inform a Windows NT server about object access.</p>
+<p>
+When I enhanced the SRVAPP application to add auditing to the <b>CSecureableObject</b> hierarchy, I discovered that a number of strategies in the auditing world are similar to corresponding strategies concerning object protection. However, there are some rather subtle differences in how your machine and your accounts must be set up to deal with auditing. In the first section of this article, I will discuss the analogy between system access control lists (SACLs) and discretionary access control lists (DACLs). The second section will present the code I wrote to manipulate auditing data structures, and the third section will deal with pragmatics, that is, additional information you need about auditing.</p>
+<h2>DACLs vs. SACLs</h2>
+<p>
+Let us quickly recap what we know about security so far. To secure an object against unauthorized access, we associate the object with a <i>security descriptor</i> (SD). The SD has one slot for a <i>discretionary access control list</i> (DACL), which defines the rights individual users or user groups have on the object. Users are identified by unique <i>access tokens</i>, which are consulted whenever an application attempts to access the object. Depending on the object type we are dealing with, either the operating system or the application code matches the DACL in the object's SD against the requesting access token and either grants or refuses the attempted access.</p>
+<p>
+Auditing works similarly. In addition to the slot for the DACL, each SD can accommodate a similar data structure called a <i>system access control list</i> (SACL). Like a DACL, a SACL consists of a list of smaller data structures called <i>access control elements</i> (ACEs). However, while ACEs in DACLs specify user rights (such as "the right to remove eggs from the carton is denied to the user BOZO and everybody in the ELEPHANT group"), ACEs in SACLs specify auditing directives (such as "inform Mom every time somebody from the KIDS group attempts to remove eggs from the carton, regardless of whether the attempt succeeds"). Like ACEs in DACLs, ACEs in SACLs must specify the user or user group and the type of access to be monitored. Thus, building an ACE and linking an ACE to an SACL is almost identical to the process in a DACL. The difference between the ACEs in DACLs and the ACEs in SACLs is that an entry in a DACL may cause a client's attempt to access an object to be refused, whereas an entry in a SACL may cause the server to be alerted when something happens.</p>
+<p>
+Could I be any less specific? What does "cause the server to be alerted when something happens" mean?</p>
+<p>
+First, let's talk about the server to be alerted. When an user does something (here's that "something" again—hang on, I'll tell you what that is in a sec) to an object associated with a SACL that is to be monitored, an event is logged in the security event log on the server machine. This log basically consists of a few informative bits in memory—it is up to a server application to utilize it. One of the things you can do with audit events is to view them interactively with the Event Viewer that is provided with Windows NT (generally located in the Administrative Tools group in Program Manager). Bring up the Event Viewer (notice that it takes special privileges to be able to view events), choose Security from the Log menu, and click one of the entries. The figure below shows a sample entry taken from running the SRVAPP sample.</p>
+<p>
+<img src="auditing_1.gif" border=0></p>
+<p class=label>
+<b>Sample entry from Event Viewer</b></p>
+<p>
+Here we see that the user "ruediger" tried to access the object "TestBase" and failed because the access was not granted.</p>
+<p>
+Note that the Event Viewer, like the Clipboard Viewer, is nothing but a convenient front-end for viewing events. Using Windows NT's event log API, you can retrieve the log entries programmatically and use, for example, the messaging API (MAPI) to send e-mail to Mom whenever the security system monitors an attempt by one of the kids to remove the eggs from the carton. Or you could write a service that scans the event log in the background and converts each new entry into a new line in a Microsoft Excel spreadsheet, and show the sheet to Mom at the end of each week, possibly to keep count of the remaining number of eggs in the fridge. This way, she can ask Dad to bring home a new carton of eggs when only a few eggs are left.</p>
+<p>
+Anyway, let's go back to the technical discussion. I mentioned earlier that the code to build and manipulate SACLs is similar to the code to build and maintain DACLs, and, furthermore, that both structures are kept in SDs. Therefore, if you have already written the code that associates an SD with an object, all you need to do to add auditing is to add an SACL to the existing SD.</p>
+<p>
+In theory, that is.</p>
+<p>
+In practice, you need to do a few more things to use both SACLs and DACLs in the same SD. Let's look at some sample code.</p>
+<h2>Adding Auditing Capabilities to CSecureableObject</h2>
+<p>
+If you expect the <b>CSecureableObject</b> class hierarchy to be fortified by new member functions such as <b>AddAuditingForUserAndAccess</b>, you are probably in for a disappointment. I have always felt that a sample application loses a lot of value when it shows more than what is minimally necessary; thus, to demonstrate auditing in the sample application set, I simply added some code to the constructor of <b>CSecureableObject</b> to enable auditing access by everybody. I'm sure you will be able to add more ACEs to the SACL or do whatever your application needs. I will help you with the tough part: linking the SACL to an object.</p>
+<p>
+The code I present in this article can be found in the updated version of the CLIAPP/SRVAPP sample suite that is included with this article series. Note that none of the changes affect the client side. In fact, if you still have an old version of the client application, you can run that application unmodified and not see any change in its behavior.</p>
+<p>
+I wrote the code below to add an SACL to an SD. There is nothing magical about the code—it is mostly an exercise in cut-and-paste. Remember that the security descriptor <b>m_sd</b> has been previously initialized and associated with a DACL. (The code below is from SEC.CPP.)</p>
+<pre><code>// At this point, we need to go through the same procedure with an SACL...
+ if (pcSid) free (pcSid);
+ pcSid = NULL;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // We reuse this data structure.
+ iTempSidLength = GetSidLengthRequired(1); // This cannot fail.
+ pcSid = (PSID)malloc(iTempSidLength); 
+ if (!pcSid)
+ {
+  SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+  goto ErrorExit;
+ };
+ dwDACLLength = sizeof (ACL) +sizeof (SYSTEM_AUDIT_ACE) - sizeof (DWORD) + 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iTempSidLength;
+ m_pSACL = (PACL) malloc(dwDACLLength);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ if (!m_pSACL)
+ {
+  SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+  goto ErrorExit;
+ }; 
+ if (!InitializeAcl(m_pSACL,dwDACLLength,ACL_REVISION) 
+ &nbsp;&nbsp;&nbsp; ||!InitializeSid(pcSid,&amp;siaWorld,1))
+  goto ErrorExit;
+ *(GetSidSubAuthority(pcSid,0)) = SECURITY_WORLD_RID;
+ if (!AddAuditAccessAce(m_pSACL,ACL_REVISION,GENERIC_ALL|STANDARD_RIGHTS_ALL|
+ &nbsp;&nbsp;&nbsp; SPECIFIC_RIGHTS_ALL,pcSid,TRUE,TRUE)) goto ErrorExit;
+ if (!SetSecurityDescriptorSacl(m_pSD,TRUE,m_pSACL,FALSE)) goto ErrorExit;
+
+ SetLastError(ERROR_SUCCESS);
+ErrorExit:
+ m_iSecErrorCode = GetLastError(); 
+ if (pcSid) free (pcSid);
+</code></pre>
+<p>
+Note that the SD is nothing but a data structure in memory at this point and has no association whatsoever with the object that it is supposed to protect. As I discussed in the article <a href="msdn_secguts.htm">"The Guts of Security,"</a> we turn the SD into an "official" data structure by calling one of the security functions that associate the SD with an object: <b>SetKernelObjectSecurity</b>, <b>SetUserObjectSecurity</b>, or <b>SetPrivateObjectSecurity</b>.</p>
+<p>
+I also changed the calls to set the system security along with the discretionary security; for example, in the <b>CKernelSecObject::SetTheDescriptor</b> function:</p>
+<pre><code>if (!SetKernelObjectSecurity(...,DACL_SECURITY_INFORMATION|SACL_SECURITY_
+ &nbsp;&nbsp; INFORMATION))...
+</code></pre>
+<p>
+This line tells the security system to use both the SACL and DACL from the security descriptor for the object's internal security descriptor. Note that you could ask the security system to ignore existing auditing information when building the object's SD by leaving out SACL_SECURITY_INFORMATION from the call above.</p>
+<p>
+The big surprise was that the <b>SetKernelObjectSecurity</b> function returned with the error "access denied," refusing to perform the security change. What happened?</p>
+<p>
+The documentation says that the calling process needs to have <b>SeSecurityPrivilege</b> enabled to access the system security. Ah, a meta-security issue! So although DACL information can be changed without special privileges, a server application must be run by a user who has a certain privilege to perform auditing! Interesting. . . So my next task was to learn everything about the wonderful world of privileges. So here we go.</p>
+<h3>Privileges, or "To Have or to Have Not"</h3>
+<p>
+I discussed the concept of privileges in my earlier article, <a href="msdn_seccpp.htm">"Windows NT Security in Theory and Practice."</a> In summary, a privilege constitutes the part of the security model that is not centered around specific objects; instead, a privilege is associated with an access token. </p>
+<p>
+There is a subtle but important distinction between "having a privilege" and "having a privilege enabled." If a user (or, to be more precise, an access token) "has a privilege," all that means is that an entry that represents the privilege exists in the access token. To use the privilege, a server must "enable" it.</p>
+<p>
+To make this a little bit clearer, let us look at the privilege section of a sample access token. The following access token dump was generated by calling the <b>ExamineAccessToken</b> function from EXAMSTFF.CPP:</p>
+<pre><code>Token privileges (16)
+  NOTE: Most token privileges are not enabled by default.
+ &nbsp;&nbsp; For example, the privilege to reboot or logoff is not.
+ &nbsp;&nbsp; 0x00000000 for attributes implies the privilege is not enabled.
+ &nbsp;&nbsp; Use care when enabling privileges. Enable only those needed,
+ &nbsp;&nbsp; and leave them enabled only for as long as they are needed.
+  Token's privilege (00) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeChangeNotifyPrivilege
+  Token's privilege (00) attributes == 0x00000003
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000001 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SE_PRIVILEGE_ENABLED_BY_DEFAULT
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_PRIVILEGE_ENABLED
+  Token's privilege (01) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeShutdownPrivilege
+  Token's privilege (01) attributes == 0x00000000
+  Token's privilege (02) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeSecurityPrivilege
+  Token's privilege (02) attributes == 0x00000000
+  Token's privilege (03) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeBackupPrivilege
+  Token's privilege (03) attributes == 0x00000000
+  Token's privilege (04) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeRestorePrivilege
+  Token's privilege (04) attributes == 0x00000000
+  Token's privilege (05) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeSystemtimePrivilege
+  Token's privilege (05) attributes == 0x00000000
+  Token's privilege (06) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeRemoteShutdownPrivilege
+  Token's privilege (06) attributes == 0x00000000
+  Token's privilege (07) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeTakeOwnershipPrivilege
+  Token's privilege (07) attributes == 0x00000000
+  Token's privilege (08) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeDebugPrivilege
+  Token's privilege (08) attributes == 0x00000002
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x00000002 SE_PRIVILEGE_ENABLED
+  Token's privilege (09) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeSystemEnvironmentPrivilege
+  Token's privilege (09) attributes == 0x00000000
+  Token's privilege (10) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeSystemProfilePrivilege
+  Token's privilege (10) attributes == 0x00000000
+  Token's privilege (11) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeProfileSingleProcessPrivilege
+  Token's privilege (11) attributes == 0x00000000
+  Token's privilege (12) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeIncreaseBasePriorityPrivilege
+  Token's privilege (12) attributes == 0x00000000
+  Token's privilege (13) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeLoadDriverPrivilege
+  Token's privilege (13) attributes == 0x00000000
+  Token's privilege (14) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeCreatePagefilePrivilege
+  Token's privilege (14) attributes == 0x00000000
+  Token's privilege (15) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeIncreaseQuotaPrivilege
+  Token's privilege (15) attributes == 0x00000000
+</code></pre>
+<p>
+You will notice that the token has only 16 privileges (only one of which is enabled), but Windows NT currently defines 24 privileges. Where are the other 8 privileges?</p>
+<p>
+It's rather simple: The access token does not have the privilege, therefore trying to enable one of the missing privileges with the <b>AdjustTokenInformation</b> call does not succeed. (To be precise, the call to <b>AdjustTokenPrivileges</b> returns TRUE, but a <b>GetLastError</b> call returns ERROR_PRIVILEGE_NOT_HELD. You figure.)</p>
+<p>
+How do you assign the privilege? Before Windows NT version 3.51, you could assign a privilege only interactively, from the User Rights dialog box in the User Manager Policies dialog box. Using this technique, you must log off from Windows NT after assigning the privilege and then log on again for the updated access token to take effect.</p>
+<p>
+Windows NT 3.51 exposes the calls for assigning privileges in the LSA API; that is, you can now assign privileges to users programmatically, but you will still need to log off and log on again as the user for the changes to take effect.</p>
+<p>
+After the privilege has been assigned but not enabled, you can see the privilege in the access token dump as follows: </p>
+<pre><code>&nbsp;&nbsp;Token's privilege (16) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeAuditPrivilege
+  Token's privilege (16) attributes == 0x00000000
+</code></pre>
+<p>
+To figure out which privilege you need to do something, look in the Win32® Software Development Kit (SDK) documentation. The comments section for a particular function generally includes a remark such as "A process must have the AUDIT_NAME privilege enabled to call this function." </p>
+<p>
+Great. . . The privilege is called AUDIT_NAME, but if you want to enable the privilege using <b>AdjustTokenPrivileges</b> later on, you need to pass the string "SeAuditPrivilege," but neither the privilege name nor the string is visible in the User Manager, User Rights dialog box. How do we know which privilege goes with which description?</p>
+<p>
+Fortunately, you have the MSDN Library CD. You can find a list of all privilege names, along with their corresponding strings and the complete descriptions that appear in the User Manager, in the Knowledge Base article Q101366, "Definition and List of Windows NT Advanced User Rights." The description of AUDIT_NAME in that article states: "The user can generate audit-log entries." This is what you need to select in the User Manager, Policies/User Rights dialog box to assign the AUDIT_NAME privilege to a user. When you make that assignment, and then log off and on again, the server application can successfully enable the privilege using <b>AdjustTokenInformation</b>, passing in the "SeAuditPrivilege" string. Phew! </p>
+<p>
+If you wish to determine the names of the privileges programmatically, you can use the <b>LookupPrivilegeDisplayName</b> and <b>LookupPrivilegeName</b> functions.</p>
+<p>
+After learning all of this about privileges, I recycled a function that I had seen before: <b>SetPrivilegeInAccessToken</b>, which is used in the CHECK_SD sample to enable the <b>SeSecurityPrivilege</b> we need to access system security. Right behind the call to <b>SetPrivilegeInAccessToken</b>, I inserted a call to <b>ExamineAccessToken</b> to double-check that I had done the right thing. The access token dump revealed that the access token indeed had <b>SeSecurityPrivilege</b> enabled:</p>
+<pre><code>&nbsp;&nbsp;Token's privilege (16) name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; == SeAuditPrivilege
+  Token's privilege (16) attributes == 0x00000002 SE_PRIVILEGE_ENABLED
+</code></pre>
+<p>
+We see there that the <b>SeSecurityPrivilege</b> is indeed enabled, so now we should be able to call <b>SetKernelObjectSecurity</b> and succeed, right?</p>
+<p>
+Wrong. The documentation is a bit unclear here. What the <b>SeSecurityPrivilege</b> buys us is simply the ability to obtain a new handle to the kernel object that requests ACCESS_SYSTEM_SECURITY rights. It is that NEW handle on which <b>SetKernelObjectSecurity</b> succeeds. Let us look at the modified code for <b>CKernelSecObject::SetObjectSecurity</b>:</p>
+<pre><code>BOOL CKernelSecObject::SetObjectSecurity(HANDLE hObject)
+{
+ BOOL bErrorCode=TRUE;
+ if (!SetKernelObjectSecurity(hObject,DACL_SECURITY_INFORMATION|
+ &nbsp;&nbsp;&nbsp; SACL_SECURITY_INFORMATION,m_pSD))
+ { 
+  m_iSecErrorCode = GetLastError();
+  bErrorCode = FALSE;
+ };
+
+ FreeDataStructures();
+
+ return bErrorCode;
+};
+</code></pre>
+<p>
+The only difference between this code and the old version is that now we request SACL_SECURITY_INFORMATION along with the previous DACL_SECURITY_INFORMATION access to the handle. To do that, the object-specific implementation of <b>SetTheDescriptor</b> must duplicate the handle, as we discussed earlier. The example below is for the secured file-mapping object:</p>
+<pre><code>BOOL CSecuredFileMapping::SetTheDescriptor(void)
+{
+ HANDLE hNewHandle;
+ BOOL bReturn=FALSE;
+ SetPrivilegeInAccessToken(TRUE);
+
+ if (!DuplicateHandle(GetCurrentProcess(),m_hMap,GetCurrentProcess(),&amp;hNewHandle,
+ WRITE_DAC|ACCESS_SYSTEM_SECURITY,NULL,NULL))
+ {
+  GetLastError();
+  goto ErrorExit;
+ };
+
+ bReturn = SetObjectSecurity(hNewHandle);
+ CloseHandle(hNewHandle);
+ ErrorExit:
+ SetPrivilegeInAccessToken(FALSE);
+ return bReturn;
+
+};
+</code></pre>
+<p>
+As long as the <b>SeSecurityPrivilege</b> privilege is not enabled, the <b>DuplicateHandle</b> call will fail with the error "access denied." With the privilege enabled, we can obtain the duplicate handle, use <b>SetKernelObjectSecurity</b> on it, and then close the handle. Note that the WRITE_DAC access is necessary to set the DACL from the security descriptor to the object. Note, once more, that no special privilege is necessary to request WRITE_DAC access to the handle, but that the <b>SeSecurityPrivilege</b> privilege must be enabled to request ACCESS_SYSTEM_SECURITY.</p>
+<p>
+The same argument holds for the <b>GetTheDescriptor</b> member function, except that WRITE_DAC is required to set a DACL, whereas READ_CONTROL is required to read a DACL from an object. Thus, in the <b>CSecuredFileMapping::GetTheDescriptor</b> function, WRITE_DAC is replaced by READ_CONTROL.</p>
+<p>
+Now here is something else that may make you wonder: My definition of a kernel-secure object is an object that is initially associated with a DACL that doesn't grant access to anyone. Thus, the very first time an object's security is set, the object's default DACL is replaced by a very strictly secured DACL. Doesn't it now follow that the next time we access an object's DACL, we wouldn't even be able to request READ_CONTROL because the object is now so secure that it is even protected against that access?</p>
+<p>
+You may be surprised to learn that this is not the case: Although the object is now associated with security information that does not grant anyone any rights, we can still duplicate the handle with a request to access WRITE_DAC or READ_CONTROL. Is that a security leak?</p>
+<p>
+No, it is simply a slick design that provides a well-controlled trap door to make sure that we cannot pull the carpet from under our own feet. A security descriptor contains not only a DACL and an SACL, but also an SID that represents the owner. The owner always has special rights, one of which is to be able to access the object's DACL. This is a nice way to keep the owner of an object from locking himself or herself out. Of course, it is possible to either reset the owner to somebody without rights, or to change the rights of the owner. This way, you can write an application that secures an object so well that nobody can possibly do anything with it (like the poor chap who built himself a fallout shelter so secure that after he locked himself in, he couldn't get out, so he starved to death).</p>
+<p>
+In any case, the server application that created the objects in the first place is their owner and can, therefore, change the security regardless of whether the right to access the security is granted.</p>
+<p>
+Note one more thing: When you call <b>DuplicateHandle</b> to obtain a handle that allows you to party on the object's DACL and SACL, at the minimum, you must specify ACCESS_SYSTEM_SECURITY and either READ_CONTROL or WRITE_DAC access at the minimum, depending on whether you want to read from, or write to, the object's security. Why don't we specify anything else, for example, FILE_MAP_ALL_ACCESS for file-mapping objects? This includes READ_CONTROL|WRITE_DAC, so wouldn't it be safest to request all access?</p>
+<p>
+Nope, because now the argument about the stiffly protected objects holds. If you specified ACCESS_SYSTEM_SECURITY|FILE_MAP_ALL_ACCESS as requested rights for <b>DuplicateHandle</b> on a file-mapping object, the doomsday scenario that I pictured earlier would kick in: The first time you set the security, you are fine, because the default DACL for file-mapping objects grants you FILE_MAP_ALL_ACCESS. Then you associate a new DACL with the object. This DACL grants nobody access, so the next time you try to duplicate a handle to the object, you have locked yourself out because you, as the owner, may have READ_CONTROL and WRITE_DAC access, but none of the other rights that FILE_MAP_ALL_ACCESS contains. Thus, minimal is best when it comes to security.</p>
+<h3>No More "Access Denied" Errors! What's Next?</h3>
+<p>
+After I figured out all of these little trapdoors and gotchas (some of which I wouldn't have figured out without the help of some of the developers of the security system), I single-stepped through the code and received no more "access denied" errors. I figured that I would now be able to see the event log entries in the Event Viewer, but I was mistaken: I had to solve one more piece of the puzzle—enabling object auditing. (I already took the fun out by revealing this to you in the preceding section on privileges.)</p>
+<p>
+At this point, I had extended the original client-server application set to incorporate auditing on kernel objects. That is, whenever the client tried to access either the secured mutex, the secured shared file, or the secured named pipe, a new event log entry was generated.</p>
+<p>
+One last piece was missing, and that was extending the auditing capabilities to privately secured objects. You will recall that the server application manages four secured object types: mutexes, named pipes, shared files, and a homegrown database object. Let us see how we can add auditing to privately secured objects.</p>
+<h2>Private Objects and Auditing</h2>
+<p>
+When it comes to DACLs, the effort it takes to protect objects against unauthorized access is considerably higher for private objects than for kernel or user objects, as we saw in the article <a href="msdn_secguts.htm">"The Guts of Security."</a> There are two reasons for this oddity:
+<ul type=disc>
+<li>
+The operations on objects provided by Windows NT are predefined by the system, whereas the operations on private objects are defined by the server application. Thus, it is up to the server to determine which action by a client constitutes what type of access, and the server must explicitly match a client's access request against the object. (When accessing system-provided objects, the security check is made implicitly.)<br><br></li>
+<li>
+A server has to handle and maintain a few additional data structures associated with private security. These data structures (which are exposed to the server application through an opaque concept labeled "private object security") must not only provide a secure entryway to the server objects, but must also be invulnerable to security breaches themselves.</li>
+</ul>
+<p>
+That said, I had a slight suspicion that auditing private objects would provide a number of new and interesting challenges over kernel objects. Guess what? I was right.</p>
+<p>
+My first thought was, hey, maybe the <b>AccessCheck</b> function (which performs the security check in <b>CPrivateSecObject::MatchAccessRequest</b>) is smart enough to see if the SD it works on has an SACL associated with it, and will, therefore, automatically generate an audit if the SACL says so. <b>AccessCheck</b> is called. Nice try, but wrong answer. Next candidate, please.</p>
+<p>
+It turns out that a second-degree cousin of <b>AccessCheck</b> called <b>AccessCheckAndAuditAlarm</b> does exactly what <b>AccessCheck</b> does, but also generates audit logs according to the SACL information in its security descriptor. (In other words, <b>AccessCheckAndAuditAlarm</b> does exactly what I wanted it to do.) Unfortunately, you cannot simply replace <b>AccessCheck</b> with <b>AccessCheckAndAuditAlarm</b>, because the two functions are, well, second-degree cousins.</p>
+<p>
+Some of the parameters of <b>AccessCheck</b> and <b>AccessCheckAndAuditAlarm</b> overlap, but <b>AccessCheckAndAuditAlarm</b> has some new parameters. Also, the user that runs the server application must have the <b>SeAuditPrivilege</b> privilege enabled to call <b>AccessCheckAndAuditAlarm</b>. Recall the distinction between "having a privilege" and "having a privilege enabled," which I discussed earlier. By default, the <b>SeAuditPrivilege</b> is not even in your access token, so you must first assign the privilege to the token, and then enable it programmatically.</p>
+<p>
+The first three parameters of <b>AccessCheckAndAuditAlarm</b> are strings that will be copied into the log entry. The first parameter is the identifier of the "object server," which is basically a process or service that maintains a custom securable object. Our server application is an object server because it maintains the database object type. I chose the name "DBServer" to identify the server application. The name of the object server will show up in the security log entry to inform the user which process generated the audit.</p>
+<p>
+The second string identifies the object type, and the third parameter specifies the name of the object instance. If your application supports multiple instances of object types, it is a good idea to assign unique names to each generated object to make it easier for the user of the security log to determine which instance of the object type caused the audit. Likewise, the object type name provides a nice way for you to distinguish between multiple object types.</p>
+<p>
+With the exception of the second parameter (object handle) and last parameter (<b>bAuditGenerated</b>), all remaining parameters of <b>AccessCheckAndAuditAlarm</b> are identical to <b>AccessCheck</b> parameters, so I will not discuss them here (please refer to <a href="msdn_secguts.htm">"The Guts of Security"</a> for more information). The last parameter (<b>bAuditGenerated</b>) is for subsequent use with the <b>ObjectCloseAuditAlarm</b> function, and the object handle parameter identifies the security log entry. It is up to you to determine what the value should be. There is no requirement that the handle must be unique, but using a unique handle can help you determine which object access has generated a log entry. For the <b>CPrivateSecObject</b> class, I devised a hack to make the handles unique: Each instance of a <b>CPrivateSecObject</b> object has a private member variable called <b>m_dwUniqueHandleId</b>. This member variable is initialized to the <b>this</b> pointer, converted to a <b>DWORD</b>, and with every successful audit, the handle is incremented. This is useful for debugging purposes, because you can always determine the <b>this</b> pointer from a debugger. This, along with the current value of the <b>m_dwUniqueHandleId</b> member, can help you track down the object access generated by the security log entry.</p>
+<h2>Debugging Secure Servers</h2>
+<p>
+Debugging secure servers is not at all like debugging anything else. The problems you most frequently encounter in most applications are data overwrites, access violations, synchronization problems, and the like. The problem you generally encounter in a secure server is that one function call that is supposed to succeed returns the error "access denied," or a call that should fail with "access denied" returns successfully. Even worse, you can't really poke around in the system to figure out what's going on (for security reasons).</p>
+<p>
+The best thing to do to figure out why a client has access when he/she shouldn't or vice versa is to manually examine the SD associated with the object in question and the access token of the requesting client at the same time. There are two ways to accomplish this:
+<ul type=disc>
+<li>
+Programmatically, you can use the <b>ExamineSD</b> and <b>ExamineAccessToken</b> functions in your server code to look at the data structures.<br><br></li>
+<li>
+You can use the PView utility from the Win32 SDK to examine a user's access token from the "outside," and the ObjDir utility from the Windows NT Resource Kit to examine the security descriptors for named Windows NT objects. For files and other objects, you can use the Permissions and Auditing dialogs from File Manager or other utilities to study the contents of security descriptors.</li>
+</ul>
+<p>
+Given the access token and SD information, you should be able to determine why your object access calls and audit requests behave the way they do.</p>
+<h2>Summary</h2>
+<p>
+To make auditing work in your server application, you need to do a number of things. I have put together a checklist to make sure that everything works smoothly:
+<ul type=disc>
+<li>
+To <b>view</b> events using the Event Viewer, the user who runs the Event Viewer must have the privilege to maintain audit and security logs. We have not discussed this before, but it is fairly elementary—you wouldn't even be able to start up the Event Viewer without this privilege. Normally, this privilege is granted to administrators. If Windows NT does not allow you to view the event log, bring up User Manager, choose User Rights from the Policies menu, and try to assign yourself the right to maintain audit and security logs. Then log off and log on again.<br><br></li>
+<li>
+To <b>generate</b> audit events, the server application must run under an account that has the AUDIT_NAME privilege enabled. Follow the instructions above to assign the privilege to generate audits.<br><br></li>
+<li>
+From User Manager, choose Audit from the Policies menu and check "File and Object Access" in the Audit These Events box. To confirm that auditing has been enabled, you can run a quick sanity check if your machine has an NTFS partition: Select any file on that partition from File Manager, bring up the Auditing dialog, and specify that read access to that object is to be audited. (Note that this interactive procedure is absolutely the same as writing some code that builds an SACL and associates the SACL with that file.) Load that file into Notepad and use the Event Viewer to check whether the audit was successful.<br><br></li>
+<li>
+Build a security descriptor that contains an SACL that specifies the events to audit. Make sure that all security API calls that are involved in building the security descriptor succeed.<br><br></li>
+<li>
+Associate the security descriptor with an object using the appropriate <b>Set<i>xxx</i>ObjectSecurity</b> function. Note that for kernel objects, you must first duplicate the existing handle, requesting ACCESS_SYSTEM_SECURITY, before submitting the <b>SetKernelObjectSecurity</b> call. This process requires the <b>SeSecurityPrivilege</b> to be enabled.</li>
+</ul>
+</BODY>
+</HTML>

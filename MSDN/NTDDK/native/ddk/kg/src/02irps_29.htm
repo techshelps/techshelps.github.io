@@ -1,0 +1,178 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML>
+<HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>2.5.8  Points to Consider about NT Objects</TITLE>
+<style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD>
+<BODY BGPROPERTIES="FIXED" TEXT="#000000" BGCOLOR="#FFFFFF">
+
+<FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<H3><A NAME="DDK_Points_to_Consider_about_NT_Objects_KG"></A>2.5.8  Points to Consider about NT Objects</H3>
+<P>
+Keep the following points in mind when designing an NT driver:
+<UL>
+<LI>
+Except for video and SCSI miniport drivers, every NT driver must create a
+named device object to represent each physical, logical, or virtual device
+that could be a target for an I/O request.
+<P>
+For example, a replacement parallel port or serial driver should create a
+logical device object for each port. By contrast, a new virtual disk driver
+that presented every hard disk in the machine as one big disk device could
+create a single device object to represent its disk, plus some number of
+device objects representing disk partitions for the file systems layered over
+such an intermediate driver.
+<P>
+<LI>
+For most NT device and intermediate drivers, the device extension of each
+device object is each driver’s primary (and frequently only) global data
+storage area. Many NT drivers maintain device state and all other
+driver-specific or device-specific data and resources a driver needs in the
+driver-defined device extension(s) of one or more driver-created device
+objects.
+<P>
+The driver-specific I/O stack location in IRPs can be considered an
+operation-specific local storage area for some kinds of data.
+<P>
+<LI>
+NT drivers of slave DMA devices that use the system DMA contoller(s) must have
+an AdapterControl routine and call the system-supplied support routines that
+manipulate adapter objects in order to carry out DMA transfers.
+<P>
+NT drivers of nonSCSI busmaster DMA devices usually must have an
+AdapterControl routine and must call the system-supplied support routines that
+manipulate adapter objects in order to carry out DMA transfers.
+<P>
+The NT SCSI port driver sets up all necessary adapter objects for HBA-specific
+SCSI miniport drivers.
+<P>
+<LI>
+A driver of physical devices that are connected to a device controller may or
+may not represent the physical controller with a driver-created controller
+object and implement a ControllerControl routine to synchronize operations
+between attached devices. Generally, drivers use controller objects to
+synchronize operations to attached devices if the following criteria hold:
+<P>
+<UL>
+<LI>
+The controller does not carry out long operations without interrupting, so the
+driver does not need to create a device-dedicated thread or use system worker
+threads.
+<P>
+<LI>
+The devices connected to the controller are similar. That is, they are not
+devices with entirely different physical properties or operational
+functionality, such as the keyboard and mouse devices that can be connected to
+the keyboard and auxiliary device controller (see <A HREF="02irps_13.htm#DDK_Figure_2..7_KG">Figure
+2.7</A>).
+<P>
+<LI>
+The driver is designed to be monolithic: single-layered in relation to the
+device controller and attached physical devices, rather than being designed as
+a port driver (for the controller) with one or more class drivers (for
+attached devices) layered over the port driver.
+</UL>
+<P>
+<LI>
+Consider the synchronization of operations for the system floppy controller,
+SCSI disk, and “AT” disk drivers described in this section:
+<P>
+<UL>
+<LI>
+Floppy Driver
+<P>
+This driver creates a device-dedicated thread because setting up its device
+controller for an I/O operation takes so much time (up to 375ms per command
+byte for up to 9 individually loaded bytes per I/O operation). This driver
+synchronizes all I/O operations for one or more floppy drives with its
+device-dedicated thread. The floppy driver queues IRPs to the floppy thread,
+which waits to complete all operations necessary to carry out each I/O request
+<I>before</I>&nbsp;starting the next IRP on the floppy controller. In effect, the
+floppy driver and thread synchronize operations between or among floppy drives
+by serializing IRPs in the driver’s interlocked queue and processing only one
+request to completion at a time.
+<P>
+<LI>
+SCSI Disk Driver
+<P>
+This driver is required to be an NT SCSI class driver. It sends requests to
+its disks through the NT SCSI port driver to HBAs driving buses with connected
+disk devices. The NT SCSI port driver is responsible for synchronizing
+operations for all SCSI class drivers, while the HBAs driving the SCSI buses
+are responsible for synchronizing hardware operations among peripheral devices
+on their respective buses.
+<P>
+The NT SCSI port driver creates a set of supplemental device queues to hold
+IRPs sent down by the higher-level NT SCSI class drivers, in order to manage
+the synchronization of requests to the SCSI peripheral devices on each HBA’s
+bus(es). The NT SCSI disk class driver simply sends each IRP down to the NT
+port driver, using the class/port interface, without having to synchronize
+operations among its target disks.
+<P>
+Each NT SCSI class driver sets up an IoCompletion routine for IRPs when the
+driver needs to determine the completion status of any operation it sends down
+to the NT SCSI port driver. For example, when a class driver must split
+transfers to suit the limits of a given HBA, the class driver’s IoCompletion
+routine can track the amount of data actually transferred in each sub-request
+it makes and free any IRPs and SRBs the class driver allocated for subtransfer
+requests.
+<P>
+<LI>
+“AT” Disk Driver
+<P>
+This driver is a monolithic (single-module) driver that uses a controller
+object to synchronize operations between attached disk devices. This driver
+programs the device controller and communicates directly only with the
+controller hardware in order to carry out I/O requests to the physical disks.
+However, its physical devices might have been managed by a disk class driver
+layered above a (controller) port driver, instead of by a monolithic driver.
+</UL>
+<P>
+<LI>
+A driver writer with any SCSI peripheral device (except tape) whose type is
+already handled by a system SCSI class driver has a choice about where to
+layer the driver:
+<P>
+<UL>
+<LI>
+A new SCSI filter driver can be inserted above the system class driver by
+attaching its device object(s) to the class driver’s. Note that such an SFD
+must attach itself to the class driver before any higher-level intermediate
+driver is loaded and before any higher-level file system driver mounts a
+volume on the physical device.
+<P>
+<LI>
+A new SCSI class driver can be layered over the NT port driver as another
+class driver that defines only the set of device objects necessary to
+represent its physical and/or logical devices. Unless the device requires the
+new driver to handle every I/O request differently than other SCSI devices of
+its type, writing an SFD takes much less time than writing such a new SCSI
+class driver.
+</UL>
+<P>
+<LI>
+NT drivers cannot and must not attempt to wait for a nonzero interval on a
+Kernel-defined dispatcher object in an arbitrary thread context. In other
+words, an NT driver can wait on a Kernel-defined event, semaphore, mutex, or
+timer object within its DriverEntry, Reinitialize, and certain Dispatch
+routines for inherently synchronous I/O operations. Otherwise, an NT driver
+cannot wait on a dispatcher object within most of its standard routines, which
+run at IRQL &gt;= DISPATCH_LEVEL and in an arbitrary thread context. (NT
+drivers must use a spin lock to synchronize access to shared resources by
+driver routines that run at IRQL &gt;= DISPATCH_LEVEL.)
+<P>
+If necessary, an NT driver can create a device-dedicated thread, which can
+wait on a dispatcher object that the driver’s other routines (except an ISR or
+SynchCritSection routine) can set to the Signaled state and reset to the
+Not-Signaled state. As a general guideline, if you expect that your new device
+driver will often need to stall for longer than 50 microseconds while it waits
+for device-state changes during I/O operations, consider implementing a driver
+with a device-dedicated thread. If such a device driver is also a
+highest-level driver, consider using system worker threads and implementing
+one or more worker-thread callback routines.
+</UL>
+<P>
+&nbsp;
+<P></FONT>
+</BODY>
+</HTML>

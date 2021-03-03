@@ -1,0 +1,281 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>DDE Execute Strings</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><a name="msdn_ddeexec"></a>DDE Execute Strings</h1>
+<p>
+Herman Rodent<br>
+Microsoft Developer Network Technology Group</p>
+<p>
+Created: November 16, 1992</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="267">
+</OBJECT><a href="javascript:sample1.Click()">Click to open or copy the files in the DDEExec sample application for this technical article.</a></p>
+<h2>Abstract</h2>
+<p>
+The dynamic data exchange (DDE) protocol includes a feature designed to allow a DDE client application to send commands to a DDE server. The syntax of these execute requests and the way they should be handled by servers is not well documented and, consequently, varies slightly with different implementations. </p>
+<p>
+The current DDE protocol has no provision for returning result information from an execute request, so a client application can only tell <i>that</i> the request failed, not <i>why</i> it failed.</p>
+<p>
+This article proposes a consistent way to handle DDE execute command requests and a mechanism that allows result information to be returned. This article covers the following points:
+<ul type=disc>
+<li>
+DDE execute command syntax<br><br></li>
+<li>
+Special characters in command arguments<br><br></li>
+<li>
+Unicode® considerations for Microsoft® Windows NT™<br><br></li>
+<li>
+The returning of result information</li>
+</ul>
+<p>
+DDEExec, the sample DDE server application included with this article, implements the proposals detailed here. DDEExec uses a single module of code that you can include directly in your own server application. The glue module (STDDDE.C) provides all the System topic support, and includes a complete execute command parser and a set of functions to radically simplify the creation of a DDE server. The sample uses the dynamic data exchange management library (DDEML) to provide the basic DDE protocol support. DDEML provides all the support a DDE application needs, eliminating the need to implement the DDE message protocol directly.</p>
+<h2>Introduction</h2>
+<p>
+The DDE protocol includes a feature called DDE execute that is designed to allow a DDE client application to send commands to a DDE server. This feature is supported by many full DDE servers such as Microsoft® Excel. It is also supported by applications such as the Microsoft® Windows™ operating system Program Manager, even though the Program Manager is not a regular DDE server. The sample code provided with this article makes it easy to provide execute command support in a DDE server. The DDEExec sample uses a single module of code to implement the basic server and includes full support for the System topic and for execute commands. This implementation uses a list to describe which commands are supported and an application programming interface (API) to allow commands to be added to and removed from the list, making it easy to implement the command set you need. For more information about the System topic, see the "Supporting the DDE System Topic" technical article on the Microsoft Developer Network CD (Technical Articles, Windows Articles, OLE and DDE Articles).</p>
+<p>
+Those applications that support DDE execute commands typically have slight variations in how they interpret the command strings and use different techniques for allowing the inclusion of special characters, such as quotation marks, in the argument strings. This article and its associated sample application propose a consistent way of parsing the commands and support a flexible method for including special characters in execute command strings.</p>
+<p>
+When a server fails to execute a command for whatever reason, it currently has no way to return error information to the calling client. This article also includes a proposal for an extension to the DDE protocol called the "Execute Control 1" protocol. This protocol provides a way for a DDE server to return an information string in response to executing a command. </p>
+<h2>Execute String Syntax</h2>
+<p>
+The syntax of the commands placed in DDE execute requests has evolved over time, with a large part of the definition coming from the earlier versions of Microsoft Excel. The DDE protocol itself has only a simplistic syntax definition for commands. More recently, other applications such as the Windows Program Manager have taken to supporting a limited set of DDE execute commands, and these applications have typically used a syntax similar to the one adopted by Microsoft Excel. The sample code with this article supports and enforces the use of the Microsoft Excel syntax.</p>
+<p>
+Table 1 shows the syntax of the execute command strings. This is intended as an aid to understanding the syntax, rather than as a formal definition. Please note that unless your application uses the sample code included with this article, all parsing of the execute strings is done by your code to your own conventions. The format of these strings is a convention only and is not enforced by any feature of the system.</p>
+<p class=label>
+<b>Table 1. The Syntax of Execute Command Strings </b></p>
+<table border=1 cellpadding=5 cols=3 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=22%><b>Name</b></td>
+<td class=label width=33%><b>Definition</b></td>
+<td class=label width=45%><b>Comment</b></td>
+</tr>
+<tr valign=top>
+<td width=22%>execute_string</td>
+<td width=33%>: command+</td>
+<td width=45%>An execute request consists of one or more commands.</td>
+</tr>
+<tr valign=top>
+<td width=22%>command</td>
+<td width=33%>: '[' command_name ']'<br>
+| '[' command_name args ']'</td>
+<td width=45%>Each command is enclosed in square brackets. A command may have an optional argument list.</td>
+</tr>
+<tr valign=top>
+<td width=22%>command_name</td>
+<td width=33%>: grchar+</td>
+<td width=45%>A valid command name consists of one or more alphanumeric characters.</td>
+</tr>
+<tr valign=top>
+<td width=22%>grchar</td>
+<td width=33%>: [a-zA-Z0-9!#$%^&amp;()-_{}~]</td>
+<td width=45%>The set of legal MS-DOS® file system characters.</td>
+</tr>
+<tr valign=top>
+<td width=22%>args</td>
+<td width=33%>: '(' arglist ')'</td>
+<td width=45%>Command arguments are contained within parentheses.</td>
+</tr>
+<tr valign=top>
+<td width=22%>arglist</td>
+<td width=33%>: arg<br>
+| arg ',' arglist<br>
+|</td>
+<td width=45%>An argument list consists of zero or more arguments separated by commas.</td>
+</tr>
+<tr valign=top>
+<td width=22%>arg</td>
+<td width=33%>: '"' string '"'<br>
+| string<br>
+|</td>
+<td width=45%>An argument consists of a string or a string enclosed in double quotation marks. The argument may be empty.</td>
+</tr>
+<tr valign=top>
+<td width=22%>string</td>
+<td width=33%>: grchar*</td>
+<td width=45%>A series of valid string characters.</td>
+</tr>
+</table><br>
+<p>
+The following set of examples are all valid command strings:</p>
+<pre><code>[pen(red)]
+[pen("red")]
+[text(5,8,"Hi there Herman!")]
+[Erase()]
+[Erase]
+</code></pre>
+<p>
+Note that when the command has no arguments (the Erase example above), it is valid to use only the command name or the command name with an empty set of parentheses. Since all arguments are treated as strings, using the empty set of parentheses results in the command being parsed as though it has one argument that consists of a string of zero length. This case is easily handled by the code that handles this command.</p>
+<p>
+Arguments may be simply omitted by supplying a zero-length string. The following example shows a command that takes three arguments, and the second argument has been omitted:</p>
+<pre><code>[ThreeArgCommand("arg 1",,"arg 3")]
+</code></pre>
+<p>
+Commands may be concatenated to form a single execute-request string. The commands will be executed in the order they occur in the request. For example, the following sequence of commands might be used to make a selection and copy it to the Clipboard:</p>
+<pre><code>[Select(all)][Copy]
+</code></pre>
+<h2>Including Special Characters in String Arguments</h2>
+<p>
+Characters that are not alphanumeric—quotation marks, tabs, and so on—can be embedded in the argument strings by using the backslash character (\) as an escape code. Quotation marks can also be included by inserting them as pairs. Both Microsoft Excel and Microsoft Visual Basic™ support inclusion of quotation marks as pairs. The backslash escape mechanism (as used in C strings) gives complete flexibility. The examples in Table 2 show the command string and resulting text.</p>
+<p class=label>
+<b>Table 2. Examples of Embedding Special Characters in Argument Strings</b></p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=50%><b>Argument</b></td>
+<td class=label width=50%><b>Resultant string</b></td>
+</tr>
+<tr valign=top>
+<td width=50%><code>"""Woof"", said the big dog."</code></td>
+<td width=50%><code>"Woof", said the big dog.</code></td>
+</tr>
+<tr valign=top>
+<td width=50%><code>"\"Woof\", said the big dog."</code></td>
+<td width=50%><code>"Woof", said the big dog.</code></td>
+</tr>
+</table><br>
+<p>
+The sample code supports both of the techniques illustrated in Table 2. When a function's arguments are parsed, the enclosing quotation marks (if used) are stripped off and any escape codes are removed before the argument is passed to the appropriate function.</p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;Because the escape characters are stripped from the strings, you cannot include the \0 (null) character in a string. Doing so effectively truncates the string.</p>
+<h2>Returning Result Information</h2>
+<p>
+The existing DDE protocol provides no way for a server to return information in response to a request to execute a command. Because of this, it is very difficult for a DDE client to determine why an execute request has failed. This section proposes a protocol to allow result information to be returned to the client.</p>
+<h3>A Warning About the Sample Code</h3>
+<p>
+Because this is only a proposal for a protocol, it has not been fully implemented in the sample source code. The sample code has a reduced protocol that shows the principle of the protocol, but it has several major flaws. It doesn't take conversation instances into account, so it is possible for one client to execute a command and the result string to be sent to a different client. It also does not keep the Result item active so it can have multiple results concatenated to it. </p>
+<h3>The "Execute Control 1" Protocol</h3>
+<p>
+This section describes the proposed protocol for returning error information from execute requests.</p>
+<h4>The simple view</h4>
+<p>
+When the client wants to be able to retrieve result information from the server, it tells the server that it would like to have this information saved in a named DDE item. It does this by sending a special execute command naming the Result item, followed by the command for which it wants to retrieve the result information. For example, let's say we are about to make a request to open a file and want to know if it succeeds or, if not, why it failed. To do this, we would send the following DDE execute command:</p>
+<pre><code>[Result(OpenResults)][Open(bogus.dat)]
+</code></pre>
+<p>
+The <b>Result</b> command tells the server to create a special temporary DDE item, called OpenResults, under the current conversation. When the <b>Open</b> command is executed, its result information is copied to the OpenResults item. When the command request is complete, the client can ask the server for the contents of the OpenResults item. The server will return the string returned by the <b>Open</b> command, and then delete the special temporary OpenResults item. The Visual Basic sample, EXEC, demonstrates this process. Try entering this command: </p>
+<pre><code>[pen(bogus)] 
+</code></pre>
+<p>
+Observe that the server returns a result string informing the client that the selected color is invalid. EXEC supports the protocol to the limited extent discussed in the "A Warning About the Sample Code" section.</p>
+<h4>A more complete description</h4>
+<p>
+For the returning of execute information to be as efficient as possible, the protocol should accommodate multiple commands in a single request and allow the server to return all the result information in one string. This makes for much less DDE traffic and simplifies things at the client end of the conversation. In addition, it helps if there is some defined format to the returned data so that the client can parse it in a simple and consistent way. Follow these rules when implementing the complete protocol.</p>
+<p>
+1.When a conversation is initiated, the Result item is set to NULL, and result reporting is disabled for the topic.</p>
+<p>
+2.When a client issues a <b>Result</b> command for the topic, any existing Result item data is freed, and the previous item is deleted. A client may disable result reporting by issuing the <b>Result</b> command with no item name:</p>
+<pre><code>[Result]
+</code></pre>
+<p>
+or</p>
+<pre><code>[Result()]
+</code></pre>
+<p>
+If the name of the item given in the <b>Result</b> command is the same as an existing item for the topic, the existing item should be suspended while the Result item is active. When result reporting is turned off, the original item is reactivated. Suspending an existing item is a choice that the client makes. The client can enumerate the current list of items for the topic, so there is no reason for it to override an existing item without being aware that it is doing so.</p>
+<p>
+3.Once a <b>Result</b> command is active, it remains active until the conversation is ended or a new <b>Result</b> command is issued.</p>
+<p>
+4.Whenever the server needs to return data in response to an execute command, it concatenates the new data onto the end of any existing Result item data. Each item is terminated by a fixed sequence. The default termination sequence is \r\n (carriage return, line feed).</p>
+<p>
+5.The set of characters allowed in result strings is limited to printable characters plus \r, \n, \t, and space. The server should support the <b>SetResultDelimiter</b> command to allow a different delimiting sequence to be set, and <b>GetResultDelimiter</b> to allow the current sequence to be read.</p>
+<p>
+6.Result strings that are returning error information should default to the form:</p>
+<pre><code>ERROR:#### --- &lt;text&gt;
+</code></pre>
+<p>
+This allows all clients to simply parse a result string and detect that an error occurred. The format of the result string is by default "ERROR:%d --- %s" (in <b>printf</b> style) and may be changed if the server supports a <b>SetErrorResultFormat</b> command. The server may also support a <b>GetErrorResultFormat</b> command to allow interrogation of the current format string.</p>
+<p>
+7.The result string is reset to empty whenever the Result item is advised or requested by a client.</p>
+<p>
+8.Result links can be updated by the server after each command is executed or after the entire string of commands is executed. Note that in raw DDE applications this can mean that the server posts one or more WM_DDE_DATA messages (containing the result information) before the WM_DDE_ACK for the execute command. Applications using raw DDE need to be coded carefully to cope with this. Applications using DDEML will not see this problem.</p>
+<p>
+9.Clients should ensure that they close any links established with Result items before changing the Result item. This will ensure that the client cannot receive result information from an existing item that was temporarily overridden by a Result item of the same name.</p>
+<h3>Supporting the "Execute Control 1" Protocol</h3>
+<p>
+Any server that supports returning information with the protocol described above should also support the Protocols item under the System topic by returning the "Execute Control 1" protocol string. DDEExec includes this support. Note that this is implemented in the sample code by providing it in the System topic Protocols item by default. If you decide to provide your own support for the Protocols item, you must include the "Execute Control 1" string as one of the supported protocols. In addition, the graphic command set supported by the sample is in itself a protocol of the server, and a name for this protocol should also be included in the server Protocols item. A typical name for this protocol might be "Microsoft DDEServ Graphic Protocol 1." Please refer to the source code in STDDDE.C for more details about how the Protocols item is implemented.</p>
+<p>
+Once again I want to emphasize that this is a <i>proposal </i>for a protocol and nothing more. Currently no applications support this protocol.</p>
+<h2>Working with Unicode in Windows NT</h2>
+<p>
+Applications that register a DDE window class that is Unicode must use Unicode execute strings when communicating with other Unicode DDE windows. They must use ASCII (OEM <i>codepage</i>) execute strings when communicating with non-Unicode DDE windows. Any window's state can be determined by calling <b>IsWindowUnicode</b>. This convention places the burden of backward compatibility on Unicode DDE applications.</p>
+<p>
+Unicode compatibility is only a problem for raw DDE applications because DDEML automatically translates execute strings. DDEML bases its translation decision on how DDEML was called—either by <b>DdeInitiateA</b> or <b>DdeInitiateW</b>—when the application first initialized the conversation.</p>
+<h2>The Sample Code</h2>
+<p>
+This technical article includes a number of sample applications.</p>
+<h3>The Server Application, DDEExec</h3>
+<p>
+The DDEExec sample is a DDE server implemented using the STDDDE.C module to do most of the work and DDEML to provide the DDE protocol implementation. The server supports a graphic command set, which allows a client to draw simple pictures. Table 3 lists the commands supported by the server.</p>
+<p class=label>
+<b>Table 3. The Command Set Supported by DDEExec</b></p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=50%><b>Command</b></td>
+<td class=label width=50%><b>Description</b></td>
+</tr>
+<tr valign=top>
+<td width=50%><b>Pen(<i>color</i>)</b></td>
+<td width=50%>Select the pen and text color.</td>
+</tr>
+<tr valign=top>
+<td width=50%><b>Brush(<i>color</i>)</b></td>
+<td width=50%>Select the brush and text background color.</td>
+</tr>
+<tr valign=top>
+<td width=50%><b>Line(<i>x1</i>,<i>y1</i>,<i>x2</i>,<i>y2</i>)</b></td>
+<td width=50%>Draw a line from (<i>x1</i>,<i>y1</i>) to (<i>x2</i>,<i>y2</i>) using the current pen color.</td>
+</tr>
+<tr valign=top>
+<td width=50%><b>Ellipse(<i>x1</i>,<i>y1</i>,<i>x2</i>,<i>y2</i>)</b></td>
+<td width=50%>Draw an ellipse bounded by the rectangle whose top-left corner is (<i>x1</i>,<i>y1</i>) and whose bottom-right corner is (<i>x2</i>,<i>y2</i>). The ellipse is drawn with the current pen color and filled with the current brush color.</td>
+</tr>
+<tr valign=top>
+<td width=50%><b>Rectangle(<i>x1</i>,<i>y1</i>,<i>x2</i>,<i>y2</i>)</b></td>
+<td width=50%>Draw a rectangle whose top-left corner is (<i>x1</i>,<i>y1</i>) and whose bottom-right corner is (<i>x2</i>,<i>y2</i>). The rectangle is drawn with the current pen color and filled with the current brush color.</td>
+</tr>
+<tr valign=top>
+<td width=50%><b>Erase()</b></td>
+<td width=50%>Erase the drawing area.</td>
+</tr>
+<tr valign=top>
+<td width=50%><b>Text(<i>x</i>,<i>y</i>,<i>text</i>)</b></td>
+<td width=50%>Write text starting at (<i>x</i>,<i>y</i>) using the current pen color for the text color and the current brush color for the enclosing rectangle.</td>
+</tr>
+</table><br>
+<p>
+Valid colors are red, blue, green, black, white, yellow, cyan, magenta, and gray.</p>
+<p>
+The command set in Table 3 is in itself a protocol and, therefore, should really be listed under the System topic Protocols item. The Windows version 3.1 registry keeps track of which protocols have been registered by applications. A discussion of the registration database is outside the scope of this article.</p>
+<h3>The Other Applications</h3>
+<p>
+BUNNY is a Visual Basic 2.0 program that draws a picture of a bunny. Gripping stuff, eh? WBUNNY.DOC is a Word for Windows version 2.0 document that uses the WBUNNY.DOT template to draw another bunny, this time in a kayak. XLART.XLM is a sample Microsoft Excel version 4.0 macro that draws a rather boring picture. EXEC is a Visual Basic 2.0 program that allows you to type a DDE command and send it to the server. EXEC shows the result text sent back by the server in response to the command. Try using EXEC to send some of the following commands to see what effect they have:</p>
+<pre><code>[Erase][pen(red)][line(0,0,50,50)]
+[snarfbuggle]
+[pen(bogus)]
+[pen(]
+</code></pre>
+<h3>STDDDE.C and STDDDE.H</h3>
+<p>
+STDDDE.C is a code module you can include in your own application to transform it into a DDE server. STDDDE.H is a header file that defines all the structures used and the functions supported by STDDDE.C. Look for the "Quick and Easy DDE Server" technical article, which describes how this module is used to create a DDE server, on the Microsoft Developer Network CD (Technical Articles, Windows Articles, OLE and DDE Articles)—or just browse the DDEExec sources to see how STDDDE is used.</p>
+<h2>Summary</h2>
+<p>
+Because this article is a mixture of DDE, DDEML, proposals, source examples, and so on that can be confusing, let me try to summarize it all for you.</p>
+<p>
+DDE is a protocol based on a special set of Windows-based messages that allows applications to exchange data and, in the case of this article, commands. DDEML is a dynamic-link library that implements the DDE protocol and provides a programming interface to applications to greatly simplify the addition of DDE features to an application. Any application written from today on should use DDEML rather than implement the DDE protocol itself.</p>
+<p>
+The code in the STDDDE.C module of the samples with this and other DDE articles is my own rendition of what I think a decent DDE server should be like. No hard and fast rules govern this—only convention. What I'm trying to do with the sample code is make it easier for you to do a good job. I'm not interested in restricting what you want to do. I want to encourage you to provide what I consider to be the minimum level of support for a DDE server and to do it in a way that looks consistent to client applications.</p>
+<p>
+This article and other related articles on the Developer Network CD make certain proposals about how DDE might be further developed. These are <i>proposals</i> only. The purpose of the proposals is to help the creators of DDE servers in the world work toward providing better, more consistent services in their applications.</p>
+</BODY>
+</HTML>

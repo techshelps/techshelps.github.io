@@ -1,0 +1,165 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Starting an Interactive Client Process</title>
+<link disabled rel=stylesheet href=../../backsdk3.css>
+<style type="text/css">
+@import url(../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h2><a name="_win32_starting_an_interactive_client_process"></a>Starting an Interactive Client Process</h2>
+<p>
+The following example uses the <a href="accclsrv_9cfm.htm"><b>LogonUser</b></a> function to start a new logon session for a client. The example gets the logon SID from the client's access token, and uses it to add access-control entries (ACEs) to the DACLs of the interactive window station and desktop. The ACEs allow the client access to the interactive desktop for the duration of the logon session. Next, the example calls the <a href="accclsrv_0jle.htm"><b>ImpersonateLoggedOnUser</b></a> function to ensure that it has access to the client's executable file. A call to the <a href="prothred_6pf6.htm"><b>CreateProcessAsUser</b></a> function creates the client's process, specifying that it run in the interactive desktop. Before the function returns, it calls the <a href="accclsrv_3jdy.htm"><b>RevertToSelf</b></a> function to end the caller's impersonation of the client.</p>
+<p>
+This sample calls the GetLogonSID and FreeLogonSID sample functions described in <a href="accclsrv_1pk4.htm">Getting the Logon SID</a>. It calls the AddAceToObjectsDACL sample function described in <a href="accctrl_2elv.htm">Modifying an Object's ACLs</a>. </p>
+<pre><code>BOOL StartInteractiveClientProcess (
+    LPTSTR lpszUsername,    // client to log on
+    LPTSTR lpszDomain,      // domain of client's account
+    LPTSTR lpszPassword,    // client's password
+    LPTSTR lpCommandLine    // command line to execute
+) {
+
+HANDLE      hToken;
+HDESK       hdesk = NULL;
+HWINSTA     hwinsta = NULL, hwinstaSave = NULL;
+PROCESS_INFORMATION pi;
+PSID pSid = NULL;
+STARTUPINFO si;
+BOOL bResult = FALSE;
+
+// Log the client on to the local computer.
+
+if (!LogonUser(
+        lpszUsername,
+        lpszDomain,
+        lpszPassword,
+        LOGON32_LOGON_INTERACTIVE,
+        LOGON32_PROVIDER_DEFAULT,
+        &amp;hToken) ) 
+    goto Cleanup;
+
+// Save a handle to the caller's current window station.
+
+if ( (hwinstaSave = GetProcessWindowStation() ) == NULL)
+    goto Cleanup;
+
+// Get a handle to the interactive window station.
+
+hwinsta = OpenWindowStation(
+    "winsta0",                   // the interactive window station 
+    FALSE,                       // handle is not inheritable
+    READ_CONTROL | WRITE_DAC);   // rights to read and write the DACL
+if (hwinsta == NULL) 
+    goto Cleanup;
+
+// To get the correct default desktop, set the caller's 
+// window station to the interactive window station.
+
+if (!SetProcessWindowStation(hwinsta))
+    goto Cleanup;
+
+// Get a handle to the interactive desktop.
+
+hdesk = OpenDesktop(
+    "default",     // the interactive window station 
+    0,             // no interaction with other desktop processes
+    FALSE,         // handle is not inheritable
+    READ_CONTROL | // request the rights to read and write the DACL
+    WRITE_DAC | 
+    DESKTOP_WRITEOBJECTS | 
+    DESKTOP_READOBJECTS);
+
+// Restore the caller's window station.
+
+if (!SetProcessWindowStation(hwinstaSave)) 
+    goto Cleanup;
+
+if (hdesk == NULL) 
+    goto Cleanup;
+
+// Get the SID for the client's logon session.
+
+if (!GetLogonSID(hToken, &amp;pSid)) 
+    goto Cleanup;
+
+// Allow logon SID full access to interactive window station.
+
+if (! AddAceToWindowStation(hwinsta, pSid) ) 
+    goto Cleanup;
+
+// Allow logon SID full access to interactive desktop.
+
+if (! AddAceToDesktop(hdesk, pSid) ) 
+    goto Cleanup;
+
+// Impersonate client to ensure access to executable file.
+
+if (! ImpersonateLoggedOnUser(hToken) ) 
+    goto Cleanup;
+
+// Initialize the STARTUPINFO structure.
+// Specify that the process runs in the interactive desktop.
+
+ZeroMemory(&amp;si, sizeof(STARTUPINFO));
+si.cb= sizeof(STARTUPINFO);
+si.lpDesktop = TEXT("winsta0\\default");
+
+// Launch the process in the client's logon session.
+
+bResult = CreateProcessAsUser(
+    hToken,            // client's access token
+    NULL,              // file to execute
+    lpCommandLine,     // command line
+    NULL,              // pointer to process SECURITY_ATTRIBUTES
+    NULL,              // pointer to thread SECURITY_ATTRIBUTES
+    FALSE,             // handles are not inheritable
+    NORMAL_PRIORITY_CLASS | CREATE_NEW_CONSOLE,   // creation flags
+    NULL,              // pointer to new environment block 
+    NULL,              // name of current directory 
+    &amp;si,               // pointer to STARTUPINFO structure
+    &amp;pi                // receives information about new process
+    ); 
+
+// End impersonation of client.
+
+RevertToSelf();
+
+if (bResult &amp;&amp; pi.hProcess != INVALID_HANDLE_VALUE) { 
+    WaitForSingleObject(pi.hProcess, INFINITE); 
+    CloseHandle(pi.hProcess); 
+} 
+
+if (pi.hThread != INVALID_HANDLE_VALUE)
+    CloseHandle(pi.hThread);  
+
+Cleanup: 
+
+if (hwinstaSave != NULL)
+    SetProcessWindowStation (hwinstaSave);
+
+// Free the buffer for the logon SID.
+
+if (pSid)
+    FreeLogonSID(&amp;pSid);
+
+// Close the handles to the interactive window station and desktop.
+
+if (hwinsta)
+    CloseWindowStation(hwinsta);
+
+if (hdesk)
+    CloseDesktop(hdesk);
+
+// Close the handle to the client's access token.
+
+if (hToken != INVALID_HANDLE_VALUE)
+    CloseHandle(hToken);  
+
+return bResult;
+}
+ </code></pre>
+<p>&nbsp;</p></body>
+</HTML>

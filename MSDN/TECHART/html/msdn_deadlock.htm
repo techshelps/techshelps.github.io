@@ -1,0 +1,336 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Detecting Deadlocks in Multithreaded Win32 Applications</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_deadlock"></a></sup>Detecting Deadlocks in Multithreaded Win32 Applications</h1>
+<p>
+Ruediger R. Asche<br>
+Microsoft Developer Network Technology Group</p>
+<p>
+Created: January 11, 1994</p>
+<h2>Abstract</h2>
+<p>
+This is the first in a series of three articles that deal with deadlocks in multithreaded Win32®-based applications. This article introduces the notion of program invariants and the theoretical framework of Petri nets as a way to model multithreaded applications. It presents deadlock detection techniques based on the Petri net formalism. The next article, <a href="msdn_dldetect.htm">"The Implementation of DLDETECT.EXE,"</a> describes the implementation of DLDETECT.EXE, a Win32-based application that provides both an interactive editor for Petri nets and an aid for deriving formal properties about multithreaded applications. The final article, <a href="msdn_dldwork.htm">"Putting DLDETECT to Work,"</a> describes how a multithreaded application can be rewritten as a Petri net and how DLDETECT.EXE can be used to effectively analyze and design multithreaded applications.</p>
+<h2>Introduction</h2>
+<p>
+Next to data corruption (described in <a href="msdn_onthefly.htm">"Synchronization on the Fly,"</a> an article in the MSDN Library), a deadlock is the worst problem that can occur in a multithreaded application. It can take on very malign and subtle forms that may be fairly hard to reproduce or to track down. For this reason, it is strongly recommended that you analyze your multithreaded application for possible deadlock conditions, and detect and eliminate deadlocks before those conditions occur.</p>
+<p>
+A deadlock, very simply, is a condition in which two or more threads wait for each other to release a shared resource before resuming their execution. Because all threads participating in a deadlock are suspended and cannot, therefore, release the resources they own, no thread can continue, and the entire application (or, worse, more than one application if the resources are shared between threads in multiple applications) appears to hang.</p>
+<p>
+As an example, let us consider a simple multithreaded application, which I will call GOOFY for easy reference because we will come back to it fairly frequently:</p>
+<pre><code>#include &lt;windows.h&gt;
+#include &lt;stdio.h&gt;
+
+CRITICAL_SECTION cs1,cs2;
+
+long WINAPI ThreadFn(long);
+
+main()
+
+{
+  long iThreadID;
+  InitializeCriticalSection(&amp;cs1);
+  InitializeCriticalSection(&amp;cs2);
+  CloseHandle(CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)ThreadFn,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL,0,&amp;iThreadID));
+  (TRUE)
+  {EnterCriticalSection(&amp;cs1);
+ &nbsp; printf("\nThread1 has entered Critical Section 1 but not 2.");
+ &nbsp; EnterCriticalSection(&amp;cs2);
+ &nbsp; printf("\nThread1 has entered Critical Section 1 and 2!");
+ &nbsp; LeaveCriticalSection(&amp;cs2);
+ &nbsp; printf("\nThread1 has left Critical Section 2 but still owns 1.");
+ &nbsp; LeaveCriticalSection(&amp;cs1);
+ &nbsp; printf("\nThread1 has left both critical sections...");
+ &nbsp; Sleep(20);
+  };
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return(0);
+}
+
+long WINAPI ThreadFn(long lParam)
+{
+  while(TRUE)
+  {EnterCriticalSection(&amp;cs2);
+ &nbsp; printf("\nThread2 has entered Critical Section 2 but not 1.");
+ &nbsp; EnterCriticalSection(&amp;cs1);
+ &nbsp; printf("\nThread2 has entered Critical Section 2 and 1!");
+ &nbsp; LeaveCriticalSection(&amp;cs1);
+ &nbsp; printf("\nThread2 has left Critical Section 1 but still owns 2.");
+ &nbsp; LeaveCriticalSection(&amp;cs2);
+ &nbsp; printf("\nThread2 has left both critical sections...");
+ &nbsp; Sleep(20);
+  };
+
+}
+</code></pre>
+<p>
+You may cut and paste GOOFY into a C source file, compile and link it, and then, when running it, see the result: GOOFY will run for a little while and then lock up. Thread 1 has claimed Critical Section 1 and is suspended because it is waiting to enter Critical Section 2, whereas Thread 2 owns Critical Section 2 and waits for Thread 1 to release Critical Section 1—which will never happen, of course, because Thread 1 will not release Critical Section 1 before Thread 2 has released Critical Section 2, which will never happen, of course, because... (repeat).</p>
+<p>
+Unfortunately, deadlocks are not always that easy to see. In a complex application, several conditions depending on each other may account for a deadlock that only shows up under very specific circumstances. Here is a piece of trivia from 16-bit Microsoft® Windows™ history that describes such a pathological deadlock, involving both low-level system details and third-party applications: With certain network drivers loaded, Windows version 3.1 occasionally enters a state in which trying to open a virtual DOS box produces an empty black screen that you can switch away from but which never goes beyond the stage of pure and dull blackness—the so-called "black screen of death." This orphaned DOS box could linger around until doomsday, and there's no way to get rid of it or bring it back to life—and even worse, in some of the impersonations of the "black screen of death," the entire system simply hangs until a cold reboot is performed.</p>
+<p>
+One of the known causes of this scenario is, well, a deadlock. When initializing the DOS box, the virtual machine manager (VMM) for Windows 3.1 sends a request to the network card to initialize itself. In doing so, the DOS-based network drivers involved in this "black hole" query the network card periodically in response to timer-tick interrupts and do not return before either a time-out informs the software that the network card is not responding or the card responds successfully.</p>
+<p>
+Unfortunately, due to a very subtle problem in the way the virtual timer device (VTD) worked under Windows 3.1, it might happen that in certain scenarios, the virtual machine (VM) never "sees" any timer interrupts, and as a result, never returns from its initialization sequence. On the other hand, the VMM refuses to reflect any more timer ticks into the newly created VM unless—you guessed it—the initialization sequence returns. Deadlock!</p>
+<p>
+One typical pathology with deadlocks anywhere is that they like to occur asynchronously, as the above example shows; they like to occur in response to asynchronous events (for example, timer ticks or hardware events such as network interrupts) such that the same configuration may run fine one out of ten times (or 20, or 900, or whatever) and then deadlock the n+1st time. As a rule of thumb, the more qualified the service personnel who are available at the time you want to demonstrate the problem, the less frequently it occurs. Happy computing.</p>
+<p>
+To make things even worse, some scenarios that look like deadlocks, in fact, are not. There may be situations in which one thread is blocked on a resource that simply takes a long time to become available—maybe a network connection or a hardware interrupt from an input device that signals infrequently. In those cases, you may erroneously think that the application has deadlocked and kill it, but it might have recovered by itself if you had only let it.</p>
+<p>
+In order to prevent those embarrassing (and expensive) things from happening, you are well advised to analyze deadlock potential while you develop the application. Techniques for doing so are what this article is all about.</p>
+<h2>Strategies to Detect Deadlocks in Multithreaded Applications</h2>
+<p>
+One of the nice features of the Win32® Application Programming Interface (API) is that it gives you total control over the resources that might cause a deadlock. In the Windows 3.1 example stated earlier, neither a driver vendor nor an application programmer nor the developers for Windows could possibly anticipate this conspiratorial deadlock because it involved several pieces of software whose internal functionality was not known to the authors of the other pieces, but together, they could hang the system.</p>
+<p>
+However, in the Win32 API, all synchronization objects work only locally, that is, they affect only the threads that decide to share them. There is no such thing as "the global critical section" under the VMM or OS/2® that, when claimed, will suspend all the other threads in the system. By coding your applications carelessly, you might end up deadlocking one or a few of your Windows NT™–based applications, but the remainder of the system will not be affected, which is a great plus on the security and reliability side.</p>
+<p>
+Traditionally, deadlock detection has worked in one of two ways: the posthumous way or the invariant way. The posthumous strategy has already been explained before: Release a product, wait until reports from the field indicate a possible deadlock condition, and then find and fix it in the next release. (I am sure that this is not a deliberate strategy that any company would employ, but it is rather a side effect of a schedule that does not allow enough time for formal analysis.)</p>
+<p>
+In order to explain the invariant way, let us go back to the GOOFY example that we looked at earlier. Even without running GOOFY, we can determine right away that it may deadlock; all we need to do is to provide a scenario in which a deadlock occurs—which is exactly what happens when Thread 1 owns Critical Section 1 and waits for Critical Section 2, while Thread 2 owns Critical Section 2 and waits for Critical Section 1. It is easy to prove that an application has a deadlock by describing it, but the converse—namely, proving that an application is <i>deadlock-free</i>—is difficult. Let us look at GOOFY2, a modified version of GOOFY. GOOFY2 looks exactly like GOOFY, except that instead of claiming the critical sections in a nested fashion (claim A, claim B, release B, release A), both Thread 1 and Thread 2 first claim Critical Section 1 and then Critical Section 2, in effect duplicating Critical Section 1. This does not make sense from a programming point of view, but it serves to illustrate the point. (That's why I call the set of applications GOOFY.)</p>
+<pre><code>long WINAPI ThreadFn(long lParam)
+{
+  while(TRUE)
+  {EnterCriticalSection(&amp;cs1);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // change!
+ &nbsp; printf("\nThread2 has entered Critical Section 1 but not 2.");
+ &nbsp; EnterCriticalSection(&amp;cs2);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // change!
+ &nbsp; printf("\nThread2 has entered Critical Section 1 and 2!");
+ &nbsp; LeaveCriticalSection(&amp;cs2);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // change!
+ &nbsp; printf("\nThread2 has left Critical Section 2 but still owns 1.");
+ &nbsp; LeaveCriticalSection(&amp;cs1);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // change!&nbsp;&nbsp; 
+ &nbsp; printf("\nThread2 has left both critical sections...");
+ &nbsp; Sleep(20);
+  };
+
+}
+</code></pre>
+<p>
+We have a gut feeling that GOOFY2 is deadlock-free, but can we do better than gut feelings? Can we indeed <i>prove</i> that GOOFY2 does not deadlock? Possibly even without using a lot of Greek letters and reasoning that qualifies you for a graduate degree in Space Technology?</p>
+<p>
+Let us try to make a few statements about the control flow in GOOFY2. First, the definition of a critical section requires that either Critical Section 1 is free or that either Thread 1 or Thread 2 has claimed it. Also, because Critical Section 1 can only be claimed while it is free, and the only place at which it is free is when both threads are executing the respective top statements of their <b>while </b>loops, we can safely say that either Critical Section 1 is free or one thread has it <i>and</i> the other thread <i>must</i> execute some code in between the top of its <b>while</b> loop and its call to <b>EnterCriticalSection(&amp;cs1)</b>, while waiting to claim Critical Section 1. Likewise, since Critical Section 2 can be claimed only after Critical Section 1 is owned already, at any point in time it must hold true that if Critical Section 2 is owned, the thread that owns it must execute the code in between its calls to <b>EnterCriticalSection(&amp;cs2)</b> and <b>LeaveCriticalSection(&amp;cs2)</b> <i>while</i> the other thread must execute code in the top of its <b>while</b> loop or be suspended for Critical Section 1.</p>
+<p>
+Now the only scenario in which a deadlock could occur will be if one thread (A) is suspended for a critical section that the other thread (B) owns while A, in turn, owns a critical section that B waits for. However, as soon as any thread owns any critical section, from our intuitive statements above, we can conclude that the other thread must be waiting for Critical Section 1. Thus, the thread that owns one critical section has either both or none, and thus, a scenario in which both threads own one resource each (a necessary condition for a deadlock) cannot occur.</p>
+<p>
+Case closed? Yes, except that we have to prove that our intuitive statements are correct. We will come back to that. And, if you have followed <i>this</i> reasoning, you'll probably score 800+ in the analytical section of the Graduate Record Exam. Will it help if I promise that later on we'll see something that expresses the same but looks more intuitive?</p>
+<p>
+You might not be aware of it, but the above discussion is actually something fairly scholarly called "invariant analysis"—which, you remember, is the second approach to detecting deadlocks in multithreaded applications. What happens is that we determine some statements about the application that always hold true, no matter what states the two threads are in. Because of this property, those statements are called "invariants" (which is Latin for "does not change"). Invariants qualify for the top ten list of computer scientists' favorite toys because there are many cool things you can do with them. In the case of multithreaded applications, you can use them to, well, detect deadlocks: What we did when discussing GOOFY2 was basically describe what a deadlock looks like and then argue that such a deadlock would violate some of the invariants and cannot, therefore, occur.</p>
+<p>
+Wouldn't it be great if we could simply feed our application into a computer program that returns all of the invariants and then tells us outright if there is an inherent deadlock in the application? That way, we would not have to search for invariants (and also risk forgetting some of them or misinterpreting others) and spend pages and pages arguing why the application could or could not deadlock. Such a program (let us dream a little bit, assume that it exists, and call it DEADLOCOP) might be a multimedia application and blurt out of the sound card, "Yeah! Bozo! You may <i>think</i> you are a good programmer, but I hate to tell you, the program that you just fed me will blow up into smithereens faster than you can say, 'Wazoo!!' Take a...." (Double-click by the user, terminating DEADLOCOP).</p>
+<p>
+Yes, that would be great. And guess what, the functionality of DEADLOCOP can, in part, be implemented. I say "in part" because some of the questions involved in detecting deadlocks can effectively be answered by computer programs, whereas others are either not decidable or not <i>effectively</i> computable. Let me list and comment on some of the theorems that theoretical Computer Science has derived for this purpose.
+<ul type=disc>
+<li>
+For any state that a given application (or set of applications) is in, it can be determined whether the system is deadlocked or not.<p class=tl>
+Please recall that a system may appear to be deadlocked when it is not. Using what is called a resource allocation graph (RAG) for any given state, it can be determined whether that state constitutes a deadlock or not. We will look at resource allocation graphs later.</P></li>
+<li>
+The invariants can be computed.<p class=tl>
+We will look at techniques to compute invariants later in this paper. The problem here is that the computation may not be effective. </P><p class=tl>
+It should be noted that the invariants of single-threaded applications cannot be computed. This sounds strange at first—we would expect that a multithreaded application, because it is more complex than a single-threaded one, would make statements about the application more difficult, not easier! What is going on here?</P><p class=tl>
+The catch is that an invariant in a multithreaded application is something slightly different from an invariant in a single-threaded application. In the latter one, we are concerned with invariants regarding the state of memory (such as "the value of variable <i>i</i> is always 2 greater than the value of variable <i>j</i>, and the respective values of variable <i>p</i> and variable <i>q</i> always add up to 7"), whereas the invariants in a multithreaded application refer to the state of threads (such as "if Thread 1 owns Resource 2, then the other threads are in their respective code sections, 3 and 4"). If we wanted the invariants in our multithreaded application to incorporate information about their respective computational states as well (such as the values of some of their variables), the problem would be undecidable again.</P></li>
+<li>
+It is decidable whether a scenario that is identified as a deadlock can be reached given a certain initial state of the application.<p class=tl>
+The computation, however, is not efficient—that is, it may take longer to obtain the result from the computer than to spend an all-nighter with cafe lattes and some Benson &amp; Hedges® and, using your intelligence instead of a mechanical algorithm, figure it out yourself.</P></li>
+</ul>
+<p>
+Thus, although DEADLOCOP might be written, it would not be a very efficient cop. In any case, however, it is worthwhile to look at the formal frameworks that can be employed to implement DEADLOCOP, not only because it will eventually lead us to a modest version of DEADLOCOP, but also because it gives us a much clearer understanding of what our multithreaded application does and how it does it. In the next section, I will take you on a journey to the wonderful world of Petri nets and hope to convince you that it pays to view your application slightly different than you did before—namely, as a collection of circles, squares, and arrows.</p>
+<h2>Introducing Petri Nets</h2>
+<p>
+According to the 1993 edition of the <i>Encyclopedia of Computer Science</i>, Carl Adam Petri currently works for the <i>Gesellschaft fuer Mathematik und Datenverarbeitung</i> in Bonn, Germany, and, I suspect, probably spends a lot of time wondering why his formalism does not have the attention in the scholarly and business world that it deserves. Petri nets have been researched in depth since the early 1970s, and in my humble opinion, they provide an excellent framework to analyze and study concurrent systems. The best and most comprehensive discussion of Petri nets can be found in T. Murata's paper "Petri Nets: Properties, Analysis and Applications," <i>Proceedings of the IEEE</i>, 77 (April 1989), 541-580. In this section, I will summarize the most important aspects of Petri nets, and in the next section, we will see how they can be put to work in applications written for the Win32 API.</p>
+<p>
+Petri nets are very general and can be employed to model much more than multithreaded applications; for example, computer hardware or industrial processes may be depicted as Petri nets. In this paper, I restrict the discussion to those aspects of Petri nets that are applicable to multithreaded applications.</p>
+<p>
+A Petri net is a directed graph whose nodes are either <i>places</i> (generally drawn as circles), which roughly describe states that a thread can be in, or <i>transitions</i> (generally drawn as squares), which roughly describe actions that transform states into one another. <i>Edges</i> may only exist between places and transitions (that is, two transitions can never be directly connected to each other, nor can two places). It is permissible, however, for two or more places to be connected to the same transition (important to model synchronization) and for one transition to connect to more than one place (important to model nondeterminism).</p>
+<p>
+In order to simulate the dynamic behavior of an application, individual places can be marked (this is generally indicated in the Petri net by drawing a black dot into the circle that represents that place), meaning that the thread currently executes code that corresponds to that state. There is a simple firing rule: A transition can fire if all the places that lead into it (called the predecessor or input places) are marked and all the places that it connects to (called the successor or output places) are not marked. If a transition can fire, it may remove all the marks from its predecessor nodes and put marks into all of its successor nodes. Note that the general framework of Petri nets is more flexible: In unrestricted Petri nets, each place is associated with a capacity that describes how many marks at most may be in a place simultaneously, and each edge is associated with an integer that describes how many marks are removed from or inserted into a place when the edge is traversed, respectively. In this paper, though, I will restrict the discussion to so-called "1-conservative" Petri nets, in which the capacity of each place is assumed to be 1, and each edge will remove exactly one mark from a net if it leads from a place to a transition and add exactly one when it leads from a transition to a place.</p>
+<p>
+After this somewhat dry discussion, let us consider an example—let us see how GOOFY translates into a Petri net.</p>
+<p>
+<img src="deadlock_1.gif" border=0></p>
+<p class=label>
+<b>Figure 1. GOOFY as a Petri net</b></p>
+<p>
+This net represents only the <b>while</b> loops that the two threads can be in. The net consists of ten places, four places for each of the two threads, corresponding to the four "states" that each thread can be in:
+<ul type=disc>
+<li>
+Waiting for both critical sections (p11 or p21, respectively)<br><br></li>
+<li>
+Having claimed its first respective critical section, but waiting for the other one (p12, p22)<br><br></li>
+<li>
+Having claimed both critical sections (p13, p23)<br><br></li>
+<li>
+Having released the second critical section that it claimed, but not the first one (p14, p24)</li>
+</ul>
+<p>
+The remaining two places depict Critical Sections 1 and 2, respectively. A mark in one of the places that correspond to thread states implies that the thread executes that particular section of code, and a mark on one of the "critical section" places implies that that critical section is free.</p>
+<p>
+As Figure 2 shows, when transition "ecs1" fires, the marks from p11 and cs2 are removed and a mark is placed into p12.</p>
+<p>
+<img src="deadlock_2.gif" border=0></p>
+<p class=label>
+<b>Figure 2. GOOFY after one transition has fired</b></p>
+<p>
+We see that the transitions labeled "ecs1" or "ecs2" can only fire if the thread is in a state where it is waiting for the critical section <i>and</i> the corresponding critical section is free. "ecs1" represents the statement <b>EnterCriticalSection(&amp;cs1)</b>, whereas "ecs2" represents <b>EnterCriticalSection(&amp;cs2)</b>, and "lcs1" and "lcs2" represent the statements <b>LeaveCriticalSection(&amp;cs1)</b> and <b>LeaveCriticalSection(&amp;cs2)</b>, respectively. The marks on the net characterize the "initial markings" of the application; that is, both threads are on the top of their respective <b>while</b> loops, ready to claim their respective first critical sections, and both critical sections are unowned.</p>
+<p>
+Note that we are not interested in what exactly happens during the time a thread owns a critical section. In the version of GOOFY that we presented earlier, the threads do some output to the screen, but the places may represent an arbitrary amount of computation. For example, a multithreaded Windows NT–based application is required to serialize output to a device context via a critical section or a mutex object, but what it does while it owns the critical section is of no interest to the Petri net that models it. As long as the code in the critical section does not request any other synchronization resource or does not do any work that requires interaction with other threads, we may depict all of it by just one place.</p>
+<p>
+This is fairly important. A Petri net is an abstraction of an application; that is, it hides some information from us. It would theoretically be possible to take any application statement and transform it 1:1 into a Petri net, that is, make every single statement in the program a transition and add a place in between all transitions that describes two subsequent statements. But we use the Petri net to model only the interaction and the synchronization between threads, so a lot of those "intermediate" places and transitions may as well be omitted because they make the net less overseeable and do not change anything in the concurrent aspects of the application. In <a href="msdn_dldwork.htm">"Putting DLDETECT to Work,"</a> we will look at the minimum set of Win32 API calls that need to be considered.</p>
+<p>
+Something else that is abstracted away in the Petri net formalism is timing behavior. For example, we may set a timer to refresh information on the screen every 500 milliseconds (ms). In a Petri net depiction of such an application, the length of the interval between timer ticks is lost; there is no way in the formalism to incorporate it. Two timers, one that runs out every 500 ms and another that runs out every, say, 2 seconds, look exactly alike in a Petri net. Although one may be tempted to think of this as a drawback, it actually isn't. Any assumption about the relationships of the timer intervals would be highly dangerous for the correctness of the application because of the asynchronous nature of the timers. All that Petri nets model is the fact that there <i>are</i> asynchronous events, not <i>when</i> they happen.</p>
+<p>
+Also, note that in the Petri net depiction of GOOFY, there is a certain degree of nondeterminism; that is, there are scenarios in which more than one transition can fire. In the initial marking, for example, both critical sections are free, so either "ecs1" in Thread 1 or "ecs2" in Thread 2 can fire. The Petri net formalism does not prescribe any firing order in this case; either one of the two "fireable" transitions may fire, changing the state of the entire system. This nicely models the nondeterminism of GOOFY in that we cannot make any assumptions as to which of the two threads first enters its first critical section.</p>
+<h3>So What?</h3>
+<p>
+Now that we have the tools at hand to convert a multithreaded application into a Petri net, you may very well ask, "Aaaaaaaand? So now we have a sophisticated spider's web instead of a number of lines of code, but what does this gain us?" Good question. The Petri net formalism in itself seems to have few merits, except for giving us a visual idea of the control flow in a multithreaded application at run time. It turns out, however, that it is the basis for a solid mathematical analysis that can tell us quite a bit about the application. Let us view the net as a matrix in which the rows correspond to the places and the columns correspond to the transitions. Let an entry (x, y) in the matrix be -1 if the transition <i>y</i>, when firing, removes a mark from place <i>x</i>, 1 if it puts a mark in <i>x</i>, and 0 otherwise. This matrix <i>m</i> is called the <i>incidence matrix</i> belonging to the net. Let us look at the incidence matrix for GOOFY.</p>
+<p>
+<img src="deadlock_3.gif" border=0></p>
+<p class=label>
+<b>Figure 3. Incidence matrix for GOOFY</b></p>
+<p>
+It can be shown that the solutions <i>V</i> of the equation v*m = 0 (the null space of the matrix) are the basis of the vector space that enumerates all invariants of the application. That is, all solutions to the above equation are invariants of the application, and they are all linearly independent, and all linear combinations of the individual solutions are invariants as well.</p>
+<p>
+This is linear algebra. Yuck! When I first attacked this article, I hoped that I could get away without matrices, ranks, endless downward columns of indices, and all that jazz. But I could not, so here we are. And since "linear combinations," "bases," "null spaces," and all these terms tend to be annoyingly abstract, let us look at how to apply this in practice—namely, with our infamous GOOFY application. Employing a classified, magic potion–supported algorithm that is strictly passed on from druid's mouth to druid's ear (just kidding—the algorithm is described and credited in the article <a href="msdn_dldetect.htm">"The Implementation of DLDETECT.EXE"</a>), I computed the solutions of the null space of GOOFY's incidence matrix, and here they are:</p>
+<pre><code>Invariant No.&nbsp;&nbsp;&nbsp; |p11 p12 p13 p14 cs1 cs2 p21 p22 p23 p24
+-----------------|---------------------------------------
+ &nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | 1&nbsp;&nbsp; 1&nbsp;&nbsp; 1&nbsp;&nbsp; 1&nbsp;&nbsp; 0&nbsp;&nbsp; 0&nbsp;&nbsp; 0&nbsp;&nbsp; 0&nbsp;&nbsp; 0&nbsp;&nbsp; 0
+ &nbsp;&nbsp;&nbsp; 2&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | 0&nbsp;&nbsp; 0&nbsp; -1&nbsp;&nbsp; 0&nbsp; -1&nbsp;&nbsp; 0&nbsp;&nbsp; 1&nbsp;&nbsp; 0&nbsp;&nbsp; 0&nbsp;&nbsp; 0
+ &nbsp;&nbsp;&nbsp; 3&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | -1&nbsp; 0&nbsp;&nbsp; 0&nbsp;&nbsp; 0&nbsp;&nbsp; 0&nbsp;&nbsp; 1&nbsp;&nbsp; 0&nbsp;&nbsp; 0&nbsp;&nbsp; 1&nbsp;&nbsp; 0
+ &nbsp;&nbsp;&nbsp; 4&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | 1&nbsp;&nbsp; 0&nbsp;&nbsp; 1&nbsp;&nbsp; 0&nbsp;&nbsp; 1&nbsp; -1&nbsp;&nbsp; 0&nbsp;&nbsp; 1&nbsp;&nbsp; 0&nbsp;&nbsp; 1 
+</code></pre>
+<p>
+These numbers need elaboration. The ten columns represent the ten places as they appear in the incidence matrix, so I labeled them accordingly. Each of the four vectors represents one invariant; that is to say, the sum of all marks in the net will always be constant according to each invariant vector. Leaving out the annoying 0s, we can rewrite this as follows:</p>
+<p>
+p11+p12+p13+p14 = constant<br>
+p21-p13-cs1 = constant<br>
+cs2+p23-p11 = constant<br>
+p11+p13+cs1-cs2+p22+p24 = constant</p>
+<p>
+Note that these invariants do not tell us anything about the run-time behavior of the application yet, and they do not depend on any particular initial marking. All they tell us is that once we choose any initial marking in the net, any state that can ever be reached from that marking by any valid sequence of transition firings will yield the same results as the initial marking for all equations. Let us demonstrate this with an example: Take the initial marking from GOOFY, where p11, p21, cs1, and cs2 are marked. Then the above equations for the initial marking yield the following:</p>
+<p>
+1*p11+0*p12+0*p13+0*p14=1<br>
+1*p21-0*p13-1*cs1=0<br>
+1*cs2+0*p23-1*p11=0<br>
+1*p11+0*p13+1*cs1-1*cs2+0*p22+0*p24=1</p>
+<p>
+No marking that can be reached from the initial marking can violate the invariants. For example, the program would be incorrect if both threads were allowed to execute at the same time their respective code sections in which both critical sections are claimed, which would correspond to a marking of p13 and p23. Inserting this marking into the invariant equations would yield the following:</p>
+<p>
+0*p11+0*p12+1*p13+0*p14 = 1 <br>
+0*p21-1*p13-0*cs1 = -1 <br>
+0*cs2+1*p23-0*p11 = 1<br>
+0*p11+1*p13+0*cs1-0*cs2+0*p22+0*p24 = 1</p>
+<p>
+The results of the second and third equations are different from the results in the initial markings; thus, the incorrect marking &lt;p13, p23&gt; is not reachable. On the other hand, the deadlock marking &lt;p12, p22&gt; yields the following results for the invariant equations:</p>
+<p>
+p11+p12+p13+p14 = 1<br>
+p21-p13-cs1 = 0<br>
+cs2+p23-p11 = 0<br>
+p11+p13+cs1-cs2+p22+p24 = 1</p>
+<p>
+Because these results are the same as for the initial marking, the deadlock marking may be reachable.</p>
+<p>
+Unfortunately, compliance with the invariants is only a necessary, not a sufficient, condition for a marking to be reachable. For example, the marking &lt;p14, p24&gt; satisfies all invariants but is not reachable. For certain subtypes of Petri nets, necessary and sufficient conditions can be formulated, but those net types are generally too restricted to be useful models for multiple thread analyses.</p>
+<p>
+The question of whether any given marking is reachable from another marking in a general Petri net has been proven to be at least exponentially complex, which is too costly when it comes to really large nets, so the best DEADLOCOP can do in this scenario is to spit out a warning: "Hmmm, here is a deadlock marking that may or may not be reached from the initial marking, so you might want to check by hand. Have a nice...." (A double-click by the user terminates DEADLOCOP.) Then again, for a net in which no deadlock marking satisfies the invariant equations, DEADLOCOP may blurt out, "Congratulations! There are no deadlocks I can find in this net." (Message echoed by the happy user.)</p>
+<p>
+Note that in order to make a marking a candidate for reachability from another marking, it is not enough to show that the marking yields the same result for any subset of equations—<i>all</i> equations must satisfy the invariant condition for the marking to be a candidate for reachability. For example, if we only looked at the first and fourth equations, then the unreachable marking &lt;p13, p23&gt; would be flagged as potentially reachable, but the second and third equations show that this is not the case.</p>
+<p>
+Let us harp on the GOOFY example a little bit longer. The invariant analysis, as stated before, claims only that the invariant equations yield equal results for all markings that can be reached from an initial marking. If we modified GOOFY such that the main thread would never spawn Thread 2, the net would still look the same, but the initial marking would change from &lt;p11, cs1, cs2, p21&gt; to &lt;p11, cs1, cs2&gt;. In other words, the right side of the net, representing Thread 2, will never have a mark in it. Now the invariant equations for that initial marking look as follows.</p>
+<p>
+1*p11+0*p12+0*p13+0*p14 = 1<br>
+0*p21-0*p13-1*cs1 = -1<br>
+1*cs2+0*p23-1*p11 = 0<br>
+1*p11+0*p13+1*cs1-1*cs2+0*p22+0*p24 = 1</p>
+<p>
+Now, the deadlock marking &lt;p12, p22&gt; is not reachable because it would violate the second invariant. Thus, with no second thread running, there is no deadlock in the system—surprise! With only one thread running, there cannot possibly be a deadlock because any deadlock requires a circular wait of at least two threads! We have formally proven a statement that everybody knows to be true just by common sense. Hooray!</p>
+<h3>Variations on a Theme: Invariants</h3>
+<p>
+I just love to play with GOOFY. (Believe me, by now I know almost everything about GOOFY just because I have played with it so much.) Assume, for a second, that the initial marking was &lt;p11, cs1, cs2, p23&gt;—we could do this, for example, by adding a GOTO statement to the beginning of Thread 2 that would warp the thread right into its <b>while</b> loop, and then by resuming Thread 1 to make sure that they both start from this strange initial marking. Oops! See what happens? "cs1" is not claimed, and Thread 2 would call <b>EnterCriticalSection(&amp;cs1) </b>right away, which is a bug, of course. Windows NT will not allow any thread to release a critical section it does not own. According to the Win32 Software Development Kit (SDK) online documentation for <b>LeaveCriticalSection</b>, the behavior is as follows:</p>
+<p class=indent>
+<i>If a thread calls LeaveCriticalSection when it does not have ownership of the specified critical section object, an error occurs that may cause another thread using EnterCriticalSection to wait indefinitely.</i></p>
+<p>
+This may look like a deadlock at run time, but in reality it is a programming error. A Petri net analysis shows you right away that something weird is going on here: Either the transition "lcs1" in Thread 2 will refuse to fire, because its output place is not empty (which is the assumed behavior under the definition of a Petri net firing condition), or it will fire, but leave two marks in "lcs1"—which is a contradiction of our initial stipulation that any place is allowed to have only one mark at any time.</p>
+<h3>Giving Meanings to Invariants</h3>
+<p>
+Now let us look at the invariants themselves. Invariant 1, when applied to the initial marking, states that Thread 1 always has exactly one mark in all of its states, which makes intuitive sense because (a) it executes an infinite <b>while</b> loop out of which it can never drop (so there must always be one mark in one of its places), and (b) a thread never executes more than one of its statements at the same time. It seems goofy (pun intended) to derive this as a formal property, but please keep in mind that GOOFY is a very simple example of a Petri net, and in other examples, it may well be the case that such an invariant reveals an infinite loop where we did not expect one—for example, a condition that causes a <b>while</b> loop to terminate may never be satisfied. Also, Petri nets a priori do not have any idea of threads or critical sections; we simply choose to design the net based on a multithreaded application. Thus, the first invariant can be seen as a verification that the system gives for having rewritten at least the thread part of our application correctly into a Petri net.</p>
+<p>
+But does the same not hold true for Thread 2? In other words, why is there no invariant equation like the one that follows?</p>
+<p>
+p21+p22+p23+p24=constant</p>
+<p>
+Well, there is, but it is not explicit. Keep in mind that the four invariants are a basis of only the vector space that comprises the invariants, that is, all linear combinations of one or more of them will be an invariant as well. For example, adding vectors (invariants) 2 and 3 and 4 to each other is the valid linear combination </p>
+<p>
+0 0 0 0 0 0 1 1 1 1,</p>
+<p>
+which is exactly p21+p22+p23+p24.</p>
+<p>
+Invariants 2 and 3 are respective symmetrical equivalents. (The Petri net corresponding to GOOFY reveals that GOOFY is, indeed, symmetrical with respect to the two threads and critical sections.) They state that if we assume &lt;p11, p21, cs1, cs2&gt; as the initial marking and if one thread is on top of its loop (which means it has not claimed any critical section), then either the critical section that thread would claim next is free or the other thread has claimed both critical sections.</p>
+<p>
+The last invariant can be interpreted in several ways; my favorite one is that (once more, under the initial marking &lt;p11, p21, cs1, cs2&gt;) if one critical section is taken and the other is free, the thread that first claims the critical section that is taken (before it claims the other one, which is free) must be on top of its loop (that is, has no critical section claimed) and the other thread has claimed the critical section that is claimed.</p>
+<p>
+You will notice that all of these invariants seem trivial to us; they basically confirm our intuitive knowledge about the behavior of the application. But hold on—isn't that exactly what we set out to do? Remember the discussion of GOOFY2, in which we cranked out all of these statements, hoping that a machine could do this for us so that we could match the deadlock marking against them? Well, here we are! No more arguing; here are the invariants, right at our fingertips! The only thing left to do now is to determine how a deadlock marking should look so that we can match it against the invariants.</p>
+<h3>Describing Deadlocks</h3>
+<p>
+We have intuitively described a deadlock before: There must be at least two threads and at least two resources for the threads to be blocked on, and there must be a circular wait condition such that some of the threads are blocked on a resource that another thread holds; this other thread in return must directly or indirectly be blocked on a resource that the first thread holds.</p>
+<p>
+This scenario is, in fact, fairly easy to describe formally. We can even describe the scenario as a Petri net itself: Let each thread in the system be represented by a transition and each resource on which a thread can be blocked be represented by a place. An arc from a place (<i>p</i>) to a transition (<i>t</i>) means that Thread <i>t</i> owns Resource <i>p</i>, and an arc from a Transition <i>t</i> to a Place <i>p</i> means that Thread <i>t</i> is blocked on <i>p</i>. That kind of Petri net is fairly widely used; it is also referred to as a <i>resource allocation graph</i> or RAG. Almost by definition, a deadlock is equivalent to a cycle in the RAG. Let us consider the deadlocking scenario in GOOFY:</p>
+<p>
+<img src="deadlock_4.gif" border=0></p>
+<p class=label>
+<b>Figure 4. Deadlock scenario for GOOFY</b></p>
+<p>
+Thus, in a given situation, by building the resource allocation graph, it is possible to determine whether a deadlock is indeed present.</p>
+<p>
+Unfortunately, for any given net, we cannot effectively enumerate all deadlock markings. The reason is that (a) the number of all possible markings in a Petri net is an exponential function of the number of places; thus, even enumerating all possible markings would be an impracticable task; and (b) determining whether any given directed graph has circles is difficult. Both reasons together make for an enterprise that not even today's powerful machines can harness.</p>
+<p>
+To make matters more complicated, a deadlock in a more complex net than GOOFY may take on several forms. For example, GOOFY might only be a subnet in a more complex application that contains three or more threads; in that case, any combination of markings that involves GOOFY's deadlock is also a deadlock. Or GOOFY might be a little bit more complex, with p12 and p22 being refined to subnets that in themselves might be alive—for example, if we replaced the statements that read like this:</p>
+<pre><code>&nbsp;&nbsp;&nbsp;printf("\nThread1 has entered Critical Section 1 and 2!");
+</code></pre>
+<p>
+with, say, a <b>while</b> loop that in itself contains resources. As long as both threads execute their <b>while</b> loops, their respective computations still progress, but eventually they are doomed to deadlock on Critical Sections 1 and 2.</p>
+<h2>Postlude</h2>
+<p>
+We began this article by daydreaming about DEADLOCOP, an application that takes a look at your multithreaded application and determines whether there is a chance that the application will deadlock.</p>
+<p>
+We then put together a framework that allows us to make more formal than intuitive statements about the multithreaded application, and then discussed its possibilities and shortcomings. Following that discussion, we can put together a wish list for what a real DEADLOCOP application should do. It should:
+<ul type=disc>
+<li>
+Assist you in converting your multithreaded application to a Petri net.<br><br></li>
+<li>
+Determine and display the application invariants for you to scrutinize.<br><br></li>
+<li>
+Let you enter an initial marking and compute the invariant equations for that marking.<br><br></li>
+<li>
+Simulate a possible instruction flow through the net.<br><br></li>
+<li>
+Determine, for a given marking, whether it may be reachable from the initial marking, using the invariant equations.<br><br></li>
+<li>
+Determine, for a given marking, whether the marking comprises a deadlock, by computing the resource allocation graph.</li>
+</ul>
+<p>
+These features are exactly what I put in the spec for DLDETECT, an MFC application that you will also find in the MSDN Library. After reading this article, you might want to take a look at <a href="msdn_dldetect.htm">"The Implementation of DLDETECT.EXE"</a> and, after that, <a href="msdn_dldwork.htm">"Putting DLDETECT to Work."</a></p>
+<h2>Conclusion</h2>
+<p class=indent>
+<i>What goofy stuff the Microsoft Developer Network folks are coming up with these days! Don't they have anything more meaningful to write about than stuff they heard about in college?</i></p>
+<p>
+This may be your reaction to this article series. Then again, maybe you'll read it with moderate interest, think about applying the framework some time, and then forget all about it.</p>
+<p>
+Or maybe you'll get really excited about Petri nets, start impressing your boss with all kinds of elaborate statements about decidability questions in Petri nets and how much they can help you to write more stable and reliable multithreaded applications. In that case, you are my friend, and your application might receive an award for stability because your company was the only one among its competitors that cared to analyze the multithreading behavior of an application while designing it. Doesn't that sound great?</p>
+<p>
+And besides, if you don't think you can make sense of Petri nets, you can still use them as art works.</p>
+<h2>Bibliography</h2>
+<p>
+Asche, Ruediger. <a href="msdn_dldwork.htm">"Putting DLDETECT to Work,"</a> MSDN Library, Technical Articles, 1994.</p>
+<p>
+Asche, Ruediger. <a href="msdn_dldetect.htm">"The Implementation of DLDETECT.EXE,"</a> MSDN Library, Technical Articles, 1994.</p>
+<p>
+Murata, Tadao. "Petri Nets: Properties, Analysis and Applications." <i>Proceedings of the IEEE </i>77 (April 1989): 541-580.</p>
+<p>
+Peterson, James L. <i>Petri Nets and the Modeling of Systems</i>. Englewood Cliffs, N.J: Prentice-Hall, 1981.</p>
+<p>
+Reisig, W. <i>A Primer in Petri Net Design</i>. Berlin: Springer-Verlag, 1992.</p>
+</BODY>
+</HTML>

@@ -1,0 +1,280 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Allocating Memory the Old-Fashioned Way: _fmalloc and Applications for Windows</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_malloc"></a></sup>Allocating Memory the Old-Fashioned Way: _fmalloc and Applications for Windows</h1>
+<p>
+Dale Rogerson<br>
+Microsoft Developer Network Technology Group</p>
+<p>
+Created: July 10, 1992</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="102">
+</OBJECT><a href="javascript:sample1.Click()">Click to open or copy the files in the Smart Alloc sample application for this technical article.</a></p>
+<h2>Abstract</h2>
+<p>
+One of the most shocking things that a first-time programmer for Windows has to learn is not to use <b>malloc</b> but to use special Microsoft® Windows™ memory allocation functions such as <b>GlobalAlloc</b>, <b>GlobalReAlloc</b>, <b>GlobalLock</b>, <b>GlobalUnlock</b>, and <b>GlobalFree</b>. The reasons for requiring special memory allocation functions have mostly gone away with the demise of real mode. In fact, Microsoft C/C++ version 7.0 brings us almost full circle, because the preferred method for memory allocation is the large-model version of <b>malloc</b> or <b>_fmalloc</b>. Even the C startup code now uses <b>malloc</b> to allocate space for the environment.</p>
+<p>
+This article discusses the behavior of <b>malloc</b> supplied with Microsoft C/C++ version 7.0. The article focuses on programming for the protected modes—standard and enhanced—of Microsoft Windows version 3.1. The following topics are discussed:
+<ul type=disc>
+<li>
+<b>_nmalloc</b>: Why <b>_fmalloc</b> is not the same<br><br></li>
+<li>
+History: Why <b>_fmalloc</b> was bad<br><br></li>
+<li>
+Subsegment Allocation: Why <b>_fmalloc</b> is good<br><br></li>
+<li>
+<b>_ffree</b>: Why <b>_fmalloc</b> is not perfect<br><br></li>
+<li>
+DLLs: Why <b>_fmalloc</b> may not do what you want<br><br></li>
+<li>
+Versatility: Why <b>_fmalloc</b> is not for everything</li>
+</ul>
+<p>
+The information for this article was gleaned from the C/C++ version 7.0 compiler run-time library source code.</p>
+<p>
+To interactively explore the behavior of <b>_fmalloc</b>, the Smart Alloc (SMART.EXE) sample application is provided. Smart Alloc is best used in conjunction with Heap Walker, which shows the exact state of the global segments allocated. Segments allocated with <b>GlobalAlloc</b> (or <b>_fmalloc</b>) are listed by Heap Walker as having a type designation of "Private." Smart Alloc has a dynamic-link library (DLL) that intercepts all calls to <b>GlobalAlloc</b>, <b>GlobalFree</b>, and <b>GlobalReAlloc</b> made by Smart Alloc or the C run-time library and prints messages with <b>OutputDebugString</b> to the debugging console. It is usually most convenient to use DBWIN.EXE to view these messages.</p>
+<h2>_nmalloc: Why _fmalloc Is Not the Same</h2>
+<p>
+When compiling with the large data model libraries (compact-, large-, and huge-model programs), <b>malloc</b> is automatically mapped to <b>_fmalloc</b>. In other memory models, the programmer must explicitly call <b>_fmalloc</b>, because <b>malloc</b> maps to <b>_nmalloc</b> in these memory models.</p>
+<p>
+<b>_nmalloc</b> functions differently from <b>_fmalloc</b>. <b>_nmalloc</b> directly maps to <b>LocalAlloc</b> with the LMEM_NODISCARD | LMEM_FIXED flags. <b>_nfree</b> directly calls <b>LocalFree</b>. Because <b>_nmalloc</b> allocates fixed memory blocks, it can lead to fragmentation of the local heap.</p>
+<h2>History: Why _fmalloc Was Bad</h2>
+<p>
+Before Microsoft® Windows™ version 3.1, programmers had to worry about compatibility with Windows-based real mode, which required the locking and unlocking of memory handles to support movable memory. A locked block in real mode is fixed in memory, and leaving blocks locked would result in performance degradation. The way <b>_fmalloc</b> is defined meant that an allocated block would have to be locked throughout its lifetime. When Microsoft C version 6.0 was released, real mode was the only mode in Windows; therefore, <b>_fmalloc </b>was designed to work under real mode. </p>
+<p>
+Microsoft C/C++ version 7.0 was designed to develop protected-mode applications for Windows. In protected mode, there is no penalty for locking a memory handle and leaving it locked. It is not even necessary to retain the handle returned from <b>GlobalAlloc</b>, because the <b>GlobalHandle</b> function returns the handle to a selector returned from <b>GlobalLock</b>. Macros defined in WINDOWSX.H simplify the process of getting a pointer to a block of memory. The <b>GlobalAllocPtr</b> and <b>GlobalFreePtr</b> macros automatically lock and unlock a memory block.</p>
+<p>
+Microsoft C/C++ version 7.0 takes advantage of the new freedom allowed by protected mode. <b>_fmalloc</b> can now leave memory blocks locked with no penalty under the two protected modes of Windows version 3.<i>x</i>. </p>
+<h2>Subsegment Allocation: Why _fmalloc Is Good</h2>
+<p>
+One of the current limitations of Windows version 3.<i>x</i> is the systemwide limit of 8192 selectors (4096 for standard mode). Each call to <b>GlobalAlloc</b> uses one selector and has an overhead of 32 bytes, which makes <b>GlobalAlloc</b> inappropriate for allocating many small blocks of memory. </p>
+<p>
+For example, take a flat file database that reads in a list of names and addresses from the hard disk and puts them in a binary tree. If <b>GlobalAlloc</b> is called for each name and address, this program would not be able to store more than 4096 names. Many companies have more than 4096 employees. In fact, the actual number of available selectors is far less than 8192 because all Windows-based applications and libraries must share from the same pool of selectors.</p>
+<p>
+<b>_fmalloc</b> implements a much more intelligent use of selectors. Instead of allocating a new segment for each memory request, <b>_fmalloc</b> tries to satisfy as many requests as possible using a single segment. <b>_fmalloc</b> expands the segment as needed and returns pointers to areas of memory within the segment. This process of managing memory within a segment is called <i>subsegment allocation</i>.</p>
+<p>
+In the first call, <b>_fmalloc</b> allocates a segment with <b>GlobalAlloc</b> using GMEM_MOVEABLE. (GMEM_SHARE, also set when compiling dynamic-link libraries [DLLs], will be examined in the section on DLLs.) The block allocated by <b>_fmalloc</b> is, therefore, not fixed in memory. It is movable. The selector associated with this block of memory will not change. However, because <b>malloc</b> returns a pointer to a location within the segment, the pointer will not have an offset of zero (selector:0) as <b>GlobalAlloc</b> does.</p>
+<p>
+In the next call, <b>_fmalloc</b> first tries to satisfy the request without allocating any memory. If this is not possible, it attempts to do a <b>GlobalReAlloc</b> instead of a <b>GlobalAlloc</b>. This reduces the number of selectors used by the program. If the segment size must grow larger than the _HEAP_MAXREQ constant defined in <b>malloc.h</b> to meet the allocation request, <b>GlobalAlloc</b> is called again. _HEAP_MAXREQ is defined to be 0x0FFE6 or 65,510 bytes. This leaves enough room for the overhead needed to manage the heap and not have any memory crossing a segment boundary. If more than _HEAP_MAXREQ memory is requested, the <b>_fmalloc</b> call returns a null pointer.</p>
+<p>
+Figures 1 and 2 illustrate the behavior of <b>_fmalloc</b>.</p>
+<p>
+<img src="malloc_1.gif" border=0></p>
+<p class=label>
+<b>Figure 1. _fmalloc vs. GlobalAlloc</b></p>
+<p>
+Figure 1 illustrates how <b>_fmalloc</b> satisfies several memory requests with one segment consuming only one selector when the requested blocks are less than _HEAP_MAXREQ. Each call to <b>GlobalAlloc</b>, on the other hand, uses up a selector.</p>
+<p>
+<img src="malloc_2.gif" border=0></p>
+<p class=label>
+<b>Figure 2. _fmalloc Subsegment Allocation</b></p>
+<p>
+Figure 2 shows how <b>_fmalloc</b> allocates a new segment when it cannot satisfy a request with the old segment because the requested block would cause the segment to grow larger than _HEAP_MAXREQ. Notice how neither <b>GlobalAlloc</b> nor <b>_fmalloc</b> allocates exactly the number of bytes that are requested. Both functions have some overhead. The current version of <b>_fmalloc</b> requires 22 bytes of overhead on top of the overhead of <b>GlobalAlloc</b>. It also defines the smallest segment size to be 26. Future versions of <b>_fmalloc</b> may require more or less overhead. <b>_fmalloc</b> also returns a pointer that is guaranteed to be aligned on double-word boundaries.</p>
+<p>
+<b>_fmalloc</b> attempts to be more efficient than <b>GlobalAlloc</b> by allocating memory from Windows in chunks, hoping to satisfy several memory requests while using only one selector and without needing to call <b>GlobalAlloc</b> or <b>GlobalReAlloc</b> again. In some cases, this can lead to faster speeds.</p>
+<p>
+The amount of memory that <b>_fmalloc </b>initially allocates to a new segment is rounded up to the nearest 4K boundary. If less than 4070 bytes (4096 - 26) is requested, 4K is allocated. If 4096 - 26 + 1 is requested, 8K is allocated. This behavior differs from the explanation in the Microsoft C/C++ version 7.0 <i>Run-Time Library Reference</i>, which states that the initial requested size for a segment is just enough to satisfy the allocation request.</p>
+<p>
+When <b>_fmalloc</b> can satisfy a request by growing the segment, it calls <b>GlobalReAlloc</b>. The global variable <b>_amblksiz</b> determines the amount by which the segment is grown. <b>_fmalloc</b> will grow the segment in enough multiples of <b>_amblksiz</b> to satisfy the request. The default value of <b>_amblksiz</b> is 4K for Windows, instead of the 8K used by MS-DOS®. You can set <b>_amblksiz</b> to any value, but <b>_fmalloc</b> rounds it up to the nearest whole power of two before it is used.</p>
+<p>
+The sample application, Smart Alloc (SMART.EXE), can be used to explore the behavior of <b>_fmalloc</b> in detail. Examine Smart Alloc's Help file for more information on using it. Try allocating 1 byte of memory. <b>_fmalloc</b> calls <b>GlobalAlloc</b> with a size of 4K. Try allocating 4070 bytes and 4071 bytes. Smart Alloc also lets you experiment with different values of <b>_amblksiz</b>. </p>
+<p>
+The frugal behavior of <b>_fmalloc</b> makes it suited to allocating bunches of small memory objects. However, as will be shown in the next section, <b>_fmalloc</b> is not suitable for all uses.</p>
+<h2>_ffree: Why _fmalloc Is Not Perfect</h2>
+<p>
+While the subsegment allocation scheme employed by <b>_fmalloc</b> is very good, the behavior of <b>_ffree</b> is not as straightforward as <b>GlobalFree</b>. Knowledge of this behavior is very important to avoid wasting large amounts of memory. The following example illustrates the behavior of <b>_ffree</b>.</p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;In Figures 3 through 7, it is possible for Selector 3 to have a lower or higher value than Selector 1. The number indicates in what order the selectors were allocated.</p>
+<p>
+<img src="malloc_3.gif" border=0></p>
+<p class=label>
+<b>Figure 3. Freed Segments Are Not GlobalFree'd</b></p>
+<p>
+In Figure 3, the last block allocated has been freed. However, its memory is not returned to the system.</p>
+<p>
+<img src="malloc_4.gif" border=0></p>
+<p class=label>
+<b>Figure 4. Freed Blocks Are Not Reallocated</b></p>
+<p>
+In Figure 4, the first and fourth blocks of memory are freed in addition to Block 5. Again, no memory is returned to Windows with a <b>GlobalFree</b>. If <b>_fmalloc</b> returned the memory for the first block to Windows, the pointer to Block 2 would have to change. It would be possible for <b>_fmalloc</b> to <b>GlobalReAlloc</b> the memory associated with Selector 2 and <b>GlobalFree</b> the memory associated with Selector 3. This can be accomplished with the C/C++ run-time library, as will be explained in conjunction with Figure 7.</p>
+<p>
+<img src="malloc_5.gif" border=0></p>
+<p class=label>
+<b>Figure 5. Figure 4 Followed with an _fmalloc(x/2)</b></p>
+<p>
+In Figure 5, a new block has been allocated. Because this block is half the size of the previous first block, <b>_fmalloc</b> places it in this empty block of Selector 1.</p>
+<p>
+<img src="malloc_6.gif" border=0></p>
+<p class=label>
+<b>Figure 6. Figure 5 Followed with an _fmalloc(2 * x)</b></p>
+<p>
+In Figure 6, another block of memory is allocated. This time it is twice the size of the previous blocks of memory. Because this block is too large to fit into the heap associated with Selector 2, the memory associated with Selector 3 is reallocated to hold it.</p>
+<p>
+<img src="malloc_7.gif" border=0></p>
+<p class=label>
+<b>Figure 7. Figure 4 Followed by _heapmin</b></p>
+<p>
+If memory is set up as in Figure 4, calling <b>_heapmin</b> will leave memory in the state shown by Figure 7. <b>_heapmin</b> performs the following actions to achieve this state:
+<ul type=disc>
+<li>
+Memory associated with Selector 1 is <b>GlobalReAlloc</b>'ed to remove the padding.<br><br></li>
+<li>
+Selector 2's memory is <b>GlobalReAlloc</b>'ed to remove the freed block and padding.<br><br></li>
+<li>
+<b>GlobalFree</b> releases Selector 3 and all of its memory.</li>
+</ul>
+<p>
+To recreate the previous examples with Smart Alloc, use 22,000 bytes for the size <i>x</i>. It is important to note that Smart Alloc sorts allocated memory by handle (that is, selector) and not the order in which it was allocated. </p>
+<p>
+In addition to <b>_heapmin</b>, the C compiler run-time library contains many other functions to help manage the heap created by <b>_fmalloc</b>. Descriptions of these functions are in the Microsoft C/C++ version 7.0 <i>Run-Time Library Reference</i>. Like <b>_heapmin</b>, most of these functions are unique to C/C++ version 7.0 and are not ANSI C compatible. Below is a list of these unique functions:</p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=29%><b>Reallocation functions:</b></td>
+<td class=label width=71%></td>
+</tr>
+<tr valign=top>
+<td width=29%> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; _fexpand</td>
+<td width=71%>Expands or shrinks a block of memory without moving its location.</td>
+</tr>
+<tr valign=top>
+<td width=29%> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; _frealloc</td>
+<td width=71%>Reallocates a block to a new size. Might move the block of memory.</td>
+</tr>
+<tr valign=top>
+<td width=29%> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; _heapadd</td>
+<td width=71%>Adds memory to a heap.</td>
+</tr>
+<tr valign=top>
+<td width=29%> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; _heapmin</td>
+<td width=71%>Releases unused memory in a heap.</td>
+</tr>
+<tr valign=top>
+<td class=label width=29%><b>Information functions:</b></td>
+<td class=label width=71%></td>
+</tr>
+<tr valign=top>
+<td width=29%> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; _fmsize</td>
+<td width=71%>Returns size of an allocated block.</td>
+</tr>
+<tr valign=top>
+<td width=29%> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; _fheapwalk</td>
+<td width=71%>Returns information about each entry in a heap.</td>
+</tr>
+<tr valign=top>
+<td class=label width=29%><b>Debugging functions:</b></td>
+<td class=label width=71%></td>
+</tr>
+<tr valign=top>
+<td width=29%> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; _fheapset</td>
+<td width=71%>Fills free heap entries with a specified value.</td>
+</tr>
+</table><br>
+<p>
+All programmers who decide to use <b>_fmalloc</b> must be aware that <b>_ffree</b> does not return memory to the operating system. For example, an application might read in an entire text file and display it on the screen. Let's say that the application keeps a linked list of lines and <b>malloc</b>s the memory for each line in the file. If the user selects a large file of about 1 megabyte (MB), the application allocates at least 1 MB of memory. The user then closes the file. The application faithfully calls <b>_ffree</b> for each line in the file. Even though the application does not need the memory, it is still hogging it from the system. This application needs to call <b>_heapmin</b> or one of the other heap management functions.</p>
+<p>
+Why doesn't <b>_ffree</b> call <b>GlobalFree</b>? There are two main reasons:
+<ul type=disc>
+<li>
+Speed. It is faster to keep the memory allocated than to repeatedly call <b>GlobalAlloc</b>, <b>GlobalReAlloc</b>, and <b>GlobalFree</b>. <b>_fmalloc</b> calls can be extremely fast when <b>_fmalloc</b> only has to return a pointer to an existing block of memory.<br><br></li>
+<li>
+Pointers. <b>_fmalloc</b> returns pointers to an offset inside a segment. <b>_fmalloc</b> would have to move the memory pointed to by these pointers if it<b> </b>were to actually call <b>GlobalFree</b> to free the memory. It is not possible for <b>_fmalloc</b> or <b>_ffree</b> to update all the pointers into its heap.</li>
+</ul>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;All memory (freed and unfreed) is returned to the system as part of the Windows kernel's normal clean-up process when the application exits.</p>
+<h2>DLLs: Why _fmalloc May Not Do What You Want</h2>
+<p>
+As mentioned above, when <b>_fmalloc</b> must allocate a segment, it makes a call to <b>GlobalAlloc</b>. For applications, it allocates the segment as GMEM_MOVEABLE. For DLLs, <b>_fmalloc</b> calls <b>GlobalAlloc</b> with GMEM_SHARE | GMEM_MOVEABLE flags. <b>_fmalloc</b> maintains only one heap for a DLL, which is shared by all applications that use the DLL. In most cases, programmers do not really want the memory allocated from a DLL marked as GMEM_SHARE.</p>
+<p>
+The GMEM_SHARE flag tells Windows that this memory is going to be shared by several programs. The most immediate consequence of using GMEM_SHARE in a DLL is that the memory will not be released until the DLL is unloaded from memory. The DLL is not always unloaded from memory when the application that loads it exits. Because multiple applications or instances of an application are using a DLL, the DLL and its memory will not be unloaded until all applications using the DLL have exited.</p>
+<p>
+The following are the possible times when memory is freed:
+<ul type=disc>
+<li>
+If an application allocates memory and does not free it, the memory is freed by Windows when the application exits. <br><br></li>
+<li>
+If an application calls a DLL that allocates memory <i>without</i> the GMEM_SHARE flag (via <b>GlobalAlloc</b>), the memory is owned by the <i>application</i> and will be freed when the application exits. <br><br></li>
+<li>
+If an application calls a DLL that allocates memory <i>with</i> the GMEM_SHARE flag, the memory will be owned by the <i>DLL</i> and not by the application. The memory will be released when the DLL is unloaded and <i>not</i> when the application exits.</li>
+</ul>
+<p>
+If a programmer is not careful, the use of <b>_fmalloc</b> in a DLL can lead to large pools of allocated but unneeded memory. It is usually best to use the GMEM_SHARE flag only when memory must be shared or must exist for the lifetime of the DLL. This means that, in many cases, <b>GlobalAlloc</b> should be used instead of <b>_fmalloc</b> in a DLL.</p>
+<p>
+Remember, calling <b>_ffree</b> does not generate a call to <b>GlobalFree</b>. Even if the DLL is freeing memory before it returns to the application, memory can be wasted. Refer to the previous section on <b>_ffree</b> for more information.</p>
+<p>
+The situations listed above can be demonstrated by using the Smart Alloc sample application. Perform the following steps:
+<ol>
+<li>
+Run Heap Walker (HEAPWALK.EXE).<br><br></li>
+<li>
+Run an instance of Smart Alloc (SMART.EXE).<br><br></li>
+<li>
+<b>GlobalAlloc</b> 1000 bytes of movable memory from a DLL. (See the Smart Alloc help file for details on how to do this.)<br><br></li>
+<li>
+Walk the global heap using Heap Walker and examine the listing. The above memory should be owned by Smart Alloc. It will differ slightly in size due to the overhead and padding performed by <b>GlobalAlloc</b>.<br><br></li>
+<li>
+<b>GlobalAlloc</b> 2000 bytes of shared memory from a DLL.<br><br></li>
+<li>
+Walk the global heap using Heap Walker and examine the listing. The memory allocated in step 5 should be owned by SMARTDLL.DLL. It will differ slightly in size due to the overhead and padding performed by <b>GlobalAlloc</b>.<br><br></li>
+<li>
+Run a second instance of Smart Alloc. Do not exit the first instance.<br><br></li>
+<li>
+<b>GlobalAlloc</b> 3000 bytes of movable memory from a DLL using the second instance of Smart Alloc.<br><br></li>
+<li>
+<b>GlobalAlloc</b> 4000 bytes of shared memory from a DLL using the second instance of Smart Alloc.<br><br></li>
+<li>
+Walk the global heap in Heap Walker and examine the listing. The memory allocated in steps 8 and 9 should be owned and allocated like the memory allocated by the first instance in steps 4 and 5. In fact, the memory allocated in step 9 will be allocated in the same segment as the memory allocated for the first instance of Smart Alloc in step 5.<br><br></li>
+<li>
+Exit the second instance of Smart Alloc.<br><br></li>
+<li>
+Walk the global heap using Heap Walker and examine the listing. The 3000-byte segment will have been discarded by Windows, but the 4000-byte segment owned by SMARTDLL.DLL will still exist.</li>
+</ol>
+<p>
+Figures 8 and 9 illustrate the above sequence. Figure 8 illustrates the state of memory after executing steps 1 through 10 in the list above.</p>
+<p>
+<img src="malloc_8.gif" border=0></p>
+<p class=label>
+<b>Figure 8. State of Memory After Step 10</b></p>
+<p>
+Figure 9 illustrates what is freed after Instance 2 is deleted.</p>
+<p>
+<img src="malloc_9.gif" border=0></p>
+<p class=label>
+<b>Figure 9. State of Memory After Closing Instance 2</b></p>
+<p>
+Remember that <b>_fmalloc</b> allocates memory with the GMEM_SHARE option set.</p>
+<h2>Versatility: Why _fmalloc Is Not for Everything</h2>
+<p>
+While the subsegment allocation makes <b>_fmalloc</b> better for general use, it does not provide the same kind of versatility that <b>GlobalAlloc</b> does. Below is a list of some of the things that <b>GlobalAlloc</b> can do that <b>_fmalloc</b> cannot:
+<ul type=disc>
+<li>
+Allocate memory with the GMEM_SHARE flag in an application.<br><br></li>
+<li>
+Allocate nonshared memory from a DLL.<br><br></li>
+<li>
+Allocate more than 64K. <b>GlobalAlloc</b> takes a <b>DWORD</b>, while <b>_fmalloc</b> takes a <b>size_t</b>, which is an <b>unsigned int</b>. <b>_halloc</b> can also be used to allocate more than 64K in a block of memory.<br><br></li>
+<li>
+Allocate fixed memory, discardable memory, or memory with the other GMEM_* attributes.</li>
+</ul>
+<p>
+Although most programmers do not think of general protection faults as a positive thing, they can be helpful in locating where a program writes outside of a memory block. Because <b>_fmalloc</b> returns a pointer into a block of memory, it is possible to write past the end of the block and not write past the end of the segment.</p>
+<h2>Conclusion</h2>
+<p>
+In most cases, <b>_fmalloc</b> and <b>_ffree</b> utilize system resources better than directly calling <b>GlobalAlloc</b> and <b>GlobalFree</b>. The subsegment allocation scheme used by <b>_fmalloc</b> reduces the number of selectors needed and also reduces the amount of system overhead.</p>
+<p>
+While the subsegment allocation scheme is a boon to programmers for Windows, <b>_fmalloc</b> is not without its limitations. The most important one to remember is that memory is not returned to Windows when <b>_ffree</b> is called.</p>
+<p>
+Also keep in mind that calling <b>_fmalloc</b> from a DLL allocates memory with the GMEM_SHARE attribute set, which is usually not what is wanted because memory is not freed until the DLL is unloaded.</p>
+</BODY>
+</HTML>

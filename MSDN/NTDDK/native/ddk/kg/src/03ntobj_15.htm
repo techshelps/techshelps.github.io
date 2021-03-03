@@ -1,0 +1,262 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML>
+<HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>3.3.4.1  Packet-Based System DMA</TITLE>
+<style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD>
+<BODY BGPROPERTIES="FIXED" TEXT="#000000" BGCOLOR="#FFFFFF">
+
+<FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<H4><A NAME="DDK_Packet_Based_System_DMA_KG"></A>3.3.4.1  Packet-Based System DMA</H4>
+<P>
+NT drivers of slave devices that use packet-based DMA call the following
+general sequence of support routines as they process an IRP requesting a DMA
+transfer:
+<OL>
+<LI>
+<B>KeFlushIoBuffers</B>&nbsp;just before attempting to allocate the system DMA
+controller
+<P>
+See Chapter 16 for more information about maintaining cache coherency during
+DMA with <B>KeFlushIoBuffers</B>&nbsp;and <B>IoFlushAdapterBuffers</B>.
+<P>
+<LI>
+<B>IoAllocateAdapterChannel</B>&nbsp;when the driver is ready to program its device
+for DMA and needs the system DMA controller
+<P>
+<LI>
+<B>MmGetMdlVirtualAddress</B>&nbsp;to get an index into the MDL, required as an
+parameter in the initial call to <B>IoMapTransfer</B>, and <B>IoMapTransfer</B>
+to program the system DMA controller for the transfer operation
+<P>
+Note that a driver might need to call <B>IoMapTransfer</B>&nbsp;more than once to
+transfer all the requested data, as explained in <A HREF="03ntobj_13.htm">Section
+3.3.3</A>.
+<P>
+<LI>
+<B>IoFlushAdapterBuffers</B>&nbsp;just after each DMA transfer operation to/from
+the slave device
+<P>
+If a driver must call <B>IoMapTransfer</B>&nbsp;more than once to transfer all the
+requested data, it must call <B>IoFlushAdapterBuffers</B>&nbsp;as many times as it
+calls <B>IoMapTransfer</B>.
+<P>
+<LI>
+<B>IoFreeAdapterChannel</B>&nbsp;as soon as all the requested data has been
+transferred or the driver fails the IRP because of a device I/O error
+</OL>
+<P>
+The <I>AdapterObject</I>&nbsp;pointer returned by <B>HalGetAdapter</B>&nbsp;is a
+required parameter to each of these routines except <B>KeFlushIoBuffers</B>
+and <B>MmGetMdlVirtualAddress</B>, which require a pointer to the MDL at <B>Irp-&gt;MdlAddress</B>.
+<P>
+Individual NT drivers call this sequence of support routines at different
+points, depending on how each driver is implemented to service its device. For
+example, one driver’s StartIo routine might make the call to <B>IoAllocateAdapterChannel</B>,
+another driver might make this call from a routine that removes IRPs from a
+driver-created interlocked queue, and still another driver might make this
+call when its slave DMA device indicates it is ready to transfer data.
+<H5><A NAME="DDK_Allocating_an_Adapter_Channel_for_Packet_Based_DMA_KG"></A>3.3.4.1.1  Allocating an Adapter Channel for Packet-Based DMA</H5>
+<P>
+<A NAME="DDK_Figure_3..7_KG"></A>A driver calls <B>KeFlushIoBuffers</B>&nbsp;and <B>IoAllocateAdapterChannel</B>
+after its Dispatch routine for IRP_MJ_READ and/or IRP_MJ_WRITE requests, or
+for any other request that requires a DMA transfer, has already checked the
+validity of the IRP’s parameters (if necessary), possibly queued the IRP to
+another driver routine for further processing, and the transfer request is the
+current IRP requiring a device I/O operation. Figure 3.7 illustrates such a
+call to <B>IoAllocateAdapterChannel</B>.
+<P>
+<B><IMG SRC="../art/3adtrobj.gif" BORDER=0></B>
+<P>
+<B>Figure 3.7    Allocating the System DMA Controller</B>
+<P>
+The driver routine that calls <B>IoAllocateAdapterChannel</B>&nbsp;must be
+executing at IRQL DISPATCH_LEVEL when this call occurs. For more information
+about the IRQLs at which NT drivers’ standard routines execute, see Chapters 5
+through 15. For more information about support-routine-specific IRQL
+requirements, see the <I>Kernel-Mode Driver Reference.</I>
+<P>
+As Figure 3.7 shows, the driver must supply more than a pointer to the adapter
+object returned by <B>HalGetAdapter</B>&nbsp;when it calls <B>IoAllocateAdapterChannel</B>.
+Along with a pointer to the target device object, it must supply the entry
+point for its AdapterControl routine and a pointer to any driver-determined
+context information the AdapterControl routine will use.
+<P>
+<B>IoAllocateAdapterChannel</B>&nbsp;queues the driver’s AdapterControl routine,
+which executes when the system DMA controller is assigned to this driver and a
+set of map registers (described in <A HREF="03ntobj_11.htm">Section
+3.3.1</A>) has been allocated for the driver’s DMA operation(s).
+<P>
+On entry, an AdapterControl routine is given the <I>DeviceObject</I>&nbsp;and <I>Context</I>
+pointers passed in the call to <B>IoAllocateAdapterChannel</B>, as well as a
+handle (<I>MapRegisterBase</I>) for the allocated map registers, as shown in
+Figure 3.7.
+<P>
+The AdapterControl routine also is given a pointer to the <B>DeviceObject-&gt;CurrentIrp</B>
+if the driver has a StartIo routine. If a driver manages its own queueing of
+IRPs (instead of having a StartIo routine), the driver should include a
+pointer to the current IRP as part of the context it passes when it calls <B>IoAllocateAdapterChannel</B>.
+<P>
+The AdapterControl routine usually does the following:
+<OL>
+<LI>
+Saves or initializes whatever context the driver maintains about DMA
+operations, such as saving the input <I>MapRegisterBase</I>&nbsp;handle the driver
+must pass to <B>IoMapTransfer</B>&nbsp;and <B>IoFlushAdapterBuffers</B>&nbsp;and,
+possibly, the <B>Length</B>&nbsp;of the requested transfer from its I/O stack
+location in the IRP
+<P>
+<LI>
+Calls <B>MmGetMdlVirtualAddress</B>&nbsp;followed by <B>IoMapTransfer</B>
+(described in the next section)
+<P>
+<LI>
+Sets up the slave device to start the transfer operation
+<P>
+<LI>
+Returns the value <B>KeepObject</B>
+</OL>
+<P>
+As Figure 3.7 shows, an AdapterControl routine must return a system-defined
+value of type IO_ALLOCATION_ACTION. For NT drivers that use system DMA, the
+AdapterControl routine must return the value <B>KeepObject</B>. This allows
+the driver to retain &quot;ownership” of the system DMA controller and
+allocated map registers until it has transferred all the requested data.
+<P>
+Note that an AdapterControl routine cannot wait for the slave device to carry
+out the DMA operation, so an AdapterControl routine must at least do the
+following:
+<OL>
+<LI>
+Save context information, particularly the <I>MapRegisterBase</I>&nbsp;handle, in
+the driver’s device extension, controller extension, or other
+driver-accessible resident storage area (nonpaged pool allocated by the
+driver).
+<P>
+<LI>
+Return <B>KeepObject</B>.
+</OL>
+<P>
+Another driver routine (probably the DpcForIsr) must call <B>IoFlushAdapterBuffers</B>
+when each DMA transfer operation is complete. This routine also must call <B>IoMapTransfer</B>
+and <B>IoFlushAdapterBuffers</B>&nbsp;again if it is necessary to set up the DMA
+controller more than once to satisfy the current IRP’s transfer request.
+<P>
+When a driver has satisfied the current IRP’s request, it must call <B>IoFreeAdapterChannel</B>.
+This support routine should be called immediately following the last call to <B>IoFlushAdapterBuffers</B>
+for the current IRP so that other drivers and this driver can use the system
+DMA controller to satisfy other transfer requests expeditiously.
+<P>
+Note that the driver of a slave device with scatter/gather capabilities should
+also return <B>KeepObject</B>&nbsp;from its AdapterControl routine. Such a device
+must be capable of waiting while the system DMA controller is reprogrammed
+between DMA operations when the driver must split up a given DMA request. On
+some Windows NT platforms, these kinds of devices can transfer at most a page
+of data per DMA operation because the HAL can assign only a single map
+register to the driver of such a device.
+<H5><A NAME="DDK_Setting_Up_the_System_DMA_Controller_for_Packet_Based_DMA_KG"></A>3.3.4.1.2  Setting Up the System DMA Controller for Packet-Based DMA</H5>
+<P>
+When <B>IoAllocateAdapterChannel</B>&nbsp;transfers control to a driver’s
+AdapterControl routine, the driver “owns” the system DMA controller and a set
+of map registers. Then, the DMA controller must be set up for a transfer
+operation by calling the following routines:
+<OL>
+<LI>
+<B>MmGetMdlVirtualAddress</B>&nbsp;with the MDL at <B>Irp-&gt;MdlAddress</B>&nbsp;to get
+an index for the system physical address where the transfer should start
+<P>
+The return value is a required parameter (<I>CurrentVa</I>) to <B>IoMapTransfer</B>.
+<P>
+<LI>
+<B>IoMapTransfer</B>&nbsp;to set up the system DMA controller before the driver
+sets up its device for the transfer operation
+</OL>
+<P>
+<A NAME="DDK_Figure_3..8_KG"></A>Figure 3.8 illustrates such a call to <B>IoMapTransfer</B>.
+<P>
+<B><IMG SRC="../art/3dmaptsf.gif" BORDER=0></B>
+<P>
+<B>Figure 3.8    Programming the System DMA Controller</B>
+<P>
+As Figure 3.8 shows, the driver supplies the following parameters to <B>IoMapTransfer</B>:
+<UL>
+<LI>
+The <I>AdapterObject</I>&nbsp;pointer returned by <B>HalGetAdapter</B>&nbsp;(see <A HREF="03ntobj_12.htm">Section
+3.3.2</A>)
+<P>
+<LI>
+A pointer (<I>Mdl</I>) to the MDL at <B>Irp-&gt;MdlAddress</B>&nbsp;for the current
+IRP
+<P>
+<LI>
+The <I>MapRegisterBase</I>&nbsp;handle passed to the driver’s AdapterControl
+routine by <B>IoAllocateAdapterChannel</B>
+<P>
+<LI>
+The value (<I>CurrentVa</I>) returned by <B>MmGetMdlVirtualAddress</B>&nbsp;if this
+is the first call to<B>&nbsp;IoMapTransfer</B>&nbsp;for the IRP
+<P>
+Otherwise, the driver should supply an updated <I>CurrentVa</I>&nbsp;value,
+indicating where in the buffer the next transfer operation should start. (How
+to calculate an updated <I>CurrentVa</I>&nbsp;is described later.)
+<P>
+<LI>
+A pointer to a variable (<I>Length</I>, shown in Figure 3.8 as
+IrpLengthNextTransfer)
+<P>
+If the driver can transfer all the requested data with a single call to <B>IoMapTransfer</B>
+and has no device-specific constraints on its DMA operations, <I>Length</I>
+can be set to the value of <B>Length</B>&nbsp;in the driver’s I/O stack location of
+the IRP. At most, the length in bytes can be (PAGE_SIZE * the <I>NumberOfMapRegisters</I>
+returned by <B>HalGetAdapter</B>). Otherwise, the driver must split up the
+request, as explained in <A HREF="03ntobj_13.htm">Section
+3.3.3</A>&nbsp;and must update the value of <I>Length</I>&nbsp;in subsequent calls to <B>IoMapTransfer</B>
+for the current IRP.
+<P>
+<LI>
+A Boolean value (<I>WriteToDevice</I>), indicating the direction of the
+transfer operation (TRUE for a requested transfer from system memory to the
+device)
+</UL>
+<P>
+<B>IoMapTransfer</B>&nbsp;returns a logical address, which drivers that use system
+DMA must ignore. When <B>IoMapTransfer</B>&nbsp;returns control, the driver should
+set up its device for the DMA operation. When the device indicates that its
+current DMA operation has completed, the driver should call <B>IoFlushAdapterBuffers</B>,
+usually from the driver’s DpcForIsr routine.
+<P>
+Note that the DpcForIsr or another driver routine that completes a DMA
+operation calls <B>IoFlushAdapterBuffers</B>&nbsp;to ensure that any data cached in
+the system DMA controller is read into system memory or written out to the
+device. The same routine also must call <B>IoMapTransfer</B>&nbsp;again if it is
+necessary to reprogram the system DMA controller to transfer more data for the
+current IRP and <B>IoFlushAdapterBuffers</B>&nbsp;again following each transfer
+operation.
+<P>
+If a driver must call <B>IoMapTransfer</B>&nbsp;more than once for the current IRP,
+it supplies the same <I>AdapterObject</I>&nbsp;pointer, <I>Mdl</I>&nbsp;pointer, <I>MapRegisterBase</I>
+handle, and transfer direction in every call. However, the driver must update
+the <I>CurrentVa</I>&nbsp;and <I>Length</I>&nbsp;parameters before it makes the second
+and any subsequent calls to <B>IoMapTransfer</B>. To calculate an updated
+value for each of these parameters, use the following formulas:
+<UL>
+<LI>
+<I>CurrentVa</I>&nbsp;= <I>CurrentVa</I>&nbsp;+ (<I>Length</I>&nbsp;requested in the
+preceding call to <B>IoMapTransfer</B>)
+<P>
+<LI>
+<I>Length</I>&nbsp;= Minimum (remaining<I>&nbsp;</I><B>Length</B>&nbsp;to be transferred,
+(PAGE_SIZE * <I>NumberOfMapRegisters</I>&nbsp;returned by <B>HalGetAdapter</B>))
+</UL>
+<P>
+The context information each driver maintains about its DMA transfers, such as
+the IrpLengthNextTransfer, IrpLengthDMAedSoFar, and MdlCurrentVa shown in
+Figure 3.8, depends on the driver writer.
+<P>
+When all the requested transfer is complete or the driver must return an error
+status for the IRP, the driver should call <B>IoFreeAdapterChannel</B>
+promptly to release the system DMA controller for other drivers and this
+driver to use.
+<P></FONT>
+</BODY>
+</HTML>

@@ -1,0 +1,240 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML>
+<HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>7.3.5  Managing Supplemental Device Queues</TITLE>
+<style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD>
+<BODY BGPROPERTIES="FIXED" TEXT="#000000" BGCOLOR="#FFFFFF">
+
+<FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<H3><A NAME="DDK_Managing_Supplemental_Device_Queues_KG"></A>7.3.5  Managing Supplemental Device Queues</H3>
+<P>
+The I/O Manager usually (except for FSDs) creates an associated device queue
+object when an NT driver calls <B>IoCreateDevice</B>. It also provides <B>IoStartPacket</B>
+and <B>IoStartNextPacket</B>, which drivers can call to have the I/O Manager
+insert IRPs into the associated device queue or call their StartIo routines
+with an IRP, as desribed in <A HREF="07strtio_2.htm">Section
+7.2</A>. 
+<P>
+Consequently, very few NT driver designers find it necessary (or particularly
+useful) to set up their own device queue objects for IRPs. Likely candidates
+are drivers, such as the NT SCSI port driver, that must coordinate incoming
+IRPs from some number of closely coupled class drivers for heterogeneous
+devices that are serviced through a single controller or bus adapter. 
+<P>
+In other words, the designer of an NT driver for a disk array controller is
+more likely to use a driver-created controller object than to set up
+supplemental device queue object(s), while the designer of an NT driver for an
+add-on bus adapter and of a set of class drivers is slightly more likely to
+use supplemental device queues. 
+<H5>Support for Supplemental Device Queues</H5>
+<P>
+The <B>KeInsert..DeviceQueue</B>&nbsp;routines return a Boolean value indicating
+whether the given IRP was inserted into the device queue. As mentioned in in
+Chapter 3, <B>KeInsertDeviceQueue</B>&nbsp;either inserts an entry at the tail of
+the device queue and sets the state of the device queue object to Busy, or it
+simply sets the state to Busy and returns FALSE to indicate that the IRP was
+not queued. A driver that sets up a supplemental device queue can impose a
+driver-determined order on the processing of IRPs by calling <B>KeInsertByKeyDeviceQueue</B>,
+which also returns a Boolean value indicating whether the given IRP was
+inserted into the device queue. 
+<H5><IMG SRC="../../../wedge.gif" BORDER=0>&nbsp; &nbsp; Consider the following an implementation guideline for NT drivers that call KeInsertDeviceQueue or KeInsertByKeyDeviceQueue directly: </H5>
+<P>
+If the return value is FALSE, the caller <I>must</I>&nbsp; pass the IRP on for
+further processing by another driver routine immediately. 
+<P>
+A call to <B>KeInsertDeviceQueue</B>&nbsp;or <B>KeInsertByKeyDeviceQueue</B>&nbsp;sets
+the state of the device queue object to Busy, even if the queue is currently
+empty and the input IRP is not inserted into the queue. A reciprocal call to <B>KeRemove..DeviceQueue</B>
+resets the state of an empty device queue object to Not-Busy.
+<P>
+Such a driver can remove an IRP from its supplemental device queue (or reset
+the device queue state to Not-Busy) by calling <B>KeRemoveDeviceQueue</B>. The
+driver also can remove a particular entry or determine whether it is currently
+queued by calling <B>KeRemoveEntryDeviceQueue</B>. 
+<H5>Using Supplemental Device Queues with a StartIo Routine</H5>
+<P>
+By calling <B>IoStartPacket</B>&nbsp;and <B>IoStartNextPacket</B>, an NT device
+driver’s Dispatch and DpcForIsr (or CustomDpc) routines synchronize calls to
+its StartIo routine using the device queue that the I/O Manager created when
+the driver created its own device object. For a port driver with a StartIo
+routine, <B>IoStartPacket</B>&nbsp;and <B>IoStartNextPacket</B>&nbsp;insert and remove
+IRPs in the device queue for the port driver’s shared device
+controller/adapter. If such a port driver also sets up supplemental device
+queues to hold requests coming in from closely coupled higher-level class
+drivers, it must “sort” incoming IRPs into its supplemental device queues,
+usually in its StartIo routine. 
+<P>
+However, the closely coupled class drivers of such a port driver must identify
+their devices in the IRPs they send down so that the port driver can attempt
+to insert each IRP into the appropriate driver-managed device queue before
+attempting to program its shared controller/adapter to carry out the request.
+Thus, such a port driver can process incoming requests for all devices on a
+first-come, first-served basis until a call to <B>KeInsertDeviceQueue</B>&nbsp;puts
+an IRP into a particular class driver’s device queue. 
+<P>
+However, such a port driver’s StartIo routine must determine which class
+driver sent any incoming request. When each class driver called <B>IoGetDeviceObjectPointer</B>
+to layer itself over the port driver, each class driver was given a unique
+file object pointer for its “open” of the port driver’s device object. Each
+class driver can set this file object pointer in the port driver’s I/O stack
+location to identify itself when it sets up IRPs for the port driver. 
+<P>
+By using its own device queue for all IRPs to be processed through its StartIo
+routine, such an underlying port driver serializes operations through the
+shared device (or bus) controller/adapter to all attached devices. By
+sometimes holding IRPs for each supported device in a separate device queue,
+this port driver inhibits the processing of IRPs for an already busy device
+while increasing I/O throughput for every other device doing I/O through its
+shared hardware. 
+<P>
+At the call to <B>IoStartPacket</B>&nbsp;from such a port driver’s Dispatch
+routine, the I/O Manager either calls that driver’s StartIo routine
+immediately or puts the IRP into the device queue associated with the device
+object for the port driver’s shared controller/adapter. 
+<H5>Managing Supplemental Device Queues in StartIo</H5>
+<P>
+Such a port driver with supplemental device queues would have a StartIo
+routine with the following features:
+<PRE><FONT FACE="Courier" SIZE="2">{ 
+&nbsp; &nbsp; PIO_STACK_LOCATION irpSp = 
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; IoGetCurrentIrpStackLocation(Irp); 
+&nbsp; &nbsp; PDEVICE_EXTENSION deviceExtension = 
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; DeviceObject-&gt;DeviceExtension; 
+&nbsp; &nbsp; PFILE_OBJECT whichClass; 
+&nbsp; &nbsp; PATTACHED_DEVICE_STATE attachedDevice; 
+&nbsp; &nbsp; &nbsp; &nbsp; :     : 
+// 
+// Switch on MajorFunction code in IRP. 
+// 
+&nbsp; &nbsp; switch (irpSp-&gt;MajorFunction) { 
+&nbsp; &nbsp; &nbsp; &nbsp; case IRP_MJ_READ: 
+&nbsp; &nbsp; &nbsp; &nbsp; case IRP_MJ_WRITE: 
+// 
+// Get which device this request is for. 
+// 
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; whichClass = irpSp-&gt;FileObject; 
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; attachedDevice = GetAttachedDeviceState( 
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; deviceExtension, 
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; whichClass); 
+// 
+// Increment the following to get a unique value 
+// to give the error log routine, if necessary. 
+// 
+&nbsp;
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; attachedDevice-&gt;SequenceNumber++; 
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; :     : 
+&nbsp; &nbsp; &nbsp; &nbsp; case IRP_MJ_DEVICE_CONTROL: 
+// 
+// Get which device this request is for. 
+// 
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; whichClass = irpSp-&gt;FileObject; 
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; attachedDevice = GetAttachedDeviceState( 
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; deviceExtension, 
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; whichClass); 
+&nbsp; &nbsp; &nbsp; &nbsp; :     : 
+&nbsp; &nbsp; } // end switch 
+} 
+&nbsp;</FONT></PRE>
+<P>
+Note that this code fragment checks state information, based on the file
+object pointer that each class driver sets in the underlying port driver’s I/O
+stack location of the IRP, in order to determine the current state of the
+(attached) target device for any given request. The device object pointer
+input to its StartIo routine gives the port driver access to its own device
+object, representing the device controller/adapter. It does <I>not</I>&nbsp;give
+this port driver access to the class driver’s device object for the target
+device. Such a port driver must maintain its own state information about each
+of the heterogeneous devices that it services through the shared device
+controller/adapter.
+<H5><IMG SRC="../../../wedge.gif" BORDER=0>&nbsp; &nbsp; NT driver writers who design class/port drivers with supplemental device queues in the port driver should keep in mind the following facts: </H5>
+<UL>
+<LI>
+An NT driver <I>cannot</I>&nbsp;get a pointer to the device object of any driver
+layered above itself easily. 
+<P>
+By design, the I/O Manager does not provide a support routine for getting such
+a pointer. Moreover, the order in which NT drivers are loaded makes it
+impossible for lower drivers to get pointers for higher-level drivers’ device
+objects, which have not yet been created when any lower-level driver is
+initializing itself. 
+<P>
+<LI>
+An NT driver <I>cannot use</I>&nbsp;a pointer to the device object of any driver
+layered above itself. 
+<P>
+There is no way to synchronize access to a single device object (and its
+device extension) between two drivers in a multiprocessor-safe manner. Neither
+driver can make any assumptions about what I/O processing the other driver is
+currently doing. 
+</UL>
+<P>
+Even for closely coupled class/port drivers, each class driver should use the
+pointer to the port driver’s device object(s) only to pass on IRPs with <B>IoCallDriver</B>.
+The underlying port driver must maintain its own state, probably in the port
+driver’s device extension, about requests that it processes for any closely
+coupled class driver(s)’ device(s). 
+<H5>Managing Supplemental Device Queues Across Driver Routines</H5>
+<P>
+Any NT port driver that queues IRPs in supplemental device queues for a
+closely coupled set of class drivers also must handle the following situation
+efficiently:
+<OL>
+<LI>
+Its Dispatch routines have inserted IRPs for a particular device in the
+driver-created device queue for that device.
+<P>
+<LI>
+IRPs for other devices continue to come in, to be queued to the driver’s
+StartIo routine with <B>IoStartPacket</B>, and to be processed through the
+shared device controller. 
+<P>
+<LI>
+The device controller does not become idle, but each IRP held in the
+driver-created device queue also must be queued to the driver’s StartIo
+routine as soon as possible.
+</OL>
+<P>
+Consequently, such a port driver’s DpcForIsr must attempt to transfer an IRP
+from the driver’s internal device queue for a particular device into the
+device queue for the shared adapter/controller whenever the port driver
+completes an IRP, as follows: 
+<OL>
+<LI>
+The DpcForIsr routine calls <B>IoStartNextPacket</B>&nbsp;to have the StartIo
+routine begin processing the next IRP queued to the shared device controller.
+<P>
+<LI>
+The DpcForIsr routine calls <B>KeRemoveDeviceQueue</B>&nbsp;to dequeue the next IRP
+(if any) that it is holding in its internal device queue for the device on
+whose behalf it is about to complete an IRP.
+<P>
+<LI>
+If <B>KeRemoveDeviceQueue</B>&nbsp;returns a nonNULL pointer, the DpcForIsr routine
+calls <B>IoStartPacket</B>&nbsp;with the just dequeued IRP to have it queued to the
+shared device controller/adapter. Otherwise, the call to <B>KeRemoveDeviceQueue</B>
+simply resets the state of the device queue object to Not-Busy, and the
+DpcForIsr omits the call to <B>IoStartPacket</B>.
+<P>
+<LI>
+Then, the DpcForIsr calls <B>IoCompleteRequest</B>&nbsp;with the input IRP for
+which the port driver has just completed I/O processing, either by setting the
+I/O status block with an error or by satisfying the I/O request.
+</OL>
+<P>
+Note that the preceding sequence implies that such a DpcForIsr routine also
+must call the internal GetAttachedDeviceState routine shown in the preceding
+StartIo code fragment. That is, the DpcForIsr must determine the device for
+which it is completing the current (input) IRP in order to manage internal
+queueing of IRPs efficiently. 
+<P>
+If such a port driver attempted to wait until its shared controller/adapter
+was idle before dequeueing IRPs held in its supplemental device queues, the
+driver might starve a device for which there was heavy I/O demand while it
+promptly serviced every other device for which the current I/O demand was
+actually much lighter. 
+<P>
+&nbsp;
+<P></FONT>
+</BODY>
+</HTML>

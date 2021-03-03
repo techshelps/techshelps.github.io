@@ -1,0 +1,1019 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Bugslayer</title>
+<style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000 dir=ltr>
+<Font face="verdana,arial,helvetica" size="2">
+<h1><a name="bugslayer"></a>Bugslayer</h1>
+<p class=indent>
+by John Robbins</p>
+<p>
+These days it’s common for an application to have a front-end done in one language, three or four components done in other languages, and yet another part that is running in a different process or on a completely different machine. Trying to track down a bug that occurs between the VBScript-based Active Server Page and an object that it calls on another machine can be a hair-raising experience. Unfortunately, there are no debuggers yet that will allow you to single-step across machines, or even do something seemingly simple like stepping from VBScript into a C++ control. Debugging modern applications definitely isn’t easy. </p>
+<p>
+Help is on the way! In this column, I will present a tool, TraceSrv, that at least allows you to easily add trace statements to all the parts of your applications, no matter what machine they reside on, and allows the output to be viewed all in the same place. While not as useful as the ultimate debugger—where you’d be able to single-step everything, everywhere—at least you will have a fighting chance of tracking down problems in your multilanguage, multiprocess, and multimachine development. As all good Bugslayers know, trace statements are right up there with ASSERT macros in the Good Things list. You can never have enough of either.</p>
+<p>
+In presenting TraceSrv, I will start out with a set of requirements and the underlying technology decisions, and then highlight the design and development. Most of the code for TraceSrv is not rocket science. I originally thought that TraceSrv would be rather easy to develop, but I spent a great deal of time filling many holes in my knowledge, as well as working around bugs in some tools. I hope I can save you some of the frustrations that I had to deal with.</p>
+<h3>Requirements Time</h3>
+<p>
+First, let’s go over my design objectives for TraceSrv. (All of you start all of your projects with the complete written specification of what you are doing, right? Check.). Here are the requirements that I started with:
+<ol>
+<li>
+You must be able to use TraceSrv with most common programming languages including, at a minimum, C++, Visual Basic®, Delphi, Visual Basic for Applications, Java™, and Visual Basic Script.<br><br></li>
+<li>
+It must be very simple to use inside a programming language.<br><br></li>
+<li>
+TraceSrv must always be running so any application can connect to it at any time.<br><br></li>
+<li>
+The trace statements of a program on multiple machines should go to the same place.<br><br></li>
+<li>
+The trace statements should be viewable on multiple machines at the same time by trace viewer applications.<br><br></li>
+<li>
+There should be some trace statement options processing:<p class=tl>
+a. Prefix the trace statement with the time the trace statement was received.
+<p class=tl>
+b. Prefix the trace statement with the number of the trace statement.
+<p class=tl>
+c. Prefix the process ID of the process that sent the trace statement.
+<p class=tl>
+d. Append a carriage return and line feed, if needed.
+<p class=tl>
+e. Send the trace statement through to a kernel debugger where the TraceSrv process is running.
+</li>
+<li>
+If one of the TraceSrv options is changed, all of the currently active viewers should be notified so that all viewers, even on other machines, are in synch with the current options.</li>
+</ol>
+<p>
+Since TraceSrv is still under development, all of the code in this month’s column has been tested only on Windows NT®. However, since Windows® 95 Distributed COM (DCOM) works just like Windows NT DCOM, it should be just a matter of getting the registry set and using DCOMCNFG.EXE to get the machine information specified.</p>
+<p>
+At first glance, the requirements for TraceSrv look  kind of daunting because of things like network development and multilanguage programming. I thought I could address multilanguage issues with a simple DLL that anyone could load with a simple API. Since I am primarily a systems programmer, my ignorance of VBScript or Java was getting in my way. Particularly when I looked at VBScript, I realized that no matter how much hacking I  did I wasn’t going to get VBScript to call a DLL directly. I finally started getting a clue when I saw that VBScript supported CreateObject; I just needed a COM object, and VBScript would be able to use it just fine. Since COM works in almost all languages, I decided to make TraceSrv a simple COM object.</p>
+<p>
+COM made the network programming problem go away fairly easily. You basically get DCOM for free. The “running all the time” problem is solved by DCOM because you can have your DCOM servers running as Win32® services. The object is always ready if you use an automatic start service.</p>
+<p>
+My first brush with DCOM services in the Windows NT 4.0 alpha days was rather scary. Not only did you have to write the service—not the easiest thing in the world—you also had to do all sorts of weird stuff with COM to get it all hooked up. Fortunately, my copy of Visual Studio™ 97 finally arrived. The Active Template Library (ATL) 2.1 with Visual C++® 5.0 handles all of the grunge work and even provides a wizard to help generate the code! Once that was settled, I needed to define the interface for TraceSrv.</p>
+<h3>The TraceSrv Interface</h3>
+<p>
+TraceSrv.idl (see Figure 1) is the main interface for TraceSrv. Basically, I use the Trace method of the ITrace interface to have a trace statement sent to TraceSrv. To hit the broadest number of languages, I decided to set the string type passed as a BSTR.</p>
+<p>
+<b>Figure 1: TraceSrv.idl</b></p>
+<pre><code>/*----------------------------------------------------------------------
+John Robbins
+Microsoft Systems Journal, December 1997 - BugSlayer Column!
+----------------------------------------------------------------------*/
+import "oaidl.idl" ;
+import "ocidl.idl" ;
+
+// Forward declarations.
+interface ITrace ;
+dispinterface _TraceEvent ;
+
+[
+    uuid ( 76AA99F4-0228-11D1-B293-00AA004206E4 ) ,
+    helpstring ( "ITrace Interface" ) ,
+    // Mark this as a dual interface.
+    dual ,
+    // Mark this interface as compatible with OLE automation.
+    oleautomation
+]
+interface ITrace : IDispatch
+{
+
+    [
+        id ( 0x00000001 ) ,
+        helpstring ( "Tracing output method" )
+    ]
+    // The simple method that everyone will call.
+    HRESULT Trace ( [in] BSTR bstrText ) ;
+
+    // For advanced users, or cool wrappers.
+    HRESULT FullTrace ( [in] BSTR       bstrText ,
+                        [in] long       dwPID     ) ;
+
+    ////////////////////////////////////////////////////////////////////
+    // ShowTimeStamps property.
+    ////////////////////////////////////////////////////////////////////
+    [
+        propget     ,
+        id ( 2 )    ,
+        helpstring("If set, puts the time the trace message was received by the server on the front of the message.")
+    ]
+    HRESULT ShowTimeStamps ( [out , retval ] VARIANT_BOOL *pVal ) ;
+
+    [
+        propput     ,
+        id ( 2 )    ,
+        helpstring("If set, puts the time the trace message was received by the server on the front of the message.")
+    ]
+    HRESULT ShowTimeStamps ( [in] VARIANT_BOOL newVal ) ;
+
+    ////////////////////////////////////////////////////////////////////
+    // ShowTraceAsODS property
+    ////////////////////////////////////////////////////////////////////
+    [
+        propget     ,
+        id ( 3 )    ,
+        helpstring("Sends the Trace string to kernel debuggers on the server system.")
+    ]
+    HRESULT ShowTraceAsODS ( [out , retval ] VARIANT_BOOL *pVal ) ;
+
+    [
+        propput     ,
+        id ( 3 )    ,
+        helpstring("Sends the Trace string to kernel debuggers on the server system.")
+    ]
+    HRESULT ShowTraceAsODS ( [in] VARIANT_BOOL newVal ) ;
+
+    ////////////////////////////////////////////////////////////////////
+    // ShowItemNumber property
+    ////////////////////////////////////////////////////////////////////
+    [
+        propget     ,
+        id ( 4 )    ,
+        helpstring("If set, puts the trace message count on the front of the message.")
+    ]
+    HRESULT ShowItemNumber ( [out , retval ] VARIANT_BOOL *pVal ) ;
+
+    [
+        propput     ,
+        id ( 4 )    ,
+        helpstring("If set, puts the trace message count on the front of the message.")
+    ]
+    HRESULT ShowItemNumber ( [in] VARIANT_BOOL newVal ) ;
+
+    ////////////////////////////////////////////////////////////////////
+    // ShowPID property
+    ////////////////////////////////////////////////////////////////////
+    [
+        propget     ,
+        id ( 5 )    ,
+        helpstring("If set, and the PID is passed in, will show the PID in the message.")
+    ]
+    HRESULT ShowPID ( [out , retval ] VARIANT_BOOL *pVal ) ;
+
+    [
+        propput     ,
+        id ( 5 )    ,
+        helpstring("If set, and the PID is passed in, will show the PID in the message.")
+    ]
+    HRESULT ShowPID ( [in] VARIANT_BOOL newVal ) ;
+
+    ////////////////////////////////////////////////////////////////////
+    // AddCRLF property
+    ////////////////////////////////////////////////////////////////////
+    [
+        propget     ,
+        id ( 6 )    ,
+        helpstring("If set, adds a CR/LF to the message if needed.")
+    ]
+    HRESULT AddCRLF ( [out , retval ] VARIANT_BOOL *pVal ) ;
+
+    [
+        propput     ,
+        id ( 6 )    ,
+        helpstring("If set, adds a CR/LF to the message if needed.")
+    ]
+    HRESULT AddCRLF ( [in] VARIANT_BOOL newVal ) ;
+
+} ;
+
+[
+    object  ,
+    uuid ( D4C22CC0-0620-11D1-B29A-00aa004206e4 ) ,
+    helpstring ( "ITraceEvent Interface" ),
+    // Mark as hidden for user browsers.
+    //hidden
+]
+interface ITraceEvent : IDispatch
+{
+    HRESULT TraceEvent ( BSTR bstrText ) ;
+
+    HRESULT ChangeShowTimeStamps ( VARIANT_BOOL bNewVal ) ;
+
+    HRESULT ChangeShowTraceAsODS ( VARIANT_BOOL bNewVal ) ;
+
+    HRESULT ChangeShowItemNumber ( VARIANT_BOOL bNewVal ) ;
+
+    HRESULT ChangeShowPID ( VARIANT_BOOL bNewVal ) ;
+
+    HRESULT ChangeAddCRLF ( VARIANT_BOOL bNewVal ) ;
+
+} ;
+
+[
+    uuid ( C1262E40-0186-11D1-B292-00AA004206E4 ) ,
+    version ( 1.0 ) ,
+    helpstring ( "TraceSrv 1.0 Type Library" )
+]
+library TRACESRVLib
+{
+    // Import the specified standard libraries into this library.
+    importlib ( "stdole32.tlb" ) ;
+    importlib ( "stdole2.tlb" ) ;
+
+    [
+        uuid ( 480F47B3-02F0-11D1-B296-00AA004206E4 ) ,
+        helpstring ( "TraceSrv notification events for trace viewers" ),
+        // Mark as hidden for user browsers.
+        //hidden
+    ]
+    dispinterface DITraceEvent
+    {
+        properties  :
+        methods     :
+
+            [
+                id ( 0x00000001 ) ,
+                helpstring ( "Tells the viewer that an ODS string is here" ),
+            ]
+            void TraceEvent ( [in] BSTR bstrText ) ;
+
+            [
+                id ( 0x00000002 ) ,
+                helpstring ( "Tells the viewer the state of the ShowTimeStamps property" ),
+            ]
+            void ChangeShowTimeStamps ( [in] VARIANT_BOOL bNewVal ) ;
+
+            [
+                id ( 0x00000003 ) ,
+                helpstring ( "Tells the viewer the state of the ShowTraceAsODS property" ),
+            ]
+            void ChangeShowTraceAsODS ( [in] VARIANT_BOOL bNewVal ) ;
+
+            [
+                id ( 0x00000004 ) ,
+                helpstring ( "Tells the viewer the state of the ShowItemNumber property" ),
+            ]
+            void ChangeShowItemNumber ( [in] VARIANT_BOOL bNewVal ) ;
+
+            [
+                id ( 0x00000005 ) ,
+                helpstring ( "Tells the viewer the state of the ShowPID 
+property" ),
+            ]
+            void ChangeShowPID ( [in] VARIANT_BOOL bNewVal ) ;
+
+            [
+                id ( 0x00000006 ) ,
+                helpstring ( "Tells the viewer the state of the AddCRLF 
+property" ),
+            ]
+            void ChangeAddCRLF ( [in] VARIANT_BOOL bNewVal ) ;
+
+    } ;
+
+    ////////////////////////////////////////////////////////////////////
+    // Trace coclass supported interface attributes.
+    ////////////////////////////////////////////////////////////////////
+    [
+        uuid ( 76AA99F5-0228-11D1-B293-00AA004206E4 ) ,
+        helpstring ( "Trace Class" )
+    ]
+    coclass Trace
+    {
+        // The default input interface.
+        [default] interface ITrace  ;
+        // The event interface.
+        interface ITraceEvent       ;
+        // The dispinterface needed to trigger events in VB.
+        [default , source] dispinterface DITraceEvent ;
+    } ;
+} ;
+</code></pre>
+<p>
+To write a trace statement viewer, all you need to do is handle the events from the ITraceEvent interface. Its properties, which match the requirements above, are on the ITrace interface in case an application using TraceSrv might want to change them. When a TraceSrv property is changed, it generates an event that a trace viewer should handle. While I probably should have used IPropertyNotifySink to do the property change notification, I could never get it to work in ATL. Since there were so few properties, it was simpler to just have change notifications for each of them. The TraceView program I’ll go over later shows how to handle each event TraceSrv generates.</p>
+<p>
+When I first developed TraceSrv, I got the event handling hooked up just fine in C++, but I could not get Visual Basic to see the events. After getting nowhere for a while, the July 1997 issue of the Microsoft Developer Network showed up on my doorstep and the article, “Events: From an ATL Server to a Visual Basic Sink,” by Robert Coleridge, spelled out exactly how to do it. In a nutshell, Visual Basic does not generate vtables for event sinks, so all events must be fired through IDispatch. Now that you see how relatively simple the interface is, it’s time to dive into the code.</p>
+<h3>The TraceSrv Code</h3>
+<p>
+After I had the ATL project wizard crank out a DCOM service, it seemed like almost 90 percent of the code was there. The only parts that I really had to code were the actual TraceSrv interface and handlers. Most of the code that I did is in Trace.h and Trace.cpp (see Figure 2).</p>
+<p>
+<b>Figure 2: TraceSrv Interface and Handlers</b></p>
+<p>
+<b>Trace.h</b></p>
+<pre><code>/*----------------------------------------------------------------------
+John Robbins Microsoft Systems Journal, December 1997 - Bugslayer Column!
+----------------------------------------------------------------------*/
+#ifndef __TRACE_H_
+#define __TRACE_H_
+
+#include "resource.h"
+
+// The IDispatch proxy classes for the events.
+#include "CorrectProxyTraceSrv.h"
+
+// The fast BSTR class.
+#include "FastBSTR.h"
+
+// The following are the formatting sizes.  Since I arbitrarily chose to
+//  wrap the item numbers at 100,000, so the number format was known in
+//  advance, you can change those constants if you would like.  You will
+//  need to change the handling code in TraceFull as well.
+// Item Number - 6 (5 numbers + 1 space).
+const int k_SIZE_ITEMNUMBER = 6 ;
+// Time        - 9 (hh:mm:ss + 1 space)
+//  BUG BUG
+//  Double check that Chinese and Thai formats are really this size!
+//  I think they might have characters on the front of the time but,
+//  I'm not sure if the TIME_NOTIMEMARKER shuts them off.
+const int k_SIZE_TIME       = 9 ;
+// PID         - 7 ([XXXX] + 1 space)
+const int k_SIZE_PID        = 7 ;
+// CR/LF       - 2
+const int k_SIZE_CRLF       = 2 ;
+// TOTAL...
+const int k_SIZE_FULLFORMAT = k_SIZE_ITEMNUMBER + k_SIZE_TIME +
+                              k_SIZE_PID + k_SIZE_CRLF        ;
+// The byte count is expressed in Unicode characters since everything
+//  sent to this class is in wide characters.
+const int k_SIZE_FULLFORMATBYTES = k_SIZE_FULLFORMAT * sizeof ( wchar_t )   ;
+
+// The minimum trace buffer size.
+const int k_MIN_TRACE_BUFF_SIZE = 2048 ;
+
+// The default values for the trace settings.  These are used in both
+//  the constructor and in the INI reading code.  Note that -1 is TRUE
+//  for VARIANT_BOOLS!
+const int k_DEFVAL_SHOWTIMESTAMPS  = 0     ;
+const int k_DEFVAL_SHOWTRACEASODS  = -1    ;
+const int k_DEFVAL_SHOWITEMNUMBER  = 0     ;
+const int k_DEFVAL_SHOWPID         = 0     ;
+const int k_DEFVAL_ADDCRLF         = 0     ;
+
+// The constant values for the INI where settings are stored.  These
+//  do not need to be internationalized.
+const LPCTSTR k_STR_INIFILE         = _T ( "TraceSrv.ini"   ) ;
+const LPCTSTR k_STR_SECTION         = _T ( "Settings"       ) ;
+const LPCTSTR k_STR_SHOWTIMESTAMPS  = _T ( "ShowTimeStamps" ) ;
+const LPCTSTR k_STR_SHOWTRACEASODS  = _T ( "ShowTraceAsODS" ) ;
+const LPCTSTR k_STR_SHOWITEMNUMBER  = _T ( "ShowItemNumber" ) ;
+const LPCTSTR k_STR_SHOWPID         = _T ( "ShowPID"        ) ;
+const LPCTSTR k_STR_ADDCRLF         = _T ( "AddCRLF"        ) ;
+
+// Since there is no WritePrivateProfileInt, these are the strings that
+//  represent the integer values for all the settings.
+const LPCTSTR k_STR_VBTRUE  = _T ( "-1" ) ;
+const LPCTSTR k_STR_VBFALSE = _T ( "0"  ) ;
+
+class ATL_NO_VTABLE CTrace :
+        // The standard COM classes.
+        public CComObjectRootEx&lt;CComMultiThreadModel&gt;   ,
+        public CComCoClass&lt;CTrace , &amp;CLSID_Trace&gt;       ,
+        public ISupportErrorInfo                        ,
+        public IDispatchImpl&lt;ITrace , &amp;IID_ITrace , &amp;LIBID_TRACESRVLib&gt; ,
+
+        // This class holds ITraceEvent connection points.
+        public IConnectionPointContainerImpl&lt;CTrace&gt;    ,
+        // The actual event classes.
+        public CProxyDITraceEvent&lt;CTrace&gt;               ,
+        // Allows TraceSrv to be scriptable.
+        public IObjectSafetyImpl&lt;CTrace&gt;
+{
+public  :
+
+    CTrace( )
+    {
+        m_pUnkMarshaler     = NULL                    ;
+        m_vbShowTimeStamps  = k_DEFVAL_SHOWTIMESTAMPS ;
+        m_vbShowTraceAsODS  = k_DEFVAL_SHOWTRACEASODS ;
+        m_vbShowItemNumber  = k_DEFVAL_SHOWITEMNUMBER ;
+        m_vbShowPID         = k_DEFVAL_SHOWPID        ;
+        m_vbAddCRLF         = k_DEFVAL_ADDCRLF        ;
+        m_dwCurrCount       = 0                       ;
+
+        LoadSettings ( ) ;
+    }
+
+    ~CTrace ( void )
+    {
+        SaveSettings ( ) ;
+    }
+
+DECLARE_REGISTRY_RESOURCEID(IDR_TRACE)
+DECLARE_GET_CONTROLLING_UNKNOWN()
+
+// Wow, it only took me an entire day to figure out that this was the
+//  magic macro that forced a single instance!
+DECLARE_CLASSFACTORY_SINGLETON(CTrace)
+
+BEGIN_COM_MAP(CTrace)
+    COM_INTERFACE_ENTRY(ITrace)
+    COM_INTERFACE_ENTRY(IDispatch)
+    COM_INTERFACE_ENTRY(ISupportErrorInfo)
+    COM_INTERFACE_ENTRY_IMPL(IConnectionPointContainer)
+    COM_INTERFACE_ENTRY_AGGREGATE(IID_IMarshal, m_pUnkMarshaler.p)
+    COM_INTERFACE_ENTRY_IMPL(IObjectSafety)
+END_COM_MAP()
+
+BEGIN_CONNECTION_POINT_MAP(CTrace)
+    CONNECTION_POINT_ENTRY(DIID_DITraceEvent)
+END_CONNECTION_POINT_MAP()
+
+    // The memory debugging code.  See the Oct installment of Bugslayer!
+    DECLARE_MEMDEBUG ( CTrace ) ;
+
+    HRESULT FinalConstruct ( )
+    {
+        return ( CoCreateFreeThreadedMarshaler( GetControllingUnknown(),
+                                                &amp;m_pUnkMarshaler.p   ));
+    }
+
+    void FinalRelease ( )
+    {
+        m_pUnkMarshaler.Release ( ) ;
+    }
+
+    CComPtr&lt;IUnknown&gt; m_pUnkMarshaler;
+
+// ISupportsErrorInfo
+    STDMETHOD(InterfaceSupportsErrorInfo)(REFIID riid);
+
+// ITrace
+public      :
+    STDMETHOD(Trace) ( BSTR bstrText ) ;
+    STDMETHOD(FullTrace) ( BSTR bstrText , long dwPID ) ;
+
+    STDMETHOD(get_ShowTimeStamps) ( VARIANT_BOOL * pVal   ) ;
+    STDMETHOD(put_ShowTimeStamps) ( VARIANT_BOOL   newVal ) ;
+
+    STDMETHOD(get_ShowTraceAsODS) ( VARIANT_BOOL * pVal   ) ;
+    STDMETHOD(put_ShowTraceAsODS) ( VARIANT_BOOL   newVal ) ;
+
+    STDMETHOD(get_ShowItemNumber) ( VARIANT_BOOL * pVal   ) ;
+    STDMETHOD(put_ShowItemNumber) ( VARIANT_BOOL   newVal ) ;
+
+    STDMETHOD(get_ShowPID) ( VARIANT_BOOL * pVal   ) ;
+    STDMETHOD(put_ShowPID) ( VARIANT_BOOL   newVal ) ;
+
+    STDMETHOD(get_AddCRLF) ( VARIANT_BOOL * pVal   ) ;
+    STDMETHOD(put_AddCRLF) ( VARIANT_BOOL   newVal ) ;
+
+private     :
+
+    void LoadSettings ( void ) ;
+    void SaveSettings ( void ) ;
+
+    // The real property values.
+    VARIANT_BOOL m_vbShowTimeStamps  ;
+    VARIANT_BOOL m_vbShowTraceAsODS  ;
+    VARIANT_BOOL m_vbShowItemNumber  ;
+    VARIANT_BOOL m_vbShowPID         ;
+    VARIANT_BOOL m_vbAddCRLF         ;
+
+    // The running trace count.
+    DWORD m_dwCurrCount     ;
+
+    // The fast BSTR class that holds the string buffer built up.
+    CFastBSTR   m_cOutput   ;
+
+    // The function that does all the actual work!  If this function
+    //  returns S_OK, then the m_cOutput variable has the string to
+    //  use as the parameter to Fire_TraceEvent.
+    HRESULT ProcessTrace ( BSTR bstrText , long dwPID ) ;
+} ;
+
+#endif  //__TRACE_H_
+
+Trace.cpp
+/*----------------------------------------------------------------------
+John Robbins Microsoft Systems Journal, December 1997 - Bugslayer Column!
+----------------------------------------------------------------------*/
+#include "stdafx.h"
+#include "TraceSrv.h"
+#include "Trace.h"
+
+IMPLEMENT_MEMDEBUG ( CTrace ) ;
+
+// The memory dumping and validating code for this class.
+#ifdef _DEBUG
+void CTrace :: ClassDumper ( const void * pData )
+{
+    CTrace * pClass = (CTrace*)pData ;
+    _RPT1 ( _CRT_WARN, " CTrace instance : 0x%08X\n" , pClass ) ;
+}
+void CTrace :: ClassValidator ( const void * , const void *  )
+{
+    // The validator is not needed for this class.
+}
+#endif
+
+STDMETHODIMP CTrace :: InterfaceSupportsErrorInfo ( REFIID riid )
+{
+    ASSERT ( this ) ;
+
+    static const IID* arr[] =
+    {
+        &amp;IID_ITrace,
+    } ;
+
+    for ( int i = 0 ; i &lt; (sizeof(arr)/sizeof(arr[0])) ; i++ )
+    {
+        if ( InlineIsEqualGUID ( *arr[ i ] , riid ) )
+        {
+            return ( S_OK ) ;
+        }
+    }
+    return ( S_FALSE ) ;
+}
+
+STDMETHODIMP CTrace :: Trace ( BSTR bstrText )
+{
+    ASSERT ( this ) ;
+    return ( FullTrace ( bstrText , 0 ) ) ;
+}
+
+STDMETHODIMP CTrace :: FullTrace ( BSTR bstrText, long dwPID     )
+{
+    ASSERT ( this ) ;
+    return ( ProcessTrace ( bstrText , dwPID ) ) ;
+}
+
+STDMETHODIMP CTrace :: get_ShowTimeStamps ( VARIANT_BOOL * pVal )
+{
+    ASSERT ( this ) ;
+    *pVal = m_vbShowTimeStamps ;
+    return ( S_OK ) ;
+}
+
+STDMETHODIMP CTrace :: put_ShowTimeStamps ( VARIANT_BOOL newVal )
+{
+    ASSERT ( this ) ;
+    m_vbShowTimeStamps = newVal ;
+    Fire_ChangeShowTimeStamps ( newVal ) ;
+    return ( S_OK ) ;
+}
+
+STDMETHODIMP CTrace :: get_ShowTraceAsODS ( VARIANT_BOOL * pVal )
+{
+    ASSERT ( this ) ;
+    *pVal = (VARIANT_BOOL)m_vbShowTraceAsODS ;
+    return ( S_OK ) ;
+}
+
+STDMETHODIMP CTrace :: put_ShowTraceAsODS ( VARIANT_BOOL newVal )
+{
+    ASSERT ( this ) ;
+    m_vbShowTraceAsODS = newVal ;
+    Fire_ChangeShowTraceAsODS ( newVal ) ;
+    return ( S_OK ) ;
+}
+
+STDMETHODIMP CTrace :: get_ShowItemNumber ( VARIANT_BOOL * pVal )
+{
+    ASSERT ( this ) ;
+    *pVal = (VARIANT_BOOL)m_vbShowItemNumber ;
+    return ( S_OK ) ;
+}
+
+STDMETHODIMP CTrace :: put_ShowItemNumber ( VARIANT_BOOL newVal )
+{
+    ASSERT ( this ) ;
+    m_vbShowItemNumber = newVal ;
+    Fire_ChangeShowItemNumber ( newVal ) ;
+    return ( S_OK ) ;
+}
+
+STDMETHODIMP CTrace :: get_ShowPID ( VARIANT_BOOL * pVal )
+{
+    ASSERT ( this ) ;
+    *pVal = (VARIANT_BOOL)m_vbShowPID ;
+    return ( S_OK ) ;
+}
+
+STDMETHODIMP CTrace :: put_ShowPID ( VARIANT_BOOL newVal )
+{
+    ASSERT ( this ) ;
+    m_vbShowPID = newVal ;
+    Fire_ChangeShowPID ( newVal ) ;
+    return ( S_OK ) ;
+}
+
+STDMETHODIMP CTrace :: get_AddCRLF ( VARIANT_BOOL * pVal )
+{
+    ASSERT ( this ) ;
+    *pVal = (VARIANT_BOOL)m_vbAddCRLF ;
+    return ( S_OK ) ;
+}
+
+STDMETHODIMP CTrace :: put_AddCRLF ( VARIANT_BOOL newVal )
+{
+    ASSERT ( this ) ;
+    m_vbAddCRLF = newVal ;
+    Fire_ChangeAddCRLF ( newVal ) ;
+    return ( S_OK ) ;
+}
+
+HRESULT CTrace :: ProcessTrace ( BSTR bstrText , long dwPID )
+{
+    // Always double check everything.  Trust nothing.
+    ASSERT ( this ) ;
+    ASSERT ( NULL != bstrText ) ;
+
+    // The length of the input string.  This is read after the pointer
+    //  is validated and for everyone else to use.
+    int iInputLen = 0 ;
+
+    if ( NULL == bstrText )
+    {
+        return ( Error ( IDS_NULLSTRINGPASSED, GUID_NULL, E_INVALIDARG ) ) ;
+    }
+
+    // We have some form of pointer in bstrText. Make sure what it holds
+    //  is valid.
+    ASSERT ( FALSE == IsBadReadPtr ( bstrText , sizeof ( BSTR ) ) ) ;
+    ASSERT ( L'\0' != *bstrText ) ;
+
+    if ( ( TRUE == IsBadReadPtr ( bstrText , sizeof ( BSTR ) ) ) ||
+         ( L'\0' == *bstrText ) )
+    {
+        return ( Error ( IDS_INVALIDSTRING, GUID_NULL, E_INVALIDARG ) ) ;
+    }
+
+    // Get the input length now that the pointer is validated.
+    iInputLen = lstrlenW ( bstrText ) ;
+
+    // Could this string blow the buffer?
+    UINT uiSize = ( iInputLen * sizeof ( OLECHAR) ) + k_SIZE_FULLFORMATBYTES  ;
+
+    // If this is the first time through, then m_lBuffSize is zero so
+    //  this serves as the initial allocation point.
+    if ( uiSize &gt;= m_cOutput.BufferSize ( ) )
+    {
+        // Delete the existing buffer and allocate a bigger one.
+        m_cOutput.Free ( ) ;
+
+        UINT uiAllocSize = uiSize * 2 ;
+
+        // Make sure we get a minimum buffer size.
+        if ( k_MIN_TRACE_BUFF_SIZE &gt; uiAllocSize )
+        {
+            uiAllocSize = k_MIN_TRACE_BUFF_SIZE ;
+        }
+        OLECHAR * pTemp = m_cOutput.Allocate ( uiAllocSize ) ;
+        ASSERT ( NULL != pTemp ) ;
+        if ( NULL == pTemp )
+        {
+            return ( Error ( IDS_OUTOFMEMORY, GUID_NULL, E_OUTOFMEMORY ) ) ;
+        }
+    }
+
+    // Now start the real work, everything checked out.
+    // Increment the total.
+    m_dwCurrCount++ ;
+
+    // Is it time to wrap?
+    if ( 100000 == m_dwCurrCount )
+    {
+        m_dwCurrCount = 0 ;
+    }
+
+    // Have the marker pointer start at the beginning of the output buffer.
+    OLECHAR * pCurr = m_cOutput.GetDataBuffer ( ) ;
+
+    if ( -1 == m_vbShowItemNumber )
+    {
+        pCurr += wsprintfW ( pCurr , L"%05d " , m_dwCurrCount ) ;
+    }
+
+    if ( -1 == m_vbShowTimeStamps )
+    {
+        // Show the timestamp based on the user's local (here at the
+        //  server, not at the client!).  It is forced to just be the
+        //  24 hour military time.
+        int iLen = GetTimeFormatW ( LOCALE_USER_DEFAULT,
+            LOCALE_NOUSEROVERRIDE | TIME_FORCE24HOURFORMAT | TIME_NOTIMEMARKER,
+            NULL, NULL, pCurr, 
+            m_cOutput.BufferSize ( ) - k_SIZE_FULLFORMATBYTES   ) ;
+        // BUG BUG. I need more error checking here.
+        ASSERT ( 0 != iLen ) ;
+
+        // Move the pointer along but remember to account for the
+        //  null character counted item.
+        pCurr += ( iLen - 1 ) ;
+
+        // GetTimeFormat does not stick in the extra space on the end
+        //  so do it now.
+        *pCurr = L' ' ;
+        pCurr++ ;
+    }
+
+    if ( -1 == m_vbShowPID )
+    {
+        pCurr += wsprintfW ( pCurr , L"[%04X] " , dwPID ) ;
+    }
+
+    // Now put the actual message in and copy the NULL terminator as well.
+    lstrcpynW ( pCurr , bstrText , iInputLen + 1 ) ;
+
+    // Move pCurr to point at the NULL terminator.
+    pCurr += iInputLen ;
+
+    // Finally check if the string needs CRLFs.
+    if ( -1 == m_vbAddCRLF )
+    {
+        if ( ( L'\x0D' != *(pCurr - 2) ) ||
+             ( L'\x0A' != *(pCurr - 1) )   )
+        {
+            *(pCurr) = L'\x0D' ;
+            *(pCurr + 1) = L'\x0A' ;
+            pCurr += 2 ;
+            *pCurr = L'\0' ;
+        }
+    }
+
+    // Is it supposed to get shot to a kernel debugger?
+    if ( -1 == m_vbShowTraceAsODS )
+    {
+        OutputDebugStringW ( (BSTR)m_cOutput ) ;
+    }
+
+    // Calculate the actual string length for the string.
+    m_cOutput.GetStringByteLength ( ) ;
+
+    // Finally, let any viewers know.
+    Fire_TraceEvent ( m_cOutput ) ;
+
+    return ( S_OK ) ;
+}
+
+void CTrace :: LoadSettings ( void )
+{
+    ASSERT ( this ) ;
+
+    m_vbShowTimeStamps =
+        (VARIANT_BOOL)GetPrivateProfileInt ( k_STR_SECTION, k_STR_SHOWTIMESTAMPS,
+                                             k_DEFVAL_SHOWTIMESTAMPS,
+                                             k_STR_INIFILE);
+    m_vbShowTraceAsODS =
+        (VARIANT_BOOL)GetPrivateProfileInt ( k_STR_SECTION, k_STR_SHOWTRACEASODS,
+                                             k_DEFVAL_SHOWTRACEASODS,
+                                             k_STR_INIFILE);
+    m_vbShowItemNumber =
+        (VARIANT_BOOL)GetPrivateProfileInt ( k_STR_SECTION, k_STR_SHOWITEMNUMBER,
+                                             k_DEFVAL_SHOWITEMNUMBER,
+                                             k_STR_INIFILE);
+    m_vbShowPID =
+        (VARIANT_BOOL)GetPrivateProfileInt ( k_STR_SECTION, k_STR_SHOWPID,
+                                             k_DEFVAL_SHOWPID, k_STR_INIFILE);
+    m_vbAddCRLF = 
+        (VARIANT_BOOL)GetPrivateProfileInt ( k_STR_SECTION, k_STR_ADDCRLF,
+                                             k_DEFVAL_ADDCRLF, k_STR_INIFILE);
+}
+
+void CTrace :: SaveSettings ( void )
+{
+    ASSERT ( this ) ;
+
+    WritePrivateProfileString ( k_STR_SECTION, k_STR_SHOWTIMESTAMPS,
+        ( m_vbShowTimeStamps == -1 ) ? k_STR_VBTRUE : k_STR_VBFALSE,
+        k_STR_INIFILE);
+    WritePrivateProfileString ( k_STR_SECTION, k_STR_SHOWTRACEASODS,
+        ( m_vbShowTraceAsODS == -1 ) ? k_STR_VBTRUE : k_STR_VBFALSE,
+        k_STR_INIFILE);
+    WritePrivateProfileString ( k_STR_SECTION, k_STR_SHOWITEMNUMBER,
+        ( m_vbShowItemNumber == -1 ) ? k_STR_VBTRUE : k_STR_VBFALSE,
+        k_STR_INIFILE);
+    WritePrivateProfileString ( k_STR_SECTION, k_STR_SHOWPID,
+        ( m_vbShowPID == -1 ) ? k_STR_VBTRUE : k_STR_VBFALSE,
+        k_STR_INIFILE);
+    WritePrivateProfileString ( k_STR_SECTION, k_STR_ADDCRLF,
+        ( m_vbAddCRLF == -1 ) ? k_STR_VBTRUE : k_STR_VBFALSE,
+        k_STR_INIFILE);
+}
+</code></pre>
+<p>
+Overall, everything was pretty easy. For the IConnectionPointContainer hookup, I followed both Coleridge’s example and the source code from the ATL DrawSrv sample. Getting the IConnectionPoint code was even easier as the ATL Proxy Generator can create the whole code file for you.</p>
+<p>
+I paid careful attention to the BSTR string processing. Since I could think of scenarios where the trace statements would be coming in fast and furious, I wanted to make sure the string handling was as fast as possible. The CTrace:: ProcessTrace function in Trace.cpp does a lot of string manipulation, especially considering the different items that can be placed on the front and the end of the final string output by TraceSrv. I had originally used the CComBSTR class for the string manipulation. But when I started stepping through the code and looking at what it did, I noticed that, for almost every method and operator in the class, it does memory allocation or deallocation each time with the SysXXXString functions. While this is the proper and safe thing to do, it could lead to some real performance problems in programs like TraceSrv that do a good deal of string manipulation.</p>
+<p>
+To speed up the string processing, I wrote a simple class called CFastBSTR that handles the BSTR manipulation directly. The class is in FastBSTR.h (see Figure 3). Its sole job is to allocate a single buffer for the data and to play games with the leading size DWORD in the GetStringByteLength function. Some people might feel that it is better to stick with the exact rules on BSTRs, but I felt that performance is important. You could easily change the code in CFastBSTR to use the SysXXXString functions if my gyrations make you uncomfortable.</p>
+<p>
+<b>Figure 3: FastBSTR.h</b></p>
+<pre><code>/*----------------------------------------------------------------------
+John Robbins
+Microsoft Systems Journal, December 1997 - Bugslayer Column!
+----------------------------------------------------------------------*/
+#ifndef _FASTBSTR_
+#define _FASTBSTR_
+
+class CFastBSTR
+{
+
+////////////////////////////////////////////////////////////////////////
+// Public construction and destruction.
+////////////////////////////////////////////////////////////////////////
+public      :
+
+    // The memory debugging code.  See the Oct installment of
+    //  Bugslayer!
+    DECLARE_MEMDEBUG ( CFastBSTR ) ;
+
+    CFastBSTR ( void )
+    {
+        m_szData        = NULL ;
+        m_szWholeBuff   = NULL ;
+        m_pdwStringSize = NULL ;
+        m_uiBuffSize    = 0    ;
+    }
+
+    ~CFastBSTR ( void )
+    {
+        Free ( ) ;
+    }
+
+////////////////////////////////////////////////////////////////////////
+// Public allocation and deallocation functions.
+////////////////////////////////////////////////////////////////////////
+public      :
+
+    OLECHAR * Allocate ( UINT uiSize )
+    {
+        ASSERT ( 0 != uiSize ) ;
+        if ( 0 == uiSize )
+        {
+            return ( NULL ) ;
+        }
+        // Free up any existing.
+        if ( NULL != m_szWholeBuff )
+        {
+            delete [] m_szWholeBuff ;
+        }
+        m_szWholeBuff = new DWORD[ uiSize ] ;
+        memset ( m_szWholeBuff , NULL , uiSize ) ;
+
+        m_pdwStringSize = (LPDWORD)m_szWholeBuff ;
+        *m_pdwStringSize = 0 ;
+
+        m_szData = (OLECHAR*)(m_pdwStringSize + 1) ;
+        m_uiBuffSize = uiSize ;
+        return ( m_szData ) ;
+    }
+
+    void Free ( )
+    {
+        if ( NULL == m_szWholeBuff )
+        {
+            return ;
+        }
+        delete [] m_szWholeBuff ;
+        m_szData        = NULL ;
+        m_szWholeBuff   = NULL ;
+        m_pdwStringSize = NULL ;
+        m_uiBuffSize    = 0    ;
+    }
+
+////////////////////////////////////////////////////////////////////////
+// Public length functions.
+////////////////////////////////////////////////////////////////////////
+public      :
+
+    // Returns the length of the whole data buffer currently allocated.
+    UINT BufferSize ( void ) const
+    {
+        return ( m_uiBuffSize ) ;
+    }
+
+    // Returns the byte length of the current string.  Call this before
+    //  passing the data for this string to a function that needs a
+    //  BSTR.  If the parameter is not zero, then that value will be
+    //  used for the string size.  If this parameter is zero, then
+    //  this returns the length of the string data.  (This means that
+    //  the length will be up to the first NULL character.)
+    UINT GetStringByteLength ( UINT uiLen = 0 )
+    {
+        ASSERT ( m_pdwStringSize != NULL ) ;
+        if ( NULL == m_pdwStringSize )
+        {
+            return ( 0 ) ;
+        }
+        if ( 0 == uiLen )
+        {
+            uiLen = lstrlenW ( m_szData ) * sizeof ( OLECHAR ) ;
+        }
+        *m_pdwStringSize = uiLen ;
+        return ( uiLen ) ;
+    }
+
+////////////////////////////////////////////////////////////////////////
+// Public data access members and operators.
+////////////////////////////////////////////////////////////////////////
+public      :
+
+    OLECHAR * GetDataBuffer ( ) const
+    {
+        return ( m_szData ) ;
+    }
+
+    operator BSTR ( ) const
+    {
+        return ( m_szData ) ;
+    }
+
+
+////////////////////////////////////////////////////////////////////////
+// Private data members.
+////////////////////////////////////////////////////////////////////////
+private     :
+    // The whole actual buffer.
+    LPDWORD     m_szWholeBuff   ;
+    // The string size portion of the buffer.
+    LPDWORD     m_pdwStringSize ;
+    // The data portion of the buffer.
+    OLECHAR *   m_szData        ;
+    // The buffer size.
+    DWORD       m_uiBuffSize    ;
+
+} ;
+
+
+#endif      // _FASTBSTR_
+</code></pre>
+<p>
+There are only two other items worth pointing out about the code. The first is that I used the Memory Dumper and Validator code from my article, “Introducing the Bugslayer: Annihilating Bugs in an Application Near You” (MSJ, October 1997). The only two classes that I could use it on are CTrace and CFastBSTR. I included the prebuilt libraries in the source code for this month’s column in the .\LIB\Intel and .\LIB\Alpha directories.</p>
+<p>
+The second item I need to point out is that the build is always Unicode. Since TraceSrv is designed to be a Win32 DCOM service that only runs on Windows NT, I felt that there was no reason to slow it down with the ANSI translation problems. In case you don’t know, Windows NT uses Unicode for everything internally. In non-Unicode (single-byte or Far Eastern multibyte) builds of your program, a whole bunch of string processing and memory allocation and deallocation is done for each call into the operating system that requires a string buffer.</p>
+<p>
+This can really slow down your program, and since I went to all the trouble to get fast BSTR handling, I did not want to slow down TraceSrv any more. My decision to make TraceSrv a full Unicode program has little effect when you use it for your trace statements. All the Visual Basic dialects use BSTRs internally so you don’t have to do any work at all. If you are programming in C++, you already deal with the fact that OLE and ActiveX™ are Unicode, so the only issue is that you might need to convert the strings you’re sending to TraceSrv to BSTRs.</p>
+<h3>Running TraceSrv and DCOMCNFG</h3>
+<p>
+Now that you have seen a little of the code, I want to cover what happens after you build TraceSrv and want to use it. The Visual C++ 5.0-based project that comes with the source code for this column is basically the one that the Application Wizard generated, so the last step of the build is to register TraceSrv. The registration portions are all part of the ATL code that you get for free, but TraceSrv is only registered as a local server EXE. TraceSrv won’t run as a Win32 service unless you specify the service command-line option. While I could make the service registration part of the build, I chose not to because debugging a Win32 service without a kernel debugger like SoftICE is not simple. Also, if you are in the middle of a fix-compile-debug cycle, it’s a real pain to have to shell out to an MS-DOS® box and run “net stop tracesrv” just to get the build to work. After you have done sufficient debugging and testing with TraceSrv running as a local server, you can register it and run it as a service.</p>
+<p>
+You do not have to run TraceSrv as a service to allow access to it across the network. This is convenient for debugging because all you need to do is start TraceSrv in the debugger and you can watch things connect and debug when appropriate. What worked best for me was to run both the client and TraceSrv under debuggers on the respective machines; when one hits a breakpoint, break on the other one to avoid any possible timeout problems. I always compiled the Visual Basic portions down to native code and used the Visual C++ debugger. This ensured that the Visual Basic client was stopped dead in the debugger since the Visual Basic IDE debugger is actually the client that does the connecting, not the application being debugged.</p>
+<p>
+When you want to use TraceSrv across the network, you need to run the DCOMCNFG.EXE program to get the proper information set in the registry. The first thing you need to do is get the default DCOM properties set up for your machine. Since you could leave yourself exposed to some serious security problems, you might want to check with your network administrators before deploying TraceSrv in a company environment. If you have a small network and are King of the Domain like I am, Figure 4 contains the settings that worked best for me on all the machines.</p>
+<p><img src="bugslayer04.gif">
+</p>
+<p>
+<b>Figure 4: DCOM Properties Settings</b></p>
+<p>
+After you have registered TraceSrv (either as part of the build or with the service command-line option), start DCOMCNFG.EXE, select the Trace Class, and click the Properties button. I only changed the Location property page. If you want to run TraceSrv only on the local machine, check “Run application on this computer” and leave all the options blank. If you want to run TraceSrv only on another machine, check “Run application on the following computer” and specify the server. (Note that DCOMCNFG will let you put the current computer name in the box, but then it won’t create the server.) If you want to run locally and remotely, check both “Run application on this computer” and “Run application on the following computer.” To avoid lots of headaches, double-check that all the options on the Trace Class security page are set to use the defaults.</p>
+<p>
+For the most part, you should not have to change the settings in DCOMCNFG.EXE. It’s rather interesting to set different security and identity options to see what effect they have in starting and connecting to TraceSrv. If you get into a situation where you can no longer start TraceSrv, simply run TraceSrv with the -UnRegServer command-line option; this cleans out the registry so you can start fresh again. Automatic registration and unregistration are nice features of ATL.</p>
+<p>
+Now that you have seen enough about TraceSrv to know how to build it, use it, and get it set up, you probably think that this is the end of the column. Originally, I thought so too, but some really nasty bugs showed up when I started using TraceSrv. Most were mine, but a couple were in the tools. So let’s go slay some bugs.</p>
+<h3>The Initial Spate of Bugs</h3>
+<p>
+The first problem I encountered occurred after I got TraceSrv up and running and connected to it from multiple client processes. My design requirements state that all clients will use the same instance of TraceSrv. When I was testing, each process that was connecting was getting its own copy of the ITrace interface, so there was no way that a trace viewer would ever see the output from multiple processes. </p>
+<p>
+This stumped me a bit because I didn’t think it would be that hard to make a single-instance interface. After fumbling around for a day, I was ready to override IClassFactory::CreateInstance and force it to always return a single ITrace interface. While this was not the correct thing to do, at least it would have allowed only one instance. Fortunately, while poking through the ATL code I ran across the CComClassFactorySingleton class, which the documentation says is used to create a single instance—exactly what I needed. This is handled by the DECLARE_ CLASSFACTORY_SINGLETON (CTrace) macro in Trace.cpp. I attribute this bug to my ignorance of ATL.</p>
+<p>
+After getting a single instance of TraceSrv, I noticed that the CComBSTR was doing all those allocations and deallocations on almost every method call. I started developing the CFastBSTR class, and all of a sudden none of my trace events were getting sent to trace viewer applications. When I stepped through CTrace::ProcessTrace function, everything was fine with the string memory up to the ATL Proxy Generator-generated CProxyDITraceEvent::Fire_TraceEvent function, but the trace event was never received by the trace viewer. While I did not think there could be anything wrong with the generated code, I stepped into the code and found a very big surprise.</p>
+<p>
+The generated code for Fire_TraceEvent simply sets up the VARIANTARG parameter and calls IDispatch:: Invoke. The only problem is that IDispatch::Invoke was returning exactly why the data was not getting over to the trace viewer, but it never checked the return value, which happened to be C00000005. What happened was that I had messed up the prefixed size value in the CFastBSTR class, but since the generated code didn’t check the return value, I had no way of knowing it. While this is not a bug in the ATL Proxy Generator, I wish the authors had applied their bug slaying techniques and put an ASSERT macro on the return value. The moral of the story is to not trust generated code until you have looked it over before compiling. To fix the generated code, I renamed the ATL Proxy Generator file CPTraceSrv.h to CorrectProxyTraceSrv.h and added return value checking on any calls to IDispatch::Invoke.</p>
+<p>
+After fixing the CFastBSTR size prefix problem, I took a look at the 48 bytes of memory leaks that kept being reported whenever I ran TraceSrv. The memory leaks had to be in memory allocated inside ATL, because the leak reports were not from the two class’s memory dumpers I wrote using the MemDumperValidator library. I tracked these down to lines 1605 and 1607 of ATLIMPL.CPP. In CSecurityDescriptor::GetTokenSids, two PSID variables are malloced; when I followed the call stack and looked at each place the values were used I found that the memory is never freed. However, this is not technically a memory leak. The PSIDs that are allocated are passed into the API calls SetSecurityDescriptorOwner and SetSecurityDescriptorGroup. The SIDs passed into these functions are referenced, but not copied, so they must remain allocated through the life of the program.</p>
+<p>
+The next problem I found will, unfortunately, cause you problems if you do not use the Visual C++ IDE to build TraceSrv and try to build using just the TraceSrv.mak file. I swap between Intel and DEC Alpha machines when doing my development; when I first moved the project from the Alpha back to the Intel machine, I found a bug in Visual C++. No matter what I set as the current project in the IDE on either machine, the TraceSrv.mak makefile is always saved with a default configuration of “TraceSrv Win32 Alpha Unicode Debug.” To build an Intel debug version from the command line, you will need to specify the entire CFG value like so:</p>
+<pre><code>nmake /nologo /f TraceSrv.mak CFG="TraceSrv - Win32 Unicode Debug"
+</code></pre>
+<p>
+If you do not specify the complete CFG value for what you are trying to build, you will get unknown command-line options to CL.EXE, and LINK.EXE will report the wrong machine type.</p>
+<p>
+After finally fixing or working around all of the initial bugs, TraceSrv was up and running fairly well. Now, before I can wrap up, I need to cover the TraceView, Win32 security, and the VBScript sample.</p>
+<h3>TraceView and the Security Dance</h3>
+<p>
+While TraceSrv by itself is pretty useful, it really helps to have a viewer to see the trace statements. I wrote TraceView in Visual Basic because it was rather simple to do, and I needed to learn more about Visual Basic anyway. When you look at the source code for TraceView, you should not see much that hasn’t been done before.</p>
+<p>
+I tried to make TraceView a little more useful than a plain edit control by giving it a toolbar, a status bar, window position saving and restoring, file saving capabilities, forward and backward searching, and allowing the window to stay on top. For internalization ease, I keep all of the strings in a resource file instead of hardcoding them. While I won’t discuss the resource string loading, I’ll just mention that I modified the generated LoadResStrings function (which I renamed LoadFormResStrings) to make it a little more helpful when finding an item that does not have the tag property filled out.</p>
+<p>
+When I first started using TraceView it worked great. But when I started testing all the different ways to connect TraceView to TraceSrv, I had some problems. If TraceView and TraceSrv were on the same machine, TraceView could connect to TraceSrv if it ran as a service or as a local server. TraceView could also connect properly if TraceSrv ran as a local server on another machine using DCOM. When I tried to have TraceView connect to TraceSrv running as a DCOM service on another machine, it would always fail, giving me the Visual Basic error message “Run-time error -2147023071 (8007021) Automation Error.” I looked up the error value in WINERROR.H; the ID is RPC_S_SEC_PKG_ERROR, “A security package specific error occurred.”</p>
+<p>
+I had never seen this error ID before. When I searched the Microsoft Developer Network for it, all I got back was that it was in WINERROR.H and that it was listed in the system error appendixes. After poking at this for several days, I found that I could only get a Visual Basic-based program to connect to the remote TraceSrv service if I did not use the WithEvents keyword in its declaration. If I used the WithEvents keyword, I would always get the RPC_S_SEC_PKG_ ERROR error. This had me pretty stumped until a friend pointed out that I did not have the security for the service set correctly. </p>
+<p>
+When I stepped back and walked through what happened, it started to make sense. The WithEvents keyword is setting up an IConnectionPoint interface that the server will use to call into the client—in essence a callback. This means the server must have the correct security permissions to call back into the client. When running on the same machine, this worked just fine because TraceSrv, whether started as a local server or as a service, runs under the same user identification or is trusted. Running TraceSrv on the remote machine as a local server and TraceView on another machine worked because I was lucky. On both Windows NT Workstation machines without a domain controller, I was logged in as John with the same password. According to KnowledgeBase article Q158508, “COM Security Frequently Asked Questions,” Windows NT Workstation “falls back to a ‘matching account names and passwords’ mode. If you use the same ASCII names on the two machines running Windows NT Workstation and the accounts have the same passwords, then DCOM and other [Windows] NT security (such as filesystem) should work as though you were really logged on to the two machines with the same account.” When I logged into the remote machine as Bob, started TraceSrv as a local server, and tried to connect TraceView on the client machine logged in as John, I got the RPC_S_SEC_PKG_ERROR error. My test case, running TraceSrv as a local server on a remote machine, did not take into account all the permutations for connections.</p>
+<p>
+Getting a remote local server started with proper security is fairly easy—just log in as a user that has network permissions—but a Win32 service takes a little more work. By default, Win32 services have no security credentials, so TraceSrv caused a security error whenever it tried to do anything with the IConnectionPoint interface it was passed. What I needed was a way to have the client tell DCOM the security level it will allow for its own interfaces. This is handled through the CoInitializeSecurity function call, which should be called immediately after your application calls CoInitialize. In TraceView written in Visual Basic, calling CoInitializeSecurity will not work. If you try calling CoInitializeSecurity as the first thing in your Sub Main,  it will return the error code 0x80010119 (RPC_E_ TOO_LATE) which means “Security must be initialized before any interfaces are marshalled or unmarshalled. It cannot be changed once initialized.” As you can see, Visual Basic is happily marshalling away long before your code ever gets called.</p>
+<p>
+There are two ways to get around this little Visual Basic roadblock. The first is to fire up DCOMCNFG and set the Default Authentication Level (on the Default Properties Page) to None. While this might be fine for my little sealed network at home, it is not the best solution in a real development shop. My second method is a little more secure and appropriate: on the machine that you will run TraceSrv on, register TraceSrv as a service, start up the Control Panel, and open the Services icon. Move to the TraceSrv entry and click the Startup button. Under Log On As, select the This Account radio button and type in the user name and password for the account. This allows the service to get the security it needs from a known account on the network. As the “COM Security Frequently Asked Questions” article points out, “Localsystem is a very privileged account locally.... However, it has no network privileges and cannot leave the machine via any [Windows] NT-secured mechanism, including file system, named pipes, DCOM, or secure RPC.” Once I got the service starting under the proper account, TraceView worked fine.</p>
+<p>
+If you are working with a domain server, you might want to consider creating a specific account that you can use just for starting things like TraceSrv. For example, if you have a Build account that your build machines use to send mail, you might want to use that.</p>
+<h3>VBScript Versus SECURITY.DLL</h3>
+<p>
+After getting TraceView up and running, I figured I was finished with TraceSrv. All I had to do was write VBScript and Visual Basic for Applications-based tests. One of the key requirements of writing bug-free code is to actually execute it, and since I promised everyone at the beginning of the column that TraceSrv would work with all languages, I wanted to make sure it did. The two tests are distributed with the source code for the column in the \VBA and \VBScript subdirectories. The Visual Basic for Applications sample is a Word 97 document, and the VBScript sample is an HTML page for Internet Explorer (IE). </p>
+<p>
+I tested the Visual Basic for Applications and VBScript code by connecting to TraceSrv in each of the different ways to run TraceSrv. Everything worked well, except that I found a known problem in IE 3.02: if IE is connecting to TraceSrv running on another machine, either as a local server or as a DCOM service, it crashes in the FreeCredentialsHandle function of SECURITY.DLL. This is true for both Intel and Alpha versions of IE. The bug shows up only when exiting the whole IE process, not when changing pages or at any time during use. This bug has been fixed with IE 4.0, which works fine with TraceSrv.</p>
+<h3>Wrap Up</h3>
+<p>
+While I ran into a few problems getting TraceSrv up and running, I hope that you can learn from the mistakes I made and the bugs I had to work around. I learned most about the security features in Windows NT. While they can, at first, appear pretty restrictive, they are actually quite good; once I figured out how to work with them instead of against them, I started to see some interesting tool possibilities.</p>
+<p>
+TraceSrv is a tool that will help you track down the bugs in your multilanguage, multiprocess, and multimachine programs. Look at ways that you could extend both TraceSrv and TraceView to make them more useful. One of the big weaknesses of TraceSrv is that, while it works great for brand-new development, it is not that useful for existing projects that already use OutputDebugString. My next column will demonstrate how to retrofit your existing projects with almost no fuss at all. </p>
+<h3>Slay Those Bugs!</h3>
+<p>
+Continuing from my inaugural Bugslayer article (MSJ, October 1997), here are some more debugging tips. Send your tips in and I’ll include them in future columns. </p>
+<p>
+Tip 3: Always use /W4 and /WX with CL.EXE. Why track down bugs yourself when the Visual C++ compiler will find many of them for you, simply by compiling your code? Always set the warning level to 4 so you can catch excellent problems like using uninitialized stack variables, unused variables, and signed/unsigned mismatches. The /WX switch makes the compiler treat all warnings as errors so nothing slips through the cracks. These two command-line switches have caught thousands of bugs for me.</p>
+<p>
+There’s only one drawback: many of the standard windows and OLE headers do not compile without warnings. In these cases you can use the #pragma warning directive around those files to turn off warnings and then turn them back on. I have header files called WarningsOff.h and WarningsOn.h that I use in many of my projects to bracket the standard files so they compile.</p>
+<p>
+Tip 4: Use /GF to combat really strange memory bugs. The other day at work, we had a case where there was a super-bizarre memory corruption. We eventually tracked it down to someone accidentally using a static string buffer</p>
+<pre><code>char szBuff[] = "Static String" 
+</code></pre>
+<p>
+and passing that string to a function that writes to the buffer. If you use the /GF switch on CL.EXE, it places all the static strings into a read-only section of the binary. If any part of the program tries to write to one of the static buffers it immediately causes an access violation. If we had used  /GF on all of our code, this bug would have been caught immediately. (Thanks to Matt Pietrek.)</p>
+<p>
+To obtain complete source code listings, see the MSJ Web site at  http://www.microsoft.com/msj.</p>
+<p>
+Have a tricky issue dealing with bugs? Send your questions or bug slaying tips via email to John Robbins: john@jprobbins.com</p>
+</font></BODY>
+</HTML>

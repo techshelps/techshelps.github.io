@@ -1,0 +1,181 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>How a Provider Returns an OLE DB Error Object</title>
+<link disabled rel=stylesheet href=msdn_ie3.css>
+<style type="text/css">
+@import url(msdn_ie4.css);
+</style>
+</HEAD>
+<BODY>
+<FONT FACE="Verdana, Arial, Helvetica" SIZE="2">
+
+	<!--TOOLBAR_START-->
+	<!--TOOLBAR_EXEMPT-->
+	<!--TOOLBAR_END-->
+
+
+<h1><a name="oledbhow_a_provider_returns_an_ole_db_error_object"></a>How a Provider Returns an OLE DB Error Object</h1>
+<p>
+When an error occurs in a provider, the provider can return an OLE DB error object to describe that error. To do this, it makes the following calls:
+<ol>
+<li>
+Calls <b>GetErrorInfo</b> in the Automation DLL to obtain ownership of the error object on the current thread and to retrieve an <b>IErrorInfo</b> interface pointer on it. Such an error object will exist only if added by a lower level provider. Thus, a provider at the bottom of a chain of providers will not find an error object, while a provider in the middle (a service component) might find such an object. In the latter case, the service component is merely gaining temporary ownership of the error object before returning it to the Automation DLL.<br><br></li>
+<li>
+Creates an OLE DB error object if none was retrieved in step 1. To do this, the provider calls <b>CoCreateInstance</b> with the CLSID_EXTENDEDERRORINFO class ID or <b>IClassFactory::CreateInstance</b> on a class factory object created earlier for this class. The latter method is faster and therefore preferred if the provider frequently creates error objects.<br><br></li>
+<li>
+Calls <b>IErrorRecords::AddErrorRecord</b> to add one or more error records to the error object. To <b>AddErrorRecord</b> it passes an ERRORINFO structure, the lookup ID, the error parameters, if any, an interface pointer on the custom error object that further describes the error, and a dynamic error ID.<br><br></li>
+<li>
+Calls <b>QueryInterface</b> to retrieve an <b>IErrorInfo</b> interface pointer on the error object. This interface pointer identifies the error object to all Automation components.<br><br></li>
+<li>
+Calls the function <b>SetErrorInfo</b> in the Automation DLL and passes it the <b>IErrorInfo</b> interface pointer. <b>SetErrorInfo</b> replaces the current error object on the thread, if any, with the new error object and adds a reference count to hold the new error object.<br><br></li>
+<li>
+Calls <b>Release</b> to release its reference count on the error object. This transfers ownership of the error object from the provider to the Automation DLL.</li>
+</ol>
+<p>
+The following code shows an example of how a provider might create an OLE DB error object in response to being unable to open a table and transfer ownership of the object to the Automation DLL:</p>
+<pre><code>#include &lt;oledb.h&gt;
+
+IClassFactory&nbsp;&nbsp; *m_pErrorObjectFactory ;
+IParseDisplayName *pppwow;
+DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; errCantOpenTable;
+IOpenRowset&nbsp;&nbsp; *pSimpleProvider;
+DBPROPSET&nbsp;&nbsp;&nbsp; rgPropertySets[1];
+IRowset&nbsp;&nbsp;&nbsp;&nbsp; *pRowset;
+DBID&nbsp;&nbsp;&nbsp;&nbsp; TableID;
+extern GUID&nbsp;&nbsp;&nbsp; CLSID_THISISAM;
+extern DISPID&nbsp; DISPID_OpenRowset;
+BSTR&nbsp;&nbsp;&nbsp;&nbsp; bstrTableName;
+
+int main() {
+ ERRORINFO&nbsp; ErrorInfo;
+ HRESULT&nbsp;&nbsp;&nbsp; hr, hrErr;
+ IErrorInfo&nbsp; *pErrorInfo;
+ IErrorRecords *pErrorRecords;
+
+ // Clear the current error object.
+ SetErrorInfo(0, NULL);
+
+ // Try to open the table or call another provider to do it.
+ hrErr = pSimpleProvider-&gt;OpenRowset(NULL, &amp;TableID, NULL, IID_IRowset, 1,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rgPropertySets, (IUnknown**) &amp;pRowset);
+
+ if (!FAILED(hrErr))
+  return hrErr;
+
+ // An error or warning occurred while opening the table. 
+ //Get the current error object. If one does not exist, create a new one.
+
+ GetErrorInfo(0, &amp;pErrorInfo);
+
+ if (!pErrorInfo)
+  hr = m_pErrorObjectFactory-&gt;CreateInstance(NULL, CLSID_EXTENDEDERRORINFO,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (void**) &amp;pErrorInfo);
+
+ // Get an IErrorRecords interface pointer on the error object.
+ hr = pErrorInfo-&gt;QueryInterface(IID_IErrorRecords, (void**) &amp;pErrorRecords);
+
+ // Set up a parameter to pass to the object.
+ VARIANTARG&nbsp; varg;
+ VariantInit (&amp;varg);
+ DISPPARAMS&nbsp; dispparams = {&amp;varg, NULL, 1, 0};
+
+ varg.vt = VT_BSTR;
+ varg.bstrVal = SysAllocString(bstrTableName);
+
+ // Fill in the ERRORINFO structure and add the error record.
+
+ ErrorInfo.hrError = hrErr;
+ ErrorInfo.dwMinor = errCantOpenTable;
+ ErrorInfo.clsid = CLSID_THISISAM;
+ ErrorInfo.iid&nbsp;&nbsp; = IID_IOpenRowset;
+ ErrorInfo.dispid&nbsp; = DISPID_OpenRowset;
+ hr = pErrorRecords-&gt;AddErrorRecord(&amp;ErrorInfo,ErrorInfo.dwMinor,&amp;dispparams,NULL,0);
+
+ VariantClear(&amp;varg);
+
+ // Call SetErrorInfo to pass the error object to the Automation DLL.
+ hr = SetErrorInfo(0, pErrorInfo);
+
+ // Release the interface pointers on the object to finish transferring ownership of
+ // the object to the Automation DLL.
+
+ pErrorRecords-&gt;Release();
+ pErrorInfo-&gt;Release();
+ return hr;
+};
+</code></pre>
+<p>
+The following code example shows how a provider adds a record to an OLE DB error object that includes a pointer to a custom error object:</p>
+<pre><code>#include &lt;oledb.h&gt;
+
+class CSQLStateObject:public ISQLErrorInfo {
+ public:
+  CSQLStateObject(OLECHAR );
+  CSQLStateObject();
+  HRESULT __stdcall QueryInterface(REFIID, void** );
+  ULONG __stdcall AddRef(void);
+  ULONG __stdcall Release(void);
+  HRESULT __stdcall GetSQLInfo( 
+ &nbsp; /* [out] */ BSTR __RPC_FAR *pbstrSQLState,
+ &nbsp; /* [out] */ LONG __RPC_FAR *plNativeError);
+};
+
+IClassFactory *g_pErrorObjectFactory ;
+extern DISPID&nbsp; DISPID_GetData;
+extern GUID&nbsp; CLSID_THISISAM;
+DWORD&nbsp;&nbsp;&nbsp; errGeneralError;
+
+int main() {
+ ERRORINFO&nbsp; ErrorInfo;
+ HRESULT&nbsp;&nbsp;&nbsp; hr, hrErr;
+ IErrorInfo&nbsp; *pErrorInfo;
+ IErrorRecords *pErrorRecords;
+
+ // Clear the current error object.
+ SetErrorInfo(0, NULL);
+
+ // Do something that causes an error to occur. (Not shown.)
+
+ if (!FAILED(hrErr))
+  return hrErr;
+
+ // An error or warning occurred. Get the current error object. If one&nbsp;&nbsp;&nbsp; //does not exist, create one.
+
+ GetErrorInfo(0, &amp;pErrorInfo);
+ if (!pErrorInfo)
+  hr = g_pErrorObjectFactory-&gt;CreateInstance(NULL, CLSID_EXTENDEDERRORINFO,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (void**) &amp;pErrorInfo);
+
+ // Get an IErrorRecords interface pointer on the error object.
+ hr = pErrorInfo-&gt;QueryInterface(IID_IErrorRecords, (void**) &amp;pErrorRecords);
+
+ // Create a custom error object.
+ CSQLStateObject* pMyErrObj = new CSQLStateObject(OLESTR("HY000"));
+
+ // Fill in the ERRORINFO structure and add the error record.
+ ErrorInfo.hrError = hrErr;
+ ErrorInfo.dwMinor = errGeneralError;
+ ErrorInfo.clsid = CLSID_THISISAM;
+ ErrorInfo.iid&nbsp;&nbsp; = IID_IRowset;
+ ErrorInfo.dispid&nbsp; = DISPID_GetData;
+ hr = pErrorRecords-&gt;AddErrorRecord(&amp;ErrorInfo, ErrorInfo.dwMinor, NULL,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (void**) pMyErrObj, 0);
+
+ // Release the interface pointer on the custom error object to finish transferring
+ // ownership of it to the error object.
+ pMyErrObj-&gt;Release();
+
+ // Call SetErrorInfo to pass the error object to the Automation DLL.
+ hr = SetErrorInfo(0, pErrorInfo);
+
+ // Release the interface pointers on the object to finish transferring ownership of
+ // the object to the Automation DLL.
+ pErrorRecords-&gt;Release();
+ pErrorInfo-&gt;Release();
+ return hr;
+};
+</code></pre>
+</font></BODY>
+</HTML>

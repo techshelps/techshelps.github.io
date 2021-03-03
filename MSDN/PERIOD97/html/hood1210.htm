@@ -1,0 +1,725 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Under the Hood</title>
+<style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000 dir=ltr>
+<Font face="verdana,arial,helvetica" size="2">
+<h1><a name="underhood"></a>Under the Hood </h1>
+<p class=indent>
+Matt Pietrek</p>
+<p>
+It’s a feeling you probably know all too well. You’ve just banged out a bunch of new code and run it for the first time when bam! Another pesky access violation rears its ugly head. You’ve probably also seen the dreaded number 0xC0000005, AKA STATUS_ACCESS_VIOLATION. What’s not so well known is how the number 0xC0000005 came to represent “Something bad just happened,” or the Win32® support for different exception types. In this month’s column, I’ll dig into Win32 exceptions and how they correlate to hardware exceptions. On the hardware side of things I’ll focus on the Intel x86 architecture. (Alas, the Alpha I was using was reclaimed by Digital.)</p>
+<p>
+If you’ve ever programmed for Windows® 3.x or used an MS-DOS® extender, you’ve no doubt encountered exception 0xD (General Protection Fault, or GPF for short). There’s a good chance you’ve seen other faults, such as the invalid opcode fault (exception 6). These numbers aren’t made up; any Intel manual shows you that these exception codes are what the CPU uses to signal various problems or events. You won’t see these exception codes in Win32 because Windows NT®, the flagship Win32 operating system, is designed to run on multiple hardware platforms. It simply wouldn’t do to have an Alpha or MIPS version of Windows NT using exception codes from an Intel CPU. </p>
+<p>
+Instead, Win32 uses its own numbering system to represent the various kinds of exceptions. On any given Win32-based platform, the system maps each of the CPU’s exception codes to one or more generic Win32 exception codes. For example, on Intel CPUs exception 0xD may become a STATUS_ACCESS_VIOLATION (0xC0000005). Alternatively, exception 0xD may become a Win32 STATUS_<br>
+PRIVILEGED_INSTRUCTION (0xC0000096) exception. The underlying cause for the hardware exception determines which Win32 exception it maps to.</p>
+<p>
+To begin the journey into Win32 exceptions, let’s start at the beginning: CPU exceptions and interrupts. Exceptions and interrupts are a means by which the CPU’s execution switches to a completely different code path to handle some external stimulus or condition in the executing code. An interrupt is typically caused by an external stimulus—for example, a keystroke being hit. An exception is caused by an internal condition in the code or data that causes the processor to generate an exception. A classic example of an exception is the CPU attempting to read from an address that doesn’t have physical RAM mapped to it.</p>
+<p>
+Intel CPUs reserve 32 interrupt/exception codes to handle various conditions. Figure 1 shows some of the more common numbers. It’s pretty obvious what some of the numbers mean, but there’s a good chance you haven’t encountered others (at least not before running this column’s sample program). Veterans of the MS-DOS wars may be surprised that INT 5H isn’t listed as a print-screen, while INT 8H isn’t listed as the timer interrupt. What’s up with this? The descriptions in Figure 1 are Intel’s definitions for the exceptions and interrupts. Unfortunately, before the Intel CPU architecture had fully evolved, the authors of MS-DOS used some of these interrupt numbers for other purposes. The wisdom of this decision became apparent when programmers using the BOUND instruction unexpectedly received printouts of their screens.</p>
+<p>
+<b>Figure 1: Intel-Defined Exceptions and Interrupts</b></p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=blue width=68><b>Code</b></td>
+<td class=blue width=420><b>Definition</b></td>
+</tr>
+<tr valign=top>
+<td width=68>00</td>
+<td width=420>Divide error</td>
+</tr>
+<tr valign=top>
+<td width=68>01</td>
+<td width=420>Debug exception (single-step and hardware debugging)</td>
+</tr>
+<tr valign=top>
+<td width=68>02</td>
+<td width=420>NMI interrupt</td>
+</tr>
+<tr valign=top>
+<td width=68>03</td>
+<td width=420>Breakpoint</td>
+</tr>
+<tr valign=top>
+<td width=68>04</td>
+<td width=420>INTO detected overflow</td>
+</tr>
+<tr valign=top>
+<td width=68>05</td>
+<td width=420>BOUND range exceeded</td>
+</tr>
+<tr valign=top>
+<td width=68>06</td>
+<td width=420>Invalid opcode</td>
+</tr>
+<tr valign=top>
+<td width=68>07</td>
+<td width=420>Coprocessor device not available</td>
+</tr>
+<tr valign=top>
+<td width=68>08</td>
+<td width=420>Double fault</td>
+</tr>
+<tr valign=top>
+<td width=68>0A</td>
+<td width=420>Invalid Task State Segment (TSS)</td>
+</tr>
+<tr valign=top>
+<td width=68>0B</td>
+<td width=420>Segment not present</td>
+</tr>
+<tr valign=top>
+<td width=68>0C</td>
+<td width=420>Stack fault</td>
+</tr>
+<tr valign=top>
+<td width=68>0D</td>
+<td width=420>General protection fault (GPF)</td>
+</tr>
+<tr valign=top>
+<td width=68>0E</td>
+<td width=420>Page fault</td>
+</tr>
+</table><br>
+<p>
+To keep things simple, for the rest of the column I’ll use the word “exception” to mean exception or interrupt. As I indicated earlier, interrupts and exceptions are technically different. In addition, exceptions can be further subdivided into faults, traps, and aborts. I’ll skip over a bunch of geek-speak about what these things mean and simply say that for now you can consider all of these terms to mean effectively the same thing.</p>
+<p>
+When an exception occurs, the CPU suspends the current path of execution in preparation for transferring control to the exception handler. The CPU saves the current executing state by pushing the flags register (EFLAGS), the code segment register (CS), and the instruction pointer register (EIP) onto the stack. Next, the exception code is used to look up and transfer control to the address where the designated handler for this exception resides. At the most fundamental level, the exception code is merely an index into the Interrupt Descriptor Table (IDT), which indicates where the exception should be handled.</p>
+<p>
+The IDT is a fundamental data structure used by Intel CPUs that’s comprised of an array of up to 256 interrupt descriptors, each eight bytes in length. The IDT is created and maintained by the operating system and is thus considered a CPU data structure, but it also falls under the control of the operating system. If the operating system messes up the IDT, the whole system comes down in a hurry.</p>
+<p>
+On most operating systems, including those based on Win32, the IDT is kept in privileged memory, away from access by lowly application programs. This is quite different from real-mode MS-DOS programming, where application programs commonly usurp slots in the interrupt table (a real-mode version of the IDT). The lack of coordination between multiple MS-DOS-based programs, drivers, and TSRs is what caused a great deal of the legendary instability of systems running MS-DOS and 16-bit Windows. With the newer 32-bit operating systems, the CPU restricts access to the IDT, with a corresponding increase in overall stability. Nonetheless, Win32 supervisor-level device drivers have access to the IDT and can modify its entries.</p>
+<p>
+Now back to what happens during an exception. The CPU takes the exception number and indexes it to the appropriate 8-byte descriptor. Within the descriptor are a variety of fields. Figure 2 shows a simplified version of an interrupt descriptor. Note that for each exception there’s a corresponding exception handler address (CS:EIP) to which control will transfer. Figure 3 shows the sequence of events during a GPF (exception 0xD).</p>
+<p>
+<b>Figure 2: An Interrupt Descriptor</b></p>
+<p><img src="hood02.gif">
+</p>
+<p>
+<b>Figure 3: Exception Sequence of Events</b></p>
+<p><img src="hood03.gif">
+</p>
+<p>
+At this point, I’d ordinarily grind out a program that displays the contents of the IDT. Unfortunately (for me at least), application programs don’t have access to the IDT. This is because applications under Win32 run at Ring 3, which is the lowest privilege level. The core of a Win32 operating system runs at Ring 0 (kernel or supervisor mode), which is the highest privilege level. Likewise, critical data structures such as the IDT are accessible only via Ring 0 code. (Rings 1 and 2 aren’t used by Win32 implementations. Intel put them in way back starting with the 80286, but to my knowledge nobody’s ever used these privilege levels.)</p>
+<p>
+Since I can’t write an application that reads from the IDT, I’ll fall back a notch and cheat. Figure 4 shows the first 0x30 interrupt descriptor table entries as shown by the IDT command in SoftIce/NT. SoftIce runs as a Ring 0 device driver, so it has full read/write access to the IDT.</p>
+<p>
+<b>Figure 4: SoftIce IDT Output</b></p>
+<table border=1 cellpadding=5 cols=5 frame=below rules=rows>
+<tr valign=top>
+<td class=blue width=99><b>Int</b></td>
+<td class=blue width=99><b>Type</b></td>
+<td class=blue width=99><b>Sel:Offset</b></td>
+<td class=blue width=132><b>Attributes</b></td>
+<td class=blue width=198><b>Symbol/Owner</b></td>
+</tr>
+<tr valign=top>
+<td colspan=5 width=626>IDTbase=80036400  Limit=07FF</td>
+</tr>
+<tr valign=top>
+<td width=99>0000</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013C354</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap00</td>
+</tr>
+<tr valign=top>
+<td width=99>0001</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013C49C</td>
+<td width=99>DPL=3</td>
+<td width=34>P</td>
+<td width=198>_KiTrap01</td>
+</tr>
+<tr valign=top>
+<td width=99>0002</td>
+<td width=99>IntG32</td>
+<td width=99>0008:0000137E</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198></td>
+</tr>
+<tr valign=top>
+<td width=99>0003</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013C764</td>
+<td width=99>DPL=3</td>
+<td width=34>P</td>
+<td width=198>_KiTrap03</td>
+</tr>
+<tr valign=top>
+<td width=99>0004</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013C8B8</td>
+<td width=99>DPL=3</td>
+<td width=34>P</td>
+<td width=198>_KiTrap04</td>
+</tr>
+<tr valign=top>
+<td width=99>0005</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013C9F4</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap05</td>
+</tr>
+<tr valign=top>
+<td width=99>0006</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013CB4C</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap06</td>
+</tr>
+<tr valign=top>
+<td width=99>0007</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013D068</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap07</td>
+</tr>
+<tr valign=top>
+<td width=99>0008</td>
+<td width=99>TaskG</td>
+<td width=99> 0050:000013D8</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198></td>
+</tr>
+<tr valign=top>
+<td width=99>0009</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013D3A8</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap09</td>
+</tr>
+<tr valign=top>
+<td width=99>000A</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013D4A8</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0A</td>
+</tr>
+<tr valign=top>
+<td width=99>000B</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013D5CC</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0B</td>
+</tr>
+<tr valign=top>
+<td width=99>000C</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013D8BC</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0C</td>
+</tr>
+<tr valign=top>
+<td width=99>000D</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013DABC</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0D</td>
+</tr>
+<tr valign=top>
+<td width=99>000E</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013E468</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0E</td>
+</tr>
+<tr valign=top>
+<td width=99>000F</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013E7D4</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0F</td>
+</tr>
+<tr valign=top>
+<td width=99>0010</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013E8D4</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap10</td>
+</tr>
+<tr valign=top>
+<td width=99>0011</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013E9E8</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap11</td>
+</tr>
+<tr valign=top>
+<td width=99>0012</td>
+<td width=99>TaskG</td>
+<td width=99>00A0:8013E7D4</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198></td>
+</tr>
+<tr valign=top>
+<td width=99>0013</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013E7D4</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0F</td>
+</tr>
+<tr valign=top>
+<td width=99>0014</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013E7D4</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0F</td>
+</tr>
+<tr valign=top>
+<td width=99>0015</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013E7D4</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0F</td>
+</tr>
+<tr valign=top>
+<td width=99>0016</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013E7D4</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0F</td>
+</tr>
+<tr valign=top>
+<td width=99>0017</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013E7D4</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0F</td>
+</tr>
+<tr valign=top>
+<td width=99>0018</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013E7D4</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0F</td>
+</tr>
+<tr valign=top>
+<td width=99>0019</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013E7D4</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0F</td>
+</tr>
+<tr valign=top>
+<td width=99>001A</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013E7D4</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0F</td>
+</tr>
+<tr valign=top>
+<td width=99>001B</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013E7D4</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0F</td>
+</tr>
+<tr valign=top>
+<td width=99>001C</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013E7D4</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0F</td>
+</tr>
+<tr valign=top>
+<td width=99>001D</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013E7D4</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0F</td>
+</tr>
+<tr valign=top>
+<td width=99>001E</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013E7D4</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0F</td>
+</tr>
+<tr valign=top>
+<td width=99>001F</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013E7D4</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0F</td>
+</tr>
+<tr valign=top>
+<td width=99>0020</td>
+<td width=99>Reserved</td>
+<td width=99>0008:00000000</td>
+<td width=99>DPL=0</td>
+<td width=34>NP</td>
+<td width=198></td>
+</tr>
+<tr valign=top>
+<td width=99>0021</td>
+<td width=99>TrapG16</td>
+<td width=99>00C7:00000696</td>
+<td width=99>DPL=3</td>
+<td width=34>P</td>
+<td width=198></td>
+</tr>
+<tr valign=top>
+<td width=99>0022</td>
+<td width=99>Reserved</td>
+<td width=99>0008:00000000</td>
+<td width=99>DPL=0</td>
+<td width=34>NP</td>
+<td width=198></td>
+</tr>
+<tr valign=top>
+<td width=99>0023</td>
+<td width=99>Reserved</td>
+<td width=99>0008:00000000</td>
+<td width=99>DPL=0</td>
+<td width=34>NP</td>
+<td width=198></td>
+</tr>
+<tr valign=top>
+<td width=99>0024</td>
+<td width=99>Reserved</td>
+<td width=99>0008:00000000</td>
+<td width=99>DPL=0</td>
+<td width=34>NP</td>
+<td width=198></td>
+</tr>
+<tr valign=top>
+<td width=99>0025</td>
+<td width=99>Reserved</td>
+<td width=99>0008:00000000</td>
+<td width=99>DPL=0</td>
+<td width=34>NP</td>
+<td width=198></td>
+</tr>
+<tr valign=top>
+<td width=99>0026</td>
+<td width=99>Reserved</td>
+<td width=99>0008:00000000</td>
+<td width=99>DPL=0</td>
+<td width=34>NP</td>
+<td width=198></td>
+</tr>
+<tr valign=top>
+<td width=99>0027</td>
+<td width=99>Reserved</td>
+<td width=99>0008:00000000</td>
+<td width=99>DPL=0</td>
+<td width=34>NP</td>
+<td width=198></td>
+</tr>
+<tr valign=top>
+<td width=99>0028</td>
+<td width=99>Reserved</td>
+<td width=99>0008:00000000</td>
+<td width=99>DPL=0</td>
+<td width=34>NP</td>
+<td width=198></td>
+</tr>
+<tr valign=top>
+<td width=99>0029</td>
+<td width=99>Reserved</td>
+<td width=99>0008:00000000</td>
+<td width=99>DPL=0</td>
+<td width=34>NP</td>
+<td width=198></td>
+</tr>
+<tr valign=top>
+<td width=99>002A</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013B8A6</td>
+<td width=99>DPL=3</td>
+<td width=34>P</td>
+<td width=198>_KiGetTickCount</td>
+</tr>
+<tr valign=top>
+<td width=99>002B</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013B990</td>
+<td width=99>DPL=3</td>
+<td width=34>P</td>
+<td width=198>_KiCallbackReturn</td>
+</tr>
+<tr valign=top>
+<td width=99>002C</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013BAA0</td>
+<td width=99>DPL=3</td>
+<td width=34>P</td>
+<td width=198>_KiSetLowWaitHighThread</td>
+</tr>
+<tr valign=top>
+<td width=99>002D</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013C65C</td>
+<td width=99>DPL=3</td>
+<td width=34>P</td>
+<td width=198>_KiDebugService</td>
+</tr>
+<tr valign=top>
+<td width=99>002E</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013B440</td>
+<td width=99>DPL=3</td>
+<td width=34>P</td>
+<td width=198>_KiSystemService</td>
+</tr>
+<tr valign=top>
+<td width=99>002F</td>
+<td width=99>IntG32</td>
+<td width=99>0008:8013E7D4</td>
+<td width=99>DPL=0</td>
+<td width=34>P</td>
+<td width=198>_KiTrap0F</td>
+</tr>
+</table><br>
+<p>
+The first thing to notice about the Windows NT IDT contents is that all of the exception handler addresses are above 0x80000000. Addresses above 0x80000000 are reserved by Windows NT for supervisor-level (Ring 0) access. Although it’s not obvious from the figure, nearly every exception handler address is in NTOSKRNL.EXE, which is the Ring 0 kernel component of Windows NT. Because I had previously loaded the symbols from NTOSKRNL’s DBG file, SoftIce looked up the exception handler addresses and emitted the symbolic names for most of the exception handlers. The first 0x20 exceptions are handled by a series of routines named _KiTrap00, _KiTrap01, and so on. The “Ki” stands for Kernel Interrupt.</p>
+<p>
+Something else worth noting in the IDT entries is the Descriptor Privilege Level (DPL) field. Again, without getting into a morass of details, the DPL field specifies the least privileged execution level that is allowed to invoke that particular software interrupt. For example, INT 2EH can be called by any privilege level from Ring 3 (the lowest privilege) to Ring 0 (the highest). Likewise, INT 3H, which is designated for breakpoints, can also be invoked from Ring 3 and higher privilege-level code.</p>
+<p>
+Exceptions 0x2A though 0x2E are handled by other routines in NTOSKRNL.EXE. For example, in my August 1996 article “Poking Around Under the Hood: A Programmer’s View of Windows NT 4.0,” I described how an INT 2EH call was the mechanism by which Ring 3 application code transfers control to the Ring 0 system code to perform special operations such as creating a new process. INT 2EH is invoked from Ring 3 by system DLLs such as NTDLL.DLL, USER32.DLL, and GDI32.DLL. Looking at IDT entry 0x2E, you’ll see that its address points to the _KiSystemService function in NTOSRKNL. _KiSystemService, in turn, forwards control to the appropriate code.</p>
+<p>
+After INT 2EH, the next most commonly used interrupt from the previous figure is INT 2BH. The name of the IDT entry for this interrupt is _KiCallbackReturn, which gives a good hint about its meaning. When a Ring 3 callback function is invoked from Ring 0, a method to get back to the Ring 0 caller is required. INT 2BH fills this need. A typical example of this is a window hook callback, such as you would install by calling SetWindowsHookEx. The real meat of the USER functionality is in the Ring 0 WIN32K.SYS driver, and it’s this code that makes the hook callbacks into Ring 3 code. When the callback is finished, the system executes an INT 2BH to return to Ring 0.</p>
+<p>
+Enough about interrupts. What about exceptions, in particular those nasty ones like access violations? The two most common exceptions that typically arise at the processor level are exception 0xD (GPF) and exception 0xE (page fault). Somehow, between the time the CPU generates these exceptions and the time your application gets a chance to handle them, the operating system changes the exception code to something more generic and to its liking.</p>
+<p>
+Let’s pretend that you try to run the following buggy program that attempts to write the value 2 to memory offset 0: </p>
+<pre><code>int main()
+{
+    *(int *) 0 = 2;
+}
+</code></pre>
+<p>
+As you’d expect, offset 0 isn’t a usable program address. Under Windows NT, for instance, the first 4KB page of memory is marked “not present” to prevent problems with programs that use NULL pointers. The attempt to write to this address causes a page fault (exception 0xE). Looking at the IDT figure, you’ll see that this exception is handled by the _KiTrap0E code in NTOSKRNL.EXE.</p>
+<p>
+While I’ve stepped through the _KiTrap0E code many times in a debugger, this code is extremely nasty and worthy of an entire article in its own right. For now, it’s enough to say that the Ring 0 _KiTrap0E code checks for a variety of special circumstances. The buggy sample program isn’t anything special, though. Therefore, KiTrap0E uses an IRETD instruction to transfer control to Ring 3 at the start of NTDLL’s KiUserExceptionDispatcher function. I won’t describe KiUserExceptionDispatcher here, since I already covered it in gory detail in my article “A Crash Course on the Depths of Win32 Structured Exception Handling,” (MSJ, January 1997). The important thing to know is that KiUserExceptionDispatcher is told that the exception code is 0xC0000005 (STATUS_ACCESS_VIOLATION), not good old exception 0xE, which is what the CPU generated.</p>
+<p>
+Where does Win32 come up with exception codes like 0xC0000005? The answer can be found in the WINERROR.H header file from the Win32 SDK or your C++ compiler. Near the very top, you’ll see a comment that says:</p>
+<pre><code>//  Values are 32 bit values layed out as follows:
+</code></pre>
+<p>
+Reading further in the comments, you’ll see that the top two bits (31 and 30) represent a severity code. The next lower bit (29) is the customer code. Bit 28 is reserved, while the remaining 12 bits in the upper WORD are the facility code. The bottom WORD (bits 0–15) is used for whatever types of subcodes the upper WORD wants to use it for.</p>
+<p>
+It’s interesting to note that, under Win32, the method by which bitfields are used to categorize information is also the same mechanism used for the Win32 last error codes. Thus, you can see where error codes like 0x80010002 (RPC_<br>
+E_CALL_CANCELED) come from. Incidentally, the use of severity, customer, and facility bitfields didn’t originate with Windows NT. IBM’s OS/2 uses a similar scheme, which is a by-product of the joint operating system work done by Microsoft and IBM in the late 1980s.</p>
+<p>
+Turning back to exceptions, take a look at the severity bits, bits 31 and 30. A value of 0 indicates success, 1 is informational, 2 means warning, while 3 (both bits on) means error. A fatal exception certainly qualifies as an error, so any 32-bit fatal exception code will have the top two bits set. The next two lower bits, customer and reserved, are typically both set to zero since they aren’t usually used.</p>
+<p>
+From just this limited knowledge of how exception codes are constructed, you can infer that any fatal exception code will start out with the value 0xC as its first nibble. Thus, you end up with exception codes like 0xC0000005 (STATUS_<br>
+ACCESS_VIOLATION) and 0xC000001D (STATUS_ILLEGAL_INSTRUCTION). Less severe exceptions—that is, warnings—have a severity level of 2, so you get exception codes like 0x80000003 (STATUS_BREAKPOINT) and 0x80000004 (STATUS_SINGLE_STEP). A reasonably complete list of possible exception codes under Win32 can be found in WINNT.H by searching for STATUS_. When you look at this list, it’s important to remember that not every Win32 exception code can be generated by every processor that supports Win32.</p>
+<p>
+While writing this column, I became intrigued by how many possible Win32 exception codes I could generate. I was also curious to see what exception codes the operating system would assign to various evil things that I could intentionally try to do. To help figure these things out, I wrote a framework for generating processor faults in various manners and reporting what Win32 exception codes they mapped to. The end result was my GenException program (see Figure 5).</p>
+<p>
+<b>Figure 5: GenException.CPP</b></p>
+<pre><code>//==========================================
+// Matt Pietrek
+// Microsoft Systems Journal, October 1997
+// FILE: GenException.CPP
+// To compile: CL GenException.CPP
+//==========================================
+#define WIN32_LEAN_AND_MEAN
+#include &lt;windows.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;float.h&gt;
+#include &lt;assert.h&gt;
+
+typedef void (* PFNGENERATEEXCEPTION)(void);
+void GenerateSTATUS_BREAKPOINT( void )
+{
+    __asm   int 3   // A regular, old breakpoint instruction
+}
+void GenerateSTATUS_SINGLE_STEP( void )
+{
+    // This is easier than using the hardware
+    // breakpoint register to create an int 1
+    __asm   int 1
+}
+void GenerateSTATUS_ACCESS_VIOLATION( void )
+{
+    // Create a page fault (exception 0xE) by reading
+    // from memory above 2GB.
+    int i = *(int *)0xFFFFFFF0;
+}
+void GenerateSTATUS_ILLEGAL_INSTRUCTION( void )
+{
+    __asm _emit 0x0F    // Garbage instruction causes an exception 0xD
+    __asm _emit 0xFF
+}
+void GenerateSTATUS_ARRAY_BOUNDS_EXCEEDED( void )
+{
+    DWORD arrayBounds[2] = { 10, 48 };
+
+    __asm   mov eax, 12
+    __asm   bound eax, arrayBounds  // This BOUND instruction works
+    __asm   mov eax, 7
+    __asm   bound eax, arrayBounds  // This makes an exception 5
+}
+void UnmaskFPExceptionBits( void )
+{
+    unsigned short cw;
+
+    __asm   fninit      // Initialize the coprocessor
+    __asm   fstcw [cw]
+    cw &amp;= 0xFFE0;       // Turn off the most of the exception bits (except the
+                        // the precision exception)
+    __asm   fldcw [cw]
+
+}
+void GenerateSTATUS_FLOAT_DIVIDE_BY_ZERO( void )
+{
+    double a = 0;
+    
+    a = 1 / a;
+    __asm fwait;        
+}
+void GenerateSTATUS_FLOAT_OVERFLOW( void )
+{
+    double a = DBL_MAX;
+
+    a *= a;
+    __asm fwait;
+        
+}
+void GenerateSTATUS_FLOAT_STACK_CHECK( void )
+{
+    unsigned a;
+
+    __asm   fistp [a]
+    __asm   fwait;
+        
+}
+void GenerateSTATUS_FLOAT_UNDERFLOW( void )
+{
+    double a = DBL_MIN;
+    
+    a /= 10;
+    __asm fwait;
+        
+}
+void GenerateSTATUS_INTEGER_DIVIDE_BY_ZERO( void )
+{
+    // Divide by zero to cause an exception 0
+    int i = 0;
+    i = 2 / i;
+}
+void GenerateSTATUS_INTEGER_OVERFLOW( void )
+{
+    __asm   mov eax, 07FFFFFFFh     // Signed max value
+    __asm   add eax, 2              // result = 0x80000001 -&gt; overflow!
+    __asm   into                    // Makes an exception 4
+}
+void GenerateSTATUS_PRIVILEGED_INSTRUCTION( void )
+{
+    // The HLT instruction can only be executed at ring 0
+    __asm   hlt
+}
+void GenerateSTATUS_STACK_OVERFLOW( void )
+{
+    DWORD myArray[512];
+    
+    // Recurse "infinitely" to overflow the stack
+    GenerateSTATUS_STACK_OVERFLOW();
+}
+DWORD GetExceptionNumber( PFNGENERATEEXCEPTION pfn )
+{
+    DWORD exceptionCode = 0;
+    __try
+    {
+        pfn();  
+    }
+    __except( exceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER )
+    {
+    }   
+    return exceptionCode;
+}
+#define SHOW_EXCEPTION( x )                                 \
+    dwExceptionNumber = GetExceptionNumber( Generate##x );  \
+    printf( "%X %s\n", dwExceptionNumber, #x );             \
+    assert( dwExceptionNumber == x );
+int main(int argc, char *argv[])
+{
+    DWORD dwExceptionNumber;
+    
+    SHOW_EXCEPTION( STATUS_BREAKPOINT )
+    SHOW_EXCEPTION( STATUS_SINGLE_STEP )
+    SHOW_EXCEPTION( STATUS_ACCESS_VIOLATION )
+    SHOW_EXCEPTION( STATUS_ILLEGAL_INSTRUCTION )
+    SHOW_EXCEPTION( STATUS_ARRAY_BOUNDS_EXCEEDED )
+    
+    UnmaskFPExceptionBits();
+    SHOW_EXCEPTION( STATUS_FLOAT_DIVIDE_BY_ZERO )
+
+    UnmaskFPExceptionBits();
+    SHOW_EXCEPTION( STATUS_FLOAT_OVERFLOW )
+
+    UnmaskFPExceptionBits();
+    SHOW_EXCEPTION( STATUS_FLOAT_STACK_CHECK )
+
+    UnmaskFPExceptionBits();
+    SHOW_EXCEPTION( STATUS_FLOAT_UNDERFLOW )
+
+    SHOW_EXCEPTION( STATUS_INTEGER_DIVIDE_BY_ZERO ) 
+    SHOW_EXCEPTION( STATUS_INTEGER_OVERFLOW )
+    SHOW_EXCEPTION( STATUS_PRIVILEGED_INSTRUCTION )
+
+    SHOW_EXCEPTION( STATUS_STACK_OVERFLOW );
+    
+    return 0;
+}</code></pre>
+<p>
+The GenException code is divided into three parts. The first part is a series of functions with names that start with Generate, followed by the name of the Win32 exception they produce. For example, GenerateSTATUS_ILLEGAL_INSTRUCTION causes an illegal instruction exception. The second part of GenException is the GetExceptionNumber function. It uses Win32 structured exception handling to determine the Win32 exception code caused by the various GenerateXXX functions and returns that value to its caller. GetExceptionNumber takes one parameter, a function pointer to the GenerateXXX function it should call.</p>
+<p>
+The final portion of GenException.CPP is the main function. It consists of a series of calls to a C++ preprocessor macro that I named SHOW_EXCEPTION. Each call to SHOW_EXCEPTION corresponds to a particular Win32 exception code to be generated. The SHOW_EXCEPTION macro takes a predefined exception name (for example, STATUS_ACCESS_VIOLATION), and synthesizes a call to the corresponding GenerateXXX function. I used the SHOW_EXCEPTION macro to hide a lot of boilerplate code that differs only by the actual exception code involved. By using the preprocessor token pasting and stringizing macros, the line </p>
+<pre><code>SHOW_EXCEPTION( STATUS_BREAKPOINT ) 
+</code></pre>
+<p>
+expands to:</p>
+<pre><code>dwExceptionNumber = GetExceptionNumber(           GenerateSTATUS_BREAKPOINT) );
+printf( "%X %s\n", dwExceptionNumber,        "STATUS_BREAKPOINT" );
+assert( dwExceptionNumber == STATUS_BREAKPOINT );
+</code></pre>
+<p>
+In writing GenException, some exceptions were extremely easy to create, such as STATUS_ACCESS_VIOLATION. It wasn’t trivial to create exceptions other than the common ones, such as STATUS_ILLEGAL_INSTRUCTION. In many cases I had to resort to inline assembly language. Two good examples of this are CPU exceptions 4 and 5, which are generated by the INTO and BOUND instructions, respectively. I won’t detail how I generated the various exceptions; the GenException.CPP code contains comments for that purpose.</p>
+<p>
+Creating the floating point exceptions was somewhat tricky, as Win32 initializes the floating point unit to not generate exceptions. I had to explicitly turn off certain bits in the coprocessor’s control word to get the floating point exceptions, like STATUS_FLOAT_DIVIDE_BY_ZERO. If you’re curious, the UnmaskFPExceptionBits function contains the relevant bit-twiddling code. I also learned the hard way that floating point instructions aren’t raised until the next floating point instruction after the actual bad instruction. I used the __asm fwait instruction to force exceptions to be raised immediately after the intentionally bad instruction.</p>
+<p>
+While GenException probably isn’t the most exciting or useful program you’ll ever run, I believe you’ll find it enlightening to see how various Win32 exceptions can be caused. In most cases, the CPU generates an exception 0xD, which the Win32 exception handler then analyzes to construct a more meaningful and specific exception code. My purpose in describing these mechanisms is to explain exceptions at both the hardware and operating system levels, and to show how they relate to one another.</p>
+<p>
+To obtain complete source code listings, see the MSJ web site at http://www.microsoft.com/msj/</p>
+<p>
+Have a question about programming in Windows? Send it to Matt at mpietrek@tiac.com or <u>http://www.tiac.com/users/mpietrek</u></p>
+</font></BODY>
+</HTML>

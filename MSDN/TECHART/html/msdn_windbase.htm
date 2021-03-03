@@ -1,0 +1,552 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Developing Microsoft Windows-Based Applications for Microsoft SQL Server</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><a name="msdn_windbase"></a><sup></sup>Developing Microsoft Windows-Based Applications for Microsoft SQL Server</h1>
+<p>
+Microsoft Corporation</p>
+<h2>Abstract</h2>
+<p>
+The Microsoft® SQL Server family of products is ideally suited to the development of client-server applications and solutions. On the server side, the powerful relational database management system (RDBMS) supports the development of industrial-strength, mission-critical applications. On the client side, Microsoft has promoted and supported an open-ended architecture that has resulted in over 125 front-ends for SQL Server.</p>
+<p>
+Most client applications that work with SQL Server can be developed using powerful off-the-shelf application development tools provided by independent software vendors (ISVs). These fourth-generation tools, and some custom applications, are developed with a third-generation language (3GL), most commonly C or C++, using a call-level interface (CLI). You must consider two CLIs when developing 3GL-based client applications for SQL Server: the SQL Server native DB-Library™ and Microsoft Open Database Connectivity (ODBC).</p>
+<p>
+The success of the Microsoft Windows™ graphical environment on the desktop has resulted in its becoming the premier platform on which to deliver client applications for client-server solutions. The Windows environment in general, and its cooperative multitasking nature in particular, demands that you use special care to write applications that are "well-behaved" and that coexist peacefully with other applications a user might run.</p>
+<p>
+This technical article focuses on DB-Library programming techniques for Windows-based SQL Server client applications. DB-Library, a set of C functions and macros, allows your applications to interact with SQL Server. It includes functions that send Transact-SQL™ statements to SQL Server and functions that process the results of those statements. Other functions handle errors, convert data, and provide a variety of information about the interaction with SQL Server.</p>
+<p>
+DB-Library is well-suited for the development of Windows-based applications, and this article highlights areas of DB-Library development that are unique to the Windows environment and often not well understood. This article assumes that you are familiar with the DB-Library application programming interface (API) and with Windows-based programming. For detailed information about DB-Library, see the <i>DB-Library Programmer's Reference</i>.</p>
+<h2>Issues Unique to Windows 3.<i>x</i>-Based DB-Library Applications</h2>
+<p>
+In general, you should use the following techniques when designing and developing a Microsoft® Windows™-based DB-Library™ application for SQL Server:
+<ul type=disc>
+<li>
+Calls to SQL Server, and the processing of result sets from SQL Server, should be executed asynchronously.<br><br></li>
+<li>
+Applications that are CPU-intensive should yield to the Windows environment at appropriate points to allow other applications to run.<br><br></li>
+<li>
+Care should be taken to lock down the DB-Library data segment when an application is required to run in real mode. This is not necessary if the application will run only in protected (standard or enhanced) mode.<br><br></li>
+<li>
+Applications should use handle-based memory instead of pointer-based memory.</li>
+</ul>
+<p>
+For more information, you can find complete sample applications that use the techniques discussed in this technical note in the Microsoft Online Software Library and on CompuServe® in the Microsoft Forum Software Library.</p>
+<h2>Supporting Windows 3.<i>x</i>-Based Cooperative Multitasking</h2>
+<p>
+In an environment where only one application executes at a time (for example, with MS-DOS®), or in an environment that supports preemptive multitasking (for example, OS/2®), a DB-Library application does not need to lock up system resources when it executes a long-running Transact-SQL® query or retrieves a large data set.</p>
+<p>
+Therefore, most DB-Library applications historically use the <b>dbsqlexec</b> function to send a command to SQL Server. This command is synchronous—it sends the query to SQL Server and then waits for SQL Server to process the query before returning. Similarly, most DB-Library applications use a <b>while</b> loop to process the results of a query.</p>
+<p>
+In a cooperative multitasking Windows environment, if a query takes a long time to execute, a call to <b>dbsqlexec</b> can lock up the system while <b>dbsqlexec</b> waits for an acknowledgment that SQL Server is ready to return results. Similarly, if a large number of rows are to be returned, using a dedicated <b>while</b> loop to process the results of a query can tie up the system and violate the cooperative nature expected of Windows-based applications.</p>
+<p>
+To address these issues, DB-Library provides the following APIs that enable applications to communicate with SQL Server in an asynchronous fashion:
+<ul type=disc>
+<li>
+The <b>dbsqlsend</b> function sends a command batch to SQL Server and does not wait for a response.<br><br></li>
+<li>
+The <b>dbdataready</b> function determines whether database command processing is complete.<br><br></li>
+<li>
+The <b>dbsqlok</b> function verifies the correctness of a command batch. If <b>dbsqlok</b> returns succeed, <b>dbresults</b> can be called to process the results.</li>
+</ul>
+<p>
+There are two approaches that you can take in using these APIs in the Windows 3.<i>x</i> environment to allow Windows-based cooperative multitasking to operate: the <b>PeekMessage </b>approach and the timer approach.</p>
+<p>
+The Windows environment is a cooperative, nonpreemptive, multitasking system. A Windows-based program should use background processing techniques to complete a long task such as processing a query. You can use the <b>dbsqlsend</b>, <b>dbdataready</b>, and <b>dbsqlok</b> DB-Library functions to accomplish this task.</p>
+<p>
+Both <b>dbsqlsend</b> and <b>dbsqlexec </b>send a query to SQL Server for processing. The <b>dbsqlexec</b> function is a <i>blocking</i> function, and it maintains control of the CPU until the server completes its processing and returns results or until a timeout that was previously specified is reached. The Windows environment cannot interrupt this; all multitasking is halted while <b>dbsqlexec</b> is executing.</p>
+<p>
+The <b>dbsqlsend</b> function is a <i>nonblocking</i> function; it sends the query and immediately returns control to the program. Then <b>dbdataready</b> can be used to determine when the results are available, followed by <b>dbsqlok </b>to verify the correctness of the query.</p>
+<p>
+The following code fragment shows an MS-DOS–based or OS/2-based DB-Library program that uses <b>dbsqlsend</b> and <b>dbdataready</b> to retain control of the program while SQL Server processes a query:</p>
+<pre><code>dbsqlsend (dbproc);
+while (!dbdataready(dbproc)
+{
+  printf ("Waiting for results...\n");
+  // the program can do other work here ...
+}
+dbsqlok (dbproc);
+</code></pre>
+<p>
+A Windows-based DB-Library program could use this example method, but this would not allow the Windows environment to continue processing, and it would effectively suspend all other Windows-based programs during this time. Instead, one of two Windows-based background processing methods should be used. The first technique uses a<b> PeekMessage</b> loop instead of a <b>GetMessage</b> loop in the <b>WinMain</b> function. The second technique uses a Windows-based timer. Both methods require the creation of a function to do a small piece of the background task each time it is called. These techniques are illustrated in the following sections.</p>
+<h3>The PeekMessage Method</h3>
+<p>
+The <b>PeekMessage</b> approach replaces the standard Windows environment <b>GetMessage </b>loop in the <b>WinMain </b>function with a <b>PeekMessage</b> loop. This approach allows the application to process all input messages before performing background processing, allows you to do background processing in small parts, and yields control to the Windows environment after each small part is finished. When no background processing is needed, the <b>PeekMessage</b> loop yields control to the Windows program via <b>WaitMessage</b>, allowing the Windows-based system to idle.</p>
+<p>
+The following example <b>WinMain</b> function shows how to create a <b>PeekMessage</b> loop for background processing. This loop has three desirable properties: First, it processes all input messages before performing background processing, thus providing good response to user input. Second, it performs background processing in small parts and yields control to the Windows environment after each small part is finished. This keeps the application from monopolizing the system. Third, it yields control to the Windows environment via <b>WaitMessage</b> when no background processing is necessary, allowing the Windows-based system to idle.</p>
+<pre><code>/*
+** FUNCTION: WinMain()
+**
+** PURPOSE: Calls initialization function, processes message loop
+**
+*/
+int PASCAL WinMain(HANDLE hInstance,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; HANDLE hPrevInstce,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; LPSTR lpCmdLine,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; int nCmdShow)
+{
+  MSG msg;
+  if (!hPrevInstance)
+ &nbsp;&nbsp; if (!InitApplication(hInstance))&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp; return (FALSE);
+  /* Perform initializations that apply to a specific instance */
+  if (!InitInstance(hInstance, nCmdShow))
+ &nbsp;&nbsp; return (FALSE);
+  while (TRUE)
+  {
+ &nbsp;&nbsp; if (PeekMessage(&amp;msg, NULL, 0, 0, PM_REMOVE))
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; /* PeekMessage() has found a message - process it */
+ &nbsp;&nbsp;&nbsp;&nbsp; if (msg.message != WM_QUIT)
+ &nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Translate virtual key codes */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; TranslateMessage(&amp;msg);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Dispatch message to Windows */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DispatchMessage(&amp;msg); 
+ &nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* WM_QUIT message found, so break out of message loop */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; else
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; /*
+ &nbsp;&nbsp;&nbsp;&nbsp; * PeekMessage() has not found a message, so call&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp; * DoBackgroundPart() to do a portion of the background 
+ &nbsp;&nbsp;&nbsp;&nbsp; * processing. DoBackgroundPart() returns TRUE if&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp; * it has more background work to do, or FALSE when all&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp; * background work is completed.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp; if (!DoBackgroundPart())
+ &nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; * All background processing is now finished, so call 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; * WaitMessage() to yield control to Windows.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WaitMessage();
+ &nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; }
+  }
+  /* Return value from PostQuitMessage */
+  return (msg.wParam);&nbsp; 
+}
+</code></pre>
+<h3>The Timer Method</h3>
+<p>
+The timer approach creates a Windows-based timer that sends a WM_TIMER message to your application at regular intervals. Each time a WM_TIMER message is received, <b>dbdataready </b>is checked. This approach does not require a <b>PeekMessage</b> loop.</p>
+<p>
+The following code fragment illustrates the timer technique. This code fragment should be placed in the main window procedure. The <b>SetTimer </b>function creates a timer that sends a WM_TIMER message to your application every 1000 milliseconds. Be sure that the application checks <b>dbdataready </b>after each WM_TIMER message.</p>
+<pre><code>case WM_SENDQUERY:
+  dbsqlsend (pDbproc);
+  SetTimer (hWnd, 1, 1000, 0);
+  break;
+/*
+* Message: timer event occurred. Call DoBackgroundPart() to do a portion of
+* the background processing. DoBackgroundPart() returns TRUE if it has more
+* background work to do, or FALSE when all background work is completed.
+*/
+case WM_TIMER:&nbsp;&nbsp; 
+  if (!DoBackgroundPart())
+  {
+ &nbsp;&nbsp; /*
+ &nbsp;&nbsp; * All background processing is now finished, so cancel the timer event.
+ &nbsp;&nbsp; */
+ &nbsp;&nbsp; KillTimer (hWnd, 1);
+  }
+  break;
+</code></pre>
+<h3>DoBackground Function</h3>
+<p>
+Both of the previous examples call a user-defined function (<b>DoBackgroundPart</b>) that does a small portion of the background processing each time it is called. In a DB-Library program, this function should do background query processing. This function should return true when it needs to continue processing the query, and false when the query processing is complete.</p>
+<pre><code>/*
+** FUNCTION:&nbsp;&nbsp;&nbsp;&nbsp; DoBackgroundPart()
+** PURPOSE:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Does a small part of the background 
+**&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; processing each time it is called.
+**
+** COMMENTS:&nbsp;&nbsp;&nbsp;&nbsp; This function assumes two global variables:
+**&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DBPROCESS *pDbproc
+**&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BOOL bQueryPending
+**
+**&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; and that bQueryPending is TRUE only 
+**&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; after another part of the program has 
+**&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sent a query to SQL Server using the 
+**&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dbsqlsend() function.
+*/
+BOOL DoBackgroundPart(void)
+{
+  BOOL bContinue = FALSE;
+  /*
+  * bQueryPending is a global flag indicating if query processing is pending.
+  */
+  if (bQueryPending)
+  {
+ &nbsp;&nbsp; if (dbdataready(pDbproc))
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; dbsqlok(pDbproc);
+ &nbsp;&nbsp;&nbsp;&nbsp; ProcessQuery();
+ &nbsp;&nbsp;&nbsp;&nbsp; bQueryPending = FALSE;
+ &nbsp;&nbsp;&nbsp;&nbsp; bContinue = FALSE;
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; else
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; bContinue = TRUE;
+ &nbsp;&nbsp; }
+  }
+  else
+  {
+ &nbsp;&nbsp; bContinue = FALSE;
+  }
+  return (bContinue);
+}
+</code></pre>
+<h2>Handling the Results of an Ad Hoc Query</h2>
+<p>
+The MS-DOS–based and OS/2-based implementations of DB-Library support the <b>dbprhead</b> and <b>dbprrow </b>functions. These functions allow you to display the results of a dynamic query with multiple result sets and varying datatypes and columns. They use DB-Library functions and macros to determine the column headings, number of columns, and datatypes of the columns, and then they send the output to STDOUT with rudimentary formatting. These functions are extremely useful for simple applications and during the prototyping of DB-Library applications. Because these functions send data to STDOUT, they are not available in the Windows environment.</p>
+<p>
+It is not feasible to provide a generic Windows-based function to display results because there are many ways in which an application might display results (for example, in a parent or child window using <b>TextOut </b>or <b>SetText</b>, in a list box or combo box, as part of a<b> </b>WM_PAINT message, and so on). However, it is simple to use available DB-Library functions and macros to format the results of an ad hoc query or stored procedure. This can be implemented as a function that returns a text string, which can then be sent to the required Windows-based control. Generic functions that format a text string with the results of an ad hoc query and result column headings will be given.</p>
+<h3>ConstructHeader Function</h3>
+<p>
+The <b>ConstructHeader</b> function builds the string that contains the names of each column. It finds the print size of each column, allocates a buffer to hold all column names plus one space between each column name, and then copies that name into the appropriate location in the buffer. <b>ConstructHeader</b> should be called after <b>dbresults</b> has been called.</p>
+<pre><code>/*
+** FUNCTION&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ConstructHeader()
+** PURPOSE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Builds the string that contains the names of each column.
+*/
+RETCODE ConstructHeader(DBPROCESS *dbproc, HANDLE *phHeader)
+{
+ &nbsp;&nbsp; int&nbsp;&nbsp; i,iCols,iSize;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* counters */
+ &nbsp;&nbsp; LPSTR lpHeader;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* pointer for separator buffer */
+ &nbsp;&nbsp; LPSTR lpColName;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* pointer for column names buffer */
+ &nbsp;&nbsp; LPSTR lpPtr;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* scratch pointer */
+/* Get row size and allocate memory for buffer */
+ &nbsp;&nbsp; iSize = DetermineRowSize(dbproc,0);
+ &nbsp;&nbsp; GlobalFree(*phHeader);
+ &nbsp;&nbsp; *phHeader = GlobalAlloc (GMEM_MOVEABLE | GMEM_ZEROINIT,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (DWORD) (iSize + 1));
+ &nbsp;&nbsp; if(*phHeader != NULL)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lpPtr = lpHeader = GlobalLock(*phHeader);
+ &nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return(FAIL);
+ &nbsp;&nbsp; /* Initialize buffer to spaces */
+ &nbsp;&nbsp; _fmemset (lpPtr,' ',iSize);
+ &nbsp;&nbsp; /* Get number of columns */
+ &nbsp;&nbsp; iCols = dbnumcols(dbproc);
+ &nbsp;&nbsp; /* Loop on all columns, retrieving column size and name */
+ &nbsp;&nbsp; for(i=1;i&lt;=iCols;i++)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iSize = DetermineRowSize(dbproc,i);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lpColName = dbcolname(dbproc,i);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; _fstrncpy(lpPtr,lpColName,_fstrlen(lpColName));
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lpPtr+= iSize;
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; /* Finished: null terminate buffer, unlock buffer and return SUCCEED */
+ &nbsp;&nbsp; *lpPtr = '\0';
+ &nbsp;&nbsp; GlobalUnlock(*phHeader);
+ &nbsp;&nbsp; return(SUCCEED);
+}
+</code></pre>
+<h3>ConstructRow Function</h3>
+<p>
+The <b>ConstructRow</b> function constructs one row. Before calling this function, <b>dbnextrow</b> must be called to fetch the row. This routine could be used to print the current row as many times as necessary, because the current row data is always available until <b>dbnextrow</b> is called to retrieve the next row. This routine works like the <b>ConstructHeader</b> routine shown earlier, but each column's data is obtained (instead of a row name), converted to a string, and then set into the buffer.</p>
+<pre><code>/*
+** FUNCTION:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ConstructRow()
+**
+** PURPOSE:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; This function constructs one row - dbnextrow() must
+**&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; be called to fetch the row.
+*/
+RETCODE ConstructRow(DBPROCESS *dbproc, HANDLE *phDataVals)
+{
+ &nbsp;&nbsp; int i,iCols,iSize,iDatasize;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* counters */
+ &nbsp;&nbsp; LPSTR lpDataVals;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* data buffer pointer */
+ &nbsp;&nbsp; LPSTR lpData;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* column data pointer */
+
+ &nbsp;&nbsp; LPSTR lpPtr;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* scratch pointer */
+ &nbsp;&nbsp; /* Get row size and allocate memory for buffer */
+ &nbsp;&nbsp; iSize = DetermineRowSize(dbproc,0);
+ &nbsp;&nbsp; GlobalFree(*phDataVals);
+ &nbsp;&nbsp; *phDataVals = GlobalAlloc (GMEM_MOVEABLE | GMEM_ZEROINIT, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (DWORD) (iSize + 3));
+ &nbsp;&nbsp; if(*phDataVals != NULL)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lpPtr = lpDataVals = GlobalLock(*phDataVals);
+ &nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return(FAIL);
+ &nbsp;&nbsp; /* Get number of columns */
+ &nbsp;&nbsp; iCols = dbnumcols(dbproc);
+ &nbsp;&nbsp; /*
+ &nbsp;&nbsp; Loop through all columns, initialize to spaces and then retrieve values
+ &nbsp;&nbsp; */
+ &nbsp;&nbsp; for(i=1;i&lt;=iCols;i++)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iSize = DetermineRowSize(dbproc,i);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; _fmemset(lpPtr,' ',iSize);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lpData = dbdata(dbproc,i);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if(lpData == (BYTE *)NULL)&nbsp;&nbsp;&nbsp;&nbsp; /* If NULL, use "NULL" */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; _fstrncpy(lpPtr,(LPSTR) "NULL",4);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lpPtr += iSize;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else&nbsp;&nbsp;&nbsp;&nbsp; /* Else we have data, so convert to char */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iDatasize = dbconvert(dbproc,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dbcoltype(dbproc,i),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lpData,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dbdatlen(dbproc,i),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SQLCHAR,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lpPtr,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (DBINT)iSize-1);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lpPtr += iSize;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; /* Finished: null terminate buffer, unlock buffer and return SUCCEED */
+ &nbsp;&nbsp; *lpPtr = '\0';
+ &nbsp;&nbsp; GlobalUnlock(*phDataVals);
+ &nbsp;&nbsp; return(SUCCEED);
+ &nbsp;&nbsp; }
+</code></pre>
+<h3>DetermineRowSize Function</h3>
+<p>
+The <b>DetermineRowSize</b> function returns either the size of all columns in the row, converted to character data (<b>SQLCHAR</b>) with one space between each column, or, if <i>col</i> is non-zero, the <i>iLength</i> of the input column converted to a string. This data is used to build the header strings and each row of data. It is also called to allocate the memory needed for each row, and to determine how much of that space is to be used for each column. If 0 is passed in as the second parameter, the size of all the rows combined is calculated.</p>
+<pre><code>/*
+** FUNCTION:&nbsp;&nbsp;&nbsp;&nbsp; DetermineRowSize()
+**
+** PURPOSE:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; This function returns either the size of all columns
+**&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; in the row, converted to character data (SQLCHAR) 
+**&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; with one space between each column, or if col is 
+**&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; non-zero, the iLength of the input column converted
+**&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; to a string.
+*/
+int DetermineRowSize(DBPROCESS *dbproc,int iCol)
+{
+ &nbsp;&nbsp; int i,iCols;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* counters */
+ &nbsp;&nbsp; int iLength=0;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* total length of column(row) */
+ &nbsp;&nbsp; DBINT ColLength;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* actual length of column */
+ &nbsp;&nbsp; int iNamelength;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* iLength of name of column */
+ &nbsp;&nbsp; int iPrLength;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* printable iLength */
+ &nbsp;&nbsp; LPSTR lpName;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* pointer to column name */
+ &nbsp;&nbsp; /* Get number of columns */
+ &nbsp;&nbsp; if(!iCol)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iCols = dbnumcols(dbproc);
+ &nbsp;&nbsp; /* count from 1 to numcols if col is 0, else i will equal col only */
+ &nbsp;&nbsp; for(i =&nbsp; ((iCol) ? iCol : 1);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; i &lt;= ((iCol) ? iCol : iCols);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; i++)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; * Get column type &amp; determine SQLCHAR converted iLength 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; * (Values below are found in SQLDB.H header file)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; switch(dbcoltype(dbproc,i))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case SQLBIT:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iPrLength = PRBIT;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case SQLINT1:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iPrLength = PRINT1;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case SQLINT2:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iPrLength = PRINT2;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case SQLINT4:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iPrLength = PRINT4;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case SQLFLT8:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iPrLength = PRFLT8;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case SQLDATETIME:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iPrLength = PRDATETIME;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case SQLMONEY:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iPrLength = PRMONEY;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* VARBINARY IMAGE, and BINARY ...convert to 2 times iLength */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case SQLVARBINARY :
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case SQLBINARY:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case SQLIMAGE:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iPrLength = dbcollen(dbproc,i)*2;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Other types are maximum of actual column iLength */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; default :
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iPrLength = dbcollen(dbproc,i);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Names can be longer than column, so use name len if longer&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lpName = dbcolname(dbproc,i);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iNamelength =&nbsp; (lpName) ? _fstrlen(lpName) : 0;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Add one for space between columns */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if(iPrLength&lt;iNamelength)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iLength+=iNamelength+1;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iLength+=iPrLength+1;
+
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; /* Return the length of the field */
+ &nbsp;&nbsp; return iLength;
+}
+</code></pre>
+<h2>Using DBLOCKLIB and DBUNLOCKLIB</h2>
+<p>
+The DBLOCKLIB and DBUNLOCKLIB macros are provided in the Windows-based versions of DB-Library. These macros allow an application to lock the DB-Library data segment to preserve the values of far pointers that references data in the DB-Library data segment, or they are used by DB-Library to reference application data. The <i>DB-Library Programmer's Reference</i> describes how to use these macros, but it only addresses how to develop applications for the lowest common denominator, real mode.</p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;It is important to understand that DBLOCKLIB and DBUNLOCKLIB are needed only in DB-Library applications required to run in real mode. If your application will only run in protected mode (standard or enhanced mode), you do not need to use DBLOCKLIB and DBUNLOCKLIB.</p>
+<p>
+The following sections briefly review Windows-based memory management techniques to show why DBLOCKLIB and DBUNLOCKLIB are required only for applications that must run in real mode. For detailed information on Windows-based memory management, see the <i>Microsoft Windows SDK: Guide to Programming</i> and <i>Programming Windows,</i> by Charles Petzold. The information in this technical note uses the concepts described in those references.</p>
+<h3>Windows-Based Memory Management Under Real Mode</h3>
+<p>
+On computers based on the Intel® 8086 processor (or an 80286 or 80386 processor with less than 1 MB of memory), Microsoft Windows version 3.0 runs in real mode. This mode is basically compatible with Windows 2.1.</p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;Beginning with the Windows operating system version 3.1, real mode will not be supported.</p>
+<p>
+In real mode, a memory address consists of two parts: a 16-bit segment address and a 16-bit offset address. The 16-bit segment address is shifted 4 bits to the left and added to the offset address. The resulting 20-bit address can access 1 MB of data.</p>
+<p>
+Internal registers hold segment addresses (CS, DS, SS, ES). Software for the 8086 family runs most efficiently when the segment addresses are held constant and all addressing is done by varying the offset addresses. Offset addresses are also held in internal registers (IP, SP, and so on).</p>
+<p>
+An address that uses only the offset address with an implied segment address (the current segment address) is called a <i>near pointer</i>. An address that uses both the segment and offset address is called a<i> far pointer</i>. Every segment in the Windows environment's total memory is marked with certain attributes to tell the Windows environment how to manage the segment. Segments are primarily marked as <i>fixed</i> or <i>movable</i>. If necessary, the Windows system can move movable segments in memory to make room for other memory allocations. When Windows moves a segment in memory, all existing near pointers in that segment continue to be valid. However, far pointers become invalid when the segment they reference is moved.</p>
+<p>
+An application that calls DB-Library uses far pointers to access data from DB-Library or to pass data to it, so the DB-Library data segment must be locked down to maintain the integrity of these pointers when they are in use.</p>
+<h3>Using DBLOCKLIB/DBUNLOCKLIB in Real Mode</h3>
+<p>
+If you are developing a DB-Library application that must run in real mode, you should follow the guidelines for DBLOCKLIB and DBUNLOCKLIB as outlined the <i>DB-Library Programmer's Reference. </i>The core of this advice is to nest all calls to DB-Library with calls to DBLOCKLIB and DBUNLOCKLIB. This ensures that the DB-Library data segment remains fixed when you are accessing far pointers that reference data in DB-Library or pass data to DB-Library. This approach is preferable to issuing DBLOCKLIB on startup and DBUNLOCKLIB on exit, because it defeats the purpose of the Windows-based memory management scheme by preventing the Windows environment from moving memory.</p>
+<h3>Windows-Based Memory Management Under Protected Mode</h3>
+<p>
+When Windows runs in protected mode, the value in a segment register does not refer to a physical memory address. Instead, this value is an offset into a descriptor table that provides a 24-bit base address in physical memory. The offset address is then added to this address to generate a 24-bit physical address that can address up to 16 MB of memory. This indirect method of segment addressing means that as long as the segment is in memory, it can be moved around by the Windows program without invalidating far pointers. The Windows program simply updates the descriptor table with the new location of the segment. It is not necessary to lock the DB-Library data segment down when accessing it or passing data using far pointers in protected mode.</p>
+<h4>Using DBLOCKLIB and DBUNLOCKLIB in protected mode</h4>
+<p>
+It is not necessary to use DBLOCKLIB and DBLOCKLIB if your Windows-based DB-Library application will run only in protected mode. There are two ways to ensure that a Windows-based program is run only in protected mode:
+<ul type=disc>
+<li>
+Use the <b>-t</b> switch against your executable when you run the resource compiler. This marks the program as "protected mode only."<br><br></li>
+<li>
+On startup, call <b>GetWinFlags</b> and check for WF_PMODE.</li>
+</ul>
+<h2>Sample Applications</h2>
+<p>
+Sample programs that implement the above techniques may be found in the Microsoft Online Software Library and in the Microsoft Forum Software Library on CompuServe.</p>
+<h3>SQLWINBK Sample Application</h3>
+<p>
+The SQLWINBK sample application demonstrates the method of processing a SQL Server query in the background using a <b>PeekMessage</b> loop. It illustrates the method of retrieving results of an ad hoc query discussed earlier in this technical note.</p>
+<p>
+SQLWINBK.ZIP contains the following files:</p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=31%><b>Filename</b></td>
+<td class=label width=69%><b>Description</b></td>
+</tr>
+<tr valign=top>
+<td width=31%>SQLWINBK.C</td>
+<td width=69%>C-language source code</td>
+</tr>
+<tr valign=top>
+<td width=31%>SQLWINBK.H</td>
+<td width=69%>Source code header</td>
+</tr>
+<tr valign=top>
+<td width=31%>SQLWINBK.RC</td>
+<td width=69%>Windows resource script</td>
+</tr>
+<tr valign=top>
+<td width=31%>SQLWINBK.DEF</td>
+<td width=69%>Windows module-definition file</td>
+</tr>
+<tr valign=top>
+<td width=31%>WINDLG.DLG</td>
+<td width=69%>Dialog box resource script</td>
+</tr>
+<tr valign=top>
+<td width=31%>WINDLG.H</td>
+<td width=69%>Dialog box header</td>
+</tr>
+<tr valign=top>
+<td width=31%>SQLWINBK.RES</td>
+<td width=69%>QuickC® for Windows Dialog Editor resource</td>
+</tr>
+<tr valign=top>
+<td width=31%>SQLWINBK.MAK</td>
+<td width=69%>QuickC for Windows project</td>
+</tr>
+<tr valign=top>
+<td width=31%> SQLWINBK.</td>
+<td width=69%>C 6.0 NMAKE make file</td>
+</tr>
+</table><br>
+<p>
+SQLWINBK.ZIP can be found in the Microsoft Online Software Library or in the Microsoft Forum Software Library on CompuServe by searching on the keyword SQLWINBK, the Q number of this article (Q80266), or S13269. SQLWINBK.ZIP was archived using the PKware file-compression utility.</p>
+<h3>SQLWINTM Sample Application</h3>
+<p>
+The SQLWINTM sample application demonstrates the method of processing a SQL Server query in the background using a Windows-based timer. It illustrates the method of retrieving results of an ad hoc query discussed earlier in this article.</p>
+<p>
+SQLWINTM.ZIP contains the following files:</p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=31%><b>Filename</b></td>
+<td class=label width=69%><b>Description</b></td>
+</tr>
+<tr valign=top>
+<td width=31%>SQLWINTM.C</td>
+<td width=69%>C-language source code</td>
+</tr>
+<tr valign=top>
+<td width=31%>SQLWINTM.H</td>
+<td width=69%>Source code header</td>
+</tr>
+<tr valign=top>
+<td width=31%>SQLWINTM.RC</td>
+<td width=69%>Windows resource script</td>
+</tr>
+<tr valign=top>
+<td width=31%>SQLWINTM.DEF</td>
+<td width=69%>Windows module-definition file</td>
+</tr>
+<tr valign=top>
+<td width=31%>WINDLG.DLG</td>
+<td width=69%>Dialog box resource script</td>
+</tr>
+<tr valign=top>
+<td width=31%>WINDLG.H</td>
+<td width=69%>Dialog box header</td>
+</tr>
+<tr valign=top>
+<td width=31%>SQLWINTM.RES</td>
+<td width=69%>QuickC for Windows Dialog Editor resource</td>
+</tr>
+<tr valign=top>
+<td width=31%>SQLWINTM.MAK</td>
+<td width=69%>QuickC for Windows project</td>
+</tr>
+<tr valign=top>
+<td width=31%>SQLWINTM.</td>
+<td width=69%>C 6.0 NMAKE make file</td>
+</tr>
+</table><br>
+<p>
+SQLWINTM.ZIP can be found in the Microsoft Online Software Library or in the Microsoft Forum Software Library on CompuServe by searching on the keyword SQLWINTM, the Q number of this article (Q80280), or S13268. SQLWINTM.ZIP was archived using the PKware file-compression utility.</p>
+<h2>Summary</h2>
+<p>
+This article has highlighted DB-Library programming techniques that you can use to develop SQL Server client applications that are optimized for the Microsoft Windows environment. These techniques support the development of powerful, user-friendly, front-end applications for SQL Server.</p>
+<h2>References</h2>
+<h3>Books</h3>
+<p>
+<i>DB-Library Programmer's Reference</i></p>
+<p>
+<i>Microsoft Windows SDK: Guide to Programming</i></p>
+<p>
+Petzold, C. <i>Programming Windows </i>(2nd Edition). Microsoft Press, 1990.</p>
+<h3>Available Technical Notes</h3>
+<p>
+"Microsoft Open Data Services: Application Sourcebook" (Part number 098-32078)</p>
+<p>
+"Query Optimization Techniques: Contrasting Various Optimizer Implementations with Microsoft SQL Server" (Part number 098-301990)</p>
+<p>
+"Using Microsoft SQL Server on a Banyan VINES Network" (Part number 098-30193)</p>
+<p>
+"Using Microsoft SQL Server on a Novell NetWare Network" (Part number 098-32655)</p>
+<h3>Additional Information</h3>
+<p>
+To receive more information about Windows-based DB-Library applications, contact Microsoft Inside Sales, Systems Software, at 1-800-227-4679.</p>
+</BODY>
+</HTML>

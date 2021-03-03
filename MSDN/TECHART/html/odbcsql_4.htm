@@ -1,0 +1,214 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>SQL Server-specific Features</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+<h1>SQL&nbsp;Server-specific Features</h1>
+<p>
+This section discusses features unique to Microsoft SQL&nbsp;Server and the Microsoft SQL&nbsp;Server ODBC driver.</p>
+<h3>Processing COMPUTE BY and COMPUTE Statements</h3>
+<p>
+The COMPUTE BY clause generates subtotals within a result set, and the COMPUTE clause generates a total at the end of the result set. The SQL&nbsp;Server ODBC driver presents these totals and subtotals back to the calling application by generating multiple result sets for each SELECT.</p>
+<p>
+The following example uses COMPUTE BY to generate subtotals and COMPUTE to generate a total:</p>
+<pre><code>SELECT title = CONVERT(char(20), title), type, price, advance
+FROM titles
+WHERE ytd_sales IS NOT NULL
+  AND type like '%cook%'
+ORDER BY type DESC
+COMPUTE AVG(price), SUM(advance) BY type
+COMPUTE SUM(price), SUM(advance)
+</code></pre>
+<p>
+These statements cause a subtotal calculation for the average price and sum of advances for each book type and then cause a final total sum of both the price and advance data. The following ODBCTest GetDataAll output shows how the ODBC driver presents these subtotals and totals back to the calling application as separate result sets intermixed with the primary result set:</p>
+<pre><code>"title", "type", "price", "advance"
+"Onions, Leeks, and G", "trad_cook&nbsp;&nbsp; ", 20.9500, 7000.0000
+"Fifty Years in Bucki", "trad_cook&nbsp;&nbsp; ", 11.9500, 4000.0000
+"Sushi, Anyone?&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ", "trad_cook&nbsp;&nbsp; ", 14.9900, 8000.0000
+3 rows fetched from 4 columns.
+"AVG", "SUM"
+15.9633, 19000.0000
+1 row fetched from 2 columns.
+"title", "type", "price", "advance"
+"Silicon Valley Gastr", "mod_cook&nbsp;&nbsp;&nbsp; ", 19.9900, .0000
+"The Gourmet Microwav", "mod_cook&nbsp;&nbsp;&nbsp; ", 2.9900, 15000.0000
+2 rows fetched from 4 columns.
+"AVG", "SUM"
+11.4900, 15000.0000
+1 row fetched from 2 columns.
+"SUM", "SUM"
+70.8700, 34000.0000
+1 row fetched from 2 columns.
+</code></pre>
+<p>
+You can see from the output above that the driver presents the first result set for the rows from books having the first book type. It then produces a second result set with the two COMPUTE BY columns for the AVG(price) and SUM(advance) for this first set of books. Then it produces a third result set for the next group of books, and a fourth result set with the COMPUTE BY subtotals for that group. The driver keeps interleaving these result sets until the end, when it produces the final result set with the total for the COMPUTE SUM(price), SUM(advance) clause.</p>
+<p>
+Applications running SQL&nbsp;Server statements with COMPUTE BY and COMPUTE clauses must be coded to handle the multiple result sets returned by the driver.</p>
+<p>
+The Microsoft SQL&nbsp;Server ODBC driver only supports COMPUTE BY or COMPUTE with the default forward_only, read_only cursors with a rowset size of one. The driver implements all other cursor types (dynamic, static, or keyset-driven) using server cursors, which do not support COMPUTE BY or COMPUTE.</p>
+<h3>Distributed Transactions</h3>
+<p>
+The Microsoft Distributed Transaction Coordinator (MS&nbsp;DTC) allows applications to distribute transactions across two or more SQL&nbsp;Servers. It also allows applications to participate in transactions managed by transaction managers that comply with the X/Open DTP XA standard. (For more information, see <i>What's New in SQL&nbsp;Server 6.5</i> and the <i>Guide to Microsoft Distributed Transaction Coordinator</i> in the SQL&nbsp;Server 6.5 manuals.) ODBC applications using the driver that ships with SQL&nbsp;Server 6.5 can participate in MS&nbsp;DTC transactions.</p>
+<p>
+Normally, all transaction management commands go through the ODBC driver to the server (see "Autocommit vs. ANSI Transaction Management"). The application starts a transaction by calling:</p>
+<pre><code>SQLSetConnectOption(hdbc, SQL_AUTOCOMMIT, SQL_AUTOCOMMIT_OFF);
+</code></pre>
+<p>
+The application then performs the updates comprising the transaction and calls <b>SQLTransact</b> with either the SQL_COMMIT or SQL_ROLLBACK option.</p>
+<p>
+When using MS&nbsp;DTC, however, MS&nbsp;DTC is the transaction manager and the application no longer uses <b>SQLTransact</b>. The application:
+<ul type=disc>
+<li>
+Connects to MS&nbsp;DTC using the MS&nbsp;DTC <b>DtcSelectTransactionManager</b> function. <br><br></li>
+<li>
+Calls <b>SQLDriverConnect</b> once for each connection.<br><br></li>
+<li>
+Calls the MS&nbsp;DTC <b>ITransactionDispenser::BeginTransaction</b> function to begin the MS&nbsp;DTC transaction and get a transaction object that represents the transaction.<br><br></li>
+<li>
+Enlists each ODBC connection in the MS&nbsp;DTC transaction by calling:<pre><code>SQLSetConnectOption(hdbc,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SQL_COPT_SS_ENLIST_IN_DTC,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (UDWORD)pTransaction);
+</code></pre>
+<p class=tl>
+where <i>pTransaction</i> is a pointer to the transaction object.</P></li>
+<li>
+Performs all updates that make up the transaction.<br><br></li>
+<li>
+Calls the MS&nbsp;DTC function <b>ITransaction::Commit</b> or <b>ITransaction::Rollback</b> to commit or roll back the transaction.</li>
+</ul>
+<p>
+For information about MS&nbsp;DTC, see the <i>Guide to Microsoft Distributed Transaction Coordinator</i>, which includes a sample ODBC SQL&nbsp;Server MS&nbsp;DTC application.</p>
+<h3>Fallback Connections</h3>
+<p>
+SQL&nbsp;Server 6.5 introduced fallback support. In fallback support, one server is defined as a fallback server to another, primary, server. If the primary server fails for some reason, then applications can switch to the fallback server. This feature depends on special hardware and operating system support. For more information, see <i>Microsoft SQL&nbsp;Server What's New in SQL&nbsp;Server 6.5</i>.</p>
+<p>
+ODBC applications can take advantage of the SQL&nbsp;Server fallback feature by setting a driver-specific option before connecting:</p>
+<pre><code>SQLSetConnectOption(hdbc,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SQL_COPT_SS_FALLBACK_CONNECT,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SQL_FB_ON);
+</code></pre>
+<p>
+Then, when the driver connects to the primary server, it retrieves from the primary server all the information it needs to connect to the fallback server and stores the information in the client's registry. If the application loses its connection to the primary server, it should clean up its current transaction and attempt to reconnect to the primary server. If the ODBC driver cannot reconnect to the primary server, it uses the registry information to attempt connecting to the fallback (secondary) server.</p>
+<h3>Handling SQL&nbsp;Server Messages</h3>
+<p>
+The way SQL&nbsp;Server presents information from the Transact-SQL SET, DBCC, PRINT, and RAISERROR statements was originally designed for the architecture of DB-Library applications. DB-Library applications have separate callback functions for handling messages and errors. These separate callback functions are difficult to code in multithreaded applications, so the designers of ODBC chose the method of having the application call a <b>SQLError</b> function to receive error messages. This means the SQL&nbsp;Server ODBC driver maps errors and messages originally returned by the DB-Library callback functions to the ODBC model.</p>
+<p>
+Note that the SQL&nbsp;Server ODBC drivers that ship with SQL&nbsp;Server 6.0 and 6.5 do not return the severity-level or state codes associated with messages from SQL&nbsp;Server.</p>
+<h4>Using SET SHOWPLAN and SET STATISTICS</h4>
+<p>
+The Transact-SQL SET statement options SHOWPLAN, STATISTICS TIME, and STATISTICS IO can be used to get information that aids in diagnosing long-running queries. An ODBC application can set these options by executing the following statements:</p>
+<pre><code>SQLExecDirect(hstmt, "SET STATISTICS IO ON", SQL_NTS);
+SQLExecDirect(hstmt, "SET STATISTICS TIME ON", SQL_NTS);
+SQLExecDirect(hstmt, "SET SHOWPLAN ON", SQL_NTS);
+</code></pre>
+<p>
+When SET STATISTICS TIME or SET SHOWPLAN are ON, <b>SQLExecute</b> and <b>SQLExecDirect</b> return SQL_SUCCESS_WITH_INFO, and, at that point, the application can retrieve the SHOWPLAN or STATISTICS TIME output by calling <b>SQLError</b> until it returns SQL_NO_DATA_FOUND. Each line of SHOWPLAN data comes back in the format:</p>
+<pre><code>szSqlState="01000", *pfNativeError=6223,
+szErrorMsg="[Microsoft][ODBC SQL&nbsp;Server Driver][SQL&nbsp;Server] 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Table Scan"
+</code></pre>
+<p>
+Each line of STATISTICS TIME comes back in the format:</p>
+<pre><code>szSqlState="01000", *pfNativeError= 3613,
+szErrorMsg="[Microsoft][ODBC SQL&nbsp;Server Driver][SQL&nbsp;Server]
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SQL&nbsp;Server Parse and Compile Time: cpu time = 0 ms."
+</code></pre>
+<p>
+The output of SET STATISTICS IO is not available until the end of a result set.&nbsp; To get STATISTICS IO output, the application calls <b>SQLError</b> at the time <b>SQLFetch</b> or <b>SQLExtendedFetch</b> returns SQL_NO_DATA_FOUND.&nbsp; The output of STATISTICS IO comes back in the format:</p>
+<pre><code>szSqlState="01000", *pfNativeError= 3615,
+szErrorMsg="[Microsoft][ODBC SQL&nbsp;Server Driver][SQL&nbsp;Server]
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Table: testshow&nbsp; scan count 1,&nbsp; logical reads: 1,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; physical reads: 0."
+</code></pre>
+<h4>Using DBCC Statements</h4>
+<p>
+DBCC statements return data to an ODBC application in two ways:
+<ul type=disc>
+<li>
+Trace flags output<p class=tl>
+An application can turn on various trace flags using the DBCC statement. No data is returned by the DBCC statement that turns on the trace flag, but the trace data is returned on subsequent SQL statements.</P><p class=tl>
+For example, if the application sets on a 3604 trace flag along with another flag or flags that return output, subsequent calls to <b>SQLExecDirect</b> or <b>SQLExecute</b> return SQL_SUCCESS_WITH_INFO, and the application can retrieve the trace flag output by calling <b>SQLError</b> until it returns SQL_NO_DATA_FOUND:</P><pre><code>SQLExecDirect(hstmt, "dbcc traceon(3604, 4032)", SQL_NTS);
+</code></pre>
+<p class=tl>
+For example, after the above <b>SQLExecDirect</b> completes, the following subsequent call to <b>SQLExecDirect</b> returns SQL_SUCCESS_WITH_INFO:</P><pre><code>SQLExecDirect(hstmt, "select * from authors", SQL_NTS);
+</code></pre>
+<p class=tl>
+Calling <b>SQLError</b> returns:</P><pre><code>szSqlState = "01000", *pfNativeError = 0,
+szErrorMsg="[Microsoft][ODBC SQL&nbsp;Server Driver][SQL&nbsp;Server]
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 96/02/02 11:08:45.26 10 LangExec: 'select * from authors"
+</code></pre>
+</li>
+<li>
+DBCC execution output<p class=tl>
+All other DBCC statements return data when they are executed. <b>SQLExecDirect</b> or <b>SQLExecute</b> returns SQL_SUCCESS_WITH_INFO, and the application retrieves the output by calling <b>SQLError</b> until it returns SQL_NO_DATA_FOUND. </P><p class=tl>
+For example, the following statement returns&nbsp;&nbsp; <br>
+SQL_SUCCESS_WITH_INFO: </P><pre><code>SQLExecDirect(hstmt, "dbcc checktable(authors)", SQL_NTS);
+</code></pre>
+<p class=tl>
+Calls to <b>SQLError</b> return:</P><pre><code>szSqlState = "01000", *pfNativeError = 2536,
+szErrorMsg="[Microsoft][ODBC SQL&nbsp;Server Driver][SQL&nbsp;Server]
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Checking authors"
+szSqlState = "01000", *pfNativeError = 2579,
+szErrorMsg="[Microsoft][ODBC SQL&nbsp;Server Driver][SQL&nbsp;Server]
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; The total number of data pages in this table is 1."
+szSqlState = "01000", *pfNativeError = 7929,
+szErrorMsg="[Microsoft][ODBC SQL&nbsp;Server Driver][SQL&nbsp;Server]
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Table has 23 data rows."
+szSqlState = "01000", *pfNativeError = 2528
+szErrorMsg="[Microsoft][ODBC SQL&nbsp;Server Driver][SQL&nbsp;Server]
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DBCC execution completed. If DBCC printed error messages,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; see your System Administrator."
+</code></pre>
+</li>
+</ul>
+<h4>Using PRINT and RAISERROR Statements</h4>
+<p>
+Transact-SQL PRINT and RAISERROR statements also return data through calling <b>SQLError</b>. PRINT statements cause the SQL statement execution to return SQL_SUCCESS_WITH_INFO, and a subsequent call to <b>SQLError</b> returns a <i>SQLState</i> of 01000. A RAISERROR with a severity of ten or lower behaves the same as PRINT. A RAISERROR with a severity of 11 or higher causes the execute to return SQL_ERROR, and a subsequent call to <b>SQLError</b> returns <i>SQLState</i> 37000. For example, the following statement returns SQL_SUCCESS_WITH_INFO:</p>
+<pre><code>SQLExecDirect (hstmt, "PRINT&nbsp; 'Some message' ", SQL_NTS);
+</code></pre>
+<p>
+Calling <b>SQLError</b> then reports:</p>
+<pre><code>szSQLState = "01000", *pfNative Error = 0,
+szErrorMsg= "[Microsoft] [ODBC SQL&nbsp;Server Driver][SQL&nbsp;Server]
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Some message"
+</code></pre>
+<p>
+The following statement returns SQL_SUCCESS_WITH_INFO:</p>
+<pre><code>SQLExecDirect (hstmt, "RAISERROR ('Sample error 1.', 10, -1)", SQL_NTS)
+</code></pre>
+<p>
+Calling <b>SQLError</b> then reports:</p>
+<pre><code>szSQLState = "01000", *pfNative Error = 50000,
+szErrorMsg= "[Microsoft] [ODBC SQL&nbsp;Server Driver][SQL&nbsp;Server]
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Sample error 1."
+</code></pre>
+<p>
+The following statement returns SQL_ERROR:</p>
+<pre><code>SQLExecDirect (hstmt, "RAISERROR ('Sample error 2.', 11, -1)", SQL_NTS)
+</code></pre>
+<p>
+Calling <b>SQLError</b> then reports:</p>
+<pre><code>szSQLState = "37000", *pfNative Error = 50000,
+szErrorMsg= "[Microsoft] [ODBC SQL&nbsp;Server Driver][SQL&nbsp;Server]
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Sample error 2."
+</code></pre>
+<p>
+The timing of calling <b>SQLError</b> is critical when output from PRINT or RAISERROR statements are included in a result set. The call to <b>SQLError</b> to retrieve the PRINT or RAISERROR output must be made immediately after the statement that receives SQL_ERROR or SQL_SUCCESS_WITH_INFO. This is straightforward when only a single SQL statement is executed, as in the examples above. In these cases, the call to <b>SQLExecDirect</b> or <b>SQLExecute</b> returns SQL_ERROR or SQL_SUCCESS_WITH_INFO and <b>SQLError</b> can then be called. It is less straightforward when coding loops to handle the output of a batch of SQL statements or when executing SQL&nbsp;Server stored procedures.</p>
+<p>
+In this case, SQL&nbsp;Server returns a result set for every SELECT statement executed in a batch or stored procedure. If the batch or procedure contains PRINT or RAISERROR statements, the output for these is interleaved with the SELECT statement result sets. If the first statement in the batch or procedure is a PRINT or RAISERROR, the <b>SQLExecute</b> or <b>SQLExecDirect</b> returns SQL_SUCCESS_WITH_INFO or SQL_ERROR and the application needs to call <b>SQLError</b> until it returns SQL_NO_DATA_FOUND to retrieve the PRINT or RAISERROR information.</p>
+<p>
+If the PRINT or RAISERROR statement comes after other SQL statements (such as a SELECT), then the PRINT or RAISERROR information is returned when <b>SQLFetch</b> or <b>SQLExtendedFetch </b>is called for the result set, before the PRINT or RAISERROR returns SQL_NO_DATA_FOUND or SQL_ERROR.</p>
+<p>
+For example, in the following procedure, the <b>SQLExecute</b> or <b>SQLExecDirect</b> call returns SQL_SUCCESS_WITH_INFO and a call to <b>SQLError</b> at that point returns the first print message. If the ODBC application then processes through the result set using <b>SQLFetch</b>, the application can get the second print statement by calling <b>SQLError</b> when <b>SQLFetch</b> returns SQL_NO_DATA_FOUND:</p>
+<pre><code>CREATE PROCEDURE odbcproc AS
+PRINT 'First PRINT Message.'
+SELECT name FROM sysusers WHERE suid &lt; 2
+PRINT 'Second PRINT Message.'
+GO
+</code></pre>
+</BODY>
+</HTML>

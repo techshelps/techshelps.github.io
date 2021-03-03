@@ -1,0 +1,67 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Application Concurrency Issues</title>
+<style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000 dir=ltr>
+<h1><a name="applicationconcurrencyissues"></a>Application Concurrency Issues</h1>
+<p>
+As we've already seen, the purpose of the <b><code>Application</code></b> object is to be able to store information that is globally used among all application users. These could be object reference variables or other values that all application users require access to. However, the problem is that, because they are shared, we can come up against concurrency problems. Consider the following example:</p>
+<pre><code>Application("NumberOfSales") = Application("NumberOfSales") + 1</code></pre>
+<p>
+This line of code in an ASP file could be used to count the number of users who had ordered goods from our site. It maintains the count in the <b><code>Application</code></b> variable <b><code>myData</code></b>. However, if two users access this variable at the same time corruption is likely occur, because the single <b><code>Application</code></b> object has global scope and is visible to all. User <b><code>A</code></b> reads the value of <b><code>NumberOfSales</code></b> at the same time as user <b><code>B</code></b>. Both instances of the ASP page get the same value, they both increment it, and they both store it back in the <b><code>Application</code></b> object. The result is that it only gets incremented once. It might even corrupt it altogether if both writes occurred at the same moment.</p>
+<h2>Locking the Application Object</h2>
+<p>
+To solve the problem, we just change the code to read:</p>
+<pre><code>Application.Lock
+Application("NumberOfSales") = Application("NumberOfSales") + 1
+Application.Unlock</code></pre>
+<p class=indent>
+You don’t need to use <b><code>Lock</code></b> and <b><code>Unlock</code></b> in the <b><code>Application_onStart</code></b> event, because this event is can only be called once—by the single session that starts the application. The <b><code>Application_onStart</code></b> event is called before the first <b><code>Session_onStart</code></b> event, which is called before the ASP page is actually processed. </p>
+<h2>Read-Only Session and Application Variables</h2>
+<p>
+You may think that with a simple assignment like the one we've just seen, the chances of corruption are remote. That may be true for a single processor computer, but with SMP multi-processor machines becoming popular this assumption is not safe under all circumstances. One useful trick, where appropriate, is to make variables read-only for all sessions by checking the value first—as shown below:</p>
+<pre><code>Sub Session_OnStart
+  Application.Lock
+  If IsEmpty(Application("myData")) Then 
+     Application("myData") = strTheValue 
+  End if
+  Application.Unlock
+End Sub</code></pre>
+<p>
+This code only sets the value of the variable if it hasn't been set before, giving it—in effect—a default value. Once the variable has been assigned a value, and is not <b><code>Empty</code></b>, it can't be changed. However any other code can read the value as required, and with no fear of corruption:</p>
+<pre><code>Application.Lock
+MyVar = Application("myData")
+Application.Unlock</code></pre>
+<h2>Using Global Values and Object References</h2>
+<p>
+While the previous example solves the concurrency problem, it brings new ones. In a very busy site, the code to read the value could be called thousands of times a day. Locking the application just to read a value could drastically hit server performance. The situation is even worse when we come to store references to objects, which could be required by all users.</p>
+<p>
+If we only need to read the value of a variable as it stood at the start of a session, we could copy it from the <b><code>Application</code></b> object into that user's <b><code>Session</code></b> object. Then, each ASP page could reference the <b><code>Session</code></b> version. This has the down side, however, in that the value will not keep up with changes to the value in the <b><code>Application</code></b> object automatically—but it all comes down to what we actually use the values for.</p>
+<h3>Connection Pooling with ADO</h3>
+<p>
+When we come to use objects like the Active Data Object, we often need to access a single instance of it several times in a page, and across our application. For example, we use the <b><code>ADODB.Connection</code></b> object to create a database connection. Instead of doing it on every page, we might consider just opening a single database connection once (in <b><code>Session_onStart</code></b>, or even in the <b><code>Application_onStart</code></b>) and then using that connection throughout the entire session or application. </p>
+<p>
+Database applications designed for a multi-user audience will generally run on something like SQL Server, or another high-end database. While reusing a connection stored in the <b><code>Session</code></b> or <b><code>Application</code></b> object might be an efficient way to work with low transaction volume databases like Microsoft Access, this method loses attractiveness as the number of users of our application increases. </p>
+<p>
+You might recall from Chapter 4 that ODBC 3.0 includes a feature called <b>connection</b> <b>pooling</b>, which manages connections across multiple users. When using connection pooling it’s best to open and close the database connection on each page that uses it—this allows ODBC to manage the connections most efficiently. Without it, there could be ten users logged onto our application, but who weren't actually doing anything and this could cause ten idle connections that decrease performance and consume server and database resources. </p>
+<p>
+So, with Access, you should consider a <b><code>Session_onStart</code></b> instantiation of connections—while for other databases it may well be wiser to use local connections in each page. The Roadmap help file that ships with ASP has more information on connection pooling.</p>
+<h3>Global Object Reference Problems</h3>
+<p>
+When we come to create global references to objects, however, we can't just shuffle the values around between the <b><code>Application</code></b> and <b><code>Session</code></b> objects, because we risk problems as the object's own internal state changes. Instead, we need to make the decision as to where we actually want to use the object. We saw ways of creating and destroying an object at global <b><code>Application</code></b> level earlier. We can, of course, create <b><code>Session</code></b> level objects in <b><code>Session_onStart</code></b>, and destroy them in <b><code>Session_onEnd</code></b>. In this case, we don’t have to worry about concurrency, and we know they will not hang around in memory on the server when the session ends.</p>
+<p>
+Creating objects at <b><code>Session</code></b> level is generally the best solution. If we do need a global object for the whole application, like the Card Game case study you'll see in Part 3, we have to take some extra care when using it. Have a look at these two extracts of code:</p>
+<pre><code>Sub Application_OnStart
+   Application("myObject") = Server.CreateObject("game500.player")
+End Sub</code></pre>
+<p>
+This is in <b><code>global.asa</code></b>, and it creates the global instance of the object that will manage the whole game. In one of the ASP files that are used as part of the game, we call the <b><code>SetData</code></b> method of this object to change the game state at that point—when a card is played.</p>
+<pre><code>Application("myObject").SetData(Request.QueryString("txtUser"))</code></pre>
+<p>
+The problem here is that we risk corruption again. Two users could call this method at the same time, leaving the results undefined. This time, the concurrency problem is not at the <i>script</i> level, but at the <i>object</i> level. It needs to be handled by the object itself, and is concerned with the threading model it uses, and the way that the COM interface is implemented. These topics are beyond the scope of this chapter, but will be investigated in more depth in the case study in Chapter 14.</p>
+</BODY>
+</HTML>

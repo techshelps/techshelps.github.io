@@ -1,0 +1,661 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>A Classy Way to Save Changes </title>
+
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000>
+
+<font face="verdana,arial,helvetica" size="2"><h1>A Classy Way to Save Changes</h1>
+<p>
+Jim Booth and Jeri Rosenhaft</p>
+<p>
+<i>ave you ever thought, “I’ve done this before” when writing code to update buffered tables and views in Visual FoxPro? We certainly have. In this article we’ll show you how we solved this problem by creating a data handling form class that has this functionality built in.</i></p>
+<p>
+THE problem of generically updating tables and views breaks down into two major issues. First: “How do we know which tables or views are in the form’s Dataenvironment and whether they’re buffered?” Second: “How do we know if a particular buffer is dirty?” Eventually, we’ll run into a third issue-handling potential conflicts in the update process. Before we start, we should mention that we’ve settled on universally using optimistic table buffering. The reasons for this decision are the makings of another article, so let’s just agree that this is the buffering mode we’re using here.</p>
+<h2>Why bother?</h2>
+<p>
+Can’t we just write the code for each form and be done with it? What benefits do we gain? The answers to these questions are key to our motivation for doing this in the first place. For the project we were working on, a number of developers would be writing forms for us, and we wanted them to be unconcerned with the data-saving activity. We wanted them to call a method that would save the data for them.</p>
+<p>
+We wanted the option to save, no matter how they chose to end an edit session. If they clicked the Save button this was no problem, but what if they clicked the “X” button in the upper-right corner of the form, double-clicked the control menu, or used the Exit button in the toolbar or the form itself? We wanted to give users the Save Changes? message box just as in Word or Excel.</p>
+<p>
+Our application would have some forms with a lot of tables and views, so the update code could become pretty complex. Errors were very likely, so we wanted to write this code once, test it thoroughly, and then be done with it.</p>
+<h2>The design</h2>
+<p>
+Our design took a number of issues into consideration. We wanted a public method that the developers of the forms could call to save data, but we also wanted to protect the considerable code we’d be writing to handle the actual updating of the tables and views. We wanted to provide a method for validation before the various aliases that the developers could use would be updated. Finally, we wanted to programmatically resolve any update conflicts so the user wasn’t unnecessarily bothered by messages such as “Sorry-someone else has changed this record before you.”</p>
+<p>
+In a moment we’ll outline our final design. One method that isn’t mentioned in the design description, SaveViewTables, will turn out to be instrumental to our approach. We won’t describe it here because it would confuse things at this point. We’ll introduce this method later when we encounter the problem it solves.</p>
+<h2>The methods to our madness</h2>
+<p>
+Let’s discuss each of these methods in some detail and also look at the code they contain. In this section we’ll also look at some other methods in our form class.</p>
+<h3>DoSave</h3>
+<p>
+The DoSave method has a small amount of code in its class definition. Our developers are cautioned to use the scope resolution operator (or the DoDefault() function in VFP 5.0) to ensure that the code will run even if they add to it.</p>
+<p>
+The DoSave method is the entry point to the saving activity for the user. Here’s the code in this method:</p>
+<pre><font face="Courier New" size="3">WITH THISFORM
+  * Force buffer update.
+  .ActiveControl.SetFocus()
+  * Now call savechanges.
+  IF .SaveChanges(&quot;MANUAL&quot;)
+    * Editing and Adding are form properties we use.
+    .Editing = .F.
+    .Adding = .F.
+  ELSE
+  * Be sure to requery any views in the form 
+  * to refresh the display.
+    MessageBox(&quot;Update failed - changes have been ;
+     discarded&quot;, MB_ICONINFORMATION+MB_OK,;
+     &quot;Failed Update&quot;)
+  ENDIF
+  * Force control WHEN to be evaluated.
+  KEYBOARD &quot;{TAB}&quot;
+  .Refresh()
+ENDWITH</font></pre>
+<p>
+.ActiveControl.SetFocus() is used to handle a particular problem. Toolbars and menus never get focus, so if the user clicked the Save button in a Toolbar the current control in the form wouldn’t lose focus, and therefore wouldn’t update its buffer, thus leaving a new value in the control. But the buffer appears to be clean. This situation causes a problem in that the table or view buffer may seem to be clean to our later code when in fact it isn’t. The SetFocus call forces the control to update its buffer and therefore eliminates this problem.</p>
+<p>
+The call to SaveChanges is clear. The parameter being passed, &quot;MANUAL&quot;, tells SaveChanges that this is a manual rather than an automatic action. We’ll explain the automatic parameter later. If the changes were successfully saved, we set the editing and adding properties of the form to .F., signifying that the edit is over. If SaveChanges couldn’t do the update and the changes were reverted, then we display a message to the user telling them that this happened.</p>
+<p>
+The KEYBOARD of a Tab is done to force the When for each control to be evaluated so the user is sitting on an available control upon return from this code. Finally, we refresh the form.</p>
+<p>
+Two other methods in this form may call DoSave.</p>
+<h3>Release</h3>
+<p>
+If the user chooses to exit the form while an edit is in progress, we need to handle it. To do this we put code in the form’s Release method:</p>
+<pre><font face="Courier New" size="3">IF NOT THISFORM.QueryUnload()
+  NODEFAULT
+ENDIF</font></pre>
+<p>
+This code starts by calling the QueryUnload method, which we’ll discuss next. The reason for this is the strange way in which the QueryUnload event-method is called by VFP. If the user or program code destroys the form, thus releasing its reference, VFP calls the QueryUnload. But if the form is released by calling its Release method, the QueryUnload is <i>not </i>called.</p>
+<p>
+We didn’t want to duplicate the code in the QueryUnload here in the Release, so instead we just called it.</p>
+<p>
+The QueryUnload checks to see if there are any dirty buffers; if there are, it tries to save them. The QueryUnload returns either a .T. for success or an .F. for failure. If the QueryUnload fails, the release does a NODEFAULT so the form is <i>not </i>released. The NODEFAULT will keep the user in the form so he or she can fix any problems or undo the edit.</p>
+<h3>QueryUnload</h3>
+<p>
+The QueryUnload is called when the form is released, as long as the release isn’t due to the form’s Release having been called as described earlier. This means that if the user uses the close button at the top right of the form, or chooses Close from the control menu for the form, we’ll catch that action here in the QueryUnload.</p>
+<p>
+A NODEFAULT in the QueryUnload (see the OTHERWISE statement halfway through) will prevent the form from being released:</p>
+<pre><font face="Courier New" size="3">LOCAL lnCnt, lnAnswer, llSave, llRevert, llRet
+llRet = .T.
+llSave = .F.
+llRevert = .F.
+=AMEMBERS(laDataEnvironment,THISFORM.Dataenvironment,2)
+* If there are any DE objects
+IF TYPE( &quot;laDataEnvironment(1,1)&quot; ) &lt;&gt; &quot;U&quot;
+  FOR lnCnt = 1 to ALEN(laDataEnvironment,1) 
+    IF EVALUATE( &quot;THISFORM.Dataenvironment.&quot; ;
+      + laDataEnvironment(lnCnt)+&quot;.BaseClass&quot;) = &quot;Cursor&quot;
+      IF EVALUATE( &quot;THISFORM.Dataenvironment.&quot; ;
+        + laDataEnvironment(lnCnt) ;
+        + &quot;.BufferModeOverride&quot;) &gt;= 2
+        IF GETNEXTMODIFIED(0, ;
+          EVALUATE(&quot;THISFORM.Dataenvironment.&quot; ;
+          + laDataEnvironment(lnCnt)+&quot;.Alias&quot;)) &lt;&gt; 0
+          * Ask the user if they want to save changes.
+          lnAnswer = ;
+            MessageBox(;
+            &quot;Do you want to save the changes made?&quot;, ;
+            MB_YESNOCANCEL + MB_ICONEXCLAMATION, ;
+            &quot;Save Changes&quot;)
+          DO CASE
+          CASE lnAnswer = IDYES
+            * Save the changes.
+            llSave = .T.
+          CASE lnAnswer = IDNO
+            * Revert the changes.
+            llRevert = .T.
+          OTHERWISE
+            * Return to the form.
+            NODEFAULT
+            llRet = .F.
+          ENDCASE
+          EXIT
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDFOR
+
+  IF llRevert
+    * Revert changes.
+    THISFORM.DoRevert()
+  ELSE
+    * Save changes.
+    IF NOT THISFORM.DoSave()
+      NODEFAULT
+      llRet = .F.
+    ENDIF
+  ENDIF
+ENDIF
+
+RETURN llRet</font></pre>
+<p>
+This code may look overwhelming, but it’s really quite simple. We start out by building an array of references to all of the objects in the form’s Dataenvironment with an AMEMBERS() call. Next we check the array to see if the form actually has a Dataenvironment (DE) with IF TYPE( &quot;laDataEnvironment(1,1)&quot; ) &lt;&gt; &quot;U&quot;. If there is a DE, we go through a loop, checking each object in the DE to see if it’s a cursor. Then we check the cursor to see if buffering is enabled for it. Finally, if it’s a cursor and buffering has been turned on, we check to see if there are any dirty records in the buffer.</p>
+<p>
+If we find one cursor that’s buffered and dirty we’ll offer the user, through a message box, the option to save or revert changes, or cancel the exit from the form.</p>
+<p>
+The variables llSave and llRevert are used to handle this action. If the user chooses to cancel the exit, then llRet is set to .F. so the method will return that value and the NODEFAULT is issued.</p>
+<p>
+There’s a call to the DoRevert method here, which we aren’t describing in this article. This method is simply a series of TableRevert() calls to undo the edits in the form.</p>
+<h3>SaveChanges</h3>
+<p>
+The meat of this generic saving mechanism is buried in this method. Once again, the code may look complex but it’s really rather simple:</p>
+<pre><font face="Courier New" size="3">* Auto savechanges code
+* reads the DE and checks for dirty buffers,
+* attempts TableUpdate() on all dirty buffers
+* wrapped in a transaction so rollback is possible
+*
+
+LPARAMETERS pcCalledFrom
+* Parameter pcCalledFrom indicates how this method 
+* was called. It is either &quot;AUTO&quot;, meaning from the 
+* QueryUnload method, or &quot;MANUAL&quot;, meaning from the 
+* DoSave method. If the parameter is missing, it 
+* defaults to &quot;MANUAL.&quot;
+IF EMPTY( pcCalledFrom )
+ pcCalledFrom = &quot;MANUAL&quot;
+ENDIF
+
+LOCAL laBuffers(1), laDataEnvironment(1), lnCnt, ;
+  llRollback, lcAlias, lnBufferCount, llLocalView, ;
+  laDirtyViews(1)
+* Array to hold the updateable views that were 
+* found to be dirty
+DIMENSION laDirtyViews(1)
+
+* Save current alias.
+lcAlias = ALIAS()
+DIMENSION laBuffers(1,3)
+lnBufferCount = 1
+WITH THISFORM
+  * Get a list of all dirty buffers in laBuffers()
+  =amembers( laDataEnvironment, .Dataenvironment, 2 )
+  FOR lnCnt = 1 to alen(laDataEnvironment,1)
+    IF EVALUATE( &quot;THISFORM.Dataenvironment.&quot; + ;
+      laDataEnvironment(lnCnt) ;
+      +&quot;.BaseClass&quot;) = &quot;Cursor&quot;
+      IF EVALUATE( &quot;THISFORM.Dataenvironment.&quot; +;
+        laDataEnvironment(lnCnt)  ;
+        +&quot;.BufferModeOverride&quot;) &gt;= 2
+        IF GETNEXTMODIFIED(0,;
+          EVALUATE(&quot;THISFORM.Dataenvironment.&quot;;
+          +laDataEnvironment(lnCnt)+&quot;.Alias&quot;)) &lt;&gt; 0
+          laBuffers(lnBufferCount,1) = ;
+          EVALUATE(&quot;THISFORM.DataEnvironment.&quot; + ;
+          laDataEnvironment(lnCnt) + &quot;.ALIAS&quot;)
+          laBuffers(lnBufferCount,2) = ;
+          EVALUATE(&quot;THISFORM.DataEnvironment.&quot; + ;
+          laDataEnvironment(lnCnt) + &quot;.DATABASE&quot;)
+          lnBufferCount = lnBufferCount + 1
+          DIMENSION laBuffers(lnBufferCount,;
+            ALEN(laBuffers,2))
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDFOR
+
+
+  IF lnBufferCount &gt; 1
+    DIME laBuffers(lnBufferCount - 1, ALEN(laBuffers,2))
+  ELSE
+    * No buffers
+    RETURN
+  ENDIF
+  * laBuffers now contains a list of the aliases of all 
+  * dirty buffers.
+
+  * Call the validation method of this form for each 
+  * dirty buffer and store the result in column 3 of 
+  * the laBuffers array.
+  FOR lnCnt = 1 TO ALEN( laBuffers,1 )
+    laBuffers( lnCnt,3 ) = ;
+    .ValidateAlias( laBuffers(lnCnt,1), pcCalledFrom )
+    IF NOT laBuffers( lnCnt, 3 )
+      * If we failed a validation
+      IF pcCalledFrom = &quot;MANUAL&quot;
+        * If interactive save was requested by user
+        * return him or her to the form.
+        * User messages are handled by the
+        * .ValidateAlias method.
+        RETURN .F.
+      ELSE
+        * If automatic save was requested simply fail 
+        * the update and discard the edit.
+        llRollback = .T.
+      ENDIF
+    ENDIF
+  ENDFOR
+
+
+  * Attempt TableUpdate() for each buffer that is dirty.
+  * If the TableUpdate() fails, attempt to resolve the 
+  * conflict; if the conflict can't be resolved 
+  * ROLLBACK and TableRevert().
+
+  BEGIN TRANSACTION
+    IF NOT llRollback
+      FOR lnCnt = 1 TO ALEN( laBuffers,1 )
+        IF NOT TableUpdate(.T., .F., laBuffers(lnCnt,1) )
+          * Attempt resolution
+          * Resolve method returns True if the problem 
+          * was resolved. Parameters passed are the alias 
+          * name and whether or not to offer manual 
+          * resolutions of conflicts.
+          * lResolve is a logical property of the form.
+          IF .lResolve
+            llRollBack = NOT .Resolve( laBuffers(lnCnt,1),;
+              (pcCalledFrom=&quot;MANUAL&quot;),;
+              laBuffers(lnCnt,2))
+          ELSE
+            llRollBack = .T.
+          ENDIF
+          IF llRollBack
+            EXIT
+          ENDIF
+        ELSE
+          * Check to see if this is a view.
+          llLocalView = (CursorGetProp ;
+            (&quot;SOURCETYPE&quot;,laBuffers(lnCnt,1))=1)
+          IF llLocalView
+            * We have a local view; let's see if it's 
+            * updateable.
+            llLocalView = CursorGetProp ;
+              (&quot;SENDUPDATES&quot;,laBuffers(lnCnt,1))
+            IF llLocalView
+              * We have an updateable local view so add 
+              * it to the aDirtyViews array.
+              laDirtyViews(ALEN(laDirtyViews,1)) = ;
+              laBuffers(lnCnt,1)
+              DIME laDirtyViews(ALEN(laDirtyViews,1)+1)
+            ENDIF
+          ENDIF
+        ENDIF
+      ENDFOR
+    ENDIF
+
+  IF llRollback
+    * If updates failed
+    ROLLBACK
+    * TableRevert all buffers
+    DoRevert()
+  ELSE
+    * If updates succeeded
+    END TRANSACTION
+    IF NOT EMPTY( laDirtyViews(1) )
+      * We have view source tables to handle.
+      * Get rid of the empty row at the bottom 
+      * of the array.
+      DIMENSION laDirtyViews( ALEN( laDirtyViews, 1 );
+         - 1 )
+      FOR lnCnt = 1 TO ALEN( laDirtyViews, 1 )
+        BEGIN TRANSACTION
+        IF NOT .SaveViewTables(laDirtyViews(lnCnt), ;
+          &quot;UPDATE&quot;)
+          * TableUpdate on one or more source 
+          * tables failed.
+          llRollBack = .T.
+        ENDIF
+        IF llRollBack
+          ROLLBACK
+          .SaveViewTables( laDirtyViews(lnCnt), ;
+             &quot;REVERT&quot;)
+        ELSE
+          END TRANSACTION
+        ENDIF
+      ENDFOR
+    ENDIF
+  ENDIF
+  IF NOT EMPTY( lcAlias )
+    SELECT ( lcAlias )
+  ENDIF
+  .Editing = .F.
+  .Adding = .F.
+ENDWITH
+RETURN NOT llRollBack</font></pre>
+<p>
+The code for this method is heavily commented, so we’ll discuss only certain key points here. The first section of the code builds an array where each row is one alias that has a dirty buffer and therefore needs to be updated. If there are no dirty buffers, then we simply RETURN to end the method.</p>
+<p>
+Next, we call the ValidateAlias method for each alias that has a dirty buffer so the method can do any validation the developer has programmed for it. Two parameters are passed-the name of the alias from the array and the &quot;MANUAL&quot; or &quot;:AUTOMATIC&quot; method of the SaveChanges call. The developer can use this data to determine what and how to validate. If any validations fail, we either return to editing for the user or set the rollback flag so the transaction will be rolled back. The tables will be reverted depending on whether we’re in manual or automatic mode.</p>
+<p>
+Next, we begin a transaction so that this is an all-or-none proposition. In a loop we attempt a TableUpdate() on each cursor; if it fails, we call the Resolve method to attempt to resolve the problem. If any cursor fails to update and we can’t resolve the problem, we fail the whole transaction and set the llRollBack flag to .T.</p>
+<p>
+If a TableUpdate() succeeds, we check to see if it’s an updateable view. If it is, we add it to an array of views that we’ve updated. This array of views is used after the transaction has been completed to update the source tables for those views.</p>
+<p>
+Finally, we check the llRollBack flag. If it’s .T., we ROLLBACK the transaction and call the DoRevert method of the form to issue the Tablereverts. Otherwise we END the TRANSACTION, set the editing flags for the form accordingly, and refresh the form.</p>
+<p>
+If the transaction has succeeded and we’ve posted our updates, we then check the array of views to see if any of them have been updated. We do this because if an updateable view has been TableUpdated and any of its source tables are buffered in the dataenvironment, then those table updates are still pending and we need to deal with them. This is handled by the SaveViewTables method of our form class. Here, in SaveChanges, we loop through the array of views and call the SaveViewTables for each one in turn.</p>
+<h3>SaveViewTables</h3>
+<p>
+This method will issue a TableUpdate for any tables that are part of a view that has buffering enabled. We need to do this because it’s possible that we have a buffered and updateable view as well as one or more of the source tables (also buffered) for that view in the same DE. When this situation occurs, we get double buffering. This means that when we TableUpdate the view we’ve written changes to the source tables. If any of those tables are buffered in the DE, the changes we’ve written are now buffered for the table and we need to issue a TableUpdate for those tables to complete the process. </p>
+<p>
+This method does just that: </p>
+<pre><font face="Courier New" size="3">LPARAMETERS pcViewAlias, pcWhatToDo
+* pcViewAlias = The view to be handled
+* pcWhatToDo = &quot;UPDATE&quot; or &quot;REVERT&quot;
+*
+DIMENSION laTables(1)
+* Get list of source tables for this view.
+lcTables = CursorGetProp( &quot;TABLES&quot;, pcViewAlias )
+* Strip off first dbc name.
+lcTables = SUBSTR( lcTables, AT(&quot;!&quot;,lcTables)+1 )
+* As long as we still have tables
+DO WHILE NOT EMPTY( lcTables )
+  * Put the first table name in the tables array.
+  laTables( ALEN(laTables,1) ) = SUBSTR( lcTables, 1, ;
+     IIF( AT(&quot;,&quot;,lcTables) = 0, LEN(lcTables), ;
+     AT(&quot;,&quot;,lcTables)-1))
+  IF AT(&quot;,&quot;,lcTables) &gt; 0
+    * If we have more tables strip off the first one.
+    lcTables = SUBSTR( lcTables, AT(&quot;,&quot;,lcTables)+1 )
+    * Strip off the dbc name.
+    lcTables = SUBSTR( lcTables, AT(&quot;!&quot;,lcTables)+1 )
+  ELSE
+    * No more tables
+    lcTables = &quot;&quot;
+  ENDIF
+  * Add a row to the tables array.
+  DIMENSION laTables(ALEN(laTables,1)+1)
+ENDDO
+* Remove the last row from the tables array.
+DIMENSION laTables( ALEN( laTables,1 ) -1 )
+LOCAL lnCnt, llRet
+llRet = .T.
+
+* Process the tables in the array.
+FOR lnCnt = 1 TO ALEN( laTables, 1 )
+  * If buffering is on for this table:
+  IF CursorGetProp(&quot;BUFFERING&quot;, laTables( lnCnt ) ) &lt;&gt; 1
+    * If we need to update:
+    IF pcWhatToDo = &quot;UPDATE&quot;
+      * Store the result of update attempt to llRet.
+      llRet = TableUpdate( 1, .F., laTables( lnCnt ) )
+    ELSE
+      * Revert the cursor.
+      TableRevert( .T., laTables( lnCnt ) )&#09;
+    ENDIF
+  ENDIF
+ENDFOR
+
+* Return T/F for success or failure.
+RETURN llRet</font></pre>
+<p>
+This code first builds an array of the source tables for the view and then walks through that array and checks to see if each of them is buffered. If a table is buffered, we issue either a TableUpdate() or a TableRevert(), depending on what we told the method.</p>
+<h3>Resolve</h3>
+<p>
+Now let’s discuss the method that we neglected to mention earlier. With optimistic buffering, there’s always the possibility that someone else updated a record while we were working on it. An attempt at a TableUpdate() under this circumstance will result in a logical .F. being returned and the update won’t occur. We could just let this go and frustrate our users by telling them “Sorry, but we can’t save your work.” While easy to do, this isn’t acceptable, especially when you realize that it’s common for others to edit the record but not the same fields that you have in your buffer.</p>
+<p>
+The purpose of the Resolve method is to sense this condition and handle it without user intervention. The method also makes a call to a form that will allow the user to handle other situations where the record on disk has changes to fields that we’ve changed. This conflict form isn’t included here because it’s outside the scope of the article. You can comment that code out and just fail the update or you can develop your own method for having the user resolve those situations.</p>
+<pre><font face="Courier New" size="3">LPARAMETERS pcAlias, plManual, pcDatabase
+
+* Define constants for the arrays.
+#DEFINE BUFFERNEW laFields( lnCnt, 2 )
+#DEFINE TABLENEW laFields( lnCnt, 3 )
+LOCAL llRet, laFields(1), lnCnt, lnNext, llGotOne, llView
+DIMENSION laFields(1)
+llRet = .T.
+llView = ( CursorGetProp( &quot;SOURCETYPE&quot;, pcAlias ) = 1 )
+IF llView
+  * Fail the resolution for updateable views.
+  RETURN .F.
+ENDIF
+
+SET DATABASE TO (pcDatabase)
+* Attempts to resolve a failed TableUpdate()
+*
+* Compares OldVal() and Buffer values to find the
+* changed values, then checks CurVal() to see if
+* these are among the fields that are different
+* in the file. If the changed fields aren't
+* among the different file values, the buffer
+* is updated from the table and the TableUpdate()
+* is forced.  Otherwise the TableUpdate is allowed
+* to fail and the SaveChanges will also fail.
+
+* Select the work area being resolved.
+SELECT (pcAlias)
+
+* Build an array of fields names.
+=AFIELDS(laFields)
+
+* Get the first modified record.
+lnNext = GETNEXTMODIFIED(0,pcAlias)
+* As long as we have a modified record and 
+* haven't failed:
+DO WHILE lnNext &lt;&gt; 0 AND llRet
+  * Set for no conflicts.
+  llGotOne = .F.
+  * Move to the modified record.
+  GOTO lnNext
+
+  * Check buffer against OLDVAL() to build a list of 
+  * changed fields. The result of the comparison is 
+  * stored in column 2 of laFields.
+  FOR lnCnt = 1 TO ALEN(laFields,1)
+    * Ignore the update and create fields.
+    BUFFERNEW = OLDVAL(laFields(lnCnt,1)) &lt;&gt; ;
+      EVALUATE(pcAlias+&quot;.&quot;+laFields(lnCnt,1))
+  ENDFOR
+
+  * Check changed fields against CURVAL() to find any 
+  * conflicts and store the result of the conflict 
+  * detection in column 3 of laFields.
+  FOR lnCnt = 1 TO ALEN(laFields,1)
+    TABLENEW = OLDVAL(laFields(lnCnt,1)) ;
+             &lt;&gt; CURVAL(laFields(lnCnt,1))
+    IF BUFFERNEW AND TABLENEW AND ;
+      EVALUATE(pcAlias+&quot;.&quot;+laFields(lnCnt,1)) &lt;&gt; ;
+        CURVAL( laFields( lnCnt, 1 ) )
+      * If both the buffer and the curval() 
+      * are new from the oldval()
+      * and they aren't the same value,
+      * set conflict flag.
+      llGotOne = .T.
+    ENDIF
+  ENDFOR
+
+  * If any conflicts:
+  IF llGotOne
+    IF plManual
+      * This is manual so we need to offer the user the
+      * chance to resolve the conflict.
+      
+      * Prepare private array for passing to the 
+      * conflict form.
+      PRIVATE laConflicts( 1, 3 )
+      DIMENSION laConflicts( 1, 3 )
+      FOR lnCnt = 1 TO ALEN( laFields, 1 )
+        IF BUFFERNEW AND TABLENEW AND ;
+           EVALUATE(pcAlias+&quot;.&quot;+laFields(lnCnt,1)) &lt;&gt; ;
+            CURVAL( laFields( lnCnt, 1 ) )
+          * Post field name to laConflicts.
+          laConflicts(ALEN(laConflicts,1),1) = ;
+            laFields(lnCnt,1)
+          * Set column 2 to the Caption for this field.
+          laConflicts(ALEN(laConflicts,1),2) = ;
+            DBGETPROP(pcAlias+&quot;.&quot;+laFields(lnCnt,1),;
+                   &quot;FIELD&quot;,&quot;CAPTION&quot;)
+          * Set column 3 data type to character to be used
+          * by conflict form to post user's decision.
+          laConflicts( ALEN( laConflicts, 1), 3 ) = &quot;&quot;
+          * Add a row to the array.
+          DIMENSION laConflicts(ALEN(laConflicts,1)+1, ;
+                 ALEN(laConflicts,2))
+        ENDIF
+      ENDFOR
+      * Remove blank row from end of array.
+      DIMENSION laConflicts(ALEN(laConflicts,1)-1, ;
+                     ALEN(laConflicts,2) )
+
+      * Show the form for the user to decide.
+      DO FORM Conflict WITH .F., THIS, pcAlias, ;
+        THISFORM.DataSessionID, &quot;laConflicts&quot;
+
+      * Update buffer according to user decisions.
+      FOR lnCnt = 1 TO ALEN( laConflicts, 1 )
+        IF EMPTY( laConflicts( lnCnt, 3 ) )
+          * Fail the resolution.
+          llRet = .F.
+          EXIT
+        ENDIF
+        IF laConflicts( lnCnt, 3 ) = &quot;FILE&quot;
+          REPLACE ( laConflicts( lnCnt, 1 ) ) WITH ;
+                CURVAL( laConflicts( lnCnt, 1 ), pcAlias )
+        ENDIF
+      ENDFOR
+                  
+    ELSE
+      * Set to fail.
+      llRet = .F.
+      * LOOP back to exit DO WHILE.
+      LOOP
+    ENDIF
+  ELSE
+    * There are no field collisions so we'll fix the 
+    * buffered field values to match the disk image 
+    * for the unedited fields.
+    FOR lnCnt = 1 TO ALEN(laFields,1)
+      IF TABLENEW
+         REPLACE (pcAlias+&quot;.&quot;+laFields(lnCnt,1)) WITH ;
+              CURVAL( pcAlias+&quot;.&quot;+laFields( lnCnt, 1 ) )
+      ENDIF
+    ENDFOR
+    
+  ENDIF
+
+  IF NOT llRet
+    * Resolution failed.
+    LOOP
+  ENDIF
+  
+  * Force TableUpdate()
+  IF NOT TableUpdate( .F., .T., pcAlias )
+    llRet = .F.
+    LOOP
+  ENDIF
+  
+
+  * Get the next modified record.
+  lnNext = GETNEXTMODIFIED(lnNext,pcAlias)
+
+ENDDO
+
+RETURN llRet
+  IF NOT llRet
+    * Resolution failed.
+    LOOP
+  ENDIF
+  
+  * Force TableUpdate()
+  IF NOT TableUpdate( .F., .T., pcAlias )
+    llRet = .F.
+    LOOP
+  ENDIF
+  
+
+  * Get the next modified record.
+  lnNext = GETNEXTMODIFIED(lnNext,pcAlias)
+
+ENDDO
+RETURN llRet</font></pre>
+<p>
+Here’s an overview of what’s going on here: This method first looks to see if the alias we’re trying to resolve is an updateable view. If it is, the resolution is simply failed (we’ll discuss the reasons later). It then takes a list of fields for the current table and compares our original value with the value we currently have in the buffer to find out if the field has been changed in our edit session. We store the result in a column of the array of fields.</p>
+<p>
+Next, we compare our original value to the current value on disk and store that result in another column of the array. Now we have the array of field names. In one column we know if we changed it, and in another column we know if it’s new on the disk, so we just walk through the array to see if any of the fields have both conditions set. If we find any, we make a call to a form, which allows the user to tell us which value should be written. (This form isn’t included in this article.)</p>
+<p>
+If we find no fields that have both conditions set, then we do a REPLACE in the buffer for every field that is new on disk-to preserve the edits that another user has made-and then force the TableUpdate. This writes our changes along with the changes that were found on the disk.</p>
+<p>
+We’ve performed all these steps in a loop to be sure we process all of the edited records for this cursor or table.</p>
+<h2>Why not resolve views?</h2>
+<p>
+We don’t attempt to resolve conflicts in an updateable view for one simple reason: It can’t be done. At first it may seem like views could be resolved; however, once you consider the issues you’ll see why they can’t.</p>
+<p>
+In the resolution code, one of the things we do is compare the OLDVAL() of a field to its CURVAL(). CURVAL() gives us the current value in the file. However, with a view, the file is always the same as it was when we started because our view is local to our machine.</p>
+<p>
+Then why not check the actual table value using the CursorGetProp to find out where the data in the view came from? We could do that, except that introduces other problems. For example, how do we know that the source table is on the correct record for the comparison? There’s no way to learn the record in the source that provided the data to our view’s record.</p>
+<p>
+Taking these issues into consideration, we decided to just fail the resolution if we were looking at an updateable view.</p>
+<h3>DoRevert</h3>
+<p>
+Finally, what do we do if any of the previous mechanisms fail, or even if the user asks to reject his or her work? The form has a DoRevert method that will issue TableReverts for all buffers:</p>
+<pre><font face="Courier New" size="3">* Revert all buffers.
+LOCAL lnCnt,lnAnswer, laDataEnvironment(1)
+WITH THISFORM
+  =amembers( laDataEnvironment, .Dataenvironment,2)
+  FOR lnCnt = 1 to alen(laDataEnvironment,1)
+    IF EVALUATE( &quot;THISFORM.Dataenvironment.&quot; + ;
+      laDataEnvironment(lnCnt)+&quot;.BaseClass&quot;) = &quot;Cursor&quot;
+      IF EVALUATE( &quot;THISFORM.Dataenvironment.&quot; + ;
+          laDataEnvironment(lnCnt) + ;
+          &quot;.BufferModeOverride&quot;) &gt;= 2
+        =TableRevert(.T.,EVALUATE(;
+                     &quot;THISFORM.Dataenvironment.&quot; ;
+                      +laDataEnvironment(lnCnt);
+                      +&quot;.Alias&quot;))
+
+        llLocalView = (CursorGetProp(&quot;SOURCETYPE&quot;, ;
+                  EVALUATE(&quot;THISFORM.Dataenvironment.&quot; ;
+                  +laDataEnvironment(lnCnt)+&quot;.Alias&quot;))=1)
+        IF llLocalView
+          * We have a local view; let's see if it's 
+          * updateable.
+          llLocalView = CursorGetProp(&quot;SENDUPDATES&quot;,;
+                    EVALUATE(&quot;THISFORM.Dataenvironment.&quot; ;
+                    +laDataEnvironment(lnCnt)+&quot;.Alias&quot;) )
+          IF llLocalView
+            * We have an updateable view
+            * so we need to call the SaveViewTables 
+            * method to send update to the source 
+            * tables. If necessary call the method 
+            * for reverting the source tables.
+            .SaveViewTables(;
+              EVALUATE(&quot;THISFORM.Dataenvironment.&quot;+;
+              laDataEnvironment(lnCnt)+&quot;.Alias&quot;),&quot;REVERT&quot;)
+          ENDIF
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDFOR
+  .Editing = .F.
+  .Adding = .F.
+  * Force controls when to be evaluated.
+  KEYBOARD &quot;{TAB}&quot;
+  .Refresh()
+ENDWITH</font></pre>
+<p>
+This code is very similar to the SaveChanges code except it’s doing TableReverts instead of TableUpdates. It also processes the source tables for updateable views just like the SaveChanges method does for the updates.</p>
+<h2>So, now what?</h2>
+<p>
+The code you’ve just seen is part of a larger complete framework for building applications. This code has been extracted from that framework and presented here to explain the process of generically handling table updating with buffering in VFP. To add this code to your form class, you need to add the appropriate methods to your form and copy these code examples into those methods. You may need to modify this code somewhat to reside well in your application framework. You can copy this code if you like, or you can use it to learn the principles involved and then write your own code to handle these situations.</p>
+<p>
+The development project for which we wrote this code is a large project with a number of programmers creating application forms. These programmers are now saved from the tedium of writing code to do TableUpdates and TableReverts. They can instead focus their attention on the presentation and interface used for editing the data and let the framework handle the details for them. s</p>
+<p>
+<i>Jim Booth is an independent consultant who writes applications and teaches Visual FoxPro. Jim teaches for Application Developer’s Training Company nationally and he has spoken to numerous user groups in the United States and Canada. Jim has presented at FoxPro conferences in the United States, Canada, and Europe, and he has written articles for the major FoxPro journals. He is co-author of </i>Visual FoxPro Unleashed,<i> published by Sams Publishing. 230-758-6942, 72130.2570@compuserve.com.</i></p>
+<p>
+<i>Jeri Rosenhaft is president of Contemporary Data Services, a Stamford, Connecticut-based consulting firm specializing in FoxPro applications since 1986. Jeri is a pioneer in software development, having programmed since 1955.</i></p>
+<P align="center"><a
+href="http://www.pinpub.com/foxtalk/"><img src="Pinnacle.gif"
+border="0" width="216" height="72"></a></p>
+
+<P align="center"><strong>To find out more about
+FoxTalk and Pinnacle Publishing, visit their website at</strong> <br>
+<a href="http://www.pinpub.com/foxtalk/"><strong>http://www.pinpub.com/foxtalk/</strong></a></p>
+
+<P align="center"><font size="1">Note: This is not a
+Microsoft Corporation website. <br>
+Microsoft is not responsible for its content..</font></p>
+
+<P>This article is reproduced from the April 1997
+issue of FoxTalk. Copyright 1997, by Pinnacle Publishing, Inc.,
+unless otherwise noted. All rights are reserved. FoxTalk is an
+independently produced publication of Pinnacle Publishing, Inc.
+No part of this article may be used or reproduced in any fashion
+(except in brief quotations used in critical articles and
+reviews) without prior consent of Pinnacle Publishing, Inc. To
+contact Pinnacle Publishing, Inc., please call (800)788-1900 or
+(206)251-1900.</p>
+</font></BODY>
+</HTML>

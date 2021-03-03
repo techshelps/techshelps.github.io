@@ -1,0 +1,173 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Creating a Dataset and Obtaining Axis Information</title>
+<link disabled rel=stylesheet href=msdn_ie3.css>
+<style type="text/css">
+@import url(msdn_ie4.css);
+</style>
+</HEAD>
+<BODY>
+<FONT FACE="Verdana, Arial, Helvetica" SIZE="2">
+
+	<!--TOOLBAR_START-->
+	<!--TOOLBAR_EXEMPT-->
+	<!--TOOLBAR_END-->
+
+
+<h1><a name="creatingdatasetobtainingaxisinformation"></a>Creating a Dataset and Obtaining Axis Information</h1>
+<p>
+This function executes an MDX query statement specified by <i>pwszQuery</i>. <b>GetAxisInfo</b> and <b>GetAxisRowset</b> are called to traverse the column information for each axis in the MDX query.</p>
+<pre><code>HRESULT MDPQueryColumnInfo(ICommandText *pICommandText, pwszQuery)
+{
+   HRESULT hr;
+
+   struct COLUMNDATA
+   {
+      SDWORD   dwLength;      // length of data
+      DBSTATUS   dwStatus;      // status of column
+      SHORT      wPadding;
+      BYTE      bData[1];      // variable length data 
+   };
+
+   // Execute the query
+   IMDDataset* pIMDDataset = NULL;
+   hr = pICommandText-&gt;SetCommandText(DBGUID_MDX, pwszQuery);
+   hr = pICommandText-&gt;Execute(NULL, IID_IMDDataset, NULL, NULL,
+                               (IUnknown **)&amp;pIMDDataset ));
+
+   // Fetch and traverse the axis info
+   ULONG cAxis;
+   MDAXISINFO* rgAxisInfo = NULL;
+   hr = pIMDDataset-&gt;GetAxisInfo( &amp;cAxis, &amp;rgAxisInfo );
+
+   for (ULONG iAxis=0; iAxis &lt; cAxis; iAxis++)
+   {
+      // rgAxisInfo contains the array of dimensions for each axis
+      for (ULONG iDim=0; iDim &lt; 
+         rgAxisInfo[iAxis].cDimensions; iDim++)
+      {
+         // rgAxisInfo[iAxis].rgpwszDimensionNames points 
+         // to the dimension name
+         assert(rgAxisInfo[iAxis].rgpwszDimensionNames);
+      }
+
+      // Fetch the axis rowset for each axis
+      IRowset* pIrowset = NULL;
+      hr = pIMDDataset-&gt;GetAxisRowset(NULL, iAxis, 
+                           IID_IRowset, 0, NULL, (IUnknown**)&amp;pIRowset));
+
+      // Fetch the column info for the axis rowset
+      IColumnsInfo *pIColumnsInfo = NULL;
+      hr = pIRowset-&gt;QueryInterface(IID_IColumnsInfo, 
+                              (void**)&amp;pIColumnsInfo);
+
+      ULONG cCol;
+      WCHAR* pStringsBuffer = NULL;
+      DBCOLUMNINFO* pInfo = NULL;
+      hr = pIColumnsInfo-&gt;GetColumnInfo(&amp;cCol, &amp;pInfo, &amp;pStringsBuffer);
+
+      // Create bindings for all columns, in same order as given by 
+      // GetColumnInfo().Bind everything as string, skip DBTYPE_VECTOR 
+      // type columns
+      ULONG dwOffset = 0;
+      ULONG iBind = 0;
+      ULONG cBind = 0;
+      DBBINDING* rgBind = (DBBINDING*)CoTaskMemAlloc(
+                              cCol*sizeof(DBBINDING));
+      for (ULONG iCol=0; iCol &lt; cCol; iCol++)
+      {
+         // Skip columns of type _VECTOR (Probably binary data)
+         if (pInfo[iCol].wType &amp; DBTYPE_VECTOR)
+            continue;
+
+         rgBind[iBind].iOrdinal&nbsp; = pInfo[iCol].iOrdinal;
+         rgBind[iBind].obValue&nbsp;&nbsp; = dwOffset + 
+            offsetof(COLUMNDATA,bData);
+         rgBind[iBind].obLength&nbsp; = dwOffset + 
+            offsetof(COLUMNDATA,dwLength);
+         rgBind[iBind].obStatus&nbsp; = dwOffset + 
+            offsetof(COLUMNDATA,dwStatus);
+         rgBind[iBind].pTypeInfo = NULL;
+         rgBind[iBind].pObject&nbsp;&nbsp; = NULL;
+         rgBind[iBind].pBindExt&nbsp; = NULL;
+         rgBind[iBind].cbMaxLen&nbsp; = pInfo[iCol].ulColumnSize;
+         rgBind[iBind].dwFlags&nbsp;&nbsp; = 0;
+         rgBind[iBind].eParamIO&nbsp; = DBPARAMIO_NOTPARAM;
+         rgBind[iBind].dwPart&nbsp;&nbsp;&nbsp; = DBPART_VALUE | 
+                                   DBPART_LENGTH | 
+                                   DBPART_STATUS;
+         rgBind[iBind].dwMemOwner= DBMEMOWNER_CLIENTOWNED;
+         rgBind[iBind].bPrecision= 0;
+         rgBind[iBind].bScale&nbsp;&nbsp;&nbsp; = 0;
+         rgBind[iBind].wType&nbsp;&nbsp;&nbsp;&nbsp; = DBTYPE_STR;
+
+         dwOffset += rgBind[iBind].cbMaxLen + 
+            offsetof(COLUMNDATA,bData);
+         iBind++;
+      }
+      cBind = iBind;
+
+      // Create the accessor.
+      IAccessor* pIAccessor;
+      hr = pIRowset-&gt;QueryInterface(IID_IAccessor, (void**)&amp;pIAccessor);
+      hr = pIAccessor-&gt;CreateAccessor(DBACCESSOR_ROWDATA, cBind, rgBind, 
+                                      dwOffset, phAccessor, NULL);
+
+      // Allocate a buffer for a single row of data.
+      ULONG cbRowsize = dwOffset;
+      BYTE* pData = (BYTE *)CoTaskMemAlloc(cbRowSize);
+
+      while (SUCCEEDED(hr))
+      {
+         // Prepare internal buffers and get handles to // the rows.
+         // Fetch 20 rows at a time
+         ULONG cRowsObtained;
+         hr = pIRowset-&gt;GetNextRows(NULL, 0, 20, &amp;cRowsObtained, &amp;pRows);
+
+         // break on EndOfRowset
+         if (cRowsObtained == 0)   break;
+
+         for (ULONG iRow=0; iRow &lt; cRowsObtained; iRow++)
+         {
+            // Clear buffer.
+            memset(pData, 0, cbRowSize);
+
+            // Get the row data.
+            hr = pIRowset-&gt;GetData(rghRows[iRow], hAccessor, pData);
+
+            // traverse each bound column value for a single row
+            // use pColumn to access each column’s data values
+            for (iBind=0; iBind &lt; cBind; iBind++)
+            {
+               // advance to the column value
+               (COLUMNDATA*)pColumn = (COLUMNDATA *)(pData + 
+                  rgBind[iBind].obLength);
+               // (WCHAR*)pColumn-&gt;bData points to the string value
+             }
+         }
+         // Release the row handles.
+         hr = pIRowset-&gt;ReleaseRows(cRowsObtained, rghRows, NULL, NULL, 
+                                    NULL);
+      }
+      // Free the accessor and rowset
+      hr = pIAccessor-&gt;ReleaseAccessor(hAccessor, NULL);
+      hr = pIAccessor-&gt;Release();
+      hr = pIRowset-&gt;Release();
+
+      // Free the row data and bindings
+      CoTaskMemFree(pData);
+      CoTaskMemFree(rgBind);
+
+      // Free the column info.
+      CoTaskMemFree(pInfo);
+      CoTaskMemFree(pwszStringsBuffer);
+   }
+   hr = pIMDDataset-&gt;FreeAxisInfo(cAxis, rgAxisInfo);
+   hr = pIMDDataset-&gt;Release();
+   return hr;
+}
+</code></pre>
+</font></BODY>
+</HTML>

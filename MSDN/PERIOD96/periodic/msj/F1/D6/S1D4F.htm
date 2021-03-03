@@ -1,0 +1,103 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Win32 Q&amp;A</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  Win32 Q&amp;A</H1><P>Jeffery Richter</P>
+<P>Jeffrey Richter wrote <I>Advanced Windows</I> (Microsoft Press, 1995) and <I>Windows 95: A Developer</I><I>'</I><I>s Guide</I> (M&amp;T Books, 1995). Jeff is a consultant and teaches Win32-based programming seminars. He can be reached at v-jeffrr@microsoft.com.</P>
+<P> <font size="6" face="verdana,arial,helvetica">Q</font>I'm developing a shell extension DLL. In order to help debugging, I decided to place a call to the DebugBreak function directly inside my code. This way, when I run the Explorer and it loads my shell extension DLL, the call to DebugBreak should cause a breakpoint exception message box to appear, allowing me to spawn the debugger to debug my code. But, the call to DebugBreak never causes the message box to appear and the remainder of my code in my shell extension DLL never executes. What am I doing wrong and how can I get the debugger to debug my shell extension when it is invoked?</P>
+<P><I>Val Ludwig</I></P>
+<P><font size="6" face="verdana,arial,helvetica">A</font>Let me start off by saying that the system is working exactly the way it should. What you are seeing is the effect of Microsoft's shell team making the Explorer robust. When the Explorer calls a function in your shell extension DLL, it's afraid that you might have a bug in your code that would force the Explorer to terminate abnormally. Specifically, I'm talking about your code raising exceptions such as access violations, division by zero, or stack overflow exceptions.</P>
+<P>To protect itself from your bugs, the Explorer calls your shell extension DLL functions like this:</P>
+<P> </P>
+<P><BR></P>
+<PRE> __try {<BR>   YourShellExtensionDllFunction(...);<BR>}<BR>__except (EXCEPTION_EXECUTE_HANDLER) {<BR>   //YourShellExtensionDllFunction raised an exception<BR>   //Let's pretend we never called the function at all<BR>}</PRE>
+<P> </P>
+<P>By wrapping the call to your shell extension function inside a structure exception handling (SEH) frame, the Explorer can trap any exceptions you raise and recover so the Explorer process itself continues running but without the benefit of your shell extension.</P>
+<P>The call to DebugBreak inside your code raises an EXCEPTION_BREAKPOINT exception. Normally, raising this exception would display a message box, allowing you to spawn the debugger so you can debug your code. However, the Explorer is trapping this exception so it can recover from your error and continue execution. The only time you see the message box allowing you to debug an application is if an exception is raised that is not handled.</P>
+<P>What you need to do is make the system think that your exception is not being handled so the message box will appear and you can debug your code. To do this, wrap your call to DebugBreak with your own SEH frame.</P>
+<P> </P>
+<P><BR></P>
+<PRE> // Make sure that we only force the debugger to appear<BR>// in debug builds of our shell extension DLL.<BR>#ifdef _DEBUG<BR><BR>__try {<BR>   DebugBreak();<BR>}<BR>__except (UnhandledExceptionFilter(GetExceptionInformation())) {<BR>   // Nothing to do in here.<BR>}<BR><BR>#endif    // _DEBUG</PRE>
+<P> </P>
+<P>Because your SEH frame is nested inside the Explorer's SEH frame, your frame's exception handler gets the first crack at handling the breakpoint exception. The call to UnhandledExceptionFilter fakes the system into believing that the exception was not handled and causes the message box to appear. Now you can connect the debugger.</P>
+<P>UnhandledExceptionFilter is a documented Win32<FONT FACE="Symbol">Ò</FONT> function. The system usually calls this function when a thread does not handle an exception, but there is no reason why you cannot call this function explicitly in your own code just as I have here. It is this function that displays the message box and spawns the debugger.</P>
+<P>By the way, this technique is useful when you are developing and debugging any DLL that is loaded into some executable's address space. I have used this technique when developing Performance Monitor Counter DLLs and ISAPI DLLs too.</P>
+<P><font size="6" face="verdana,arial,helvetica">Q</font>I hope you can help me find a solution to a big problem we have. We are porting our 16-bit Windows¨-based application to Win32, but our application requires the use of several third-party 16-bit DLLs that do not have 32-bit versions available yet. I know that we can use the flat thunking mechanism supported on Windows 95 to do this but this mechanism is not supported on Windows NTª. I also know that we can't use the generic thunking mechanism (supported on both Windows 95 and Windows NT) because this only allows a 16-bit executable to call a 32-bit DLL–we need to go the other way.</P>
+<P>I suppose we could write a 16-bit executable stub program that talks back and forth with our new 32-bit application, but I'm not sure how to do this. We need to send big buffers (several hundred kilobytes for images) between the processes. We need a large bandwidth!</P>
+<P><I>Piergiorgio Grossi</I></P>
+<P></P>
+<P><font size="6" face="verdana,arial,helvetica">A</font>Without a doubt, the absolute best way to solve this problem is to create a 16-bit executable stub application and communicate across the bit boundaries by using window messages. In particular, you want to use the new WM_COPYDATA message, which was added to Win32 by the Windows NT 3.1 team and therefore has been around for over three years. It is fully documented and supported on all versions of Windows NT and on Windows 95.</P>
+<P>The original purpose of the message was to allow an easy way for one Win32 process to send data to another Win32 process. Internally, the message causes USER32.DLL to create a file-mapping object backed by the paging file and copies the data from the source process's address space into the file mapping. When the target process's thread receives the WM_COPYDATA message, it maps another view of the file-mapping object into its address space.</P>
+<P>WM_COPYDATA exists as a convenience; it is not the most efficient way to transfer data across process boundaries. It's not super efficient because sending the message actually makes a copy of the data, so additional memory must be allocated and a block of bytes must be copied. When the target processes the WM_COPYDATA message, it is working with its own copy of the data; changes made to the data are not reflected back to the sending process. You'll want to use the memory-mapped file APIs directly if you're concerned about performance.</P>
+<P>For 16-bit Windows-based applications, you must use the WM_COPYDATA message because the memory-mapped file APIs cannot be called from 16-bit applications. When trying to compile a 16-bit application that uses WM_COPYDATA you may run into a problem because some versions of the 16-bit Windows header files do not contain a #define for WM_COPYDATA. Don't let this scare you! The message is supported but it just wasn't defined. You can easily fix this problem yourself by adding the following line to your 16-bit source code module:</P>
+<P> </P>
+<P><BR></P>
+<PRE> #define WM_COPYDATA   0x004A</PRE>
+<P> </P>
+<P>By the way, when you use WM_COPYDATA to transfer data to and from 16-bit Windows applications, the maximum size of the block that you can transfer is 16MB. This gives you the bandwidth that you require. Win32-based applications are limited only by the amount of virtual memory available. </P>
+<P><font size="6" face="verdana,arial,helvetica">Q</font>I would prefer to embed linker options inside my source code modules rather than by setting options using the Visual C++ integrated environment.  Is there an easy way to do this?</P>
+<P><I>Chuck Bell</I></P>
+<P></P>
+<P><font size="6" face="verdana,arial,helvetica">A</font>I explain how to do this in both my "Advanced Windows" and "Windows 95: A Developer's Guide" books, but I'll discuss the technique here. The following code fragment shows the proper way to embed a linker directive inside a source code module.</P>
+<P> </P>
+<P><BR></P>
+<PRE> //Create a new data section for linker directives<BR>//The section MUST be called ".drectve"<BR>#pragma data_seg(".drectve")<BR><BR>//Add string(s) into the ".drective" data section<BR>static char szShared[] = "-section:Shared,rws";<BR>static char szFixed[] = "-fixed";<BR><BR>//Stop adding strings into the ".drective" data section<BR>#pragma data_seg()</PRE>
+<P> </P>
+<P>When the compiler compiles this code, it creates a data section called ".drectve" inside the source module's associated object file. Any literal strings that appear after the first pragma data_seg directive will be placed into this section. The strings in this section must always be ANSI strings even if you are compiling for Unicode.</P>
+<P>When the linker combines all of the OBJ modules together, it looks specifically for any ".drective" sections. If it finds any, the linker parses the ".drective" sections and pretends that the directives were passed as command-line arguments. The linker also removes the ".drective" sections so that there is no sign of them in the resulting EXE or DLL file.</P>
+<P>In both of my books, I used a different technique than the one described above. For example, to make a "Shared" section readable, writable, and shared, I used the following single line.</P>
+<P> </P>
+<P><BR></P>
+<PRE> #pragma comment(lib, "kernel32 " "-section:Shared,rws")</PRE>
+<P> </P>
+<P>I must admit that this is a hack! When the compiler sees the line above, it automatically creates a ".drective" section and adds the following string to the section.</P>
+<P> </P>
+<P><BR></P>
+<PRE> -DEFAULTLIB:kernel32 -section:Shared,rws</PRE>
+<P> </P>
+<P>If you were to pass this string as a command-line argument to the linker, the linker would see two options specified.</P>
+<P> </P>
+<P><BR></P>
+<PRE> -DEFAULTLIB:kernel32<BR>-section:Shared,rws</PRE>
+<P> </P>
+<P>The linker that shipped with Visual C++ version 2.x interpreted my pragma comment directive perfectly, but the linker that ships with Visual C++ 4.x parses my pragma comment directive incorrectly. This, unfortunately, breaks many of my sample applications when compiled with <BR>Visual C++ 4.x. When I reported this problem to Microsoft's Visual C++ team, they responded with a very satisfactory explanation that I feel compelled to accept. The Visual C++ team broke my hack to support long filenames; specifically, they wanted the linker to support filenames with spaces in them. So, when the Visual C++ 4.x compiler sees my pragma comment line, it now creates a single string in a ".drective" section that makes the linker think I have a library file called "kernel32 -section:Shared,rws". This library file does not exist and the Visual C++ 4.x linker fails to link my sample applications.</P>
+<P>To build my sample applications with Visual C++ 4.x, you must modify my code to use the technique I describe here. Why didn't I use this first technique to begin with instead of using the hacky pragma comment technique? I used the hack because the Visual C++ 2.0 linker didn't handle the pragma dataseg technique correctly. There is a bug in the Visual C++ 2.0 linker that made it recognize and parse only the first linker directive and ignore the remaining directives. So, if you have the following lines in your source file, the linker sees only the "-section" directive and ignores the "-fixed" directive completely.</P>
+<P> </P>
+<P><BR></P>
+<PRE> #pragma data_seg(".drectve")<BR>static char szShared[] = "-section:Shared,rws";<BR>static char szFixed[] = "-fixed";<BR>#pragma data_seg()</PRE>
+<P> </P>
+<P>Because of this bug, you have to use the pragma comment technique if you're still using Visual C++ 2.0. Because adding linker directives to source code has become so popular, the Visual C++ 4.0 team modified the #pragma comment directive to make this incredibly simple. With Visual C++ 4.0 you can now have the following line in your source code.</P>
+<P> </P>
+<P><BR></P>
+<PRE> #pragma comment(linker, "-section:Shared,rws")</PRE>
+<P> </P>
+<P>This technique is by far the simplest and is the solution of choice. If you are having trouble compiling any of my book's sample applications with Visual C++ 4.0, use this new directive and all will be fine.</P>
+<P><font size="6" face="verdana,arial,helvetica">Q</font>I am implementing a C++ class inside a DLL. When an instance of my class is created, I'd like to get the full pathname of the DLL and save it inside a member variable. How can I get the pathname of my DLL at run time?</P>
+<P><I>Donna Murray</I></P>
+<P></P>
+<P><font size="6" face="verdana,arial,helvetica">A</font>The quickest and easiest way to get the pathname of any module in your process's address space is to call the GetModuleFileName function.</P>
+<P> </P>
+<P><BR></P>
+<PRE> GetModuleFileName(HINSTANCE hinst, LPTSTR szPathName,                         int cch);</PRE>
+<P> </P>
+<P>The first parameter is the HINSTANCE or HMODULE of the EXE or DLL. Remember, in Win32 an HINSTANCE and an HMODULE are exactly the same. Also, remember that HINSTANCEs and HMODULEs represent the base address of where an EXE or DLL module is loaded in the process's address space.</P>
+<P>In your class's constructor, all you need to do is determine the base address where your DLL loaded. The best way to do this is to save the hinst value that is passed to your DLL's DllMain function.</P>
+<P>You can also get your DLL's base address by calling VirtualQuery. The following code fragment demonstrates this technique.</P>
+<P> </P>
+<P><BR></P>
+<PRE> class CSomeClass {<BR>   TCHAR m_szDllPathname[_MAX_PATH];<BR><BR>public:<BR>   CSomeClass ();<BR>};</PRE>
+<P> ·</P>
+<P>·</P>
+<P>·</P>
+<P><BR></P>
+<PRE> CSomeClass::CSomeClass () {<BR>   MEMORY_BASIC_INFORMATION mbi;<BR>   VirtualQuery(DllMain, &amp;mbi, sizeof(mbi));<BR>   GetModuleFileName(mbi.AllocationBase, 
+                         m_szDllPathname, _MAX_PATH);<BR>}</PRE>
+<P> </P>
+<P>The first parameter to VirtualQuery is the address of something—anything that is contained inside the DLL's module. I chose to give the address of the DllMain function but you could give the address of any function, any global variable, or any static variable. You cannot pass the address of a local variable since this address identifies something on the calling thread's stack, which will definitely not be contained inside the DLL's module.</P>
+<P>When VirtualQuery returns, the AllocationBase member of MEMORY_BASIC_INFORMATION contains the memory address where the DLL was loaded (this is also the DLL's HINSTANCE value). Passing this value to GetModuleFileName returns the full pathname of the DLL module.</P>
+<P>Have a question about programming in Win32? You can mail it directly to Win32 Q&amp;A, Microsoft Systems Journal, 825 Eighth Avenue, 18th Floor, New York, New York 10019, or send it to MSJ (re: Win32 Q&amp;A) via:</P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="145pt" VALIGN="TOP"><COL WIDTH="156pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P> <BR>Internet:</P></TD><TD VALIGN="TOP"><P>Jeffry Richter<BR>v-jeffrr@microsoft.com</P></TD></TR><TR><TD VALIGN="TOP"><P> <BR>Internet:</P></TD><TD VALIGN="TOP"><P>Eric Maffei<BR>ericm@microsoft.com</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P><I>This article is reproduced from Microsoft Systems Journal. Copyright © 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</P></font></body></HTML>

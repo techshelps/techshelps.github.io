@@ -1,0 +1,481 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Accessing Rowsets with CRowset</title>
+<link disabled rel=stylesheet href=msdn_ie3.css>
+<style type="text/css">
+@import url(msdn_ie4.css);
+</style>
+</HEAD>
+<BODY>
+<FONT FACE="Verdana, Arial, Helvetica" SIZE="2">
+
+	<!--TOOLBAR_START-->
+	<!--TOOLBAR_EXEMPT-->
+	<!--TOOLBAR_END-->
+
+
+<h1><a name="accessingrowsetswithcrowset"></a>Accessing Rowsets with CRowset</h1>
+<p>
+<b>CRowset</b> is a class that wraps some of the functionality of OLE DB rowset interfaces.</p>
+<p>
+The many interfaces that are available to a particular rowset make rowsets cumbersome to consume. Often, more code is dedicated to acquire an interface than is actually required to set up parameters and call methods of the interface itself. To simplify this process, this SDK includes <b>CRowset</b>, a specialized rowset wrapper class that exposes methods that allow users to perform the most basic operations on a rowset without having to manage interfaces. The wrapper traverses interfaces when necessary, caching the commonly used interfaces on demand and releasing cached interfaces on the behalf of a consumer.</p>
+<p>
+It is possible for a consumer to include calls to both the <b>CRowset</b> class and to the OLE DB interfaces directly. The following methods are supplied to allow the programmer to gain access to the OLE DB interfaces exposed by the attached rowset:</p>
+<pre><code>// Allow consumers to gain access to key Rowset interfaces.
+// These interfaces are returned without AddRef.
+//
+IRowset* GetRowset(void);
+IAccessor* GetAccessor(void);
+IRowPosition* GetRowPosition(void);
+IDataSource* GetDataSource(void);
+</code></pre>
+<p>
+These return the requested interface if it is implemented by the attached rowset. If <b>CRowset</b> is not attached, they return <b>Null</b>.</p>
+<p>
+The reference count of the returned interface is not incremented. This allows the caller to quickly test whether an interface is available without having to call <b>Release</b>. The caller must call <b>AddRef</b> to take ownership of a returned interface.</p>
+<pre><code>if (m_pRowset-&gt;GetRowset() == NULL)
+   // Do something that pertains to a detached rowset
+   // like returning an error.
+else
+   // Use the rowset.</code></pre>
+<p>
+The <b>CRowset</b> class is declared in Rowset.h and implemented in Rowset.cpp. <b>CRowset</b> provides its own implementation of some operations that may not be available because a provider does not implement the necessary optional interface. </p>
+<h1>Attaching Rowset and CRowset Object</h1>
+<p>
+To use <b>CRowset</b>, consumers create an instance of the class. They then attach a rowset to the object and begin consumption.</p>
+<h1>CRowset::Attach</h1>
+<p>
+Once an instance of a <b>CRowset</b> object is created, <b>CRowset::Attach</b> must be called to attach it to an <b>IRowset</b> base interface, an <b>IRowPosition</b> interface or an <b>IDataSource</b> interface before it is usable. <b>CRowset::Attach</b> cleans up any interface from a previous attachment before attaching itself to the new interface. It is valid to call this method with a <b>Null</b> argument. In that case, only the cleanup process is performed. </p>
+<p>
+This method performs a number of checks on the <b>IUnknown</b> interface to determine to which of the three interfaces to make the attachment.</p>
+<pre><code>HRESULT CRowset::Attach(IUnknown *punk, BSTR bstrDM /* = NULL */)
+{
+   // If we have a previous attachment then clean up first
+   //
+   if (m_pDataSource || m_pRowset || m_pRowsetPos)
+   {
+      SetChapter(NULL);
+      ZeroMemory((void*)&amp;m_properties, sizeof m_properties);
+      m_columns.RemoveAll();
+
+      // Release all Rowset interfaces
+      //
+      RELEASE_OBJECT(m_pRowsetPos);
+      RELEASE_OBJECT(m_pRowsetLocate);
+      RELEASE_OBJECT(m_pRowsetScroll);
+      RELEASE_OBJECT(m_pRowsetExactScroll);
+      RELEASE_OBJECT(m_pRowsetFind);
+      RELEASE_OBJECT(m_pRowsetInfo);
+      RELEASE_OBJECT(m_pRowsetIdentity);
+      RELEASE_OBJECT(m_pRowsetChange);
+      RELEASE_OBJECT(m_pRowsetUpdate);
+      RELEASE_OBJECT(m_pAccessor);
+      RELEASE_OBJECT(m_pConvertType);
+      RELEASE_OBJECT(m_pColumnsInfo);
+      RELEASE_OBJECT(m_pRowset);
+      RELEASE_OBJECT(m_pDataSource);
+
+      if (m_bstrDM)
+      {
+         SysFreeString(m_bstrDM);
+         m_bstrDM = NULL;
+      }
+   }
+   if (NULL == punk)
+      return S_OK;
+
+   // Is this a DataSource interface?
+   //
+   HRESULT hr = punk-&gt;QueryInterface(IID_DataSource, (void**)&amp;m_pDataSource);
+   if (m_pDataSource)
+   {
+      // Try to retrieve an IRowPosition from the DataSource. This call
+      // will fail if the DataSource is not initialized, which will
+      // leave m_pRowsetPos NULL
+      //
+      m_pDataSource-&gt;getDataMember(bstrDM, IID_IRowPosition, (IUnknown**)&amp;m_pRowsetPos);
+      if (bstrDM)
+         m_bstrDM = SysAllocString((WCHAR*)bstrDM);
+
+      // Return S_FALSE if the DataSource is not initialized
+      //
+      if (NULL == m_pRowsetPos)
+         hr = S_FALSE;
+   }
+   else
+   {
+      // Is this an IRowset?
+      //
+      hr = punk-&gt;QueryInterface(IID_IRowset, (void**)&amp;m_pRowset);
+
+      // Is this a RowPostion interface?
+      //
+      if (NULL == m_pRowset)
+         hr = punk-&gt;QueryInterface(IID_IRowPosition, (void**)&amp;m_pRowsetPos);
+   }
+   // Once we have IRowPosition, we can get the associated IRowset
+   //
+   if (m_pRowsetPos)
+      hr = m_pRowsetPos-&gt;GetRowset(IID_IRowset, (IUnknown**)&amp;m_pRowset);
+
+   // Get the rowset properties if IRowset is available
+   //
+   if (m_pRowset)
+   {
+      // Do one time initialization of the 
+      // contained ROWSETPROPERTIES structure
+      //
+      GetProperties();
+   }
+   return hr;
+}</code></pre>
+<p>
+The optional parameter is used when the interface is an <b>IDataSource</b>. This parameter is the data member name and can be NULL for the default data member.</p>
+<h1>Getting Rowset Properties</h1>
+<p>
+A rowset’s properties tell consumers what optional interfaces the rowset implements, as well as a number of attributes that describe limitations and capabilities of the rowset, how it responds to editing, and its threading model. Consumers are encouraged to query properties for a particular rowset to establish whether certain optional interfaces are available and whether it possesses capabilities required by the consumer. </p>
+<h1>CRowset::GetRowsetProperties</h1>
+<p>
+This method uses <b>IRowsetInfo::GetProperties</b> to retrieve a rowset’s property values. The first argument can be an external <b>IUnknown</b> of a rowset or <b>Null</b> for the attached rowset.</p>
+<pre><code>HRESULT CRowset::GetRowsetProperties(IUnknown *pRowset, const DBPROPID *pPropIDs, VARIANT *pValues, ULONG cPropIDs)
+{
+   // Validate arguments.
+   //
+   if (!(pPropIDs &amp;&amp; pValues &amp;&amp; cPropIDs))
+      return E_INVALIDARG;
+
+   HRESULT hr;
+   IRowsetInfo * pRowsetInfo = NULL;
+
+   if (pRowset &amp;&amp; pRowset != m_pRowset)
+      // Traverse to desired interface.
+      //
+      hr = pRowset-&gt;QueryInterface(IID_IRowsetInfo, (void**)&amp;pRowsetInfo);
+   else
+   {
+      // Use attached Rowset.
+      //
+      hr = InitRowsetInfo();
+      pRowsetInfo = m_pRowsetInfo;
+   }
+   RETURN_ON_FAILURE(hr);
+
+   // Initialize DBPROPSET parameter.
+   //
+   DBPROPIDSET propidSet;
+   propidSet.rgPropertyIDs = (DBPROPID*)pPropIDs;
+   propidSet.cPropertyIDs = cPropIDs;
+   propidSet.guidPropertySet = DBPROPSET_ROWSET;
+
+   // Retrieve property values.
+   //
+   DBPROPSET *ppropSet = NULL;   // Array DBPROPSET.
+   ULONG    cpropSets = 0;      // Number DBPROPSET in array
+   
+   hr = pRowsetInfo-&gt;GetProperties(1, &amp;propidSet, &amp;cpropSets, &amp;ppropSet);
+
+   if (SUCCEEDED(hr) &amp;&amp; NULL != ppropSet)
+   {
+      // Do a byte copy of the variant property 
+      // value and leave it up to the caller to call
+      // VariantClear when it is done with the value 
+      // to do any necessary cleanup.
+      //
+      for (ULONG i = 0; i &lt; ppropSet[0].cProperties; i++)
+         pValues[i] = ppropSet[0].rgProperties[i].vValue;
+
+      // Free callee-allocated buffer.
+      //</code></pre>
+<p>
+<code>CoTaskMemFree((void*)ppropSet[0].rgProperties);</code></p>
+<pre><code>      CoTaskMemFree((void*)ppropSet);
+   }
+   // If pRowsetInfo is not ours, then release it.
+   //
+   if (NULL != pRowsetInfo &amp;&amp; pRowsetInfo != m_pRowsetInfo)
+      pRowsetInfo-&gt;Release();
+
+   return hr;
+}
+</code></pre>
+<h1>ROWSETPROPERTIES Structure</h1>
+<p>
+The ROWSETPROPERTIES structure contains a subset of rowset properties that may interest a consumer. <b>CRowset</b> initializes its own copy of this structure after it has successfully attached itself to a rowset. The definition of this structure is located in Abdhelp.h.</p>
+<pre><code>struct ROWSETPROPERTIES
+{
+   // Value properties.
+   //
+   struct
+   {
+      long   MaxOpenRows;   // Maximum rows consumers are allowed to hold.
+      long   Updatability;   // IRowsetChange methods supported.
+   }   value;
+
+   // Boolean properties.
+   //
+   struct
+   {
+      UINT   StrongId      :1;   // Newly inserted HROWs can be compared.
+      UINT   LiteralId      :1;   // HROWs can be literally compared.
+      UINT   HasBookmarks   :1;   // Rows have self-bookmark columns.
+                           //   IRowsetLocate is implemented.
+      UINT   CanHoldRows      :1;   // HROWs can be held in between GetRows.
+      UINT   CanScrollBack   :1;   // GetRows can scroll backward.
+                           //   IRowsetScroll is implemented.
+      UINT   CanFetchBack   :1;   // GetRows can fetch backward.
+      UINT   CanChange      :1;   // IRowsetChange is implemented.
+      UINT   CanUpdate      :1;   // IRowsetUpdate is implemented.
+
+      UINT   IRowsetScroll   :1;      // IRowsetScroll is implemented
+      UINT   IRowsetExactScroll:1;   // IRowsetExactScroll is implemented
+   }   flag;
+};
+</code></pre>
+<h1>CRowset::GetProperties</h1>
+<p>
+The <b>CRowset::GetProperties</b> method is called by <b>CRowset::Attach</b> to initialize the ROWSETPROPERTIES structure member of <b>CRowset</b>. A read-only reference to the structure is returned so callers can inspect the rowset’s properties.</p>
+<p>
+See Rowset.cpp for the definition of <b>CRowset::GetProperties</b>.</p>
+<pre><code>#define IS_TRUE(pv) (VT_BOOL == V_VT(pv) &amp;&amp; VARIANT_FALSE != V_BOOL(pv))
+
+const ROWSETPROPERTIES&amp; CRowset::GetProperties(void)
+{
+   // List of DBPROPSET_ROWSET Properties we 
+   // are interested in
+   //
+   static const DBPROPID rgpropid[] =
+   {
+      // Value props
+      //
+      DBPROP_MAXOPENROWS,   
+      DBPROP_UPDATABILITY,   
+
+      // BOOL props
+      //
+      DBPROP_STRONGIDENTITY,
+      DBPROP_LITERALIDENTITY,
+      DBPROP_BOOKMARKS,
+      DBPROP_CANHOLDROWS,
+      DBPROP_CANSCROLLBACKWARDS,
+      DBPROP_CANFETCHBACKWARDS,
+      DBPROP_IRowsetChange,
+      DBPROP_IRowsetUpdate,
+      DBPROP_IRowsetScroll,
+      DBPROP_IRowsetExactScroll
+   };
+   static const ULONG cPropIDs = sizeof rgpropid/sizeof rgpropid[0];
+
+   // Check to see if we need to initialize
+   // the properties structure
+   //
+   if (NULL == m_pRowsetInfo)
+   {
+      HRESULT hr = InitRowsetInfo();
+      
+      if (SUCCEEDED(hr))
+      {
+         // Allocate VARIANT values array
+         //
+         VARIANT *pValues = new VARIANT[cPropIDs];
+         
+         if (NULL == pValues)
+            hr = E_OUTOFMEMORY;
+         else
+         {
+            // Zero out VARIANTs and get property values
+            //
+            ZeroMemory((void*)pValues, cPropIDs * sizeof(VARIANT));
+            hr = GetRowsetProperties(NULL, rgpropid, pValues, cPropIDs);
+
+            // Save property values in structure
+            //
+            if (SUCCEEDED(hr))
+            {
+               m_properties.value.MaxOpenRows   = VT_I4 == V_VT(pValues) ? V_I4(pValues) : 0;
+               m_properties.value.Updatability   = VT_I4 == V_VT(pValues+1) ? V_I4(pValues+1) : 0;
+
+               m_properties.flag.StrongId         = IS_TRUE(pValues+2);
+               m_properties.flag.LiteralId         = IS_TRUE(pValues+3);
+               m_properties.flag.HasBookmarks      = IS_TRUE(pValues+4);
+               m_properties.flag.CanHoldRows      = IS_TRUE(pValues+5);
+               m_properties.flag.CanScrollBack      = IS_TRUE(pValues+6);
+               m_properties.flag.CanFetchBack      = IS_TRUE(pValues+7);
+               m_properties.flag.CanChange         = IS_TRUE(pValues+8);
+               m_properties.flag.CanUpdate         = IS_TRUE(pValues+9);
+               m_properties.flag.IRowsetScroll      = IS_TRUE(pValues+10);
+               m_properties.flag.IRowsetExactScroll= IS_TRUE(pValues+11);
+            }
+            delete [] pValues;
+         }
+      }
+   }
+   return m_properties;
+}
+</code></pre>
+<h1>Columns Information</h1>
+<p>
+Once a rowset’s properties have been inspected and it is ready for consumption, the next step is to collect information about the rowset’s columns. A rowset exposes information about its columns through the required <b>IColumnsInfo</b> and the optional <b>IColumnsRowset</b> interfaces. <b>IColumnsRowset</b> exposes metadata in tabular format and is consumed like any other rowset.</p>
+<p>
+Of the two, <b>IColumnsRowset</b> provides the most complete metadata information but is more complicated to consume. <b>IColumnsInfo</b> provides consumers with the most commonly used metadata through an array of DBCOLUMNINFO structures, and is more convenient and easy to consume. For the most part, consumers will find the metadata supplied by DBCOLUMNINFO to be sufficient.</p>
+<h1>COLUMNINFO Structure</h1>
+<p>
+The COLUMNINFO structure is an extension of DBCOLUMNINFO and includes additional metadata about a column. The additional metadata is retrieved using <b>IColumnsRowset</b>, which is demonstrated later in this section. This structure is defined with a constructor and destructor to perform initialization and cleanup of complex data members. Its implementation is in Adbhelp.cpp.</p>
+<pre><code>struct COLUMNINFO : public DBCOLUMNINFO
+{
+public:
+   COLUMNINFO();
+   ~COLUMNINFO();
+
+   void Clear(BOOL fZeroMemory = TRUE);
+
+// Additional metadata
+public:
+   VARIANT   varDefault;      // Default value for a column
+
+// Operators
+public:
+   COLUMNINFO&amp; operator=(const COLUMNINFO&amp; other);
+   COLUMNINFO&amp; operator=(const DBCOLUMNINFO&amp; other);
+};
+</code></pre>
+<h1>CRowset::GetColumns</h1>
+<p>
+The <b>CRowset::GetColumns</b> method uses <b>IColumnsInfo::GetColumnInfo</b> to populate an array of COLUMNINFO structures; it then calls <b>CRowset::InitColumnsMetadata</b> to fill additional metadata members for each COLUMNINFO in the array.</p>
+<pre><code>HRESULT CRowset::GetColumns(COLUMNINFO*&amp; pColumns, ULONG&amp; cColumns)
+{
+   // Clear out bound parameters.
+   //
+   pColumns = NULL;
+   cColumns = 0;
+
+   HRESULT hr = InitColumnsInfo();
+   RETURN_ON_FAILURE(hr);
+
+   // Get the column information.
+   //
+   OLECHAR         *wszColumns   = NULL;
+   DBCOLUMNINFO   *pDBColumns   = NULL;
+   
+   hr = m_pColumnsInfo-&gt;GetColumnInfo(&amp;cColumns, &amp;pDBColumns, &amp;wszColumns);
+   
+   if (SUCCEEDED(hr) &amp;&amp; cColumns &gt; 0)
+   {
+      // Allocate COLUMNINFO array.
+      //
+      pColumns = new COLUMNINFO[cColumns];
+      if (NULL == pColumns)
+      {
+         cColumns = 0;
+         hr = E_OUTOFMEMORY;
+      }
+      else for (register ULONG i = 0; i &lt; cColumns; i++)
+         pColumns[i] = pDBColumns[i];
+   }
+   // Free callee-allocated buffers.
+   //
+   if (pDBColumns)
+   {
+      for (register ULONG i = 0; i &lt; cColumns; i++)
+      {
+         if (pDBColumns[i].pTypeInfo)
+            pDBColumns[i].pTypeInfo-&gt;Release();
+      }
+      CoTaskMemFree((void*)pDBColumns);
+      CoTaskMemFree((void*)wszColumns);
+   }
+   // Get the default value metadata for
+   // each column.
+   //
+   if (cColumns)
+      InitColumnsMetadata(pColumns, cColumns);
+
+   return hr;
+}
+</code></pre>
+<h1>CRowset::InitColumnsMetadata</h1>
+<p>
+This method is a protected member of <b>CRowset</b> and cannot be called by consumers, but it is discussed here because it uses <b>IColumnsRowset::GetColumnsRowset</b> to retrieve the rowset containing column metadata for the base rowset. The column rowset is read-only and can be consumed in the same manner as the base rowset. This method also demonstrates the use of more advanced <b>CRowset</b> methods that are discussed later in this section.</p>
+<pre><code>HRESULT CRowset::InitColumnsMetadata(COLUMNINFO*&amp; pColumns, ULONG cColumns)
+{
+   if (!(pColumns &amp;&amp; cColumns))
+      return E_INVALIDARG;
+
+   // Determine if the rowset implements IColumnsRowset.
+   //
+   IColumnsRowset   *pColRowset = NULL;
+   HRESULT hr = m_pRowset-&gt;QueryInterface(IID_IColumnsRowset, (void **)&amp;pColRowset);
+   RETURN_ON_FAILURE(hr);
+
+   IUnknown   *punkRowset   = NULL;   // Columns Rowset
+   CRowset      *pRowset   = NULL;   // Used to consume Columns Rowset
+   HROW      *phRows      = NULL;   // Receives row handles
+   ULONG      cRows      = 0;   // Receives row handles count
+   HACCESSOR   haccessor   = NULL;   // Accessor for Columns Rowset
+   DBBINDING   dbBinding;         // Binding for default value column
+   CBookmark bmk(sizeof DBBMK_FIRSTROW, &amp;DBBMK_FIRSTROW);
+
+   // Get the IRowset for all required metadata columns
+   // and the optional default value column. The returned
+   // rowset is read-only and can be consumed like any other.
+   //
+   hr = pColRowset-&gt;GetColumnsRowset(NULL, 1, &amp;DBCOLUMN_DEFAULTVALUE, 
+    IID_IRowset, 0, NULL, &amp;punkRowset);
+   pColRowset-&gt;Release();
+   if (FAILED(hr)) goto CleanUp;
+
+   // Attach it to a CRowset.
+   // 
+   pRowset = new CRowset();
+   if (NULL == pRowset)
+   {
+      hr = E_OUTOFMEMORY;
+      goto CleanUp;
+   }
+
+   hr = pRowset-&gt;Attach(punkRowset);
+   if (FAILED(hr)) goto CleanUp;
+
+   // Create binding for the default value column.
+   //
+   InitBinding(dbBinding, 0, DBTYPE_VARIANT, sizeof(VARIANT), offsetof(COLUMNINFO, varDefault));
+   hr = pRowset-&gt;GetColumnOrdinals(&amp;dbBinding.iOrdinal, &amp;DBCOLUMN_DEFAULTVALUE, 1);
+   if (FAILED(hr) || DB_INVALIDCOLUMN == dbBinding.iOrdinal) goto CleanUp;
+
+   // The number of rows fetched needs
+   // to be the same as the number of columns.
+   //
+   hr = pRowset-&gt;GetRows(bmk, 0, (long)cColumns, phRows, cRows);
+   if (FAILED(hr) || cRows != cColumns) goto CleanUp;
+
+   // Create an accessor.
+   //
+   hr = pRowset-&gt;CreateAccessor(&amp;dbBinding, 1, haccessor);
+
+   if (NULL != haccessor)
+   {
+      // Get the default value for each column.
+      //
+      for (ULONG i = 0; i &lt; cRows; i++)
+         pRowset-&gt;GetData(phRows[i], haccessor, (void*)(pColumns+i));
+
+      pRowset-&gt;ReleaseAccessor(haccessor);
+   }
+   
+CleanUp:
+   if (punkRowset)
+      punkRowset-&gt;Release();
+
+   if (pRowset)
+   {
+      if (phRows)
+         pRowset-&gt;FreeRows(phRows, cRows);
+
+      delete pRowset;
+   }
+   return hr;
+}
+</code></pre>
+</font></BODY>
+</HTML>

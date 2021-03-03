@@ -1,0 +1,146 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML>
+<HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>6.3.2  DispatchCleanup Functionality</TITLE>
+<style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD>
+<BODY BGPROPERTIES="FIXED" TEXT="#000000" BGCOLOR="#FFFFFF">
+
+<FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<H3><A NAME="DDK_DispatchCleanup_Functionality_KG"></A>6.3.2  DispatchCleanup Functionality</H3>
+<P>
+Any NT driver in which IRPs can be held for an indefinite interval should have
+a DispatchCleanup routine. If IRPs might be queued when a user-mode handle for
+a file object that represents the underlying physical or logical device is
+closed, the highest-level driver holding IRPs bound for that device must have
+a DispatchCleanup routine. 
+<P>
+An NT driver’s DispatchCleanup routine is called to cancel all IRPs that are
+currently queued to the target device object for the file object specified in
+the driver’s I/O stack location of the cleanup IRP. 
+<P>
+In general, a DispatchCleanup routine must do the following:
+<UL>
+<LI>
+Reset the driver’s Cancel entry point, if any, to NULL in every IRP currently
+in the device queue (or in the driver’s internal queue of IRPs) for the target
+device object and given file object with <B>IoSetCancelRoutine</B>. 
+<P>
+<LI>
+Cancel every IRP currently in the queue for the target device object and the
+file object specified in the driver’s I/O stack location of the cleanup IRP. 
+<P>
+<LI>
+Complete the input cleanup IRP and return STATUS_SUCCESS.
+</UL>
+<P>
+The DispatchCleanup routine must set up the I/O status block as follows in
+each IRP queued to the target device object for the given file object, before
+it completes each IRP to be cancelled:
+<TABLE>
+<TR VALIGN=top>
+<TD><FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<P>
+<B>Status</B>
+</FONT><TD><FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<P>
+set to STATUS_CANCELLED
+</FONT><TR VALIGN=top>
+<TD><FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<P>
+<B>Information</B>
+</FONT><TD><FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<P>
+set to zero
+</FONT></TABLE>
+<P>
+The DispatchCleanup routine specifies IO_NO_INCREMENT when it calls <B>IoCompleteRequest</B>
+with each cancelled IRP. After it has cancelled all queued IRPs for the given
+file object, the DispatchCleanup routine completes the cleanup request itself
+with STATUS_SUCCESS and a <I>PriorityBoost</I>&nbsp;of IO_NO_INCREMENT. 
+<P>
+If a driver manages its own internal queue of IRPs, rather than using the
+device queue associated with its device object, the driver should set up an
+interlocked queue that is protected with an executive spin lock. Otherwise,
+another driver routine (running on another processor in an SMP machine) might
+dequeue an IRP that should be cancelled by the DispatchCleanup routine. To
+remove an IRP from such a queue and cancel it, the DispatchCleanup routine
+calls an <B>ExInterlocked..List</B>&nbsp;support routine with a driver-supplied
+executive spin lock. 
+<P>
+Any area in the device extension of the target device object that is shared
+between the DispatchCleanup routine and another driver routine also must be
+protected by a spin lock. 
+<P>
+Any NT driver must synchronize its access to cancelable IRPs with the I/O
+Manager and with its own Cancel routine(s), if any. 
+<P>
+<B><IMG SRC="../../../wedge.gif" BORDER=0>&nbsp; &nbsp; </B>Consider the following
+guidelines for managing spin lock usage within a DispatchCleanup routine that
+must synchronize with one or more Cancel routines:<B>&nbsp;</B>
+<UL>
+<LI>
+If the DispatchCleanup routine must acquire both the system cancel spin lock
+and one or more of the driver’s own spin locks, it should call <B>IoAcquireCancelSpinLock</B>
+<I>before</I>&nbsp;it acquires its own spin lock(s).
+<P>
+Such a DispatchCleanup routine <I>must</I>&nbsp;release any nested spin lock
+acquisitions in inverse order: that is, it must release its own spin lock(s) <I>before</I>
+it calls <B>IoReleaseCancelSpinLock</B>. 
+<P>
+<LI>
+If a driver uses the I/O-manager-supplied device queue in the device object,
+then the DispatchCleanup routine must call <B>IoAcquireCancelSpinLock</B>
+before it calls <B>IoSetCancelRoutine</B>&nbsp;to reset the Cancel entry point in
+an IRP to NULL. 
+<P>
+If a driver manages its own queue(s) of IRPs, then the DispatchCleanup routine
+does not need to acquire the cancel spin lock before calling <B>IoSetCancelRoutine</B>.
+<P>
+<LI>
+The DispatchCleanup routine must release every spin lock it is holding before
+it calls <B>IoCompleteRequest</B>&nbsp;with an IRP, including each IRP that it
+cancels. 
+</UL>
+<P>
+For more information about Cancel routines, see also Chapter 12. 
+<P>
+<B><IMG SRC="../../../wedge.gif" BORDER=0>&nbsp; &nbsp; </B>Keep the following points
+in mind when implementing a DispatchCleanup routine:<B>&nbsp;</B>
+<UL>
+<LI>
+This routine must walk the queue of IRPs for the target device object and
+cancel every outstanding request for the given file object before it completes
+the input cleanup IRP, which is sent when the handle for the file object that
+represents the device in user mode is closed. 
+<P>
+<LI>
+The queue should be protected by a spin lock to prevent IRPs that should be
+cancelled from being dequeued by any other driver routine. The device queue
+associated with a device object comes with a spin lock. If a driver sets up
+its own queue for IRPs, it should set up an interlocked queue.
+<P>
+<LI>
+This routine must acquire the system cancel spin lock with <B>IoAcquireCancelSpinLock</B>
+before it calls <B>IoSetCancelRoutine</B>&nbsp;to reset its Cancel entry point to
+NULL in each queued IRP if the driver has a Cancel routine. The exception to
+this rule is if the driver manages its own queue(s) of IRPs and synchronizes
+access to them with driver-supplied spin locks; in that case, the driver does
+not need to acquire the cancel spin lock before calling <B>IoSetCancelRoutine</B>.
+<P>
+<LI>
+This routine must set each queued IRP’s I/O status block with <B>Status</B>
+set to STATUS_CANCELLED and <B>Information</B>&nbsp;set to zero before it completes
+each such IRP. 
+<P>
+<LI>
+This routine must release all spin locks it is holding before calling <B>IoCompleteRequest</B>
+with an IRP.
+<P>
+<LI>
+This routine should set the <I>PriorityBoost</I>&nbsp;to IO_NO_INCREMENT when it
+completes each cancelled IRP and the cleanup IRP.
+</UL>
+<P></FONT>
+</BODY>
+</HTML>

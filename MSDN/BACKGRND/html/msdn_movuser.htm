@@ -1,0 +1,243 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Moving Window Manager and GDI into the Windows NT 4.0 Executive</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><a name="msdn_movuser"></a>Moving Window Manager and GDI into the Windows NT 4.0 Executive</h1>
+<p>
+Dave Leinweber<br>
+Mark Ryland<br>
+Microsoft Corporation</p>
+<p>
+April 1996</p>
+<h4><a name="movuser_contents"></a>Contents</h4>
+<p>
+<a href="#movuser_over">Overview</a></p>
+<p>
+<a href="#movuser_microkernel">Microkernel Designs and the Windows NT Architecture</a></p>
+<p>
+<a href="#movuser_change">The Windows NT 4.0 Kernel-Mode Change</a></p>
+<p>
+<a href="#movuser_effects">Effects of the Change</a></p>
+<p>
+<a href="#movuser_perform">Performance</a></p>
+<p>
+<a href="#movuser_scale">Scalability and Portability</a></p>
+<p>
+<a href="#movuser_summ">Summary</a></p>
+<h2><a name="movuser_over"></a>Overview</h2>
+<p>
+Microsoft® Windows&nbsp;NT® Workstation 4.0 and Windows NT Server 4.0 include a change in the implementation of Microsoft Win32® graphics-related application programming interfaces (APIs). These changes are transparent to applications and users, yet they result in a variety of improvements to graphics performance and memory requirements, as well as simplify the design of the Windows&nbsp;NT Win32 subsystem. The improvements result from the move of certain operating system modules from a user-mode application process into a subsystem within the privileged portion of Windows&nbsp;NT, known as the <i>Executive</i>.</p>
+<p>
+Changes to the code that operates in the <i>kernel</i> or "privileged" mode of any operating system can be of concern to application designers and system architects. Because such changes potentially affect the operating system's compatibility with existing applications, as well as its portability and reliability, such changes should be explained and justified.</p>
+<p>
+This article provides a basic understanding of the issues and justifications surrounding this change and its effect on customers and developers. It explains how this change will provide improvements to the operation of the system—such as performance and memory requirements—while leaving the critical factors of application compatibility, scalability, portability, and reliability unaffected.</p>
+<p>
+<a href="#movuser_contents">Return to Contents</a></p>
+<h2><a name="movuser_microkernel"></a>Microkernel Designs and the Windows&nbsp;NT Architecture</h2>
+<p>
+<a name="movuser_text1"></a>The Windows&nbsp;NT 4.0 architecture merges the best attributes of a layered operating system with those of a client/server or <i>microkernel</i> operating system. (<a href="#movuser_end1">Endnote 1</a>) The Windows&nbsp;NT Executive is the generic name for a number of subsystems and components of the operating system that execute in the microprocessor's kernel (or privileged) mode. The remainder of the operating system, such as various server subsystems and their application clients, execute in user (or application) mode.</p>
+<p>
+Within the Windows&nbsp;NT Executive, basic functions of the operating system are integrated in a component and layered fashion, as shown in Figure 1. The underlying layer of the Windows&nbsp;NT Executive is the Hardware Abstraction Layer (HAL), which provides a common software abstraction over such hardware devices as clocks, cache and memory controllers, peripheral adapters, symmetric multiprocessing functions, and system buses. Simplifying Windows&nbsp;NT provides support for a wide range of hardware designs within a given microprocessor family. Various system services at the top of the Executive offer support to the user-mode subsystems and to each other. Residing between these two layers is the microkernel, the heart of the operating system, which provides the most basic operating system functions such as first-level interrupt handling, deferred procedure call and thread scheduling, and synchronization primitives.</p>
+<p>
+<img src="movuser01.gif" border=0></p>
+<p class=label>
+<b>Figure 1. Windows&nbsp;NT 3.51 architecture</b></p>
+<p>
+<a name="movuser_text2"></a>For this discussion, it is important to clearly understand the difference between the terms <i>kernel mode</i> (<a href="#movuser_end2">Endnote 2</a>) and <i>microkernel</i>. Kernel mode refers to a mode of code execution in a microprocessor in which all memory is totally accessible and all CPU instructions can be issued. By providing the operating system software with a higher privilege level than application software, the microprocessor provides a necessary foundation for operating system designers to ensure that a misbehaving application cannot disrupt the stability of the system as a whole. (<a href="#movuser_end3">Endnote 3</a>)</p>
+<p>
+A <i>microkernel</i>, on the other hand, is the name given to the core portion of a modern, modular operating system. Microkernel operating systems are based on two fundamental principles. The most basic principle is one of modularity, encapsulation, and data hiding. In this aspect of the design, there is one and only one portion of the operating system that has system-wide responsibility for a particular function. All other parts of the operating system (as well as applications, naturally) access that function through a well-defined interface. There is no duplication of function and no "back doors" to critical data structures; all access to system data structures is through software interfaces. This approach makes it possible to upgrade or replace entire modules within the system without disturbing the remainder. A secondary principal of the microkernel design, related to the first but focused more on the implementation strategy, is that large portions of the operating system which traditionally run entirely in the kernel mode of the microprocessor can now be executed in user mode, with only the microkernel itself, along with a relatively small amount of hardware device-specific code, executing in kernel mode.</p>
+<p>
+Operating systems that follow both of these principles are often called "pure microkernel" systems. Operating systems that follow the first principle only—strict modularity and strong encapsulation—but not the second are sometimes called "modified microkernel" or <i>macrokernel</i> operating systems.</p>
+<p>
+<a name="movuser_text4"></a>No commercial operating system is based on a pure microkernel design. (<a href="#movuser_end4">Endnote 4</a>) The reason is simple: the pure microkernel design is commercially impractical because it is too computationally expensive—that is, it is too slow. The simple fact is that there are insufficient benefits from running core portions of the operating system in user mode to make up for resulting dramatic losses in performance. Consider the following: suppose the file-system code of an operating system has a bug that causes it to crash from time to time. In a traditional operating system or a macrokernel operating system, a bug in kernel-mode code such as a file system may crash the entire operating system. In a pure microkernel operating system the file system implementation is run in user mode, so theoretically it can't crash the entire operating system. That's all well and good, but the hypothetical buggy file system will still fail from time to time. What is the practical difference in real-world use between an operating system that crashes from time to time and one that continues running but loses all access to persistent storage? (<a href="#movuser_end5">Endnote 5</a>)</p>
+<p>
+<a name="movuser_text6"></a>From the start, the Windows&nbsp;NT architecture has fallen squarely into the macrokernel camp. On the one hand, Windows&nbsp;NT is extraordinarily modular and well encapsulated in its design. For example, the Windows NT operating system as a whole does not depend on a particular size for the microprocessor's virtual memory page. (<a href="#movuser_end6">Endnote 6</a>) The virtual memory page size is determined dynamically at boot time by the HAL and thereafter all operating-system code, including the memory manager itself, works happily with whatever page size the HAL has determined as the operating system booted. Thus, a microprocessor architecture could switch from using 4K pages to 16K pages and Windows&nbsp;NT could run despite this dramatic change in the hardware environment.</p>
+<p>
+On the other hand, from its first release, Windows&nbsp;NT has come down squarely on the side of implementing high-performance, operating-system subsystems in kernel mode, where they can interact with the hardware and each other without performance-robbing transitions of processor mode along with thread/process transitions. From its earliest days, Windows&nbsp;NT has implemented its memory manager, integrated cache manager, file systems (including network redirectors), object/security manager, network protocols, network server, and all thread/process management as kernel-mode subsystems while retaining a highly modular design. All of these subsystems are fully protected from errant applications, of course, as applications do not have direct access to the code and data of the privileged part of the operating system.</p>
+<p>
+The result of the tradeoffs in the Windows&nbsp;NT design speaks for itself: Windows&nbsp;NT 3.51 is recognized throughout the industry as having hit a "sweet spot" in operating system design. It is both incredibly robust and stable as an application server and workstation platform, yet fast and nimble from the perspective of core operating system services such as virtual memory management, file input/output (I/O), networking, and file and print sharing.</p>
+<p>
+<a href="#movuser_contents">Return to Contents</a></p>
+<h2><a name="movuser_change"></a>The Windows&nbsp;NT 4.0 Kernel-Mode Change</h2>
+<p>
+There is one area, however, in which Windows&nbsp;NT has, until now, followed the more pure microkernel approach in its implementation of the window manager and graphics subsystems that implement the graphical user interface (GUI) aspects of the Win32 API. Those subsystems—the Window Manager (also known as USER) and Graphics Device Interface (GDI)—have been implemented in Windows&nbsp;NT 3.51 and previous releases as a separate user-mode process called the Client-Server SubSystem (identifiable with process monitoring tools as CSRSS.EXE).</p>
+<h3>Background</h3>
+<p>
+In the earliest days of Windows&nbsp;NT, the Win32 server was designed as an equal to the OS/2, POSIX, and other planned operating system environments. Each of these subsystems was intended to operate as a stand-alone environment. However, this design was leading to a large amount of duplication of system functions that, ultimately, would have negatively affected both system size and performance. Moreover, from a market perspective it became clear toward the end of the initial development of Windows&nbsp;NT that Win32 would be the critical programming interface for the entire operating system. To alleviate much of this duplication while responding to market trends, the final Windows&nbsp;NT 3.1 Win32 subsystem was a specially privileged "application" that was required by all other subsystems and the operating system as a whole.</p>
+<p>
+The Win32 server in Windows&nbsp;NT releases prior to Windows&nbsp;NT 4.0 contains five modular components, as shown in Figure 2:
+<ul type=disc>
+<li>
+<i>Window Manager</i>, handles input and manages the screen I/O<br><br></li>
+<li>
+<i>Graphics Device Interface</i>, a drawing library for graphics output devices<br><br></li>
+<li>
+<i>Graphics Device Drivers</i>, hardware-dependent graphics drivers (portions of the graphics device drivers were also implemented in the Executive)<br><br></li>
+<li>
+<i>Console</i>, provides text window support <br><br></li>
+<li>
+<i>Operating System Functions</i>, supports all the components in the subsystem</li>
+</ul>
+<p>
+Each of these components reside in a separate DLL.</p>
+<p>
+<img src="movuser02.gif" border=0></p>
+<p class=label>
+<b>Figure 2. Windows&nbsp;NT 3.51 Win32 subsystem</b></p>
+<p>
+<a name="movuser_text7"></a>Having a separate server process that contains the Win32 graphics subsystem requires substantial memory overhead to hold data passed between the client and server and back, to marshal the information, and to manage the required multiple threads. The design also requires multiple thread and process context switches, (<a href="#movuser_end7">Endnote 7</a>) which require considerable CPU cycles and memory resources. In normal operation, potentially hundreds of graphics support calls per second can dramatically affect the overall performance of the system.</p>
+<p>
+Nevertheless, the present design is highly optimized. For example, for each thread on the client side there is a paired thread in the Win32 server waiting in a special interprocess communication facility called <i>Fast LPC</i>. Unlike normal thread context switches, transitions between paired threads via Fast LPC do not cause a scheduling event in the microkernel, thereby enabling the server thread to run for the remaining time slice of the client thread before having to take its turn in the kernel's preemptive thread scheduler. Moreover, shared memory buffers are used to allow fast passing of large data structures such as bitmaps, and clients have direct but read-only access to key server data structures to minimize the need for thread/process transitions between clients and the Win32 server. Finally, GDI operations are batched and cached. <i>Batching</i> means that a series of graphics calls by a Win32 application is not actually "pushed" over to the server and drawn on the output device until a GDI batching queue is filled. The size of the queue can be set by Win32 applications, and the queue can be flushed at any time. Conversely, read-only properties and data structures of GDI are, once they are obtained from the Win32 server, <i>cached</i> on the client side for nearly instantaneous subsequent access.</p>
+<p>
+Still, because Windows&nbsp;NT is a Windows-based operating system, in which all other environmental subsystems utilize the basic functions provided by Win32, and because the graphics and windowing subsystems have a very high rate of interaction with hardware (video drivers, mouse and keyboard drivers, and so forth), the Windows&nbsp;NT 4.0 design team decided to move that common functionality from user mode into kernel mode. In this way, the functions can be performed without shared memory buffers or paired threads, and with fewer thread and process context switches. This change as implemented in Windows&nbsp;NT 4.0 results in faster operation and reduced memory requirements, both visible benefits to the end user. And there is no loss of reliability, since (a)&nbsp;the kernel mode implementations of Win32 are fully protected from direct access by applications; and (b)&nbsp;the Win32 server process is considered a critical system component of Windows&nbsp;NT 3.51, such that if the CSRSS.EXE process faults the entire Windows&nbsp;NT operating system is shutdown.</p>
+<h3>The Kernel-Mode Change</h3>
+<p>
+With this new release, the Window Manager, GDI, and related graphics device drivers have been moved to the Windows&nbsp;NT Executive running in kernel mode. Both Window Manager and GDI now exist as Windows&nbsp;NT Executive system services. The console, shutdown, and hard error handling functions remain as part of CSRSS in user mode, as shown in the following figure.</p>
+<p>
+<img src="movuser03.gif" border=0></p>
+<p class=label>
+<b>Figure 3. Windows&nbsp;NT 4.0 Win32 service</b></p>
+<p>
+Moving the Window Manager and GDI functionality to kernel mode has removed a large amount of complexity from the code. Applications can now access the GUI implementation subsystems in exactly the same way that they currently implement the base (non-GUI) parts of the Win32 API such as file I/O and memory management: by making a kernel-mode trap call at which time the calling thread is switched to a kernel-mode stack and all call parameters are validated before being used by the privileged subsystem. Thus, many thread and process transitions are eliminated. Still, kernel-mode transitions are relatively expensive compared to direct code/data access at the same privilege level so some of the performance tricks of the old design—such as a more limited degree of GDI batching and caching in the user mode portion of the client's address space—are maintained to maximize performance.</p>
+<p>
+Once applications have called into Window Manager and GDI, those subsystems can now access other Windows&nbsp;NT Executive systems directly without the cost of user/kernel-mode transitions. This is especially important in the case of GDI calling through video drivers, which involves interaction with video hardware at high frequencies and high bandwidths.</p>
+<p>
+All in all, the change reduces memory consumption, thread count, and process/thread context switches substantially.</p>
+<p>
+<a href="#movuser_contents">Return to Contents</a></p>
+<h2><a name="movuser_effects"></a>Effects of the Change</h2>
+<p>
+There are a number of questions that naturally come to mind when evaluating a change such as this. How will this change affect Windows&nbsp;NT architecture? Will this affect reliability or security? What about memory requirements? In this section of the article, we'll attempt to answer these and other questions related to this change.</p>
+<h3>Microkernel Architecture</h3>
+<p>
+From an overall architectural view, Windows&nbsp;NT looks pretty much the same. The microkernel is still the center of the Windows&nbsp;NT Executive—for the most part, it remains the same. The architecture of Windows&nbsp;NT has always provided for an extensible kernel-mode operation. The Executive was designed from the beginning to allow services to be added without redesigning the system. In the current change, a set of services previously implemented in user mode are now operating in kernel mode. And because none of the APIs have changed, there is no effect on existing Windows&nbsp;NT-based applications.</p>
+<p>
+<img src="movuser04.gif" border=0></p>
+<p class=label>
+<b>Figure 4. Windows&nbsp;NT 4.0 architecture</b></p>
+<h3>Reliability</h3>
+<p>
+The objective of any high-end operating system, such as Windows&nbsp;NT, is to protect the system and other applications from errant applications.</p>
+<h4>Application protection</h4>
+<p>
+Windows&nbsp;NT uses the features offered by today's microprocessors to provide two ways of accomplishing memory protection—process-space memory management and CPU-processing modes. A thread running in user mode inside any given process cannot read or write outside of its own memory space, nor can it read or write to the kernel-mode portion of its own address without first transitioning to kernel mode. In Windows&nbsp;NT 3.51 (and previous releases) Window Manager and GDI are protected from applications writing into their space by the fact that each resides in a separate process.</p>
+<p>
+On the other hand, the shared services provided by the Windows&nbsp;NT Executive reside within the processor's dedicated kernel-mode memory addresses, and in this way are protected from applications and other user-mode code. The kernel-mode services can access any memory location, including all applications' memory spaces. However, applications cannot directly access the memory of any service located in the kernel mode.</p>
+<p>
+<img src="movuser05.gif" border=0></p>
+<p class=label>
+<b>Figure 5. Windows&nbsp;NT 3.51 process protection</b></p>
+<p>
+In order for an application process to access any of the Win32 Server processes in Windows&nbsp;NT 3.51, the application uses the User32 or GDI32 interfaces to pass information to the Win32 server. Because the Win32 server is located in a different process, User32 and GDI32 accomplish this action using a shared memory window and the process manager service of the Executive. While this design does indeed protect the Win32 server function from the application, it does so with a fair amount of overhead, as is shown in Figure 5.</p>
+<p>
+<img src="movuser06.gif" border=0></p>
+<p class=label>
+<b>Figure 6. Windows&nbsp;NT 4.0 service protection</b></p>
+<p>
+In the Windows&nbsp;NT Workstation 4.0 release, the Window Manager and GDI processes are still protected because applications cannot write to memory locations occupied by kernel-mode code and data, as shown in Figure 6. Also notice how the interface between the application process and the Window Manager or GDI has been greatly simplified with the elimination of the shared-memory window and multiple threads. The same thread is used for both the application code and the operating-system service without exposing the system to an errant application process because the operating-system code is able to intervene and validate access when the thread tries to cross the user/kernel boundary.</p>
+<p>
+Consequently, there is no change in stability or reliability resulting from poorly behaved applications because kernel-mode code and data is protected by the Windows&nbsp;NT architecture and the processor's memory-protection system.</p>
+<p>
+Note that in this respect of total isolation of critical operating-system data from user-mode application code, Windows&nbsp;NT Workstation 4.0 remains unchanged in being architecturally more robust than other PC operating systems such as Microsoft Windows®&nbsp;95, IBM OS/2 Warp, and Apple® Macintosh® operating systems. All of those systems make a trade-off for greater performance and smaller memory footprint that involves putting critical system data structures in memory locations that are directly accessible to application code without transitioning through operating-system code to the privileged mode of the processor. That tradeoff is entirely appropriate for today's low- and medium-range platforms, but not in a high-end platform such as Windows&nbsp;NT. With Windows&nbsp;NT 4.0, it remains true that if application code can crash the system, Windows&nbsp;NT has a bug, period. In other typical PC operating systems, because of architectural choices inherent in their designs, application code can crash the operating system even when the system code is flawless.</p>
+<h4>Protection from Win32 subsystem flaws</h4>
+<p>
+One of the side effects of this change is that now Window Manager, GDI, and graphics drivers have the potential to write directly to other spaces within the Executive, thereby possibly disrupting the stability of the whole system.</p>
+<p>
+However, from the user's point of view, that potential to disrupt the system has always existed. If the GDI process in Windows&nbsp;NT 3.51 should fail for any reason, the user would be presented with a system that appears to have crashed. The fact that the kernel is still operating is invisible to the user, because it simply appears that the system is not responding. Such is the critical nature of Window Manager and GDI. The change in Windows&nbsp;NT 4.0 has no effect on this kind of problem. However, Microsoft ensures through its development and testing standards that these services are highly reliable and trustworthy.</p>
+<h4>Driver reliability</h4>
+<p>
+Another area of possible impact can come from the move of the graphics drivers into kernel mode. Previously, some portions of a graphics driver ran within CSRSS, while other others ran in kernel mode. Now, the entire driver runs in kernel mode. While Microsoft does not develop all the graphics device drivers supported in Windows&nbsp;NT, Microsoft does work directly with hardware manufacturers to ensure that they are able to produce reliable and efficient drivers. New kernel-mode GDI drivers must be produced to operate in Windows&nbsp;NT 4.0. Fortunately, the required changes are not significant—experienced developers are able to make the modifications in just a few short hours. To ensure that all currently supported graphics devices are still supported in Windows&nbsp;NT 4.0, we are working very closely with manufacturers to make sure that the change doesn't affect the stability of the system. All drivers shipped with the system are submitted to the same rigorous testing as other Executive components.</p>
+<p>
+Finally, it's important to understand that this design is not fundamentally "risky." It is identical to the ones used by existing I/O Manager drivers (for example, network card drivers and hard disk drivers). All of these drivers have been operating within the Windows&nbsp;NT Executive since the inception of Windows&nbsp;NT with a high degree of reliability.</p>
+<h4>Security</h4>
+<p>
+Due to the modular design of Windows&nbsp;NT, moving Window Manager and GDI to kernel mode will make no difference to the security subsystem or to the overall security of the operating system. This will also have no effect on the C2 or E3 security certification evaluation, other than making it easier to document the internal architecture of Windows&nbsp;NT since the majority of Win32 APIs are now implemented in a more similar fashion.</p>
+<p>
+<a href="#movuser_contents">Return to Contents</a></p>
+<h2><a name="movuser_perform"></a>Performance</h2>
+<p>
+One of the primary goals of any new release of Windows&nbsp;NT to improve its performance. The Windows&nbsp;NT Workstation 4.0 release is no different, and in many ways is even more focused on performance. With the new user shell matching the Windows&nbsp;95 shell, customers will compare the two operating systems for use on the desktop within their organizations. While the advanced security and advanced operating-system features of Windows&nbsp;NT sometimes mean there are incompatibilities with some legacy programs, it does not mean that the performance need be noticeably different.</p>
+<p>
+By making the Window Manager and GDI subsystems into Executive services, both operations decrease in size and improve in performance. This is largely due to the elimination of the shared memory buffers, as well as a substantial reduction in the code size and thread/process switching from the more complex client/server design. Consider, for example, the client/server transition time on a Pentium 90 of at least 70 &mu; seconds, whereas a kernel-mode transition is on the order of 4 to 5 &mu; seconds. For screen graphics calls, this difference can become significant enough to be visible to the end user.</p>
+<p>
+This can be observed with previous releases of Windows&nbsp;NT. Running the 3-D Pinball Table application that comes with the Windows&nbsp;95 Plus! pack on a Windows&nbsp;NT 3.51 Workstation results in virtually unplayable graphics action. However, on Windows&nbsp;NT Workstation 4.0, users see a performance essentially identical to running the game on Windows&nbsp;95. While Windows&nbsp;NT is not designed specifically as a games platform, these same results will also be apparent on business applications that place heavy demands on the graphics subsystem. Applications such as Microsoft PowerPoint will display information 15 to 20 percent faster on the Windows&nbsp;NT 4.0 release than on Windows&nbsp;NT 3.51.</p>
+<p>
+Overall, however, Windows&nbsp;NT 4.0 system performance is estimated to remain about the same as Windows&nbsp;NT 3.51 because non-graphic subsystems are not affected by this change. Other changes that improve the functionality, such as the addition of the feature-rich but more complicated new shell, are expected to take up much of the performance gains realized by the change to Window Manager and GDI.</p>
+<h3>Memory Utilization</h3>
+<p>
+Using a client/server approach to communication between subsystems requires a substantial amount of memory. While some memory is tied up in the code required to support the complex client/server protocol, most of the required memory is used in a 64K shared-memory buffer to accumulate and pass parameters between the client and server.</p>
+<p>
+Moving Window Manager and GDI to kernel mode completely eliminates the buffer and related code complexities because all the data in the client's address space is fully accessible from kernel mode. The total amount of working set memory saved with this change in the release of Windows&nbsp;NT 4.0 is estimated to be between 256K for machines that require few simultaneously open applications and 1 MB for users who consistently have many applications open at the same time.</p>
+<p>
+These memory savings will likely be used in other subsystems or new services such as the new Windows Explorer-based user interface. Consequently, from a total system perspective, the final release of Windows&nbsp;NT 4.0 is expected to have roughly the same memory requirements as Windows&nbsp;NT 3.51.</p>
+<p>
+<a href="#movuser_contents">Return to Contents</a></p>
+<h2><a name="movuser_scale"></a>Scalability and Portability</h2>
+<p>
+Some people have speculated that the move of Window Manager and GDI into kernel mode will hurt the preemptive multitasking capability of Windows&nbsp;NT. The theory is that with all the additional Win32 processing time spent in kernel mode, there will be less opportunity for other threads to be run preemptively.</p>
+<p>
+This view is based on a misunderstanding of the Windows&nbsp;NT architecture. It is true that in many other nominally preemptive operating-systems code (such as many UNIX implementations and OS/2 Warp), executing in kernel mode is never preempted by the operating-system scheduler; or (as in AIX) is preempted only at a certain limited number of predefined points of kernel reentrancy. In Windows&nbsp;NT&nbsp; however, threads running anywhere in the Executive are preempted and scheduled alongside threads running in user mode; and all code within the Executive is fully reentrant. Among other things, this capability is necessary to achieve a high degree of system scalability on symmetric multiprocessing (SMP) hardware. This is one of the many subtle but important respects in which Windows&nbsp;NT represents a next-generation operating system beyond the capabilities of most of its competition. The preemptability and full scheduling of kernel-mode threads applies equally to threads running through the new occupants of kernel space: Window Manager and GDI.</p>
+<p>
+Another line of speculation is that SMP scaling will be hurt by this change. This theory is as follows: previously, an interaction between an application and Window Manager or GDI involved two threads, one in the application and one in CSRSS.EXE. Therefore, on an SMP system the two threads could run in parallel, improving throughput.</p>
+<p>
+<a name="movuser_text8"></a>This analysis shows a misunderstanding of how Windows&nbsp;NT works today. Today, with a single exception, (<a href="#movuser_end8">Endnote 8</a>) all calls from the client to the Win32 server run synchronously. That is, the client thread entirely blocks waiting on the server thread and begins to run again only when the server thread has completed the call. Therefore, no parallelism on SMP hardware can ever be achieved. This phenomenon is easily observable with a busy graphics application using Performance Monitor on an SMP system. The observer will discover that on a two-processor system each processor is approximately 50 percent loaded, and it is relatively easy to find the single CSRSS.EXE thread that is paired off with the busy application thread. Indeed, because the two threads are fairly intimate with each other and sharing state, the processors' caches must be constantly flushed to maintain coherency. This is the reason why with Windows&nbsp;NT 3.51 a single-threaded graphics application typically runs slightly slower on an SMP machine when compared to a single processor system!</p>
+<p>
+As a result, the changes in Windows&nbsp;NT Workstation 4.0 will actually increase SMP throughput of applications by making heavy use of Window Manager and GDI, especially when more than one application thread is busy. When two application threads are busy on a two processor Windows&nbsp;NT 3.51 machine, a total of four threads (two in the application plus two in CSRSS.EXE) are battling for time on the two processors. While only two are typically ready to run at any given time, the lack of a consistent pattern of which threads run results in loss of locality of reference and cache coherency, since the busy threads are likely to get shuffled from one processor to another. In the Windows&nbsp;NT 4.0 design, each of the two application threads will essentially have their own processor, and the Windows&nbsp;NT automatic thread affinity will tend to run the same thread on the same processor indefinitely, thus maximizing locality of reference and minimizing the need to synchronize the private per-processor memory caches.</p>
+<p>
+In general, moving Window Manager and GDI to kernel mode will have no effect on the ability of Windows&nbsp;NT to handle multiple processors, different processor architectures, large amounts of memory, or disk management. This change will have no discernible effect on the microkernel or HAL. The microkernel is responsible for responding to interrupts and exceptions, scheduling threads, and synchronizing the activities of multiple processors. The HAL handles hardware-dependent details such as I/O interfaces, interrupt controllers, and multiprocessor communication mechanisms. The microkernel and HAL will continue to be designed in the same manner with the same number of locks that are independent of each other, as well as being independent of other kernel-mode components. Because neither of these Windows&nbsp;NT Executive components has been affected by the change to Window Manager and GDI, the ability of Windows&nbsp;NT to scale with multiple processors has not changed.</p>
+<p>
+The main advantage of this change to future releases of Windows appears in the area of graphics performance. After three years of fine tuning, the GDI subsystem in Windows&nbsp;NT 3.51 is operating at its maximum potential under the client/server model. With Windows&nbsp;NT 4.0, both the Window Manager and GDI functions operate faster than their predecessors with the potential of additional performance gains in future releases.</p>
+<p>
+<a href="#movuser_contents">Return to Contents</a></p>
+<h2><a name="movuser_summ"></a>Summary</h2>
+<p>
+So what does moving Window Manager and GDI from their place as user-mode subsystems to kernel-mode Executive services really mean to the user? To the administrator? To the systems developer? Simply put, the move delivers improved performance and increased functionality with a decrease in memory requirements!</p>
+<p>
+Users and administrators of Windows&nbsp;NT 4.0-based workstations and servers will notice a performance improvement in graphics intensive applications. System reliability, security, scalability, and memory utilization are unaffected.</p>
+<p>
+Application developers are not affected by this move. The Win32 APIs are unaffected. And though Window Manager and GDI are now contained within the Windows&nbsp;NT Executive, all Win32 APIs are still accessed with the same User32 and GDI32 interfaces.</p>
+<p>
+From an architectural standpoint, Windows&nbsp;NT continues to be a modified microkernel operating system. In fact, the kernel itself is largely unaffected by this change. It is a testament to the architectural design of Windows&nbsp;NT that a change like this to a critical operating system component can be made without major structural changes.</p>
+<p>
+Ultimately, integrating the Window Manager and GDI subsystems into the Windows&nbsp;NT Executive is simply another step in the continuous improvement of Windows&nbsp;NT. It allows Windows&nbsp;NT to continue to define, within the framework of the Windows 32-bit operating system family, a new standard for personal computing that is both high-end and mainstream at one and the same time.</p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;To access information via the World Wide Web, visit the Microsoft Windows NT Workstation 4.0 Web site (<a href="http://www.microsoft.com/ntworkstation/">http://www.microsoft.com/ntworkstation/</a>).</p>
+<p>
+<a href="#movuser_contents">Return to Contents</a></p>
+<h4>Endnotes</h4>
+<ol>
+<li>
+<a name="movuser_end1"></a>For a complete discussion on Windows&nbsp;NT architecture, see <i>Inside Windows NT</i> by Helen Custer (Microsoft Press, 1995). <a href="#movuser_text1">Return to text</a><br><br></li>
+<li>
+<a name="movuser_end2"></a>This is also referred to as <i>supervisor mode</i> or <i>Ring 0</i> of the processor (on the Intel® 80<i>x</i>86 family, protection levels are called <i>rings</i>, and Ring 0 is the most privileged hardware level). <a href="#movuser_text2">Return to text</a><br><br></li>
+<li>
+<a name="movuser_end3"></a>Intel processors, since the 80386, provide four privilege levels (PL) or <i>rings</i>, although Windows&nbsp;NT uses only PL=0 (referred to in this paper as <i>kernel mode</i>) and PL=3 (user mode) to maintain source code portability across the RISC architectures supported by Windows&nbsp;NT, since all mainstream RISC processors have only two privilege levels. <a href="#movuser_text2">Return to text</a><br><br></li>
+<li>
+<a name="movuser_end4"></a>Commercial implementations of the Carnegie-Mellon University Mach microkernel operating system, for example, typically run at least all file system, networking, and memory management code in kernel mode. <a href="#movuser_text4">Return to text</a><br><br></li>
+<li>
+<a name="movuser_end5"></a>Moreover, even in pure microkernel operating systems, in order to have anything close to reasonable performance the user mode processes usually contain more than one module of the operating system; for example, the same application process often contains both the file system and portions of the disk device drivers. In that case, for example, a bug in the enhanced integrated drive electronics (EIDE) disk driver supplied by an original equipment manufacturers (OEM) can bring down the entire file system, destroying access even to other disk devices. The same problem holds true with, say, a user-mode graphics subsystem and OEM-supplied video drivers. <a href="#movuser_text4">Return to text</a><br><br></li>
+<li>
+<a name="movuser_end6"></a>Actually, there is an upper bound to the page size supported by Windows&nbsp;NT. This is because Win32 applications need to be able to name and share virtual memory in discrete units, and the unit of memory sharing—64K in the current definition of Win32—creates an upper bound on the supported hardware page size. But this boundary is the result of the need for a reliable, cross-platform application memory semantic, not poorly-designed dependencies in the operating-system code itself. <a href="#movuser_text6">Return to text</a><br><br></li>
+<li>
+<a name="movuser_end7"></a>An operating system switch between different threads (lines of execution with a single process) or across processes. <a href="#movuser_text7">Return to text</a><br><br></li>
+<li>
+<a name="movuser_end8"></a>The exception is an obscure GDI function called <b>PolyPolyLine()</b>. This one call runs asynchronously and thus does not suffer from the limitations mentioned in the text. That doesn't mean that a (hypothetical) application making exclusive use of this API will actually run more slowly in Windows&nbsp;NT SUR on an SMP machine, however, only that there's a theoretical chance of a slowdown under certain conditions for this single call. <a href="#movuser_text8">Return to text</a></li>
+</ol>
+<p class=indent>
+<B><b>Disclaimer&nbsp;&nbsp;&nbsp;</b></B>The information contained in this document represents the current view of Microsoft Corporation on the issues discussed as of the date of publication. Because Microsoft must respond to changing market conditions, it should not be interpreted to be a commitment on the part of Microsoft, and Microsoft cannot guarantee the accuracy of any information presented after the date publication. This document is for informational purposes only.</p>
+<p class=indent>
+MICROSOFT MAKES NO WARRANTIES, EXPRESS OR IMPLIED, IN THIS SUMMARY.</p>
+<p class=indent>
+Microsoft, Windows, Win32, Windows NT, and PowerPoint are registered trademarks of the Microsoft Corporation.</p>
+<p class=indent>
+Intel is a registered trademark of Intel Corporation. OS/2 is a registered trademark of International Business Machines Corporation. POSIX is a registered trademark of Institute of Electrical and Electronics Engineers, Inc. Macintosh is a registered trademark of Apple Computer, Inc. UNIX is a registered trademark in the United States and other countries, licensed exclusively through X\Open Company, Ltd.</p>
+<p class=indent>
+</p>
+</BODY>
+</HTML>

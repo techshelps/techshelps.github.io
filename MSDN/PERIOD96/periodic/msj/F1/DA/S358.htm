@@ -1,0 +1,846 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Under the Hood</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  Under the Hood</H1><P>Matt Pietrek</P>
+<P>Matt Pietrek is the author of <I>Windows 95 System Programming Secrets</I> (IDG Books, 1995). He works at NuMega Technologies Inc., and can be reached at 71774.362@compuserve.com.</P>
+<P>When I started working with OLE recently, something that jumped out at me is just how <I>much</I> stuff is kept in the registry. It turned out that many of my registry entries were from old programs, long since deleted. The problem is especially bad for developers as we tend to run a lot of programs once or twice for testing, then delete them. In an ideal world, there shouldn't be dead registry entries, as every program would have an uninstall program to clean up after itself. The reality is that most programs (especially small utilities) don't bother with uninstall programs.</P>
+<P>One day, it occurred to me that finding dead registry entries shouldn't be that hard. I figured I could write a quick 'n dirty program to examine every registry value and see if it contains a filename. Then I could check to see if that filename exists and report all the registry entries that reference nonexistent filenames. Of course, nothing is ever that simple. I ran into numerous hurdles as I progressed. Nonetheless, I persevered and came up with the CLEANREG program.</P>
+<P>Before I go any further, let me be the first to admit that CLEANREG isn't a cure-all. It doesn't find every dead registry entry. What constitutes a "dead" registry entry is highly subjective. CLEANREG also requires intelligent decision making on your part. As a result, you can seriously hose your registry if you do something dumb like deleting the HKEY_LOCAL_MACHINE tree. Of course, you can do the same thing with REGEDIT, so you're no worse off. </P>
+<P>Before I wrote CLEANREG, I checked around for similar programs. The only thing I found was the REGCLEAN program that comes with Visual Basic¨. REGCLEAN focuses on OLE inconsistencies in the registry and doesn't look for missing filenames in the general case. My CLEANREG program totally ignores OLE issues and only catches the subset of registry entries that contain file information. </P>
+<P>The CLEANREG code is shown in <B>Figure 1</B>. In the following description, I'll assume that you're familiar with registry keys and values and how they're accessed programmatically. CLEANREG has two components. The code for registry scanning and file-existence checking is in CLEANREG.CPP. This module is mostly isolated from the other component, the user interface, which is in CLNREGUI.CPP. <B>Figure 2</B> shows what the CLEANREG user interface looks like. I'll refer to this figure later on when I describe the fun I had putting together the user interface.</P>
+<P><B> Figure 1  CLEANREG.CPP and CLNREGUI.CPP</B></P>
+<P><BR></P>
+<PRE> //==========================================
+// CLEANREG - Matt Pietrek 1996
+// Microsoft Systems Journal, September 1996
+// FILE: CLEANREG.CPP
+//==========================================
+#include &lt;windows.h&gt;
+#include &lt;string.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;malloc.h&gt;
+#include &lt;tchar.h&gt;
+#pragma hdrstop
+#include "cleanreg.h"
+
+// From CLNREGUI.CPP
+void AddItemToUI(LPTSTR pszRegPath, LPTSTR pszValueName, LPTSTR pszFilename);
+
+BOOL g_fBeRealistic = TRUE; // Eliminate unlikely (but possible) filenames
+
+//
+// Checks to see if the file exists on a fixed drive, and if not,
+// adds it to the user interface
+//
+void CheckForExistence(LPTSTR pszRegPath, LPTSTR pszValueName, LPTSTR pszFile)
+{
+    // See if the file is on a floppy or CD-ROM drive. Don't tell about, if so
+    TCHAR szDriveRoot[4];
+    _tcsncpy( szDriveRoot, pszFile, 3 );
+    szDriveRoot[3] = 0;
+
+    UINT driveType = GetDriveType(szDriveRoot);
+    if ( (driveType != DRIVE_FIXED) &amp;&amp; (driveType != DRIVE_REMOTE) )
+        return;
+    
+    // A quick'n'easy way to see if a file exists.  Bail out if so.
+    if ( 0xFFFFFFFF != GetFileAttributes( pszFile ) )
+        return;
+
+    AddItemToUI( pszRegPath, pszValueName, pszFile );  // Not found! Add to UI
+}
+
+//
+// Given a string as input, this routine does its best to try and extract
+// a filename portion in the beginning.  A "filename" means that there's
+// a ":\" near the beginning.  The function handles filenames in quotes.
+// If the g_fBeRealistic variable is TRUE, it assumes that characters like
+// '/' and '-' aren't part of the filename, although they're technically
+// legal.
+//
+BOOL CheckForFilename( LPTSTR psz, LPTSTR szOutput, UINT cbOutput )
+{
+    if ( lstrlen(psz) &lt;= 2 )        // toss out strings that are too short
+        return FALSE;
+
+    BOOL fBeginQuote = FALSE;
+    LPTSTR pszStartFilename = psz;
+    if ( *pszStartFilename == '"' ) // Does the string start with a quote?
+    {                               // If so, adjust accordingly.  We'll
+        fBeginQuote = TRUE;         // assume that there must be an end quote
+        pszStartFilename++;         // for it to be a legal filename.
+    }
+    
+    LPTSTR pszEndName;  // Pointer to one char past the end of the name
+    
+    if ( fBeginQuote )  // The string started with quotes.  Find the other one
+    {
+        pszEndName = _tcschr( pszStartFilename, '"' );
+        if ( !pszEndName )
+            return FALSE;
+        
+        pszEndName--;   // Strip off spaces at the end
+        while ( (pszEndName &gt; pszStartFilename) &amp;&amp; (*pszEndName == ' ') )
+            pszEndName--;
+
+        pszEndName++;
+    }
+    else    // String didn't start with a quote
+    {
+        // Look for the first non-legal filename character
+        pszEndName = _tcspbrk( psz, TEXT("&lt;&gt;|/\"") );
+
+        if ( pszEndName )   // We found a non-legal character, so the
+        {                   // filename must end before this
+            // Now strip off any whitespace
+            pszEndName--;
+            while ( (pszEndName &gt; pszStartFilename) &amp;&amp; (*pszEndName == ' '))
+                pszEndName--;
+            
+            pszEndName++;
+        }
+        else
+            pszEndName = psz + lstrlen(psz);    // No non-legal chars found
+    }
+
+    // At this point, pszStartFilename points to the beginning of the possible
+    // filename, and pszEndName points 1 character past the last character
+    // of the possible filename.
+        
+    if ( pszEndName - pszStartFilename &lt; 2 )    // Are the start and end far
+        return FALSE;                           // enough apart to be legal?
+
+    // Check to see if the 2nd and 3rd characters are ":\"
+    if ( 0 != _tcsnicmp( pszStartFilename+1, TEXT(":\\"), 2 ) )
+        return FALSE;
+
+    if ( g_fBeRealistic )   // If set, toss out unlikely characters
+    {
+        LPTSTR pszSearch = _tcspbrk( pszStartFilename, TEXT("^/-%,;") );
+        
+        // Did we find something, and was it before what we're considering
+        // the end of the filename to be?
+        if ( pszSearch &amp;&amp; (pszSearch &lt; pszEndName) )
+        {
+            // Now strip off any whitespace
+            pszSearch--;
+            while ( (pszSearch &gt; pszStartFilename) &amp;&amp; (*pszSearch == ' ') )
+                pszSearch--;
+
+            pszEndName = pszSearch+1;
+        }
+    }
+
+    // Make sure the string we found won't overflow the input buffer
+    unsigned nameLen = pszEndName - pszStartFilename; 
+    if ( nameLen &gt;= cbOutput )
+        return FALSE;
+    
+    // copy the filename string to the input buffer
+    memcpy( szOutput, pszStartFilename, nameLen * sizeof(TCHAR) );
+    szOutput[ nameLen ] = 0;    // Null terminate it!
+    
+    return TRUE;
+}
+
+//
+// Routine that enumerates through all the values in a registry, looking
+// for REG_SZ's that begin with filenames.  Then, the routine recurses
+// to iterate through its child nodes.
+//
+void ScanRegNode( HKEY hKey, LPTSTR pszRegPath )
+{
+    DWORD regEnumIndex = 0;
+
+    while ( TRUE )
+    {
+        TCHAR szValueName[ MAX_PATH ];
+        DWORD cbValueNameSize = SIZEOFARRAY(szValueName);
+        TCHAR szValue[ MAX_PATH ];
+        DWORD cbValueSize = SIZEOFARRAY(szValue);
+        DWORD type;
+        LONG result;
+        
+        result = RegEnumValue(  hKey, regEnumIndex++,
+                                szValueName, &amp;cbValueNameSize,
+                                0, &amp;type, (LPBYTE)szValue, &amp;cbValueSize );
+                            
+        if ( ERROR_NO_MORE_ITEMS == result )
+            break;
+
+        if ( REG_SZ != type )
+            continue;
+
+        TCHAR szFilename[MAX_PATH];
+        
+        if ( CheckForFilename(  szValue,
+                                szFilename, SIZEOFARRAY(szFilename)) )
+            CheckForExistence( pszRegPath, szValueName, szFilename );
+    }
+
+    // ================ Now iterate through all the child nodes ===============
+
+    regEnumIndex = 0;
+    
+    while ( TRUE )
+    {
+        TCHAR szSubkey[ MAX_PATH ];
+        DWORD cbSubkeySize = SIZEOFARRAY(szSubkey);
+        LONG result;
+        
+        result = RegEnumKeyEx(  hKey, regEnumIndex++, szSubkey, &amp;cbSubkeySize,
+                                0, 0, 0, 0 );
+
+        if ( ERROR_NO_MORE_ITEMS == result )
+            break;
+
+        if ( 0 != result )  // Some other error?  Ignore and continue
+            continue;
+
+        HKEY hSubkey;
+        
+        result = RegOpenKeyEx( hKey, szSubkey, 0, KEY_READ, &amp;hSubkey );
+                            
+        if ( ERROR_SUCCESS != result )
+            continue;
+
+        // Create a fully qualified subkey name to pass to ScanRegNode
+        LPTSTR pszRegPathSubkey
+            = new TCHAR[lstrlen(pszRegPath) + cbSubkeySize + 2];
+        wsprintf( pszRegPathSubkey, TEXT("%s\\%s"), pszRegPath, szSubkey );
+
+        // Recurse to find any child keys
+        ScanRegNode( hSubkey, pszRegPathSubkey );
+
+        delete []pszRegPathSubkey;
+
+        RegCloseKey( hSubkey );
+    }
+}
+
+void SearchRegistryForMissingFiles(void)
+{
+    // Start the scan at the top level.  Note that we don't do keys that
+    // are mirrored elsewhere (e.g., HKEY_CLASSES_ROOT), or that we
+    // shouldn't muck with (HKEY_USERS)
+    ScanRegNode( HKEY_CURRENT_USER, TEXT("\\HKEY_CURRENT_USER") );
+    ScanRegNode( HKEY_LOCAL_MACHINE, TEXT("\\HKEY_LOCAL_MACHINE") );
+}
+
+//
+// Recursive routine to delete a key and all of its subkeys.  We can't just
+// use RegDeleteKey, since Windows NT doesn't do recursive deletions.  (For 
+// once, Windows 95 did something better than Windows NT!).  Based on PSS 
+// article Q142491
+//
+LONG RecursiveRegDeleteKey( HKEY hKey, LPTSTR pszSubkey )
+{
+    HKEY hSubkey;
+
+    LONG result = RegOpenKeyEx( hKey, pszSubkey, 0,
+                                KEY_ENUMERATE_SUB_KEYS | DELETE, &amp;hSubkey );
+
+    while ( ERROR_SUCCESS == result )
+    {
+        TCHAR szSubkey[ MAX_PATH ];
+        DWORD cbSubkeySize = SIZEOFARRAY(szSubkey);
+        
+        result = RegEnumKeyEx(  hSubkey, 0, szSubkey, &amp;cbSubkeySize,
+                                0, 0, 0, 0);
+
+        if ( ERROR_NO_MORE_ITEMS == result )
+            break;
+
+        if ( ERROR_SUCCESS != result )
+            return result;
+
+        result = RecursiveRegDeleteKey( hSubkey, szSubkey );
+    }
+
+    RegCloseKey( hSubkey );
+    result = RegDeleteKey( hKey, pszSubkey );
+
+    return result;
+}
+
+// Data structures for mapping string representation of root registry keys
+// back to their binary values
+
+struct REG_ROOT_NAME
+{
+    LPTSTR pszName;
+    HKEY   hKey;
+};
+
+REG_ROOT_NAME RegRootKeys[] =
+{
+{ TEXT("HKEY_CLASSES_ROOT"),    HKEY_CLASSES_ROOT },
+{ TEXT("HKEY_CURRENT_USER"),    HKEY_CURRENT_USER },
+{ TEXT("HKEY_LOCAL_MACHINE"),   HKEY_LOCAL_MACHINE },
+{ TEXT("HKEY_USERS"),           HKEY_USERS },
+{ TEXT("HKEY_PERFORMANCE_DATA"),HKEY_PERFORMANCE_DATA },
+{ TEXT("HKEY_CURRENT_CONFIG"),  HKEY_CURRENT_CONFIG },
+{ TEXT("HKEY_DYN_DATA"),        HKEY_DYN_DATA },
+};
+
+//
+// Given a registry path, deletes the specified key and everything below it.
+// Expects a string in the form \Key1\Key2\Key3\
+// A value can be specified via the form \[value: xxx]\
+// Thus, the path \Key1\Key2\[value: xxx]\string can be passed
+//
+BOOL DeleteRegistryPath( LPTSTR _pszRegPath )
+{
+    if ( !_pszRegPath || *_pszRegPath != '\\' )
+        return FALSE;
+    
+    // Make a copy of the string so that we can munge it
+    LPTSTR pszRegPath = _tcsdup( _pszRegPath );
+    if ( !pszRegPath )
+        return FALSE;
+
+    //
+    // First, break out the root portion of the path (e.g., "\HKEY_CLASSES\")
+    //
+    LPTSTR pszRootKey, pszRootKeyEnd, pszSubkey=0;
+    pszRootKey = pszRegPath+1;
+    pszRootKeyEnd = _tcschr( pszRootKey, '\\' );
+    if ( !pszRootKeyEnd )
+    {
+        free( pszRegPath );
+        return FALSE;
+    }
+    else
+    {
+        *pszRootKeyEnd = 0;
+        pszSubkey = pszRootKeyEnd + 1;
+    }
+
+    // Look up the predefined HKEY
+    HKEY hKeyRoot = 0;
+    for ( unsigned i = 0; i &lt; SIZEOFARRAY(RegRootKeys); i++ )
+        if ( 0 == _tcscmp( pszRootKey, RegRootKeys[i].pszName ) )
+        {
+            hKeyRoot = RegRootKeys[i].hKey;
+            break;
+        }
+        
+    if ( 0 == hKeyRoot )    // Huh??? Not found.  This shouldn't happen
+    {
+        free( pszRegPath );
+        return FALSE;       
+    }
+
+    //
+    // Next, determine if there's a value included in the reg path.  If so,
+    // isolate it and strip it off.
+    //
+        
+    LPTSTR pszValue = _tcsstr( pszSubkey, TEXT("\\[value: ") );
+    
+    if ( pszValue )     // Did we find a "\[value: xxx]" somewhere???
+    {
+        *pszValue = 0;  // Null terminate pszRegPath before the "\[value: "
+        pszValue += 9;  // Advance the pointer past "\[value: "
+        
+        // Now strip off the terminating ']'
+        LPTSTR pszEndValue = _tcschr( pszValue, ']' );
+        if ( pszEndValue )
+            *pszEndValue = 0;
+        
+        // Check for the special case of "&lt;default&gt;", which is the default value
+        if ( 0 == _tcscmp( pszValue, TEXT("&lt;default&gt;") ) )
+            pszValue = TEXT("");
+    }
+
+    //
+    // At this point, we have a predefined root key, a subkey string, and an
+    // optional value string.  If we have a value string, delete the value
+    // from the registry.  Otherwise, delete the key.
+    //
+        
+    BOOL fSuccess = FALSE;      // Assume the worst...
+        
+    if ( pszValue )             // We're just deleting a value (RegDeleteValue)
+    {
+        HKEY hSubkey;
+        if ( ERROR_SUCCESS == RegOpenKeyEx( hKeyRoot, pszSubkey,
+                                            0, KEY_ALL_ACCESS, &amp;hSubkey ) )
+        {
+            if ( ERROR_SUCCESS == RegDeleteValue( hSubkey, pszValue ) )
+                fSuccess = TRUE;
+            RegCloseKey( hSubkey );
+        }
+    }
+    else    // We're deleting an entire key
+    {
+        // Split off the last node, and null terminate the prior nodes
+        LPTSTR pszSubkey2 = _tcsrchr( pszSubkey, '\\' );
+        *pszSubkey2++ = 0;
+
+        HKEY hSubkey;
+        if ( ERROR_SUCCESS == RegOpenKeyEx( hKeyRoot, pszSubkey,
+                                            0, KEY_ENUMERATE_SUB_KEYS | DELETE,
+                                            &amp;hSubkey ) )
+        {
+            if ( ERROR_SUCCESS == RecursiveRegDeleteKey( hSubkey, pszSubkey2) )
+                fSuccess = TRUE;
+            RegCloseKey( hSubkey );
+        }
+    }
+    
+    free( pszRegPath );
+    return fSuccess;
+}</PRE>
+<P></P>
+<P>CLNREGUI.CPP</P>
+<P><BR></P>
+<PRE> //==========================================
+// CLEANREG - Matt Pietrek 1996
+// Microsoft Systems Journal, September 1996
+// FILE: CLNREGUI.CPP
+//==========================================
+#include &lt;windows.h&gt;
+#include &lt;commctrl.h&gt;
+#include &lt;tchar.h&gt;
+#pragma hdrstop
+#include "clnregui.h"
+#include "cleanreg.h"
+
+// Helper function prototypes
+void Handle_WM_COMMAND(HWND hDlg, WPARAM wParam, LPARAM lParam);
+void Handle_WM_INITDIALOG(HWND hDlg);
+void Handle_WM_CLOSE( HWND hDlg );
+BOOL Handle_WM_NOTIFY( HWND hDlg, WPARAM wParam, LPARAM lParam );
+void Handle_ListBox_Cmd(HWND hDlg, WORD wNotifyCode, WORD wID, HWND hwndCtl);
+BOOL Handle_TreeView_Notify( HWND hDlg, int idCtrl, LPNMHDR pnmh );
+BOOL CALLBACK CleanRegDlgProc( HWND, UINT, WPARAM, LPARAM );
+HTREEITEM TVAppendItem( HWND hWnd, HTREEITEM hTi, LPTSTR psz );
+BOOL GetRegPathForHTI(HWND hWnd, HTREEITEM hTi, PTSTR pszPath, unsigned cbPath);
+void DeleteRegPathAfterQuerying( HWND hWnd, LPTSTR pszRegPath );
+void RefreshViews(void);            
+
+HWND g_hWndTree=0;      // Global variables (Yes, the horror!) for speed
+HWND g_hWndList = 0;
+HTREEITEM g_hTiRoot;
+BOOL g_fRefreshAfterDelete = TRUE;
+
+TCHAR g_szRootName[] = TEXT("My Registry");
+TCHAR g_szCopyright[] = TEXT("CleanReg - Matt Pietrek, 1996 for MSJ");
+
+TCHAR g_szHelpAbout[] =
+TEXT("CleanReg searches the registry for filenames that aren't present on ")
+TEXT("a fixed or network drive.  These files are listed in the top listbox. ")
+TEXT("When a file is selected, the bottom treeview expands to show the ")
+TEXT("registry path where the filename was found.\r\n\r\n")
+TEXT("Nodes in the treeview can be selected. All keys and values below and ")
+TEXT("including the node can be deleted via the &lt;delete&gt; key.  Use this ")
+TEXT("option with care!!!\r\n\r\n")
+TEXT("CleanReg is from the September 1996 issue of the Microsoft Systems ")
+TEXT("Journal.  Please refer to that issue (which will be on the MSDN ")
+TEXT("CD-ROM) for all documentation questions.");
+
+int PASCAL WinMain( HANDLE hInstance, HANDLE hPrevInstance,
+                    PSTR lpszCmdLine, int nCmdShow )
+{
+    InitCommonControls();    // Gotta do this for treeview controls
+
+    // Bring up the user interface (A dialog box?  What a surprise!)
+    DialogBox(  hInstance, MAKEINTRESOURCE(IDD_DIALOG_CLEANREG),
+                0, (DLGPROC)CleanRegDlgProc );
+    return 0;
+}</PRE>
+<P> </P>
+<P><BR></P>
+<PRE> //=================== Start of message handling routines ====================</PRE>
+<P> </P>
+<P><BR></P>
+<PRE> BOOL CALLBACK CleanRegDlgProc(HWND hDlg,UINT msg,WPARAM wParam,LPARAM lParam)
+{
+    switch ( msg )
+    {
+        case WM_COMMAND:
+            Handle_WM_COMMAND( hDlg, wParam, lParam ); return TRUE;
+        case WM_INITDIALOG:
+            Handle_WM_INITDIALOG( hDlg ); return TRUE;
+        case WM_CLOSE:
+            Handle_WM_CLOSE( hDlg ); break;
+        case WM_NOTIFY:
+            return Handle_WM_NOTIFY( hDlg, wParam, lParam );
+    }
+    return FALSE;
+}</PRE>
+<P> </P>
+<P><BR></P>
+<PRE> void Handle_WM_COMMAND( HWND hDlg, WPARAM wParam, LPARAM lParam )
+{
+    WORD wNotifyCode = HIWORD(wParam);
+    WORD wID = LOWORD(wParam);
+    HWND hwndCtl = (HWND)lParam;
+
+    switch ( wID )
+    {
+        case IDC_LIST:
+            Handle_ListBox_Cmd( hDlg, wNotifyCode, wID, hwndCtl ); break;
+        case IDC_ABOUT:
+            MessageBox( hDlg, g_szHelpAbout, g_szCopyright, MB_OK ); break;
+        case IDC_CHECK_SANE:
+            if ( BN_CLICKED == wNotifyCode )
+            {
+                g_fBeRealistic = (BOOL)IsDlgButtonChecked(hDlg,IDC_CHECK_SANE);
+                RefreshViews(); // Valid file list may have changed, so update
+            }
+        case IDC_CHECK_UPDATE:
+            if ( BN_CLICKED == wNotifyCode )
+                g_fRefreshAfterDelete =
+                    (BOOL)IsDlgButtonChecked( hDlg,IDC_CHECK_UPDATE );
+            break;
+    }
+}
+
+void Handle_WM_INITDIALOG(HWND hDlg)
+{
+    g_hWndTree = GetDlgItem( hDlg, IDC_TREE );  // Save control HWND's in
+    g_hWndList = GetDlgItem( hDlg, IDC_LIST );  // global variables for speed
+
+    CheckDlgButton( hDlg, IDC_CHECK_SANE,   // Set checkboxes appropriately
+                    g_fBeRealistic ? BST_CHECKED : BST_UNCHECKED );
+    CheckDlgButton( hDlg, IDC_CHECK_UPDATE,
+                    g_fRefreshAfterDelete ? BST_CHECKED : BST_UNCHECKED );
+
+    RefreshViews(); // Fill treeviews with initial values
+}
+
+void Handle_WM_CLOSE( HWND hDlg )
+{
+    EndDialog(hDlg, 0);
+}
+
+// Tree controls like to use WM_NOTIFY, rather than WM_COMMAND
+BOOL Handle_WM_NOTIFY( HWND hDlg, WPARAM wParam, LPARAM lParam )
+{
+    int idCtrl = wParam;
+    LPNMHDR pnmh = (LPNMHDR)lParam;
+    
+    if ( IDC_TREE == idCtrl )
+        return Handle_TreeView_Notify( hDlg, idCtrl, pnmh );
+
+    return FALSE;
+}
+
+void Handle_ListBox_Cmd(HWND hDlg, WORD wNotifyCode, WORD wID, HWND hwndCtl)
+{
+    // If the file listbox selection changes, expand the appropriate tree item
+    if ( (g_hWndList == hwndCtl) &amp;&amp; (wNotifyCode == LBN_SELCHANGE) )
+    {
+        // Figure out which listbox item was selected
+        LRESULT lbIndex = SendMessage( hwndCtl, LB_GETCURSEL, 0, 0 );
+        if ( LB_ERR == lbIndex )
+            return;
+
+        // Now get the treeview HTREEITEM that we associated with this entry
+        HTREEITEM hTi= 
+            (HTREEITEM)SendMessage(hwndCtl, LB_GETITEMDATA, (WPARAM)lbIndex, 0);
+
+        // Set treeview selection, based on the HTREEITEM we just retrieved
+        TreeView_Select( g_hWndTree, hTi, TVGN_CARET );
+    
+            SetFocus( g_hWndTree );  // Set focus to the treeview for
+                                     // convenience
+    }
+}
+
+BOOL Handle_TreeView_Notify( HWND hDlg, int idCtrl, LPNMHDR pnmh )
+{
+    if ( TVN_KEYDOWN == pnmh-&gt;code )    // We want keystrokes
+    {
+         TV_KEYDOWN * ptvkd = (TV_KEYDOWN *)pnmh;
+         if ( VK_DELETE == ptvkd-&gt;wVKey )   // Was it the &lt;delete&gt; key?
+         {
+             TCHAR szRegPath[1024];     // Hope this is big enough!
+             
+             if ( GetRegPathForHTI(  g_hWndTree,
+                                     TreeView_GetSelection(g_hWndTree),
+                                     szRegPath,
+                                     sizeof(szRegPath)/sizeof(TCHAR) ) )
+             {
+                 DeleteRegPathAfterQuerying( hDlg, szRegPath );
+             }
+         }
+    }
+    
+    return TRUE;
+}
+
+//====================== Start of helper routines ===========================
+
+//
+// Do a complete update of the UI, based on rescanning the registry
+//
+void RefreshViews(void)
+{
+    HCURSOR hCursOld = SetCursor( LoadCursor(0, IDC_WAIT) );    // hourglass!
+
+    // Clear out the listbox and tell it to not redraw after each addition
+    SendMessage( g_hWndList, LB_RESETCONTENT, 0, 0 );
+    SendMessage( g_hWndList, WM_SETREDRAW, FALSE, 0 );
+    
+    // Clear out the treeview, and add the root treeview node
+    TreeView_DeleteAllItems( g_hWndTree );
+    g_hTiRoot = TVAppendItem( g_hWndTree, TVI_ROOT, g_szRootName );
+    
+    SearchRegistryForMissingFiles();    // Get down to the real work
+
+    SendMessage( g_hWndList, WM_SETREDRAW, TRUE, 0 );   // Let listbox redraw
+    SetCursor( hCursOld );
+}
+
+BOOL TVGetItemText( HWND hWnd, HTREEITEM hTi,
+                    LPTSTR pszText, unsigned cbText )
+{
+    TV_ITEM tvi;
+    tvi.mask = TVIF_TEXT;
+    tvi.hItem = hTi;
+    tvi.pszText = pszText;
+    tvi.cchTextMax = cbText;
+    return TreeView_GetItem( hWnd, &amp;tvi );
+}
+
+// Append a new child node to the specified HTREEITEM
+HTREEITEM TVAppendItem( HWND hWnd, HTREEITEM hTi, LPTSTR psz )
+{
+    // A helper function that appends a string to the end of the list
+    // of subnodes under a specified node (hTi).
+
+    TV_INSERTSTRUCT tvis;
+    memset( &amp;tvis, 0, sizeof(tvis) );
+    
+    tvis.hParent = hTi;
+    tvis.hInsertAfter = TVI_LAST;
+    tvis.item.mask = TVIF_TEXT;
+    tvis.item.pszText = psz;
+    return TreeView_InsertItem( hWnd, &amp;tvis );  
+}
+
+//
+// Given an HTREEITEM, return a '\' delimited path to it (e.g., "\a\b\c\d")
+//
+BOOL GetRegPathForHTI(HWND hWnd, HTREEITEM hTi, LPTSTR pszPath, unsigned cbPath)
+{
+    TCHAR szNode[MAX_PATH];
+    unsigned cbThisNode =0, cbSoFar = 0;
+    
+    while ( hTi )
+    {
+        if ( !TVGetItemText( hWnd, hTi, szNode, sizeof(szNode)/sizeof(TCHAR)))
+            return FALSE;
+        
+        cbThisNode = lstrlen(szNode) + 1;
+        cbSoFar += cbThisNode;
+        if ( cbSoFar &gt;= cbPath )
+            return FALSE;
+        
+        memmove( pszPath + cbThisNode, pszPath, cbSoFar * sizeof(TCHAR) );
+        pszPath[0] = '\\';
+        memcpy( pszPath+1, szNode, (cbThisNode-1) * sizeof(TCHAR) );
+        
+        hTi = TreeView_GetParent( hWnd, hTi );
+    }
+    
+    pszPath[cbSoFar] = 0;   // Null terminate the string
+        
+    return TRUE;
+}
+
+//
+// Given a '\' path (e.g., "\a\b\c\d"), find its HTREEITEM in the treeview.
+// If the node doesn't exist, build it!  See also GetRegPathForHTI()
+//
+HTREEITEM GetHTIForRegPath( HWND hWnd, HTREEITEM hTi, LPTSTR pszRegPath )
+{
+    //
+    // Fill in the szKey variable with the name of the current registry
+    // node being searched for.  The nodes are separated by '\'s.  The
+    // szKey variable is a string representing one registry key node, and
+    // without any '\'s
+    //
+    TCHAR szKey[MAX_PATH];
+    LPTSTR pszSlash = _tcschr( pszRegPath, '\\' );
+    if ( pszSlash )
+    {
+        unsigned len = pszSlash - pszRegPath;
+        memcpy( szKey, pszRegPath, len * sizeof(TCHAR) );
+        szKey[len] = 0;
+    }
+    else    // No slash found, so it's the last node found.  Just copy it.
+        _tcscpy( szKey, pszRegPath );
+
+    //
+    // Now look through the child nodes of the HTREEITEM that we're currently
+    // working on.  If we find it, but there's still more nodes in pszRegpath,
+    // recurse to find the next node in the registry path.  
+    //
+    HTREEITEM hTiScan;
+    hTiScan = TreeView_GetNextItem( hWnd, hTi, TVGN_CHILD );
+    while ( hTiScan )
+    {
+        TCHAR szScanItemText[MAX_PATH];
+        
+        if ( TVGetItemText( hWnd, hTiScan, szScanItemText,
+                            sizeof(szScanItemText)/sizeof(TCHAR) ) )
+        {
+            if ( 0 == _tcscmp( szKey, szScanItemText ) )
+            {
+                if ( pszSlash )
+                    return GetHTIForRegPath( hWnd, hTiScan, pszSlash+1 );
+                else
+                    return hTiScan;
+            }
+        }
+            
+        hTiScan = TreeView_GetNextItem( hWnd, hTiScan, TVGN_NEXT );
+    }
+
+    //
+    // If we get here, we didn't find the item, so create it
+    //
+    HTREEITEM hTiNew = TVAppendItem( hWnd, hTi, szKey );
+    if ( !hTiNew )
+        return 0;
+
+    //
+    // If there's still nodes left in pszRegpath, recurse so that they can
+    // be created.  Otherwise, return the HTREEITEM of the new treeview item.
+    //
+    if ( pszSlash )
+        return GetHTIForRegPath( hWnd, hTiNew, pszSlash+1 );
+    else
+        return hTiNew;
+}
+
+//
+// Called by CheckForExistence in CLEANREG.CPP when a non-existent file is
+// found in the registry.  Add the filename to the listbox and treeview.
+//
+void AddItemToUI( LPTSTR pszRegPath, LPTSTR pszValueName, LPTSTR pszFilename )
+{
+    // Get an HTREEITEM for the registry path, making the nodes if necessary
+    HTREEITEM hTi = GetHTIForRegPath(   g_hWndTree,
+                                        g_hTiRoot,
+                                        pszRegPath+1 );
+
+    // Make a new node representing the value portion (in []'s), and
+    // add it underneath the actual keys.  If the value name is empty, then
+    // it's the default value, so call it "&lt;default&gt;"
+    TCHAR szValueNode[MAX_PATH*2];
+    wsprintf( szValueNode, TEXT("[value: %s]"),
+             *pszValueName ? pszValueName : TEXT("&lt;default&gt;") );
+    hTi = TVAppendItem( g_hWndTree, hTi, szValueNode );
+    
+    // now put the filename portion of the string under its value node
+    hTi = TVAppendItem( g_hWndTree, hTi, pszFilename );
+
+    // Add the filename to the listbox, and associate the HTREEITEM of the
+    // filename as it appears in the treeview.
+    DWORD lbIndex;
+    lbIndex = SendMessage( g_hWndList, LB_ADDSTRING, 0, (LPARAM) pszFilename );
+    SendMessage( g_hWndList, LB_SETITEMDATA, (WPARAM)lbIndex, (LPARAM)hTi );
+}
+
+//
+// If the user hits the &lt;delete&gt; key on an item in the treeview, this routine
+// queries the user to make sure it's OK to delete the registry entry.  If
+// the user says "OK", it calls DeleteRegistryPath() in CLEANREG.CPP
+//
+void DeleteRegPathAfterQuerying( HWND hWnd, LPTSTR pszRegPath )
+{
+    if ( *pszRegPath != '\\' )
+        return;
+    
+    // Make sure that pszRegPath starts with "My Registry" (or whatever we've
+    // decided to call the root node in the treeview control).
+    if ( 0 != _tcsncmp(pszRegPath+1, g_szRootName, SIZEOFARRAY(g_szRootName)-1) )
+        return;
+
+    // Advance past the first node in pszRegPath.  It's just there for the
+    // treeview control, and not part of the actual registry path.
+    pszRegPath += SIZEOFARRAY(g_szRootName);
+        
+    if ( IDOK == MessageBox( hWnd, pszRegPath, TEXT("Deleting:"),
+                             MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 ) )
+    {
+        if ( DeleteRegistryPath( pszRegPath ) )
+        {
+            if ( g_fRefreshAfterDelete )
+                RefreshViews();
+        }
+        else
+            MessageBox( hWnd, TEXT("Error in deleting"), 0, MB_OK );
+    }
+}
+
+</PRE>
+<P><img src="hood2.gif"></P>
+<P><B> Figure 2  CLEANREG</B></P>
+<P>I'll start my show of horrors with the registry manipulation and file-related code in CLEANREG.CPP. <B>Figure 3</B> shows condensed call trees for the module. The SearchRegistryForMissingFiles function is what the user interface calls to kick off a complete registry scan. The function is just two calls to ScanRegNode, one to look at the HKEY_CURRENT_USER registry branch and one to look at the HKEY_LOCAL_MACHINE branch. </P>
+<P><img src="hood3.gif"></P>
+<P><B> Figure 3  Search and Delete Call Trees for CLEANREG</B></P>
+<P>As you may recall, between Windows NT¨ and Windows¨ 95 there are seven predefined registry keys. Why does CLEANREG only examine two of them? I don't scan HKEY_</P>
+<P>CLASSES_ROOT because this branch is just a subkey equivalent to HKEY_LOCAL_MACHINE\SOFTWARE\</P>
+<P>Classes. I don't search HKEY_USERS because it could contain information for accounts other than the currently logged-on user. Instead, I scan HKEY_CURRENT_USER, which is a subkey of HKEY_USERS. I also don't scan the performance keys (HKEY_PERFORMANCE_DATA on Windows NT and HKEY_DYN_DATA on Windows 95) because these keys aren't likely to contain filenames and their values are constantly changing. </P>
+<P>ScanRegNode is the workhorse of CLEANREG.CPP. It uses boilerplate code for recursively enumerating through all of the values of a key and all of its subkeys. As it reads in each value, ScanRegNode determines if it's a REG_SZ value (a string, as opposed to, say, a REG_DWORD). Each REG_SZ value is passed to CheckForFilename, which does its best to extract a filename at the beginning of the string. If CheckForFilename returns TRUE, ScanRegNode passes the filename (along with the current fully qualified registry path) to CheckForExistence. CheckForExistence decides if this is a possible dead filename. </P>
+<P>As I was writing the CLEANREG program, the first major hurdle I ran into was in the CheckForFilename function. It turns out that applications are remarkably inconsistent in storing filenames and command lines in the registry. Even worse, the expanded set of legal characters in long filenames makes it well-nigh impossible to differentiate a filename from a command line. The Win32¨ SDK documentation even states this in Knowledge Base article Q108233. Until I wrote CLEANREG, I had no idea of just what a mess long filenames can be to deal with. For example, </P>
+<P> </P>
+<P><BR></P>
+<PRE> "foo -p .exe" </PRE>
+<P> </P>
+<P>can be the legal name of a program. How you're supposed to tell this apart from a program called "foo" that takes the command line </P>
+<P> </P>
+<P><BR></P>
+<PRE> "-p .exe" </PRE>
+<P> </P>
+<P>is beyond me. Some of you might be thinking, so what, long filenames can be delimited with double quotes. While this is true, the strings in the registry don't all follow this convention. One value may include quotes where needed, another won't. A third value may contain quotes in the string, but the quotes surround an entire command line, including arguments, rather than just a filename. </P>
+<P>The result of this filename mess is that my function CheckForFilename does a reasonable but far from flawless job of extracting a fully qualified file or path name from the beginning of the string passed to it. The brief synopsis of the algorithm is to come up with the shortest possible sequence of legal filename characters at the start of a string. The one exception is that, if the string starts with a double quote, the function assumes there will be another double quote marking the end of the filename. If so, CheckForFilename removes the quotes from the filename it returns.</P>
+<P>After dealing with the quote issue, CheckForFilename scans the string for the first nonlegal filename character and truncates the filename there. I consider the forward slash (/) to be an illegal character, even though the SDK says it can be a directory separator that's equivalent to \. Since I couldn't get any program to accept directory paths with a /, I considered it an illegal filename character. </P>
+<P>The next step for CheckForFilename is to see if the current working string is fully qualified. My cheesy solution here was to look for the substring :\ at character 2 in the working string. The :\ is the delimiter between the drive letter and the root directory. This means that CheckForFilename won't pick up on relative filenames or filenames without a complete path. This works out fine for the purposes of CLEANREG, since you can't check for the existence of a file without knowing exactly where the file is in the first place. CLEANREG does not catch UNC names that start with \\. I leave it as an exercise for readers to modify CLEANREG to do this if they want.</P>
+<P>At this point, CheckForFilename has what could be a legal filename, but many of the strings that make it to this point are actually command lines with arguments or parameters to be filled in. For this reason, CheckForFilename can optionally search for characters such as a hyphen (only if preceded by a space) and a hat (^) that are rarely used in real filenames. If CheckForFilename locates such a character, it truncates the filename string there. </P>
+<P>Whenever CheckForFilename truncates the working string, it truncates back to the first character that is not a space. I determined with a little experimentation that I couldn't create a filename with spaces at the end. If you try to create a file called "foo ", it shows up as "foo" on disk. My rule about legal filenames was whether "copy con <I>filename</I>" could create the file. </P>
+<P>If CheckForFilename thinks it's found a filename, the CheckForExistence function determines if the file exists. If the filename doesn't exist, the function informs the user interface of the filename and the corresponding registry path where the filename was found. My first pass at the CheckForExistence function was dirt simple: just call GetFileAttributes. If GetFileAttributes returns –1, the file doesn't exist. This is a quickie new method over the obsolete OpenFile (OF_EXIST...) technique.</P>
+<P>There were a couple of problems with this simple approach. The first was the undesired intrusion of numerous critical error dialog boxes telling me that there was no disk in drive A: (my floppy). It turns out that many filename strings in the registry refer to the floppy the program was installed from. Another problem was that a whole slew of nonexistent files had paths to my CD-ROM drive. Since asking the user to put every one of their CD-ROMs into the drive wasn't an option, another compromise needed to be made. </P>
+<P>I ultimately decided to make CheckForExistence only report nonexistent filenames from hard drives and network drives. This killed both of the above problems. I implemented this by extracting the first three characters of the filename (the root directory of the drive), passing them to GetDriveType. Only if GetDriveType reports that the drive is a fixed or network drive will CheckForExistence continue on and call GetFileAttributes. </P>
+<P>The remaining routines in CLEANREG.CPP are for deleting registry keys or values. DeleteRegistryPath is the top-level routine that splits the input string into appropriate tokens and determines whether a registry value or registry key was specified. If it's a value to be deleted, the function calls the RegDeleteValue Win32 API. If it's an entire key, then all subkeys below that key need to be deleted. </P>
+<P>In an ideal world, deleting a registry key and all of its children would be as simple as calling RegDeleteKey. Indeed, on Windows 95 this is what happens. Unfortunately, on Windows NT you must manually delete all the subkeys of a key before you can delete the original key. I encapsulated all this code in the RecursiveRegDeleteKey routine. RecursiveRegDeleteKey uses recursion to navigate all the way down to the bottom keys, delete them, and then work its way back up the tree. Why the Windows NT version of RegDeleteKey doesn't have this option is beyond me. </P>
+<P>That's it for the CLEANREG.CPP code. Note that there's no user interface code. In fact, my early versions of CLEANREG were command-line oriented, with a simple main function that called SearchRegistryForMissingFiles. CheckForExistence wrote the names of any nonexistent files to stdout. But command-line programs aren't in vogue, so the next step was to put a GUI on top of CLEANREG. </P>
+<P> </P>
+<H2><A NAME="sec0"></A>  The CLEANREG User Interface </H2><P>The information that CLEANREG needs to convey to the user is quite simple: a list of non-existent filenames and the registry paths where they were found. A very simple user interface would simply contain a list box with the filename and the corresponding registry path. You could then select a filename, hit Delete, and the value would cease to exist. </P>
+<P>One problem with this simple approach is that the filenames might be several subkeys below the primary key for a program. For instance, consider the filename F:\MSOffice\Office\bdrec.dll, which is located in the registry path </P>
+<P> </P>
+<P><BR></P>
+<PRE> \HKEY_LOCAL_MACHINE\Software\Classes\CLSID\ 
+{59850404-6664-101b0b21C-00AA004BA90B}\InprocServer32 </PRE>
+<P> </P>
+<P>In this case, I want to remove the entire class reference from the registry (starting with the long GUID portion in the curly braces). Deleting just the InprocServer32 node would leave a registered CLSID without any information about its server. Thus, what I needed to do was give users a complete registry path and let them decide where to prune. </P>
+<P>If you've used REGEDIT, you know that it uses a TreeView control to display all the registry nodes. By selecting a particular node and hitting Delete in REGEDIT, you can delete a key and all of its children. This works well, so I adopted this model for CLEANREG. As you can see in <B>Figure 2</B>, the top list box lists all the nonexistent filenames that CLEANREG found in the registry. As each list box entry is highlighted, the TreeView expands to display the corresponding registry path. You can then click on the desired node in the TreeView and hit Delete to remove either the key or value (depending on what you've highlighted). </P>
+<P>A key difference between the CLEANREG UI and REGEDIT is that I was lazy and didn't do a split pane window with registry keys on the left side and the associated values on the right. Instead, registry values appear just as additional subitems in the TreeView. </P>
+<P>An actual registry value is stored in the TreeView in the form [value: <I>xxx</I>], where <I>xxx</I> is the name of the registry value. The actual string contents of the REG_SZ value (yes, it's confusing to keep all this straight!) appear as yet another subitem beneath the [value: <I>xxx</I>] item. If either a [value: <I>xxx</I>] or its subitem is selected when you hit Delete, CLEANREG removes the value from the registry. If anything else is selected, CLEANREG treats the selected node as a registry key, and deletes the key and all of its child keys and values. </P>
+<P>The remaining elements of the CLEANREG UI are fairly self-explanatory. The Update after delete checkbox (which is enabled by default) lets you delete multiple registry entries without forcing a complete registry rescan after each deletion. The Sane filenames checkbox reflects the setting of the g_fBeRealistic global variable. This variable tells CheckForFilename (described earlier) if it should report legal but unlikely filenames. Each time you toggle the Sane filenames button, CLEANREG does a complete update, so this button is a quick way to refresh the dialog's contents. Pressing the F5 key will also refresh, just like Windows Explorer or File Manager.</P>
+<P>The sources for implementing the CLEANREG UI are entirely within CLNREGUI.CPP. The code is all pretty straightforward, except for the TreeView control code. Doing serious work with TreeViews was the other unanticipated adventure when writing CLEANREG. I'll tell all shortly. </P>
+<P>The AddItemToUI function is the way the registry-scanning code communicates with the user interface. Conceptually, AddItemToUI's work is simple enough: put the nonexistent filename in the list box, and put the registry path key nodes into TreeView items. I used list box item data (the LB_SETITEMDATA message) to hook up the list box to the TreeView. This means that when you select a list box item, the appropriate TreeView item expands. For each list box entry, the code stores the corresponding HTREEITEM for the TreeView. (If you're unfamiliar with TreeView controls, an HTREEITEM corresponds to exactly one selectable node within the control.) </P>
+<P>The first snag I ran into with TreeView controls was that there's no way to build a nested series of HTREEITEMs. You can only create one HTREEITEM at a time. Thus, I needed to take a \-delimited registry path string and break it into individual key names. For each key name, the code creates an HTREEITEM (as long as an HTREEITEM with that name doesn't already exist). If there are additional subkey names in the registry path, the process is repeated until there's an HTREEITEM for each key name in the registry path. This task lends itself to recursion, so I wrote a single routine, GetHTIForRegPath, to do it. Given an input HTREEITEM and a registry key path, it creates an HTREEITEM for the first key name in the path. The routine then recurses to handle any remaining subkeys. </P>
+<P>A snag that came up when writing GetHTIForRegPath was that I couldn't just extract the first key name in the registry path and create an HTREEITEM for it. Why not? There might already be an HTREEITEM with that name, so I'd be creating duplicate TreeView nodes. Thus, GetHTIForRegPath has to first check if an HTREEITEM with the given name already exists, and only create a new HTREEITEM if there isn't one already. This turned out to be more difficult than I expected. </P>
+<P>For starters, the TreeView control offers no searching capabilities (not even in the new TreeView from the new Common Controls DLL, which ships with Microsoft¨ Internet Explorer 3.0). Given a string, you can't have the TreeView return an HTREEITEM for a child node with a matching name. Put another way, there's no equivalent to the list box LB_FINDSTRING message. Instead, you have to enumerate through all of the child HTREEITEMs yourself, querying each one in turn for its name. (In case you're wondering, MFC wouldn't have helped here. The MFC TreeView classes don't appear to encapsulate any functionality that you can't get with the standard TreeView messages in COMMCTRL.H.) </P>
+<P>After resigning myself to searching though every child node myself, I hit a real head banger in the documentation. Enumerating through the child nodes of an HTREEITEM is a first/next affair using the TreeView_GetNextItem function. One of the parameters to TreeView_GetNextItem is an HTREEITEM. Another parameter specifies the relationship between the passed-in HTREEITEM and the HTREEITEM you're asking for. To enumerate all the child items in a TreeView control, you pass TVGN_CHILD the first time and TVGN_NEXT in subsequent calls. The problem is, the SDK documentation states that for TVGN_CHILD, the HTREEITEM must be NULL. Obviously this is complete nonsense. Without knowing which HTREEITEM is the parent, how can you enumerate its children? </P>
+<P>Operating on the assumption that the documentation was confused, I tried passing a nonzero HTREEITEM. Since I wanted to start the enumeration at the root of the TreeView, I passed in TVI_ROOT. Big mistake! CLEANREG promptly blew up inside COMCTL32.DLL. A little poking around in a debugger led me to figure out that HTREEITEMs are really pointers. TVI_ROOT, which is defined as ((HTREEITEM)0xFFFF0000), obviously isn't a pointer. I finally got around this problem by creating a dummy root node in the TreeView called My Registry. </P>
+<P>So much for entering nodes into TreeView controls. The other challenge was to get the data back out. That is, when you click on a node and hit Delete, CLEANREG needs to create a \-delimited registry path for the selected HTREEITEM. This is the string that CLEANREG passes to DeleteRegistryPath in CLEANREG.CPP.  Since I already had a routine called GetHTIForRegPath to put registry paths into the TreeView, I wrote a mirror-image routine, GetRegPathForHTI, to do the opposite. Given an HTREEITEM, GetRegPathForHTI walks up the HTREEITEM hierarchy and builds a \-delimited path as it goes. Incidentally, both GetHTIForRegPath and GetRegPathForHTI could be used as a basis for writing general-purpose TreeView routines for other programs. </P>
+<P> </P>
+<H2><A NAME="sec1"></A>  Some Final Notes on CLEANREG </H2><P>If you peruse the CLEANREG sources, you'll see that I wrote the code to be Unicode-aware. By passing "UNICODE=1" to NMAKE when building CLEANREG, you'll get a Unicode version of the program. You might consider doing this if you only run Windows NT, as you'll get a slight speed gain. After all, Windows NT uses Unicode internally and for all of its programs, so why shouldn't other utility programs? Making the code Unicode-ready was a little more work, but it uncovered some bugs that I wouldn't have found otherwise. Since CLEANREG is designed to run on both Windows NT and Windows 95, the EXE that I've included with the sources is the ANSI-compiled version. </P>
+<P>Earlier, I mentioned that CLEANREG was far from perfect. Run it yourself and you'll see what I mean. For instance, many of the nonexistent files are from the recent file lists that many programs (such as Microsoft¨ Word and the Visual C++ IDE) keep in the registry. While it usually doesn't hurt anything to delete these entries, it doesn't buy you much. If you continue using the program that put the entries there, they'll be replaced by other filenames. </P>
+<P>Another thing to be aware of is that many install programs fill out a complete set of registry entries, even if you didn't install all of the program's options. For instance, Microsoft Office for Windows 95 adds in numerous entries for its Binder program even if you don't install the Binder. Whether or not it's OK to delete these entries is a judgment call that depends on the individual program. </P>
+<P>As currently implemented, CLEANREG can report command lines like "C:\FOO.EXE BAR.TXT" as files. After all, they're legal filenames. This is where your judgment is needed. Just because CLEANREG puts a filename in its list box doesn't mean that it's safe to delete the associated registry entry. Likewise, nothing in CLEANREG prevents you from picking a branch that's too close to the root of the registry and deleting it. CLEANREG prompts you before deleting an item to make sure that you really want to do so. If you say OK, you'll get what you asked for. </P>
+<P>The moral is this: CLEANREG is a tool for <I>assisting</I> you in finding <I>potentially</I> dead registry entries. It's certainly not infallible. Make sure you understand what you're doing. Back up your registry before running any program that deletes registry entries. And please, use it with caution just as you would with REGEDIT.</P>
+<P>Have a question about programming in Windows? Send it to Matt at 71774.362@compuserve.com</P>
+<P><I>This article is reproduced from Microsoft Systems Journal. Copyright </I>©<I> 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P><I>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</I></P>
+<P></P></font></body></HTML>

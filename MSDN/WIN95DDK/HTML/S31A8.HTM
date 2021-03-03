@@ -1,0 +1,73 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Hook procedures</TITLE><META HTTP-EQUIV="CONTENT-TYPE" CONTENT="text/html; charset= iso-8859-1"><style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD><BODY BGCOLOR="#FFFFFF">
+<FONT FACE="verdana,arial,helvetica" SIZE="2">
+<H2>Hook procedures </H2><P>Windows 95 provides additional services which allow a virtual device to unhook various services that it had previously hooked. This has become increasingly important with the introduction of dynamically-loaded VxDs. In order to support this feature, new requirements have been imposed on VxDs which hook device services or faults. </P>
+<P>The hook procedure passed in the ESI register to <B>Hook_Device_Service</B>, <B>Hook_V86_Fault</B>, <B>Hook_PM_Fault</B>, and <B>Hook_VMM_Fault</B> must be one declared with the BeginProc macro (defined in vmm.h) with the HOOK_PROC attribute. You are required to pass a new-style hook procedure even if you never plan to unhook the service. Failure to comply will prevent other devices from unhooking the service. Windows 95 supports old-style hook procedures solely for backwards-compatibility. Support for old-style hook procedures may be removed in a future version of Windows, so it is imperative that you convert all your hook procedures to the new style when building for Windows 95. (New-style hook procedures are downward-compatible with Windows 3.1, so there is no loss of amenity there.) </P>
+<P>Here is a sample hook procedure, and the code that installs and removes it. </P>
+<P><BR></P>
+<PRE>VxD_LOCKED_DATA_SEG
+pPrevHook dd 0
+VxD_LOCKED_DATA_ENDS
+
+BeginProc MyHook, HOOK_PROC, pPrevHook, LOCKED
+
+    pushfd                  ; Remember, hooks must preserve all regs
+    pushad                  ;
+    Trace_Out  "An MS-DOS app is starting"
+    popad
+    popfd
+    jmp        [pPrevHook]  ; Chain to previous hook
+
+EndProc MyHook
+
+    ...
+    ; Install the hook to watch for MS-DOS apps starting
+    mov      esi, offset32 MyHook
+    GetDeviceServiceOrdinal eax, DOSMGR_Begin_V86_App
+    VMMCall  Hook_Device_Service
+    jc       Error
+IFDEF    WIN31COMPAT
+    mov  pPrevHook, esi    ; Windows 3.1 requires this
+                           ; Optional in Windows 95 provided
+                           ; MyHook is a HOOK_PROC
+ENDIF
+
+    ...
+    ; Remove the hook that watches for MS-DOS apps starting
+    mov      esi, offset32 MyHook
+    GetDeviceServiceOrdinal eax, DOSMGR_Begin_V86_App
+    VMMCall  Unhook_Device_Service
+    jc       Error
+</PRE>
+<P>Observe that the value returned in ESI need not be stored into pPrevHook under Windows 95; the VMM automatically does this. (This also closes race conditions that occur if you hook an asynchronous service and a hardware interrupt arrives before you can save the answer.) Moreover, you should never attempt to modify the value in pPrevHook yourself; VMM assumes that it is the only code which will modify the value, because it uses that value to walk the hook chain. Furthermore, you must never attempt to 'unhook' the service by passing pPrevHook as the ESI to a <B>Hook_Device_Service</B> or <B>Hook_XX_Fault</B> call, for that too will mess up the bookkeeping. </P>
+<P>For fault hooks, there is another twist. If there was no previous fault hook, zero is returned in ESI, for compatibility with Windows 3.1, but the address of the system default fault handler is returned in pPrevHook anyway. This allows you to pass a fault through instead of being forced to handle it. Sample code to install the hook procedure would then look like </P>
+<P><BR></P>
+<PRE>    mov      esi, offset32 MyHook
+    mov      eax, 6                 ; Invalid opcode fault
+    VMMCall  Hook_VMM_Fault
+    jc       Error
+IFDEF    WIN31COMPAT
+    mov      pPrevHook, esi    ; DO NOT DO THIS FOR WINDOWS 95
+ENDIF
+</PRE>
+<P>The hook itself would look like this </P>
+<P><BR></P>
+<PRE>BeginProc MyHook, HOOK_PROC, pPrevHook, LOCKED
+
+    pushfd                    ; Remember, hooks must preserve all regs
+    pushad                    ;
+    Trace_Out  "An invalid opcode fault"
+    popad
+IFDEF  WIN31COMPAT            ; THIS IS NOT NECESSARY FOR WINDOWS 95
+    cmp        [pPrevHook], 0 ; Was there a previous hook
+    jnz        @F             ; Yes, chain to it
+    popfd                     ; No, just return (nothing better to do)
+    retd
+@@:
+ENDIF
+    popfd
+    jmp    [pPrevHook]        ; Chain to previous hook
+
+EndProc MyHook
+</PRE>
+<P>Observe how the Windows 95 hook mechanism removes the need to alter behavior depending on whether there was a previous fault handler. </P></FONT></BODY></HTML>

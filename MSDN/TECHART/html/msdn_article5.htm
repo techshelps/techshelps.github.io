@@ -1,0 +1,576 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Article 5. The Safe OLE Way of Handling Arrays</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+<h1><a name="msdn_article5"></a>Article 5. The Safe OLE Way of Handling Arrays</h1>
+<p>
+Bruce McKinney</p>
+<p>
+April 18. 1996</p>
+<p>
+Although Microsoft® Visual C++® supports arrays intrinsically, it does so with no index protection, no size limit, no initialization—just a pointer to random-value memory. Even C++ programmers are reluctant to use raw arrays. Many of them write protected wrapper classes with names like <b>Array</b> or <b>Vector</b>. You can make such classes look and act like an array—but one protected by armor. </p>
+<p>
+If you're going to make arrays available across process, machine, and operating system boundaries, your clients will expect more protection than a raw C++ array can provide. The OLE way of doing arrays (which is exactly the same as the Visual Basic® way) is through a protected data structure called a SAFEARRAY.</p>
+<h2>What Is a SAFEARRAY?</h2>
+<p>
+Because the OLE header files are implemented for both C and C++ (although using C is cumbersome, so this article will examine only the C++ case), they provide the protected standard array as a SAFEARRAY structure with a group of system functions that work on it. </p>
+<h3>The SAFEARRAY Structure </h3>
+<p>
+When converted to C++ and trimmed of excess typedefs and conditionals, the SAFEARRAY structure looks something like this: </p>
+<pre><code>struct SAFEARRAY {
+ &nbsp;&nbsp; WORD cDims;
+ &nbsp;&nbsp; WORD fFeatures;
+ &nbsp;&nbsp; DWORD cbElements;
+ &nbsp;&nbsp; DWORD cLocks;
+ &nbsp;&nbsp; void * pvData;
+ &nbsp;&nbsp; SAFEARRAYBOUND rgsabound[1];
+};
+</code></pre>
+<ul type=disc>
+<li>
+The <b>cDims</b><i> </i>field contains the number of dimensions of the array.<br><br></li>
+<li>
+The <b>fFeatures</b><i> </i>field is a bitfield indicating attributes of a particular array. (More on that later.)<br><br></li>
+<li>
+The <b>cbElements</b><i> </i>field defines the size of each element in the array.<br><br></li>
+<li>
+The <b>cLocks</b><i> </i>field is a reference count that indicates how many times the array has been locked. When there is no lock, you're not supposed to access the array data, which is located in <b>pvData</b>. </li>
+</ul>
+<p>
+The last field is an array of boundary structures. By default, there's only one of these, but if you define multiple dimensions, the appropriate system function will reallocate the array to give you as many array elements as you need. The dimension array is the last member of the array so that it can expand. A SAFEARRAYBOUND structure looks like this: </p>
+<pre><code>struct SAFEARRAYBOUND {
+ &nbsp;&nbsp; DWORD cElements;
+ &nbsp;&nbsp; LONG lLbound;
+};
+</code></pre>
+<p>
+The <b>cElements</b><i> </i>field has the number of elements in the dimension, and the <b>lLBound</b><i> </i>field has the lower boundary. In theory, you could define a range either by giving the first and last element, or by giving the first element and the number of elements. OLE chose the second format, but we'll fix that shortly.</p>
+<h3>The SAFEARRAY System Functions</h3>
+<p>
+Many of the system functions tend to work together in groups, so we'll talk about related functions in logical order. My descriptions of these functions are sometimes different from (and sometimes more complete than) the descriptions in OLE documentation. Because I personally tested them to determine some behavior that was sparsely documented, I am confident that my descriptions are valid and will work for you.</p>
+<p>
+As long as you're working with single-dimension arrays, the SAFEARRAY functions are simple and straightforward. Things get more complicated with multi-dimensional arrays, partly because Visual Basic and Visual C++ have a different ideas of how to arrange the data in different dimensions. Also C++ wants to access zero-based arrays, but the SAFEARRAY type can have index boundaries based on any signed number. </p>
+<p>
+The <b>TestSA</b> function in Test.Cpp gives the <b>SafeArray</b> system functions a workout. The examples for the functions described below are taken from this function, and the event handler for the SAFEARRAY button in the Cpp4VB sample program calls this function. I'm not going to go through the code in detail, but I will say that the more you study the raw functions, the more you'll appreciate the <b>SafeArray</b> class shown later. </p>
+<p>
+One note on terminology: OLE documentation calls a pointer to an allocated SAFEARRAY structure an <i>array descriptor</i>. Note that an array descriptor isn't necessarily the same as a pointer to a SAFEARRAY structure. The structure has space for only one dimension (SAFEARRAYBOUND structure). A descriptor is expanded to provide additional memory for each dimension. </p>
+<h4>SAFEARRAY * SafeArrayCreate(VARTYPE vt, UINT cDims, SAFEARRAYBOUND * aDims);<br>
+HRESULT SafeArrayDestroy(SAFEARRAY * psa);</h4>
+<p>
+You create an array by calling <b>SafeArrayCreate</b>, passing it the type of the array in the <i>vt </i>parameter, the number of dimensions in the <i>cDims </i>parameter, and the size of each dimension in the <i>adims </i>parameter (an array of SAFEARRYBOUND structures). <b>SafeArrayCreate</b> creates a new array, allocates and initializes the data for the array, and returns a pointer to the SAFEARRAY structure. When you're done with the array, call <b>SafeArrayDestroy</b>. The advantage of these functions is that they're simple. The disadvantage is that they can only handle the OLE variant subtypes (excluding VT_ARRAY, VT_BYREF, VT_EMPTY, or VT_NULL). That's not really a disadvantage when you're dealing with Visual Basic or most other OLE clients.</p>
+<p>
+When you destroy an array of BSTRs, VARIANTs, or objects with <b>SafeArrayDestroy</b>, BSTRs and VARIANTs are freed and objects are released. </p>
+<p>
+<b>Example:</b></p>
+<pre><code>// Create a new 1-D array of Integers.
+SAFEARRAY * psaiNew; 
+SAFEARRAYBOUND aDim[1]; 
+aDim[0].lLbound = 1; 
+aDim[0].cElements = 8; 
+// Equivalent to: Dim aiNew(1 To 8) As Integer.
+psaiNew = SafeArrayCreate(VT_I2, 1, aDim);
+if (psaiNew == NULL) throw ERROR_NOT_ENOUGH_MEMORY;
+.
+.&nbsp; // Use array.
+.
+if (hres = SafeArrayDestroy(psaiNew)) throw hres;
+</code></pre>
+<h4>HRESULT SafeArrayAllocDescriptor(UINT cDims, SAFEARRAY ** ppsaOut);<br>
+HRESULT SafeArrayAllocData(SAFEARRAY * psa);<br>
+HRESULT SafeArrayDestroyData(SAFEARRAY * psa);<br>
+HRESULT SafeArrayDestroyDescriptor(SAFEARRAY * psa);</h4>
+<p>
+These functions provide more complicated and flexible alternative to <b>SafeArrayCreate</b> and <b>SafeArrayDestroy</b>. You can put non-OLE types into the array, but you must manage the data yourself. In this series of articles, we have no reason to put nonstandard data types into arrays. Visual Basic wouldn't know what to do with them anyway.</p>
+<h4>HRESULT SafeArrayGetElement(SAFEARRAY * psa, long * aiIndex, void * pvElem);<br>
+HRESULT SafeArrayPutElement(SAFEARRAY * psa, long * aiIndex, void * pvElem);</h4>
+<p>
+These functions insert or extract a single array element. You pass one of these functions an array pointer and an array of indexes for the element you want to access. It returns a pointer to a single element through the <i>pvElem </i>parameter. You also need to know the number of dimensions and supply an index array of the right size. The rightmost (least significant) dimension should be <i>aiIndex[0] </i>and the leftmost dimension should be <i>aiIndex[psa-&gt;cDims-1]</i>. These functions automatically call <b>SafeArrayLock</b> and <b>SafeArrayUnlock</b> before and after accessing the element. If the data element is a BSTR, VARIANT, or object, it is copied correctly with the appropriate reference counting or allocation. During an assignment, if the existing element is a BSTR, VARIANT, or object, it is cleared correctly, with the appropriate release or free before the new element is inserted. You can have multiple locks on an array, so it's OK to use these functions while the array is locked by other operations.</p>
+<p>
+<b>Example:</b></p>
+<pre><code>// Modify 2-D array with SafeArrayGetElement and SafeArrayGetElement.
+long ai[2];
+Integer iVal;
+xMin = aDims[0].lLbound;
+xMax = xMin + (int)aDims[0].cElements - 1;
+yMin = aDims[1].lLbound; 
+yMax = yMin + (int)aDims[1].cElements - 1;
+for (x = xMin; x &lt;= xMax; x++) {
+ &nbsp;&nbsp; ai[0] = x;
+ &nbsp;&nbsp; for (y = yMin; y &lt;= yMax; y++) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ai[1] = y;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (hres = SafeArrayGetElement(psaiInOut, ai, &amp;iVal)) throw hres;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Equivalent to: aiInOut(x, y) = aiInOut(x, y) + 1.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iVal++;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (hres = SafeArrayPutElement(psaiInOut, ai, &amp;iVal)) throw hres;
+ &nbsp;&nbsp; }
+}
+</code></pre>
+<h4>HRESULT SafeArrayLock(SAFEARRAY * psa);<br>
+HRESULT SafeArrayUnlock(SAFEARRAY * psa);</h4>
+<p>
+These functions increment or decrement the lock count of an array. The data becomes accessible through the <b>pvData</b><i> </i>field of the array descriptor. The pointer in the array descriptor is valid until <b>SafeArrayUnlock</b> is called. Note that the <b>pvData</b> field, like all C++ arrays, is zero-indexed. If you need to keep track of the Basic index, initialize it from the <b>lLbound</b><i> </i>field of the SAFEARRAYBOUND structure. </p>
+<p>
+When processing data in a loop, it is more efficient to lock the array, process the data, and then unlock it, rather than making multiple calls to <b>SafeArrayGetElement</b> and <b>SafeArrayPutElement</b>. You can nest equal pairs of calls to <b>SafeArrayLock</b> and <b>SafeArrayUnlock</b>, so it's possible to lock and use an array while another operation also has a lock on the array. An array can't be deleted while it is locked.</p>
+<p>
+<b>Example:</b></p>
+<pre><code>// Initialize Integer array to squares of index.
+if (hres = SafeArrayLock(psaiNew)) throw hres;
+int iCur = aDim[0].lLbound;
+// Keep separate C++ index (i) and Basic index (iCur).
+for (i = 0; i &lt; (int)aDim[0].cElements; i++, iCur++) {
+ &nbsp;&nbsp; // Equivalent to: ai(iCur) = iCur * iCur.
+ &nbsp;&nbsp; ((Integer*)psaiNew-&gt;pvData)[i] = iCur * iCur;
+}
+if (hres = SafeArrayUnlock(psaiNew)) throw hres;
+</code></pre>
+<p>
+The example above illustrates accessing a simple 1-D array. As a bonus, here's an example of accessing a 2-D array without any help from <b>SafeArrayPtrOfIndex</b>. I had to consult a pack of C++ language lawyers (special credit to Paul Johns) for help untangling a type cast that looks sort of like a spilled can of night crawlers.</p>
+<pre><code>// Set up dimension array and pointer to receive value.
+if (hres = SafeArrayLock(psaiInOut)) throw hres; 
+Integer (*aiInOut)[4] = (Integer(*)[4])psaiInOut-&gt;pvData;
+for (x = 0; x &lt; (int)aDims[0].cElements; x++) {
+ &nbsp;&nbsp; for (y = 0; y &lt; (int)aDims[1].cElements; y++) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Equivalent to: aiInOut(x, y) = aiInOut(x, y) + 1.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Switch x and y order for Visual Basic storage order.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; aiInOut[y][x]++;
+ &nbsp;&nbsp; }
+}
+if (hres = SafeArrayUnlock(psaiInOut)) throw hres;
+</code></pre>
+<h4>HRESULT SafeArrayPtrOfIndex(SAFEARRAY * psa, long * aiIndex, void ** ppv);</h4>
+<p>
+This function returns a pointer to an array element. You pass it an array of index values that identify an element of the array; it returns a pointer to the element. The array should be locked before <b>SafeArrayPtrOfIndex</b> is called. Use this function with multi-dimension arrays when using <b>SafeArrayLock</b>. For single-dimension arrays, it's usually easier to just index into the array directly without this function. </p>
+<p>
+<b>Example:</b></p>
+<pre><code>// Lock 2-D array and modify.
+xMin = aDims[0].lLbound; 
+xMax = xMin + (int)aDims[0].cElements - 1;
+yMin = aDims[1].lLbound; 
+yMax = yMin + (int)aDims[1].cElements - 1;
+// Set up dimension array and pointer to receive value.
+Integer * piInOut;
+if (hres = SafeArrayLock(psaiInOut)) throw hres; 
+for (x = xMin; x &lt;= xMax; x++) {
+ &nbsp;&nbsp; ai[0] = x;
+ &nbsp;&nbsp; for (y = yMin; y &lt;= yMax; y++) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ai[1] = y;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hres = SafeArrayPtrOfIndex(psaiInOut, ai, (void **)&amp;piInOut);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (hres) throw hres;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Equivalent to: aiInOut(x, y) = aiInOut(x, y) + 1.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (*piInOut)++;
+ &nbsp;&nbsp; }
+}
+if (hres = SafeArrayUnlock(psaiInOut)) throw hres;
+</code></pre>
+<h4>HRESULT SafeArrayAccessData (SAFEARRAY * psa, void ** ppvData);<br>
+HRESULT SafeArrayUnaccessData(SAFEARRAY * psa);</h4>
+<p>
+You pass <b>SafeArrayAccessData</b> a SAFEARRAY pointer and a variable to receive the address of the array data; it locks the array and returns a pointer to the data. When you're done, you call <b>SafeArrayUnaccessData</b>. This is the verbose equivalent of locking the data and using the <b>pvData</b><i> </i>member out of the SAFEARRAY structure. It provides no way to calculate the index of multi-dimension arrays. I can't think of any reason to use these functions, so if you do, you're on your own.</p>
+<h4>HRESULT SafeArrayCopy(SAFEARRAY * psaIn, SAFEARRAY ** ppsaOut);</h4>
+<p>
+This function creates a copy of an existing safe array: You pass it the descriptor of the array to copy and the address of a SAFEARRAY pointer that will receive the copy; it copies the source data to the destination. If the source array contains BSTR or VARIANT types, <b>SafeArrayCopy</b> calls the appropriate system functions to create the copies. If the source array contains object references, <b>SafeArrayCopy</b> increments their reference counts. You end up with two identical copies of the array. </p>
+<p>
+<b>Example:</b></p>
+<pre><code>// Copy from psaiNew to psaiRet.
+SAFEARRAY * psaiRet; 
+if (hres = SafeArrayCopy(psaiNew, &amp;psaiRet)) throw hres;
+</code></pre>
+<h4>UINT SafeArrayGetDim(SAFEARRAY * psa);<br>
+UINT SafeArrayGetElemsize(SAFEARRAY * psa);</h4>
+<p>
+These functions return the number of dimensions in the array or the size in bytes of an element. They are equivalent to getting the corresponding elements out of the descriptor.</p>
+<p>
+<b>Example:</b></p>
+<pre><code>long cDim = SafeArrayGetDim(psaiInOut); 
+long cbElem = SafeArrayGetElemsize(psaiInOut); 
+</code></pre>
+<h4>HRESULT SafeArrayGetLBound(SAFEARRAY * psa, UINT cDim, long * piLo);<br>
+HRESULT SafeArrayGetUBound(SAFEARRAY * psa, UINT cDim, long * piUp);</h4>
+<p>
+These functions return the lower or upper boundary for any dimension of a safe array.</p>
+<p>
+<b>Example</b>:</p>
+<pre><code>SAFEARRAYBOUND * aDims = new SAFEARRAYBOUND[cDim];
+long iT;
+for (i = 0; i &lt; cDim; i++) {
+ &nbsp;&nbsp; hres = SafeArrayGetLBound(psaiInOut, i + 1, &amp;aDims[i].lLbound);
+ &nbsp;&nbsp; if (hres) throw hres; 
+ &nbsp;&nbsp; if (hres = SafeArrayGetUBound(psaiInOut, i + 1, &amp;iT)) throw hres;
+ &nbsp;&nbsp; // Calculate elements from upper and lower boundaries.
+ &nbsp;&nbsp; aDims[i].cElements = iT - aDims[i].lLbound + 1;
+}
+</code></pre>
+<h4>HRESULT SafeArrayRedim(SAFEARRAY * psa, SAFEARRAYBOUND * pdimNew);</h4>
+<p>
+This function changes the least significant (rightmost) bound of a safe array. You pass an array pointer to <b>SafeArrayRedim</b> and a pointer to a SAFEARRAYBOUND variable containing the desired dimensions. If you reduce the size of the array, <b>SafeArrayRedim</b> deallocates the array elements outside the new array boundary. If you increase the size, <b>SafeArrayRedim</b> allocates and initializes the new array elements. The data is preserved for elements that exist in both the old and the new array. To redimension an array passed from Visual Basic, the array must be a non-static array:</p>
+<pre><code>' Use SafeArrayRedim on this one.
+Dim aiModify () As Integer
+ReDim Preserve aiModify(1 To 8, 1 To 8) As Integer
+' Don't use SafeArrayRedim.
+Dim aiFixed(1 To 8, 1 To 8) As Integer
+</code></pre>
+<p>
+You can identify a fixed-length array passed from Visual Basic by the <b>fFeatures</b><i> </i>field of the SAFEARRAY structure. Basic sized arrays declared with <b>Dim</b>, <b>Private</b>, or <b>Public</b> will have the FADF_STATIC and FADF_FIXEDSIZE flags. Arrays sized with Basic's <b>ReDim</b> statement (and thus usable with <b>SafeArrayRedim</b>) will not have these flags. </p>
+<p>
+<b>Example</b>:</p>
+<pre><code>// Double the size of the last dimension.
+i = cDim - 1;
+aDims[i].cElements *= 2;
+if (hres = SafeArrayRedim(psaiInOut, &amp;aDims[i])) throw hres;
+</code></pre>
+<h2>The SafeArray Class</h2>
+<p>
+You're probably not used to thinking of an array as a type—it's more of a container for other types. But in C++ just about anything can be a type. Until recently, if you wanted to define one type that held objects of another type, you had to decide at design time what type you wanted to contain. You could design an ArrayLong type, but then you'd have to copy all your code and do a lot of searching and replacing to add an ArrayString type. </p>
+<p>
+C++ templates now let you define an array type that can contain any kind of OLE type. You can declare an array of strings like this:</p>
+<pre><code>SafeArray&lt;BSTR, VT_BSTR&gt; as = Dim(1, 8); // Dim as(1 To 8) As String
+</code></pre>
+<p>
+You specify by what you put in the angle brackets exactly what type you want to be contained in the array. It gets a little tiresome, not to mention redundant, to specify both the type and the OLE type constant for every array, but typedefs make it easy to define the standard OLE types: </p>
+<pre><code>typedef SafeArray&lt;BSTR, VT_BSTR&gt; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ArrayString;
+</code></pre>
+<p>
+Now you can define the string more naturally. </p>
+<pre><code>ArrayString as = Dim(1, 8);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Dim as(1 To 8) As String
+</code></pre>
+<p>
+The other OLE types have Basic-style names: ArrayByte, ArrayInteger, ArrayLong, ArraySingle, ArrayDouble, ArrayVariant, ArrayCurrency, ArrayDate, ArrayBoolean, and ArrayObject. The trick is that we don't have to define a separate class for each type. There's just one class with 11 predefined variations, and the ability to define more, although the predefined ones are all you need for a Visual Basic client. </p>
+<p>
+You can see some of these array definitions in action in the <b>TestSafeArray</b> function in Test.Cpp. This function is tested by the event handler of the SafeArray button in the Cpp4VB sample program.</p>
+<p>
+But before we look at things you might want to do with SafeArray types, what the heck is that <b>Dim</b> object being assigned to the array? </p>
+<h3>The Dim Type</h3>
+<p>
+The SAFEARRAYBOUND type is the official way of specifying a dimension for a SAFEARRAY, but it's not my idea of how a dimension ought to be specified. It certainly doesn't look like a Visual Basic dimension, so I wrote a simpler, more friendly class called <b>Dim</b>. <b>Dim</b> is inherited from SAFEARRAYBOUND, so it has the same data members, but it also has friendly constructors and methods that make it easier to use. All methods of the <b>Dim</b> class are inline, so there's no penalty for using it. </p>
+<p>
+Here's the entire class: </p>
+<pre><code>class Dim : public SAFEARRAYBOUND
+{
+public:
+ &nbsp;&nbsp; Dim(const long iLo, const long iHi)
+ &nbsp;&nbsp; { cElements = abs(iHi - iLo) + 1; lLbound = iLo; }
+ &nbsp;&nbsp; Dim(const long c)
+ &nbsp;&nbsp; { cElements = c; lLbound = 0; }
+ &nbsp;&nbsp; const Dim &amp; operator=(const Dim &amp; dim) 
+ &nbsp;&nbsp; { cElements = dim.cElements; lLbound = dim.lLbound; return *this; }
+ &nbsp;&nbsp; const Dim &amp; operator=(const long c) 
+ &nbsp;&nbsp; { cElements = c; lLbound = 0; return *this; }
+ &nbsp;&nbsp; ~Dim() {}
+ &nbsp;&nbsp; long Elements() { return cElements; }
+ &nbsp;&nbsp; long LBound() { return lLbound; }
+ &nbsp;&nbsp; long UBound() { return lLbound + cElements - 1; }
+};
+</code></pre>
+<p>
+Notice first that the <b>Dim</b> object is inherited publicly from SAFEARRAYBOUND. This means that the <b>Dim</b> is a SAFEARRAYBOUND and you can use its data members—<b>lLbound</b><i> </i>and <b>cElements</b>. These have to be public so that you can pass a <b>Dim</b> to system functions such as <b>SafeArrayCreate</b>. You can use a <b>Dim</b> the hard way:</p>
+<pre><code>Dim dim;
+dim.lLBound = 4;
+dim.cElements = 9;
+</code></pre>
+<p>
+but why bother, when you can do the following: </p>
+<pre><code>Dim dim(4, 12);
+</code></pre>
+<p>
+That's more like Visual Basic. But you can also just specify the number of elements and assume zero as the starting point: </p>
+<pre><code>Dim dim2(8);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Same as Dim dim2(0, 7)
+</code></pre>
+<p>
+Normally, you don't need a separate variable for <b>Dim</b>. Just create a temporary one in the assignment statement: </p>
+<pre><code>ArrayString as = Dim(1, 8);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Dim as(1 To 8) As String
+</code></pre>
+<p>
+So why didn't I just skip the <b>Dim</b> class and give arrays a constructor taking two arguments? Then you could define the array like this: </p>
+<pre><code>ArrayString as(1, 8);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Dim as(1 To 8) As String
+</code></pre>
+<p>
+True, this would have been easy, and you should feel free to add it if you want. But what happens with multidimensional arrays? Which makes more sense? This:</p>
+<pre><code>ArrayString2 as(Dim(1, 8), Dim(3, 9)); // Dim as(1 To 8, 3 To 9) As String
+</code></pre>
+<p>
+Or this: </p>
+<pre><code>ArrayString2 as(1, 8, 3, 9);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Dim as(1 To 8, 3 To 9) As String
+</code></pre>
+<p>
+It's arguable, but I find the separate <b>Dim</b> class easier to read. It's also more efficient internally.</p>
+<p>
+Notice that I show a separate class, <b>ArrayString2</b>, for two-dimensional arrays. I tried to write a single <b>SafeArray</b> class that could handle multiple dimensions, but function overloading issues made it hard to implement cleanly. In this article, we'll only be using one-dimensional arrays, but you should have no problem cloning the <b>SafeArray</b> class as <b>SafeArray2</b>, <b>SafeArray3</b>, and so on. You won't be able to redimension a one-dimensional class to a two-dimensional class at run time. </p>
+<h3>A SafeArray Warm-up</h3>
+<p>
+The <b>TestSafeArray</b> function seems simple enough. It takes two parameters. One is an input array that the function will modify; the other is an empty output array that the function will create. The function would like to return another output array through the return value, but Visual Basic doesn't support direct return of arrays. They can only be returned in Variants (check out Visual Basic's <b>GetAllSettings</b> function), so that's what we'll do. </p>
+<p>
+The function prototype looks simple enough:</p>
+<pre><code>Variant DLLAPI TestSafeArray(ArrayInteger &amp; aiInOut, ArrayString &amp; asOut);
+</code></pre>
+<p>
+Of course what you're really doing behind the typedefs is using templates: </p>
+<pre><code>Variant DLLAPI TestSafeArray(SafeArray&lt;short, VT_I2&gt; &amp; aiInOut, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SafeArray&lt;BSTR, VT_BSTR&gt; &amp; asOut);
+</code></pre>
+<p>
+SafeArray parameters must always be passed as pointers, but we use references to make the array objects look normal. You'll see how clean this looks in the implementation shortly. </p>
+<p>
+Unfortunately, MKTYPLIB doesn't know anything about references, much less about templates. Here's how you're supposed to define the SAFEARRAY structures in a type library: </p>
+<pre><code>Variant WINAPI TestSafeArray([in, out] SAFEARRAY(short) * ai, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [out] SAFEARRAY(BSTR) * as);
+</code></pre>
+<p>
+You can see what's going on, but it looks almost as ugly as the template prototype. We can do better: </p>
+<pre><code>Variant WINAPI TestSafeArray([in, out] ArrayInteger ai, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [out] ArrayString as);
+</code></pre>
+<p>
+This simple definition is made possible by <b>#define</b> statements in the OLETYPE.ODL standard include file. For example:</p>
+<pre><code>#define ArrayLong&nbsp;&nbsp;&nbsp;&nbsp; SAFEARRAY(long) *
+</code></pre>
+<p>
+OLETYPE.ODL should be included in any type libraries that require SafeArrays. It includes WINTYPE.ODL, so you don't need to include both. You should put this file in a standard location known to your compiler (such as \MSDEV\INCLUDE for Microsoft Visual C++). </p>
+<h3>A SafeArray Workout</h3>
+<p>
+What would you like to do with an array? Well, if you had an input array you might want to examine elements. If the array were an in/out array, you might want to modify the contents. Here's one way of doing that:</p>
+<pre><code>iMid = aiInOut.LBound() + (aiInOut.Elements() / 2);
+// Get middle value of array.
+iVal = aiInOut.Get(iMid);
+// Double it
+iVal *= 2; 
+// Put modified version back.
+aiInOut.Set(iVal, iMid);
+</code></pre>
+<p>
+There's nothing really wrong with this, and it may be the most efficient way to access a single array element. But how often do you access a single element? Every time you call the <b>Get</b> or <b>Set</b> method, the class in turn calls the <b>SafeArrayGet</b> or <b>SafeArrayPut</b> API function, which in turn calls the <b>SafeArrayLock</b> or <b>SafeArrayUnlock</b> API function. You don't need the extra function calls or the hassle.</p>
+<h4>SafeArray Looping in C++ or Basic Style</h4>
+<p>
+Here's how you modify the entire array in a loop:</p>
+<pre><code>// Square each value, C++ style.
+aiInOut.Lock();
+for (i = 0; i &lt; aiInOut.Elements(); i++) {
+ &nbsp;&nbsp; aiInOut[i] *= aiInOut[i];
+}
+aiInOut.Unlock();
+</code></pre>
+<p>
+You have to lock the array before accessing it, and unlock it when you're done. There's something strange here. This looks like a C++ array, starting at 0 and continuing as long as the index is less than the total number of elements. But what about the lower and upper boundaries the SafeArray is supposed to provide? Shouldn't you be looping from LBound() to UBound()? Well, it's a matter of taste. You can indeed do it that way if you prefer:</p>
+<pre><code>// Divide each by two, Visual Basic style.
+aiInOut.Lock();
+for (i = aiInOut.LBound(); i &lt;= aiInOut.UBound(); i++) {
+ &nbsp;&nbsp; aiInOut(i) /= 2;
+}
+aiInOut.Unlock();
+</code></pre>
+<p>
+Notice that in this case you index with parentheses instead of brackets in the Visual Basic style. It makes sense, but how can C++ have Visual Basic indexing? Through the magic of operator overloading. The <b>SafeArray</b> class overloads the subscript operator (square brackets) for zero-based indexing. It overloads the function operator (parentheses) for boundary-based indexing. It may not be what C++ designer Bjarne Stroustrup had in mind, but it works. </p>
+<h4>SafeArray Copying and Resizing</h4>
+<p>
+You can copy an array in two ways—through initialization: </p>
+<pre><code>// Copy an array.
+ArrayInteger aiCopy = aiInOut;
+</code></pre>
+<p>
+Or through assignment:</p>
+<pre><code>aiCopy = aiInOut;
+</code></pre>
+<p>
+Either way you end up with a completely new array containing the same data. It's a deep copy—if the arrays contain BSTRs, each will have its own separate but identical string for each element. SafeArray doesn't support shallow copies in which two array pointers point to the same array data. SafeArray does allow you to redimension arrays—provided that they're sizable:</p>
+<pre><code>// Redimension to throw away last element.
+if (aiInOut.IsSizable()) {
+ &nbsp;&nbsp; aiInOut.ReDim(Dim(aiInOut.LBound(), aiInOut.UBound() - 1)); 
+}
+</code></pre>
+<p>
+For this to work on an array passed from Visual Basic, the array must be created with ReDim rather than Dim. </p>
+<pre><code>' Use SafeArrayRedim on this one.
+Dim aiModify() As Integer
+Redim Preserve aiModify(1 To 8) As Integer
+</code></pre>
+<h4>Returning SafeArrays</h4>
+<p>
+Often you'll want to create an array in a function and return it to Visual Basic through an out parameter. Here's an example: </p>
+<pre><code>// Create array of strings.
+ArrayString as = Dim(4, 9);
+String s = _W("Fan");
+for (i = as.LBound(); i &lt;= as.UBound(); i++) {
+ &nbsp;&nbsp; s[0] = L'F' + (WCHAR)i;
+ &nbsp;&nbsp; as(i) = s;
+}
+// Return it through out parameter.
+asOut = as;
+</code></pre>
+<p>
+And here's how to return through a Variant return value: </p>
+<pre><code>// Create array of doubles.
+ArrayDouble adbl = Dim(-5, 5);
+for (i = adbl.LBound(); i &lt;= adbl.UBound(); i++) {
+ &nbsp;&nbsp; adbl(i) = i * 3.1416;
+}
+// Return through Variant return value.
+Variant vRet = (Variant)adbl;
+return vRet;
+</code></pre>
+<p>
+SafeArray has a Variant type conversion operator that makes the assignment to the Variant return value possible. </p>
+<h3>A ParamArray Workout</h3>
+<p>
+Visual Basic supports a passing a varying number of arguments to a procedure. To the caller of the function, it may look like you're calling a list of unrelated arguments, but the Visual Basic implementer knows that there is actually only one parameter—the last one—called a <i>ParamArray</i>. The C++ implementer knows that this final parameter is actually a variable-length array of Variants in which some elements may be missing. </p>
+<p>
+The Visual Basic parser reads the caller's argument list and creates a Variant array of the same size. It fills the array with the arguments, setting any missing arguments to an error value (DISP_E_PARAMNOTFOUND). </p>
+<p>
+The calls might looks like this on the Basic side:</p>
+<pre><code>Debug.Print AddEmUp(7, 9.4, "4")&nbsp;&nbsp;&nbsp; ' 40.4
+Debug.Print AddEmUp(, 9.4, , "24")&nbsp; ' 33.4
+Debug.Print AddEmUp(7, "4")&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ' 31
+</code></pre>
+<p>
+Wait a minute! How can you add strings to numbers? That's what Variants are for. The C++ side of the code looks like this: </p>
+<pre><code>double DLLAPI AddEmUp(ParamArray &amp; avParams)
+{
+  try {
+ &nbsp;&nbsp; double dblRet = 0;
+ &nbsp;&nbsp; // Loop through the array, retrieving parameters.
+ &nbsp;&nbsp; avParams.Lock();
+ &nbsp;&nbsp; for (long i = 0; i &lt; avParams.Elements(); i++) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Ignore missing ones.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!avParams[i].IsMissing()) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dblRet += (double)avParams[i];
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; avParams.Unlock();
+ &nbsp;&nbsp; return dblRet;
+  } catch(Long e) {
+ &nbsp;&nbsp; ErrorHandler(e);
+ &nbsp;&nbsp; return 0.0;
+  } 
+}
+</code></pre>
+<p>
+The ParamArray type is actually another typedef, which happens to be exactly the same as ArrayVariant. There's a matching ODL define in OLETYPE.ODL. You have to specify the <b>vararg</b><i> </i>attribute in the type library file so that Visual Basic will know that it should treat the last parameter as a <i>ParamArray</i>:</p>
+<pre><code>[
+entry("AddEmUp"),
+helpstring("Tests ParamArrays"),
+vararg
+]
+double WINAPI AddEmUp([in] ParamArray params);
+</code></pre>
+<p>
+The event handler for the ParamArray button in the Cpp4VB sample program tests the <b>AddEmUp</b> function. </p>
+<h3>SafeArray Implementation</h3>
+<p>
+As with the <b>String</b> and <b>Variant</b> classes, you don't have to understand how <b>SafeArray</b> is implemented to use it. But I strongly recommend taking a look at the <b>SafeArray</b> implementation because it's not just another class. Implementing a class as a C++ template requires a whole different mind set. Things you always thought were cast in concrete turn out to be sinking in wet cement.</p>
+<h3>Template Compilation and Overloading</h3>
+<p>
+The first thing you need to discard is the quaint notion that you should put your implementation in a .Cpp file and your declarations in an .H file. There—I've already saved some of you many hours of wasted effort. I wish someone had told me that right up front. </p>
+<p>
+What you need to know about template classes is that when you define one, you are actually defining as many classes as you can think up to replace the template placeholder. If the compiler treated this as a traditional C++ module, your hard disk would be filled with object files on every interminable compile. So the compiler only compiles the template code that you need. </p>
+<p>
+For example, if your program uses the <b>SafeArray</b> template class for arrays of Variant, Long, and Single, those classes will be compiled as part of the module that uses them, but the Double, Currency, and String versions won't be compiled. So there really isn't such thing as a separate SafeArray object module, just a template definition. The module using the template needs to see both declarations and implementation, and therefore most C++ compilers require that everything must go in the .H file. There isn't any .Cpp file. Some people have worked around this by putting the implementation in a .Cpp file and then including it at the end of the .H file. </p>
+<p>
+It's probably better, though, to change old habits than to fit old techniques inot new idioms. Templates require a new way of thinking. For example, you might have a bug that only shows up in certain instantiations of a template. A function overload that works fine with an array of Doubles might fail wretchedly with an array of Longs. Consider this: </p>
+<pre><code>void Do(Long i, T &amp; t);
+void Do(T &amp; t, Long i);
+</code></pre>
+<p>
+When you create an array of Doubles, you get this: </p>
+<pre><code>void Do(Long i, Double &amp; t);
+void Do(Double &amp; t, long i);
+</code></pre>
+<p>
+No problem. The compiler knows the different between Do(5.6, 5L) and Do(5L, 5.6). But if you create an array of Longs you get: </p>
+<pre><code>void Do(Long i, Long &amp; t);
+void Do(Long &amp; t, Long i);
+</code></pre>
+<p>
+These are the same function and you'll get a compile-time error—but not until you try instantiating the Long version of the class. This is why (in short) I'm recommending that you create separate <b>SafeArray2</b> and <b>SafeArray3</b> classes for 2-D and 3-D arrays. If you think you can enhance the <b>SafeArray</b> class to handle multidimensional arrays without hitting this problem, be my guest. </p>
+<h3>SafeArray Implementation</h3>
+<p>
+I'm not going to go very deep into the implementation of the <b>SafeArray</b> class, but I will show you a few bits and pieces to give you the feel. Let's start with the class itself: </p>
+<pre><code>template&lt;class T, VARTYPE vt&gt; 
+class SafeArray 
+{
+public:
+ &nbsp;&nbsp; // Constructors
+ &nbsp;&nbsp; SafeArray();
+ &nbsp;&nbsp; SafeArray(SAFEARRAY * psaSrc);
+ &nbsp;&nbsp; SafeArray(Dim &amp; dim);
+ &nbsp;&nbsp; // Copy constructor
+ &nbsp;&nbsp; SafeArray(const SafeArray &amp; saSrc);
+ &nbsp;&nbsp; // Destructor
+ &nbsp;&nbsp; ~SafeArray(); 
+ &nbsp;&nbsp; // Operator equal
+ &nbsp;&nbsp; const SafeArray &amp; operator=(const SafeArray &amp; saSrc);
+ &nbsp;&nbsp; // Indexing
+ &nbsp;&nbsp; T &amp; Get(long i);
+ &nbsp;&nbsp; T &amp; Set(T &amp; t, long i);
+ &nbsp;&nbsp; T &amp; operator[](const long i);&nbsp;&nbsp;&nbsp; // C++ style (0-indexed)
+ &nbsp;&nbsp; T &amp; operator()(const long i);&nbsp;&nbsp;&nbsp; // Basic style (LBound-indexed)
+.
+.
+.
+private:
+ &nbsp;&nbsp; SAFEARRAY * psa;
+ &nbsp;&nbsp; void Destroy();
+ &nbsp;&nbsp; Boolean IsConstructed();
+ &nbsp;&nbsp; void Constructed(Boolean f);
+};
+</code></pre>
+<p>
+It looks just the same as any other class except for the <i>template&lt;class T, VARTYPE vt&gt;</i> at the start. This says that <i>T </i>will represent whatever type the array will be instantiated to contain, and <i>vt </i>will represent the Variant type constant. (The <i>vt </i>parameter is actually needed in only one place—calls to <b>SafeArrayCreate</b> in constructors—but in that one case there's no alternative.) You can see how the <i>T </i>is used in the declarations of <b>Get</b>, <b>Set</b>, and the subscript and function operators. </p>
+<p>
+The <b>SafeArray</b> class has only one data member—<i>psa</i>,<i> </i>which is a pointer to a SAFEARRAY structure. When you pass SAFEARRAY structures directly, you pass a pointer to a pointer to a SAFEARRAY. </p>
+<pre><code>Variant DLLAPI TestSA(SAFEARRAY ** ppsaiInOut, SAFEARRAY ** ppsasOut);
+</code></pre>
+<p>
+When you use SafeArrays, you pass a reference (or pointer) to a SafeArray, which contains a pointer to a SAFEARRAY. </p>
+<pre><code>Variant DLLAPI TestSafeArray(ArrayInteger &amp; aiInOut, ArrayString &amp; asOut);
+</code></pre>
+<p>
+It comes to the same thing. </p>
+<h3>SafeArray Methods</h3>
+<p>
+Implementations of <b>SafeArray</b> methods aren't nearly as clean as their declarations. You can probably guess the implementation of constructors (which simply call <b>SafeArrayCreate</b>), so let's skip to something more interesting:</p>
+<pre><code>template&lt;class T, VARTYPE vt&gt; 
+inline T &amp; SafeArray&lt;T,vt&gt;::Set(T &amp; t, long i)
+{
+ &nbsp;&nbsp; HRESULT hres = SafeArrayPutElement(psa, &amp;i, (T *)&amp;t);
+ &nbsp;&nbsp; if (hres) throw hres;
+ &nbsp;&nbsp; return t;
+}
+template&lt;class T, VARTYPE vt&gt; 
+inline T &amp; SafeArray&lt;T,vt&gt;::operator[](const long i)
+{
+ &nbsp;&nbsp; if (i &lt; 0 || i &gt; Elements() - 1) throw DISP_E_BADINDEX;
+ &nbsp;&nbsp; return ((T*)psa-&gt;pvData)[i];
+}
+template&lt;class T, VARTYPE vt&gt; 
+T &amp; SafeArray&lt;T,vt&gt;::operator()(const long i)
+{
+ &nbsp;&nbsp; if (i &lt; LBound() || i &gt; UBound()) throw DISP_E_BADINDEX;
+ &nbsp;&nbsp; return ((T*)psa-&gt;pvData)[i - LBound()];
+}
+</code></pre>
+<p>
+There's a whole lot of angle brackets floating around here, and there's no way to avoid them. </p>
+<p>
+The <b>Set</b> function illustrates how system functions are called from template members. They almost always require the <i>psa </i>data member. Parameters of T type should normally be reference parameters so that if they turn out to be large data structures, they'll be passed by reference instead of on the stack.. Notice the use of the T type (whatever it may be) to cast the third parameter (a void pointer) of <b>SafeArrayPutElement</b> to a usable type. </p>
+<p>
+In operator functions for indexing, the indexed value is returned by reference, so that you can either assign to it or read from it. So the statement: </p>
+<pre><code>ai[2] = iVal;
+</code></pre>
+<p>
+actually means: </p>
+<pre><code>*(ai.operator[](2)) = iVal;
+</code></pre>
+<p>
+The assignment actually takes place after the function call. That's why it wouldn't help to put <b>lock</b> and <b>unlock</b> statements in the operator function even if you wanted to. </p>
+<h2>What's Next?</h2>
+<p>
+From here I could go on to one additional article about how to use objects passed by Visual Basic to your C++ DLLs. Maybe I'll get around to writing that article someday. </p>
+<p>
+But the real next step is to write your own OLE objects for Visual Basic. Objects can have many additional features, such as collections, Basic-style error handling, property pages, hidden or visible windows, and classification IDs. The problem is, how do you build objects? </p>
+<p>
+Until a few months ago, you didn't have much choice. You could use MFC to create objects that were sometimes a little slow and heavy. Alternately, you could slog through acres of OLE documentation, figuring out how to write objects in raw C++ or, if you were really a wizard (some might say a masochist), in plain C. Now you have several other options, one of which is described on the CD published with my book <i>Hardcore Visual Basic</i>. Other alternatives are either available now or will be soon, using C++, Delphi®, Visual Basic, and perhaps even Java™. But regardless of the tools you choose to create your objects, you'll be working with the same standard OLE types described in this series. </p>
+</BODY>
+</HTML>

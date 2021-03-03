@@ -1,0 +1,517 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Wicked Code</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF">
+<font face="verdana,arial,helvetica" size="2">
+<H1>Wicked Code</H1><P>Jeff Prosise</P>
+<P>Jeff Prosise is the author of Programming Windows 95 with MFC (Microsoft Press, 1996). He also teaches Visual C++/MFC programming seminars. For more information, visit http://www. </P>
+<P>Lately I've been suffering from a bad case of the envies. Not over a car, a hot new laptop, or someone else's wife, but over a feature I've seen in a piece of software. A feature so cool—and, in retrospect, so obvious—that I only wish I had thought of it first.</P>
+<P>The feature I'm referring to is found in Microsoft&reg; Internet Explorer 3.0 (IE 3.0). The first time I saw how smoothly IE 3.0 scrolls the contents of its window, I knew I had to borrow the idea and use it myself. If you don't know what I'm talking about, open a lengthy HTML document in IE 3.0 and click the vertical scroll bar below the thumb. Rather than jump down a page, IE 3.0 will quickly (but smoothly) scroll the length of one page as if the down arrow had been clicked several times in rapid succession. This feature is so visually appealing that I can easily imagine it becoming a standard part of the Windows&reg; UI. It's already showing up in other Microsoft applications, and as far as I can tell it's a smash hit with users.</P>
+<P>How hard is it to mimic this feature in your own applications? Not hard at all, especially if you're comfortable programming with MFC. All you have to do is derive a class from CScrollView and override one virtual function with an implementation that I'll provide for you. The only other requirement is to optimize your view's OnDraw function so that repainting is done as quickly and efficiently as possible. I'll show you how to do that as well, in case you haven't done it already. For most applications, smooth scrolling can be added in less than a day. If your OnDraw code is already optimized, your scrolling can be silky smooth in less than an hour.</P>
+<P></P>
+<H2><A NAME="sec0"></A>The SMOOTH Application</H2><P>The SMOOTH application shown in Figure 1 is an MFC 4.<I>x</I> (and tested under MFC 5.0) app that scrolls like IE 3.0. The scroll bars allow you to move around within a virtual workspace that measures 1,024&nbsp;<SPAN>¥</SPAN>&nbsp;1,204 pixels. In the center of the workspace lies a string of text. The background is a textured bitmap that's tiled horizontally and vertically to fill the workspace. Clicking a scroll bar smoothly scrolls the view one "page" up, down, left, or right. Clicking a scroll bar arrow smoothly scrolls the view one "line." A page is defined to be 9/10 of the visible viewing area, and a line is 1/10 of the view's width or height.</P>
+<P><img src="wicked1.gif"></P>
+<P>Figure 1  SMOOTH</P>
+<P>You can get the source code for SMOOTH from <I>MSJ</I>'s Web site (http://www.microsoft.com/msj), MSDN, or from the other sources listed on page 5 of this magazine. The source code for SMOOTH's CScrollView-derived view class, which I named CSmoothView, is reproduced in Figure 2.</P>
+<P>Figure 2  SMOOTH's CSmoothView Class</P>
+<P></P>
+<P>SmoothView.h</P>
+
+<PRE>class CSmoothView : public CScrollView
+{
+protected: // create from serialization only
+    CFont m_font;
+    CPalette m_palette;
+    int m_nImageHeight;
+    int m_nImageWidth;
+    CBitmap m_bitmap;
+    void InitScrollSizes ();
+    int m_nLineSlices;
+    int m_nPageSlices;
+    DWORD m_dwMinTime;
+    CSmoothView();
+    DECLARE_DYNCREATE(CSmoothView)
+
+// Attributes
+public:
+    void DoPaletteChanged ();
+    BOOL DoQueryNewPalette ();
+    CSmoothDoc* GetDocument();
+
+// Operations
+public:
+
+// Overrides
+    // ClassWizard generated virtual function overrides
+    //{{AFX_VIRTUAL(CSmoothView)
+    public:
+    virtual void OnDraw(CDC* pDC);  // overridden to draw this view
+    virtual BOOL PreCreateWindow(CREATESTRUCT&amp; cs);
+    virtual BOOL OnScroll(UINT nScrollCode, UINT nPos,
+                          BOOL bDoScroll = TRUE);
+    protected:
+    virtual void OnInitialUpdate(); // called first time after construct
+    //}}AFX_VIRTUAL
+
+// Implementation
+public:
+    virtual ~CSmoothView();
+#ifdef _DEBUG
+    virtual void AssertValid() const;
+    virtual void Dump(CDumpContext&amp; dc) const;
+#endif
+
+protected:
+
+// Generated message map functions
+    protected:
+    //{{AFX_MSG(CSmoothView)
+    afx_msg void OnSize(UINT nType, int cx, int cy);
+    afx_msg int OnCreate(LPCREATESTRUCT lpCreateStruct);
+    //}}AFX_MSG
+    DECLARE_MESSAGE_MAP()
+};
+
+#ifndef _DEBUG  // debug version in SmoothView.cpp
+inline CSmoothDoc* CSmoothView::GetDocument()
+    { return (CSmoothDoc*)m_pDocument; }
+#endif
+</PRE>
+<P></P>
+<P>SmoothView.cpp</P>
+
+<PRE>#include "stdafx.h"
+#include "Smooth.h"
+
+#include "SmoothDoc.h"
+#include "SmoothView.h"
+
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#undef THIS_FILE
+static char THIS_FILE[] = __FILE__;
+#endif
+
+///////////////////////////////////////////////////////////////////////
+// CSmoothView
+
+IMPLEMENT_DYNCREATE(CSmoothView, CScrollView)
+
+BEGIN_MESSAGE_MAP(CSmoothView, CScrollView)
+    //{{AFX_MSG_MAP(CSmoothView)
+    ON_WM_SIZE()
+    ON_WM_CREATE()
+    //}}AFX_MSG_MAP
+END_MESSAGE_MAP()
+
+///////////////////////////////////////////////////////////////////////
+// CSmoothView construction/destruction
+
+CSmoothView::CSmoothView()
+{
+    m_dwMinTime = 10;       // Minimum delay time in milliseconds
+    m_nPageSlices = 12;     // Number of scroll subdivisions per page
+    m_nLineSlices = 4;      // Number of scroll subdivisions per line
+    m_nImageWidth = 0;
+    m_nImageHeight = 0;
+}
+
+CSmoothView::~CSmoothView()
+{
+}
+
+BOOL CSmoothView::PreCreateWindow(CREATESTRUCT&amp; cs)
+{
+    // TODO: Modify the Window class or styles here by modifying
+    //  the CREATESTRUCT cs
+
+    return CScrollView::PreCreateWindow(cs);
+}
+
+///////////////////////////////////////////////////////////////////////
+// CSmoothView drawing
+
+void CSmoothView::OnDraw(CDC* pDC)
+{
+    CSmoothDoc* pDoc = GetDocument();
+    ASSERT_VALID(pDoc);
+
+    //
+    // Realize a palette if this is a palettized output device.
+    //
+    CPalette* pOldPalette= NULL;
+    if (m_palette.m_hObject != NULL) {
+        pOldPalette = pDC-&gt;SelectPalette (&amp;m_palette, FALSE);
+        pDC-&gt;RealizePalette ();
+    }
+
+    //
+    // Paint the window background with the bitmap.
+    //
+    CDC memoryDC;
+    memoryDC.CreateCompatibleDC (pDC);
+    CBitmap* pOldBitmap = memoryDC.SelectObject (&amp;m_bitmap);
+
+    CRect rect;
+    pDC-&gt;GetClipBox (&amp;rect);
+
+    int nStartCol = rect.left / m_nImageWidth;
+    int nEndCol = (rect.right + m_nImageWidth + 1) / m_nImageWidth;
+    int nStartRow = rect.top / m_nImageHeight;
+    int nEndRow = (rect.bottom + m_nImageHeight + 1) / m_nImageHeight;
+
+    for (int i=nStartCol; i&lt;nEndCol; i++) {
+        for (int j=nStartRow; j&lt;nEndRow; j++) {
+            int x = i * m_nImageWidth;
+            int y = j * m_nImageHeight;
+            pDC-&gt;BitBlt (x, y, m_nImageWidth, m_nImageHeight,
+                         &amp;memoryDC, 0, 0, SRCCOPY);
+        }
+    }
+    memoryDC.SelectObject (pOldBitmap);
+
+    //
+    // Draw a string of text that floats above the background.
+    //
+    pDC-&gt;SetBkMode (TRANSPARENT);
+    CFont* pOldFont = pDC-&gt;SelectObject (&amp;m_font);
+
+    CString string = "Smooth scrolling is cool!";
+
+    rect.SetRect (0, 0, 1024, 1024);
+    rect.OffsetRect (6, 6);
+    pDC-&gt;SetTextColor (RGB (192, 192, 192));
+    pDC-&gt;DrawText (string, &amp;rect,
+                   DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+
+    rect.SetRect (0, 0, 1024, 1024);
+    pDC-&gt;SetTextColor (RGB (0, 0, 0));
+    pDC-&gt;DrawText (string, &amp;rect,
+                   DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+
+    pDC-&gt;SelectObject (pOldFont);
+
+    //
+    // Deselect the palette that was selected in earlier.
+    //
+    if (pOldPalette != NULL)
+        pDC-&gt;SelectPalette (pOldPalette, FALSE);
+}
+
+void CSmoothView::OnInitialUpdate()
+{
+    CScrollView::OnInitialUpdate ();
+    InitScrollSizes ();
+}
+
+///////////////////////////////////////////////////////////////////////
+// CSmoothView diagnostics
+
+#ifdef _DEBUG
+void CSmoothView::AssertValid() const
+{
+    CScrollView::AssertValid();
+}
+
+void CSmoothView::Dump(CDumpContext&amp; dc) const
+{
+    CScrollView::Dump(dc);
+}
+
+CSmoothDoc* CSmoothView::GetDocument() // non-debug version is inline
+{
+    ASSERT(m_pDocument-&gt;IsKindOf(RUNTIME_CLASS(CSmoothDoc)));
+    return (CSmoothDoc*)m_pDocument;
+}
+#endif //_DEBUG
+
+///////////////////////////////////////////////////////////////////////
+// CSmoothView message handlers
+
+BOOL CSmoothView::OnScroll(UINT nScrollCode, UINT nPos, BOOL bDoScroll) 
+{
+    //
+    // First handle left/right scroll messages. If scrolling by page,
+    // scroll m_nPageSlices times rather than 1. If scrolling by line,
+    // scroll m_nLineSlices times.
+    //
+    BYTE nCode = LOBYTE (nScrollCode);
+
+    if ((nCode == SB_PAGELEFT) || (nCode == SB_PAGERIGHT) ||
+        (nCode == SB_LINELEFT) || (nCode == SB_LINERIGHT)) {
+
+        int nCount, nInc, nFinalInc, nLineCode;
+
+        switch (nCode) {
+
+        case SB_PAGELEFT:
+            nLineCode = SB_LINELEFT;
+            nInc = m_pageDev.cx / m_nPageSlices;
+            nFinalInc = m_pageDev.cx % m_nPageSlices;
+            nCount = m_nPageSlices;
+            break;
+
+        case SB_PAGERIGHT:
+            nLineCode = SB_LINERIGHT;
+            nInc = m_pageDev.cx / m_nPageSlices;
+            nFinalInc = m_pageDev.cx % m_nPageSlices;
+            nCount = m_nPageSlices;
+            break;
+
+        case SB_LINELEFT:
+            nLineCode = SB_LINELEFT;
+            nInc = m_lineDev.cx / m_nLineSlices;
+            nFinalInc = m_lineDev.cx % m_nLineSlices;
+            nCount = m_nLineSlices;
+            break;
+
+        case SB_LINERIGHT:
+            nLineCode = SB_LINERIGHT;
+            nInc = m_lineDev.cx / m_nLineSlices;
+            nFinalInc = m_lineDev.cx % m_nLineSlices;
+            nCount = m_nLineSlices;
+            break;
+        }
+
+        int nOldLineSize = m_lineDev.cx;
+        BOOL bResult = FALSE;
+        DWORD dwTime = 0;
+
+        while (nCount--) {
+            DWORD dwCurrentTime = ::GetCurrentTime ();
+            DWORD dwElapsedTime = dwCurrentTime - dwTime;
+            if (dwElapsedTime &lt; m_dwMinTime)
+                ::Sleep (m_dwMinTime - dwElapsedTime);
+            dwTime = dwCurrentTime;
+
+            m_lineDev.cx = nInc;
+            BOOL bScrolled =
+                CScrollView::OnScroll (MAKEWORD (nLineCode, -1), nPos);
+            m_lineDev.cx = nOldLineSize;
+
+            if (!bScrolled)
+                return bResult;
+
+            bResult = TRUE;
+        }
+
+        if (nFinalInc) {
+            m_lineDev.cx = nFinalInc;
+            if (!CScrollView::OnScroll (MAKEWORD (nLineCode, -1), nPos))
+                bResult = TRUE;
+            m_lineDev.cx = nOldLineSize;
+        }
+        return bResult;
+    }
+
+    //
+    // Next handle up/down scroll messages. If scrolling by page,
+    // scroll m_nPageSlices times rather than 1. If scrolling by line,
+    // scroll m_nLineSlices times.
+    //
+    nCode = HIBYTE (nScrollCode);
+
+    if ((nCode == SB_PAGEUP) || (nCode == SB_PAGEDOWN) ||
+        (nCode == SB_LINEUP) || (nCode == SB_LINEDOWN)) {
+
+        int nCount, nInc, nFinalInc, nLineCode;
+
+        switch (nCode) {
+
+        case SB_PAGEUP:
+            nLineCode = SB_LINEUP;
+            nInc = m_pageDev.cy / m_nPageSlices;
+            nFinalInc = m_pageDev.cy % m_nPageSlices;
+            nCount = m_nPageSlices;
+            break;
+
+        case SB_PAGEDOWN:
+            nLineCode = SB_LINEDOWN;
+            nInc = m_pageDev.cy / m_nPageSlices;
+            nFinalInc = m_pageDev.cy % m_nPageSlices;
+            nCount = m_nPageSlices;
+            break;
+
+        case SB_LINEUP:
+            nLineCode = SB_LINEUP;
+            nInc = m_lineDev.cy / m_nLineSlices;
+            nFinalInc = m_lineDev.cy % m_nLineSlices;
+            nCount = m_nLineSlices;
+            break;
+
+        case SB_LINEDOWN:
+            nLineCode = SB_LINEDOWN;
+            nInc = m_lineDev.cy / m_nLineSlices;
+            nFinalInc = m_lineDev.cy % m_nLineSlices;
+            nCount = m_nLineSlices;
+            break;
+        }
+
+        int nOldLineSize = m_lineDev.cy;
+        BOOL bResult = FALSE;
+        DWORD dwTime = 0;
+
+        while (nCount--) {
+            DWORD dwCurrentTime = ::GetCurrentTime ();
+            DWORD dwElapsedTime = dwCurrentTime - dwTime;
+            if (dwElapsedTime &lt; m_dwMinTime)
+                ::Sleep (m_dwMinTime - dwElapsedTime);
+            dwTime = dwCurrentTime;
+
+            m_lineDev.cy = nInc;
+            BOOL bScrolled =
+                CScrollView::OnScroll (MAKEWORD (-1, nLineCode), nPos);
+            m_lineDev.cy = nOldLineSize;
+
+            if (!bScrolled)
+                return bResult;
+
+            bResult = TRUE;
+        }
+
+        if (nFinalInc) {
+            m_lineDev.cy = nFinalInc;
+            if (!CScrollView::OnScroll (MAKEWORD (-1, nLineCode), nPos))
+                bResult = TRUE;
+            m_lineDev.cy = nOldLineSize;
+        }
+        return bResult;
+    }
+    //
+    // If we make it to here, the scroll message wasn't handled above.
+    // Call the base class's OnScroll function and let it do the work.
+    //
+    return CScrollView::OnScroll (nScrollCode, nPos, bDoScroll);
+}
+
+void CSmoothView::OnSize(UINT nType, int cx, int cy) 
+{
+    CScrollView::OnSize (nType, cx, cy);
+    InitScrollSizes ();
+}
+
+void CSmoothView::InitScrollSizes ()
+{
+    CRect rect;
+    GetClientRect (&amp;rect);
+
+    int nHPageSize = (rect.Width () * 9) / 10;
+    int nVPageSize = (rect.Height () * 9) / 10;
+    int nHLineSize = nHPageSize / 10;
+    int nVLineSize = nVPageSize / 10;
+
+    SetScrollSizes (MM_TEXT,
+                    CSize (1024, 1024),
+                    CSize (nHPageSize, nVPageSize),
+                    CSize (nHLineSize, nVLineSize));
+}
+
+int CSmoothView::OnCreate(LPCREATESTRUCT lpCreateStruct) 
+{
+    if (CScrollView::OnCreate(lpCreateStruct) == -1)
+        return -1;
+    
+    //
+    // Load the background bitmap.
+    //
+    HANDLE hBitmap = ::LoadImage (AfxGetInstanceHandle (),
+                                  MAKEINTRESOURCE (IDB_BITMAP), IMAGE_BITMAP, <BR>                                  0, 0, LR_CREATEDIBSECTION);
+
+    ASSERT (hBitmap != NULL);
+    m_bitmap.Attach (hBitmap);
+
+    BITMAP bm;
+    m_bitmap.GetObject (sizeof (bm), &amp;bm);
+    m_nImageWidth = bm.bmWidth;
+    m_nImageHeight = bm.bmHeight;
+
+    //
+    // Create a gray scale palette for the bitmap (if needed).
+    //
+    CClientDC dc (this);
+
+    if (dc.GetDeviceCaps (RASTERCAPS) &amp; RC_PALETTE) {
+        UINT nSize = sizeof (LOGPALETTE) + (sizeof (PALETTEENTRY) * 31);
+        LOGPALETTE* plp = (LOGPALETTE*) new BYTE[nSize];
+
+        plp-&gt;palVersion = 0x300;
+        plp-&gt;palNumEntries = 32;
+
+        for (int i=0; i&lt;32; i++) {
+            plp-&gt;palPalEntry[i].peRed = i * 8;
+            plp-&gt;palPalEntry[i].peGreen = i * 8;
+            plp-&gt;palPalEntry[i].peBlue = i * 8;
+            plp-&gt;palPalEntry[i].peFlags = 0;
+        }
+
+        m_palette.CreatePalette (plp);
+        ASSERT_VALID (&amp;m_palette);
+
+        delete[] plp;
+    }
+
+    //
+    // Create a 36-point bold Times New Roman font.
+    //
+    LOGFONT lf;
+    ::ZeroMemory (&amp;lf, sizeof (lf));
+
+    lf.lfHeight = 360;
+    lf.lfWeight = FW_BOLD;
+    lf.lfItalic = TRUE;
+    ::lstrcpy (lf.lfFaceName, "Times New Roman");
+
+    m_font.CreatePointFontIndirect (&amp;lf);
+    return 0;
+}
+
+BOOL CSmoothView::DoQueryNewPalette ()
+{
+    //
+    // This function is called when the application's main frame window
+    // receives a WM_QUERYNEWPALETTE message.
+    //
+    if (m_palette.m_hObject == NULL)
+        return 0;
+
+    CClientDC dc (this);
+    CPalette* pOldPalette = dc.SelectPalette (&amp;m_palette, FALSE);
+
+    UINT nCount;
+    if (nCount = dc.RealizePalette ())
+        Invalidate ();
+
+    dc.SelectPalette (pOldPalette, FALSE);
+    return nCount;
+}
+
+void CSmoothView::DoPaletteChanged ()
+{
+    //
+    // This function is called when the application's main frame window
+    // receives a WM_PALETTECHANGED message.
+    //
+    if (m_palette.m_hObject != NULL) {
+        CClientDC dc (this);
+        CPalette* pOldPalette = dc.SelectPalette (&amp;m_palette, FALSE);
+
+        if (dc.RealizePalette ())
+            Invalidate ();
+
+        dc.SelectPalette (pOldPalette, FALSE);
+    }
+}</PRE>
+<P></P>
+<P></P>
+<P>Much of the source code is pretty standard stuff. An OnSize handler keys the page size and line size to the view size, for example, and OnInitialUpdate initializes the view's scrolling parameters. Palette-handling code is included to make the background bitmap look good even on 256-color screens. What's special about CSmoothView is its override of CScrollView's OnScroll function. Peek inside the source code for MFC's CScrollView class in Viewscrl.cpp and you'll find that it provides handlers for WM_HSCROLL and WM_VSCROLL messages. The handlers do little more than call OnScroll, which computes the distance that the view will be scrolled in the x or y direction, and then calls another CScrollView function named OnScrollBy. OnScrollBy does the actual scrolling by calling ScrollWindow to move the window contents and SetScrollPos to reposition the scroll bar thumb.</P>
+<P>OnScroll is virtual and OnScrollBy is not, so the former is the ideal place to tap into the framework and modify the way a CScrollView behaves. CSmoothView::OnScroll implements smooth scrolling by playing a little trick on MFC. Rather than calling OnScrollBy once to scroll an entire page or line, it subdivides the page size or line size into smaller, more granular chunks and calls OnScrollBy several times. A CScrollView stores its page size and line size (the values passed in SetScrollSizes' third and fourth parameters, respectively) in a pair of protected CSize data members named m_pageDev and m_lineDev. CSmoothView adds a pair of member variables named m_nPageSlices and m_nLineSlices that store the number of discrete chunks each page or line is divided into. </P>
+<P>If m_pageDev.cy is 100, m_nPageSlices is 12, and the user pages down with the scroll bar, CSmoothView::OnScroll temporarily sets m_pageDev.cy to 8 and calls OnScrollBy 12 times. To complete the scrolling operation, it then sets m_pageDev.cy to 4 and calls OnScrollBy a final time. The window is scrolled 100 pixels, but the scrolling is much smoother than it would have been otherwise. The application is none the wiser, other than the fact that its OnDraw function got called 13 times instead of once. That's why it's critical that OnDraw be optimized to do as little painting as it can get away with. Unnecessary GDI calls can slow the scrolling process dramatically, even if the bulk of the output is clipped.</P>
+<P>The key to optimizing OnDraw performance (and by extension, smooth scrolling performance) is to use the CDC::GetClipBox function. Called from a view's OnDraw function, GetClipBox initializes a rectangle with logical coordinates describing what part of the view needs repainting. Pixels outside the rectangle are clipped by GDI, so drawing anywhere but the interior of the rectangle wastes CPU cycles. How you use GetClipBox to optimize drawing performance is highly application-specific. SMOOTH uses the clip box to minimize the number of times it calls CDC::BitBlt to tile the background bitmap. Its performance could be optimized even further by comparing a rectangle circumscribing the output text to the rectangle initialized by GetClipBox and skipping the DrawText calls if the rectangles don't overlap.</P>
+<P>CSmoothView's constructor sets m_nPageSlices and m_nLineSlices to 12 and 4, respectively. I chose these values empirically, but feel free to experiment with different settings if you borrow my OnScroll code. Another CSmoothView member variable named m_dwMinTime specifies the minimum amount of time, in milliseconds, between successive calls to OnScrollBy. I set it to 10 milliseconds, mainly because testing showed that a typical call to OnScrollBy on my PC (a 200MHz Pentium Pro with a moderately fast video subsystem) took 12 to 15 milliseconds. Reasoning that video performance will soon be 10 times what it is today, I felt it was prudent to build in a guaranteed minimum so that smooth scrolling won't happen too quickly for the eye to see.</P>
+<P>How do you put smooth scrolling to work in your own code? Easy. First override OnScroll in your CScrollView-derived class. You can copy my OnScroll function and use it as is. Second, add m_nPageSlices, m_nLineSlices, and m_dwMinTime data members to the derived class and initialize them in the class constructor. Finally, use GetClipBox to optimize your OnDraw function if you haven't already. You'll be pleased with the results. Your users will be, too.</P>
+<P></P>
+<H2><A NAME="sec1"></A>Your Needs, Your Ideas</H2><P>Are there tough Win32&reg; programming questions you'd like to see answered in this column? If so, email them to me at the address listed below. I regret that time doesn't permit me to respond individually to all questions, but rest assured that I'll read every one and consider each for inclusion in a future installment of Wicked Code.     </P>
+<P>Have a tricky issue dealing with Windows? Send your questions via email to Jeff Prosise: 72241.44@compuserve.com</P>
+<P><I>This article is reproduced from Microsoft Systems Journal. Copyright &copy; 1997 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S. and Canada, or (303) 678-0439 in all other countries. For other inquiries, call (415) 905-2200.</P>
+<P></P></font></body></HTML>

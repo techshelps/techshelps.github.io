@@ -1,0 +1,297 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Allow Updates: The System Tables "Hacker's" Guide (November)</title>
+
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000>
+
+<font face="verdana,arial,helvetica" size="2"><h1>Super Administrator</h1>
+<h2>Allow Updates: The System Tables “Hacker’s” Guide</h2>
+<p>
+Andrew Zanevsky</p>
+<p>
+<i>Warning! This article describes 12 tasks that can be effectively done by direct updates on system tables. These techniques might be dangerous to your database’s health. Reader discretion advised. For most of you, though, this is a keeper. </i></p>
+<p>
+UPDATING SQL Server system tables is a delicate procedure akin to brain surgery. So should you ever even <i>attempt</i> to change system tables directly? Let’s ask Microsoft. The documentation says: <i>“Severe problems can result from the direct manipulation of the system catalogs. Do not modify the system catalogs unless instructed to do so by your primary support provider.”</i></p>
+<p>
+Sound scary? It is. Novice DBAs who make such modifications almost always do more harm than good. However, you can do several tasks faster if you’re willing to “hack” your system tables rather than follow conventional procedures. In this article I’ll identify some of those tasks (see the sidebar, “Twelve Candidate Tasks for Direct Catalog Updates”) and describe how to perform them through system catalogs update.</p>
+<h3>Welcome to the minefield</h3>
+<p>
+Has it ever occurred to you that a DBA’s job could easily be compared to minesweeping or performing a high-wire act with no safety net? Of course, we don’t literally risk our lives, but one wrong move and we may damage information critical to our employer’s or client’s business, causing hours of downtime and jeopardizing our careers. Let’s be honest-we often perform tasks without fault protection of any kind. Meticulous precision and accuracy are required to survive in this position.</p>
+<p>
+A system tables update will not damage your server if you do it right. Just keep in mind that when you perform this operation SQL Server may be very unforgiving and may not give you a second chance.</p>
+<p>
+In some situations you really don’t have anything to lose-say, when your database is corrupt and your support provider’s only suggestion is to recover from a backup. In such a case, why not attempt a quick recovery through a system table update? It may revive a database that would otherwise be lost. If you fail, so what? You can still reload it from a dump. I’ve tried the former in many apparently “hopeless” situations, and more often than not I’ve been able to significantly cut the recovery time and minimize data loss.</p>
+<p>
+<b>&#09;</b>Obviously, it’s always a good idea to make a backup of your database before you begin any dangerous maintenance procedure-given that you have time for that. If you decide to risk not making a backup, just ask yourself what will happen if your system catalog update irreversibly corrupts the database and you need to recover. In some cases it may be okay, but you should weigh it carefully. If you do make a backup, dump every user database that you may affect with your catalog updates, including the master. The safest approach is to backup every database.</p>
+<p>
+Microsoft also recommends switching to single-user mode before allowing updates on system tables. It may be overkill in some situations, but there are several valid reasons justifying their advice. For one, somebody may be using information that you are changing-while you’re attempting to shrink a database, for instance, another transaction could be using the segment that you’re deleting. You may have a developer or even an intruder who happens to be trying to write a query to update system tables. Switching to a single-user mode will eliminate such possibilities.</p>
+<p>
+To change system tables, you have to turn configuration option “allow updates” on:</p>
+<pre><font face="Courier New" size="3">sp_configure 'allow updates', 1
+go
+reconfigure with override
+go</font></pre>
+<p>
+Don’t forget to turn it off after changing catalogs:</p>
+<pre><font face="Courier New" size="3">sp_configure 'allow updates', 0
+go
+reconfigure with override
+go</font></pre>
+<p>
+Execute BEGIN TRANSACTION before issuing any UPDATEs, INSERTs, or DELETEs on a system table, but do <i>not</i> put a COMMIT TRANSACTION statement in the script. Once the update is done, check the number of affected rows, select the modified data to make sure that everything has worked as planned, and only then commit transaction manually. If something goes wrong, you’ll be able to ROLLBACK TRANSACTION. I won’t repeat these instructions in each example below, but consider them a preface to each of the procedures that follow.</p>
+<h3>Shrinking tempdb</h3>
+<p>
+tempdb is different from all other SQL Server databases. It’s automatically rebuilt every time SQL Server is restarted and it doesn’t require recovery on restart. You may, of course, use DBCC SHRINKDB, but in my opinion a DELETE from system table master..sysusages is more efficient because sysusages contains information about database segment allocation. You can completely delete one or more segments of tempdb. Never touch the very first segment-the 2M originally allocated on the master device-but deleting the rest of them is safe.</p>
+<p>
+You first obtain information on all tempdb segments:</p>
+<pre><font face="Courier New" size="3">select * from sysusages 
+where  dbid = db_id( 'tempdb' )</font></pre>
+<p>
+For my test purposes I used a tempdb with two segments: the original 2M segment and an additional 1M segment, which I wanted to delete. Here are the results of the previous query on my test system:</p>
+<pre><font face="Courier New" size="3">dbid segmap lstart size vstart
+---- ------ ------ ---- ------
+2    7      0      1024 2564
+2    7      1024   512  11780</font></pre>
+<p>
+Columns dbid and lstart are a unique key on sysusages. This command deletes the second segment in this test:</p>
+<pre><font face="Courier New" size="3">delete sysusages 
+where  dbid = 2 and lstart = 1024</font></pre>
+<p>
+Now, when you shut down and restart SQL Server, you’ll have a 2M tempdb.</p>
+<p>
+This operation may prove very helpful in recovery situations when you need to bring tempdb down to the original 2M or when you need to delete a specific segment that’s no longer needed or has been allocated by mistake. I recommend deleting only the last segment or several of the last segments. If you want to delete one in the middle of the segments list, then you should also correct the lstart values of the following segments. If there were several additional segments in tempdb in the previous example, then I’d have to issue one more command:</p>
+<pre><font face="Courier New" size="3">update sysusages 
+set    lstart = lstart - 512 
+where  dbid = 2 and lstart &gt; 0</font></pre>
+<p>
+where 512 is the <i>size </i>column<i> </i>of the deleted second segment.</p>
+<p>
+My point is that it may be easier just to delete all segments starting with the one that you want to get rid of and then re-create those that you’d like to keep after restarting SQL Server.</p>
+<p>
+Before you make changes, you might want to associate sysusages rows with database devices. This query should help:</p>
+<pre><font face="Courier New" size="3">select db_name(a.dbid ) dbname, 
+       a.*, 
+       b.name devname, 
+       b.phyname
+from   sysusages a, sysdevices b
+where  a.vstart between b.low and b.high
+and    b.cntrltype = 0
+order by 1, a.lstart</font></pre>
+<h3>Changing log/data segment type</h3>
+<p>
+You may also have to change a segment type on the sysusages table. You can designate SQL Server segments to hold data only, log only, or data and log. In some cases it may be necessary to change between types as follows, where segmap values are 3 (data only), 4 (log only), or 7 (data and log):</p>
+<pre><font face="Courier New" size="3">update sysusages 
+set    segmap = &lt;new type&gt; 
+where  dbid = &lt;your database id&gt; 
+and    lstart = &lt;chosen segment lstart&gt;</font></pre>
+<p>
+You must restart SQL Server for the change to take effect.</p>
+<p>
+It’s easy to change from data only or log only to data and log. You won’t be able to perform other changes if the segment that you are changing isn’t empty, however. Run DBCC NEWALLOC on the database after the modification. If it reports error 2558, then you should reverse your previous action. I recommend that you review the <i>SQL Server Books Online</i> article on error 2558 for more details.</p>
+<p>
+If you have multiple log devices and want to dedicate some of them to hold data instead, truncating the transaction log before making the change makes the syslogs table small enough to fit on the first segment and you can then safely change other segments’ types. If you’re planning to change some segment’s type to log only, make sure that you don’t have any objects allocated on the segment in question. You may have to move tables to a new location in the database.</p>
+<p>
+I found this operation particularly useful when I inadvertently added a new segment to tempdb as data only. I was able to change it to data and log<i> </i>instead.</p>
+<h3>Resetting database status</h3>
+<p>
+Database status is described by the status column in system table master..sysdatabases. This column is a bitmap where each bit represents a database option or a database status setting. For a complete list of options execute:</p>
+<pre><font face="Courier New" size="3">select * 
+from   master..spt_values 
+where  type = 'D'</font></pre>
+<p>
+You may need to directly update database status when a database is marked Ôsuspect’ by recovery, or you need to set it into an emergency mode, or reset back to Ôno options set’ after recovery. Standard database options are better reset with stored procedure sp_dboption. Microsoft provides a couple of “unsupported” stored procedures that change database status: sp_resetstatus and sp_marksuspect. You may need to install these procedures from the script found on your installation disk. Search <i>SQL Server Books Online</i> for details.</p>
+<p>
+To update sysdatabases directly, execute the following, where &lt;option to change&gt; is an integer or binary value representing the bit that you want to change (may be retrieved from master..spt_values):</p>
+<pre><font face="Courier New" size="3">update sysdatabases 
+set    status = status | &lt;option to change&gt; 
+where  name = &lt;your database name&gt;</font></pre>
+<p>
+You can also explicitly specify a new status value. For example, use this if you want to cancel all options:</p>
+<pre><font face="Courier New" size="3">update sysdatabases 
+set    status = 0
+where  name = &lt;your database name&gt;</font></pre>
+<h3>Changing a physical path to device files</h3>
+<p>
+You may sometimes need to change the physical location of a particular device. (See Kalen Delaney’s May 1996 SQL Essentials column.) You can mirror the device to a new location, then unmirror the old location and release the old file. The same result is more quickly achieved if you directly update master..sysdevices table:</p>
+<pre><font face="Courier New" size="3">update sysdevices 
+set    phyname = &lt;new path and file name&gt;
+where  name = &lt;you device name&gt;</font></pre>
+<p>
+Once the file copy is complete, you must immediately shut down your SQL Server, move the file from the old location to the new, and restart SQL Server. If you restart while file copy is in progress, the database will be marked as “suspect.” You can correct the problem by resetting the database status as I’ve described and bouncing the server one more time.</p>
+<h3>Deleting corrupt databases, tables, and indexes</h3>
+<p>
+Sometimes a database is so badly corrupted that it won’t respond to either DROP DATABASE or DBCC DBREPAIR. In that case, you may directly remove all information about the database from SQL Server’s catalog and then stop and restart the server:</p>
+<pre><font face="Courier New" size="3">delete sysusages 
+where  dbid = db_id( &lt;your database name&gt; )
+delete sysdatabases 
+where  name = &lt;your database name&gt;</font></pre>
+<p>
+You perform a similar memory wipeout to deal with corrupt user table information. I’ve seen tables that didn’t respond to DROP TABLE command because some allocation information was severely damaged. If you encounter such a situation, you’ll need to remove all references to the corrupt table from all system tables. First, however, you need to find object id of the table. Use this:</p>
+<pre><font face="Courier New" size="3">select&#09;object_id( &lt;your table name&gt; )</font></pre>
+<p>
+or </p>
+<pre><font face="Courier New" size="3">select&#09;id 
+from&#09;sysobjects 
+where&#09;name = &lt;your table name&gt;</font></pre>
+<p>
+Then substitute the obtained id into the following delete commands and execute them:</p>
+<pre><font face="Courier New" size="3">delete sysdepends where id = &lt;your table id&gt;
+delete sysindexes where id = &lt;your table id&gt;
+delete syscolumns where id = &lt;your table id&gt;
+delete syskeys where id = &lt;your table id&gt;
+delete sysprotects where id = &lt;your table id&gt;
+delete sysobjects where id = &lt;your table id&gt;
+delete sysreferences where id = &lt;your table id&gt;
+delete sysreferences where fkeyid = &lt;your table id&gt; or 
+&#09;   rkeyid = &lt;your table id&gt;</font></pre>
+<p>
+This will force SQL Server to forget that there was such a table, but it won’t fix page allocations. Pages previously allocated to the deleted table will still be marked as used and will cause numerous errors 2540 and 2546 if you run DBCC NEWALLOC. To correct system information on these pages and make them available for new objects allocation, execute DBCC FIX_AL. Consult <i>SQL Server Books Online</i> for details.</p>
+<p>
+Similarly, you may encounter a bad index that won’t respond to DROP INDEX command. <i>If it’s a non-clustered index, </i>you can delete it directly:</p>
+<pre><font face="Courier New" size="3">delete sysindexes 
+where  id = object_id( Ô&lt;your table name&gt;Ô )
+and    name = &lt;your index name&gt;
+and    indid &gt; 1</font></pre>
+<p>
+The last line in this query isn’t necessary if you delete a non-clustered index-it’s just a protection against an inadvertent delete of the clustered index or data level of the table. As with table delete, you’ll need to run DBCC FIX_AL to correct page allocations.</p>
+<h3>Renaming a column</h3>
+<p>
+Most of us know firsthand how inflexible SQL Server is about changing a column name. Normal procedures require that you drop the table and re-create it with a new column name. If you also want to preserve the data in the table, then you need to unload it through BCP and import it back after re-creating the table. Depending on the table size, it may take the rest of your employment with the company. I suggest making a direct column name change in syscolumns:</p>
+<pre><font face="Courier New" size="3">update syscolumns
+set    name = &lt;new column name&gt;
+where  id = object_id( &lt;your table name&gt; )
+and    name = &lt;current column name&gt;</font></pre>
+<p>
+Make sure that you also change all references to the old column name in stored procedures, triggers, views, rules, indexes, keys, constraints, and so on. You’d have to do that anyway, even if you changed the column name using the conventional DROP/RECREATE table approach.</p>
+<h3>Correcting errors</h3>
+<p>
+The DBCC CHECKCATALOG command sometimes reports errors 2513 and 2514. Error 2513 indicates that syscolumns, syscomments, sysindexes, sysprocedures, or sysdepends<i> </i>table has no matching rows in sysobjects. To correct inconsistencies, note the offending system table name in the DBCC message and execute the command:</p>
+<pre><font face="Courier New" size="3">delete &lt;system table name&gt; 
+where  id not in
+(select id from sysobjects)</font></pre>
+<p>
+&#09;Error 2514 indicates that the usertype column is inconsistent between tables syscolumns and systypes. To select the list of offending rows, execute this:</p>
+<pre><font face="Courier New" size="3">select a.name, a.type, a.usertype, 
+       min( b.usertype ) correct_usertype
+from   syscolumns a, systypes b
+where  a.usertype not in
+( select usertype from systypes )
+and    a.type = b.type
+group by a.name, a.type, a.usertype</font></pre>
+<p>
+To correct all usertypes at once, use this:</p>
+<pre><font face="Courier New" size="3">update syscolumns 
+set    a.usertype = 
+( select min( b.usertype ) 
+  from systypes b where a.type = b.type )
+from   syscolumns a
+where  a.usertype not in
+( select usertype from systypes )</font></pre>
+<p>
+You’ll find a more complicated semi-manual procedure in the <i>SQL Server Books Online</i> article on error 2514. The article suggests that you update one offending row at a time. I recommend that you use my query, which takes care of all 2514 errors in one shot.</p>
+<h3>Changing system user ID in a loaded database</h3>
+<p>
+If you’ve ever loaded a database dump from one server into a database on another, then you’ve probably encountered a problem with inconsistent system user IDs in the loaded database. The suid column in the sysusers table in every user database has an association with suid column in master..syslogins. SQL Server automatically assigns suid in the order of adding new users. Naturally, different servers may have different suid values for the same user. This problem may also occur when you load a dump file made on the same server if you’ve dropped and re-created some user accounts since the backup was made. The standard correction procedure requires that you drop all users in the loaded database, then re-create them and reestablish all user permissions. That may be an onerous, time-consuming task, especially if you have lots of permissions on numerous objects. Lee Gould’s stored procedures (in May 1996 and other issues) generate scripts that help to automate this task. </p>
+<p>
+A quicker solution is possible if you have a user with a login account defined in the master database, but different suid between sysusers and master..syslogins. I suggest fixing suid<i> </i>in the user database directly:</p>
+<pre><font face="Courier New" size="3">update sysusers
+set    suid = 
+( select suid 
+  from   master..syslogins 
+  where  name = &lt;user login name&gt; )
+where  name = &lt;user name&gt;</font></pre>
+<p>
+If there are user aliases in sysalternates table, then you should make identical suid changes in both sysusers and sysalternates.</p>
+<p>
+An update on sysusers for user A may fail if user B in the same database already has the suid that you want to assign. To avoid the problem, you can reset user B suid to a value that doesn’t exist in master..syslogins:</p>
+<pre><font face="Courier New" size="3">update sysusers
+set    suid = 9999
+where  name = &lt;user B&gt;</font></pre>
+<p>
+Now you can change the suid for user A and reset suid of user B from the dummy value (9999 in this example) to match suid in master..syslogins.</p>
+<h3>Fixing sysdepends</h3>
+<p>
+In my January 1996 article on the faults of system table sysdepends, I demonstrated that you may miss some important information as a result of dropping and re-creating a dependent object. SQL Server doesn’t remember the dependency when such an operation is performed, so you can get incorrect results from system procedure sp_depends.</p>
+<p>
+&#09;Another problem occurs when you request a DDL for an object including all dependencies. SQL Enterprise Manager generates incomplete scripts based on sysdepends data, but there’s also a way to manually reset all dependencies when you drop and re-create an object. First, you need to generate a script that helps you to reestablish sysdepends entries later on (be sure to enter all quotes properly-fun, I know):</p>
+<pre><font face="Courier New" size="3">select 'insert sysdepends ( 
+  id, number, depid, depnumber, depdbid, 
+  depsiteid, status, selall, resultobj, 
+  readobj ) 
+values (', id, ',', number, ', 
+object_id( &quot;&lt;object to be dropped&gt;&quot; ),',
+depnumber, ',', depdbid, ',', 
+depsiteid, ',', status, ',', 
+selall, ',', resultobj, ',', readobj, ')'
+from   sysdepends
+where  depid = 
+       object_id( '&lt;object to be dropped&gt;' )</font></pre>
+<p>
+Second, you should drop the object and re-create it. At this point it will get a different id. </p>
+<p>
+Finally, you need to execute the script produced in the first step. The script inserts rows in sysdepends that refer to the new object <i>id</i>. Note that the script inserts entries only about objects depending on the re-created one. If it depends on other objects in its own turn, SQL Server handles it correctly-it loses higher-level dependencies only when you drop objects.</p>
+<h3>You’ve been warned</h3>
+<p>
+Let me repeat one more time that you must disable updates on system tables once you finish changing them. Please<i> use extreme caution</i> when you modify system tables. My intention was to provide you with an unconventional but efficient way of troubleshooting. This technique demands precise execution and double-checking at every step. The good news is that a SQL Server undergoing a lobotomy can’t sue for malpractice. s</p>
+<p>
+<b>Twelve Candidate Tasks for Direct Catalog Updates</b>
+<ul>
+<li>
+Shrinking tempdb<br><br></li>
+<li>
+Changing log/data segment type<br><br></li>
+<li>
+Resetting database status<br><br></li>
+<li>
+Changing physical path to device files<br><br></li>
+<li>
+Deleting a corrupt database<br><br></li>
+<li>
+Deleting a corrupt table<br><br></li>
+<li>
+Deleting a corrupt index<br><br></li>
+<li>
+Renaming a column<br><br></li>
+<li>
+Correcting error 2513 <br><br></li>
+<li>
+Correcting error 2514<br><br></li>
+<li>
+Changing system user id in a loaded database<br><br></li>
+<li>
+Fixing sysdepends</li>
+</ul>
+<p>
+<i>Andrew Zanevsky, an independent consultant, has worked as a DBA and as an applications developer for several Fortune 500 companies using both Microsoft and Sybase versions of SQL Server. He is president of the Great Lakes SQL Server Users Group (www.glssug.com) in Chicago. He can be reached at his consulting firm AZ Databases Inc. 708-609-8783, </i></p>
+<p>
+<i>fax 847-419-0190. 71232.3446@compuserve.com.</i></p>
+<P align="center"><a
+href="http://www.pinpub.com/sqlpro/"><img src="Pinnacle.gif"
+border="0" width="216" height="72"></a></p>
+
+<P align="center"><strong>To find out more about SQL
+Server Professional and Pinnacle Publishing, <br>
+visit their website at</strong> <a
+href="http://www.pinpub.com/sqlpro/"><strong>http://www.pinpub.com/sqlpro/</strong></a><strong>
+</strong></p>
+
+<P align="center"><font size="1">Note: This is not a
+Microsoft Corporation website. <br>
+Microsoft is not responsible for its content.</font></p>
+
+<P>This article is reproduced from the November 1996
+issue of SQL Server Professional. Copyright 1996, by Pinnacle
+Publishing, Inc., unless otherwise noted. All rights are
+reserved. SQL Server Professional is an independently produced
+publication of Pinnacle Publishing, Inc. No part of this article
+may be used or reproduced in any fashion (except in brief
+quotations used in critical articles and reviews) without prior
+consent of Pinnacle Publishing, Inc. To contact Pinnacle
+Publishing, Inc., please call (800)788-1900 or (206)251-1900.</p>
+</font></BODY>
+</HTML>

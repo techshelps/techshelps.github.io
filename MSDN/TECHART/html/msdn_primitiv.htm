@@ -1,0 +1,230 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Primitive Cool</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_primitiv"></a></sup>Primitive Cool</h1>
+<p>
+Ron Gery<br>
+Microsoft Developer Network Technology Group</p>
+<p>
+Created: March 17, 1992</p>
+<h2>Abstract</h2>
+<p>
+This article discusses the varying levels of simulations that the Microsoft® Windows™ graphics device interface (GDI) performs to provide a device-independent output model for graphical primitives on raster devices. The article covers general simulations for lines, rectangles, polygons, curves, stretched blts, device-independent bitmap (DIB) operations, and printer-specific support, as well as noting memory restrictions and error conditions.</p>
+<h2>Introduction</h2>
+<p>
+A raster device driver must support three output operations: pixel, bitblt, and scanline filling. These operations can occur on the device's output surface, on a memory bitmap with the device's color format, or on a monochrome memory bitmap. These basic operations provide all that the graphics device interface (GDI) needs to simulate any of the graphics operations available in its function interface. Most drivers, however, choose to support more of the higher-level primitives, often to increase speed and occasionally to improve output quality.</p>
+<p>
+The driver fills in a set of capability bits to identify the functions and subfunctions it supports. Applications use the <b>GetDeviceCaps</b> function to get this information. The interesting values are RASTERCAPS, CURVECAPS, LINECAPS, POLYGONALCAPS, and CLIPCAPS. When an application calls GDI to perform a specific graphics function, GDI checks these bits to see how much of the task the device can support. If the device cannot perform the operation, GDI breaks it down into primitives simple enough for the device to support. For example, the following pseudocode handles the <b>Polygon</b> function:</p>
+<pre><code>convert all coordinates to device units
+if (device can draw the polygon)
+ &nbsp;&nbsp; call device's polygon routine
+else 
+{
+ &nbsp;&nbsp; break down polygon into scanlines
+ &nbsp;&nbsp; call device's scanline routine
+ &nbsp;&nbsp; call Polyline to draw the border
+}
+</code></pre>
+<p>
+Notice that simpler primitives can be used (and often are) to draw components of a more complex primitive. The code calls an internal routine (<i>Polyline</i> in the above example) that is shared with the exported interface function and expects coordinates to already be in device units.</p>
+<p>
+Even when GDI calls a device driver to perform one of the higher-level output functions, the driver can decide to ask GDI for assistance. This usually occurs in situations where the driver has code that only supports a specialized type of primitive (for example, only integral stretched blts). GDI responds by continuing with the simulations used when a device does not support that primitive. Unfortunately, this assistant simulation occurs only at run time, so an application cannot determine if it will occur.</p>
+<p>
+All driver output functions have a parameter that specifies the coordinates of a clipping rectangle. Device drivers are not required to support clipping, but it is recommended that they support clipping to a rectangle. The clipping capabilities of a driver are found in the CLIPCAPS capability word. If an output primitive needs to be clipped and the device cannot perform the clipping to a rectangle, GDI simulates the clipping by breaking down the primitive into clipped pieces. If the primitive is clipped by a complex (nonrectangular) region, GDI breaks down the region into its component rectangles and clips the primitive to each of these rectangles.</p>
+<h2>Required Driver Functions</h2>
+<p>
+A raster driver must support three functions—<b>SetPixel</b>, <b>BitBlt</b>, and <b>Scanline</b>:
+<ul type=disc>
+<li>
+<b>SetPixel</b> is a simple output function that provides the ability to set a given pixel to a given color. GDI uses this functionality to simulate single-pixel-wide lines; an application accesses this functionality using <b>SetPixel</b>.<br><br></li>
+<li>
+The <b>BitBlt</b> function provides the ability to copy a block of pixels from one location to another. Some printers do not support all of the possible raster operations (ROPs), and printers are not required to blt <i>from</i> the page. The only blt functionality that GDI needs for simulations is the ability to blt with the SRCCOPY ROP from a memory bitmap to the device surface or to another bitmap, and vice versa. Applications use this driver function by calling <b>BitBlt</b> or <b>PatBlt</b>, and GDI uses it for simulating stretched blts, rectangular fills, and some DIB functions.<br><br></li>
+<li>
+The <b>Scanline</b> function fills a single-pixel-high scan with either the current pen or the current brush. It accepts a single <i>y</i> value that specifies the location of the scan and a number of <i>x</i> pairs that define segments of the scan that are to be filled. Applications cannot access the <b>Scanline</b> function directly. GDI's simulations use <b>Scanline</b> for filling areas with the current brush (for filled primitives) or the current pen (for wide lines).</li>
+</ul>
+<h2>The Simulations</h2>
+<p>
+This discussion of the various primitive simulations found in GDI for lines, rectangles, polygons, curves, stretched blts, and DIB functions is based on the code in the Microsoft® Windows™ operating system versions 3.0 and 3.1. Because the specific details of the simulations depend on the version of Windows being used, any limitations, side effects, or specific details discussed may or may not be relevant for future versions of Windows. If you want to make special allowances in your application, you should make them in a version-dependent manner.</p>
+<h3>Thin Lines</h3>
+<p>
+GDI simulates lines drawn with a single-pixel-wide (nominal width) pen by using the device driver's <b>Pixel</b> function. Applications draw these lines directly by using the <b>LineTo</b> and <b>Polyline</b> functions or indirectly by drawing an object with a border. In the simulations, GDI digitizes the line and outputs it to the device one pixel at a time. GDI uses a digital differential analyzer (DDA) that matches the analyzer used by both the polygon fill simulations and the VGA driver shipped with Windows. Because this type of line is very common and the simulations are not too quick, most device drivers support this primitive.</p>
+<p>
+For styled lines, GDI also rotates an 8-bit style mask along with the line, using either the foreground or background color, as appropriate, to set a pixel. If the background mode is transparent, the background pixels are not set. GDI uses the aspect ratio of the device (as defined by the ASPECTX, ASPECTY, and ASPECTXY indexes of the <b>GetDeviceCaps</b> function) to calculate the advancement of the style so that the style covers the same distance, regardless of the orientation of the line. For example, on the VGA driver, the style is advanced approximately every 3 pixels for a horizontal or vertical line and approximately every 2 pixels for a 45-degree line.</p>
+<p>
+Unlike the rest of the primitives, GDI's line drawing involves quite a bit of preclipping work. If the line is outside the clipping region, it is simply not drawn; for polylines, this trivial clipping is calculated using the polyline's bounding rectangle. If the line intersects a simple, rectangular region and the driver can clip to a rectangle, the driver handles the call on its own. If the line intersects a complex region, though, GDI walks the region and does an "intelligent" intersection, determining exactly which rectangles the line intersects and if it actually needs to be clipped at all. In contrast, for other primitives, this case is handled by walking through the region and calling the driver for each rectangle in the region; this proves too slow for intensive line drawing because the overhead can quickly overshadow the actual work involved.</p>
+<p>
+Because of the way a style continues along the length of a polyline and across clipped sections of line segments, GDI performs a complete pixel-level simulation of styled polylines that are clipped by a complex region. The other option would be to send the entire polyline to the driver with every subrectangle in the region. The pixel simulation usually wins in speed.</p>
+<p>
+In your applications, you might want to experiment with the <b>PatBlt</b> function for drawing horizontal and vertical lines. In most cases, this leads to faster drawing, and original line styles can be generated by using a carefully created pattern brush.</p>
+<h3>Wide Lines</h3>
+<p>
+To simulate a primitive using a wide pen (wider than 1 pixel), GDI creates a polygon to represent the line and then fills it with the current pen color. This process is significantly slower than drawing with a nominal width pen because the processing overhead is quite large. Unfortunately, device driver writers also realize that this is a complicated process to implement, so only a very few drivers provide wide-line support. GDI builds the polygon by surrounding each point with a circle (called a <i>cap</i>) with a diameter equal to the pen width and then connecting these caps to form a wide line with rounded ends and corners. There is no need for a full cap around each point, so only the needed section of the cap (determined by the angles of the line segments entering and leaving that point) is used.</p>
+<p>
+<img src="primitiv_1.gif" border=0></p>
+<p class=label>
+<b>Figure 1. Wide-Line Simulation</b></p>
+<p>
+This polygon is then sent to the <b>Polygon</b> routine for filling with the WINDING mode. The polygon is filled with the current pen color. If the line is drawn with a PS_INSIDEFRAME pen, a special brush is created to allow dithering. Unfortunately, the results of the wide-line simulation do leave a bit to be desired.</p>
+<p>
+GDI builds the polygon in a block of global memory that is large enough to hold a copy of the polyline, another 24 WORDs per point for the caps, and approximately 32 bytes of header information. If this memory cannot be allocated, the line drawing fails. The memory restrictions of the polygon simulations may also limit the workable size of this polygon.</p>
+<p>
+A wide PS_INSIDEFRAME pen used for the border of a nonpolygon filled object lines up on the inside of the object's outline instead of being centered on the outline. GDI achieves this special effect by massaging the input data to move the object "in" from its original position so that the border is centered about a fictional outline and ends up on the inside of the original outline. This is done at the highest level of the object's drawing function. The result is that the driver and the wide-line simulation code don't see that the pen is special, but the coordinates are already adjusted for the desired effect.</p>
+<h3>Rectangles</h3>
+<p>
+Rectangles are drawn with the <b>Rectangle</b> function. Because of the simplicity of this primitive, the simulation path is quite complex, trying to exploit every special case along the way. The interesting capability bits are found in the POLYGONALCAPS word. The basic flow is outlined below:</p>
+<pre><code>if (device can output fully (style and clipping))
+  call device
+if (device cannot output)
+{
+  if (non-NULL brush)&nbsp;&nbsp;&nbsp; // draw fill
+ &nbsp;&nbsp; if (mode not transparent)
+ &nbsp;&nbsp;&nbsp;&nbsp; BitBlt interior with ROP based on current ROP2
+ &nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp; scan out interior with current brush
+  if (non-NULL pen)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // draw border
+ &nbsp;&nbsp; if (nominal width)
+ &nbsp;&nbsp;&nbsp;&nbsp; make a polyline and call Polyline
+ &nbsp;&nbsp; else // wide line
+ &nbsp;&nbsp;&nbsp;&nbsp; scan out the border
+ &nbsp;&nbsp;&nbsp;&nbsp; // create (possibly dithered) brush for INSIDEFRAME, or use 
+ &nbsp;&nbsp;&nbsp;&nbsp; // current pen
+}
+</code></pre>
+<p>
+If the device driver can output the rectangle clipped to a rectangle and the clipping region is a complex one, GDI calls the device repeatedly, once for each subrectangle in the region.</p>
+<p>
+The ROP used to blt the interior of the rectangle is based on the currently set ROP2. Also, GDI adjusts the coordinates so that only the interior is blted without overlapping the border. The bitblt approach is not used when the current drawing mode is TRANSPARENT because transparency cannot be maintained using <b>BitBlt</b>. The only brushes actually affected by transparency are hatched brushes, so the transparency check should really look for <i>both</i> conditions being met before bypassing the faster filling approach.</p>
+<p>
+By using a scanline fill for a wide border, GDI generates a wide polyline that does not act like a normal wide line because the connectors are not rounded but square. The number of scanline calls is the same as the height of the rectangle plus the added height of the pen because the driver's scanline call can include multiple (in this case two) distinct segments within a scanline.</p>
+<h3>Polygons</h3>
+<p>
+The two GDI functions that directly involve polygons are <b>Polygon</b> and <b>PolyPolygon</b>, but several other primitives rely on the polygon functionality for simulations. As usual, if the device driver has the functionality to output the primitive directly, GDI calls the driver to do the work. The capability bits that are of interest for polygons are found in the POLYGONALCAPS word.</p>
+<p>
+GDI's simulation for polygons breaks down into two parts: the border and the fill. If either component is missing (a NULL pen means no border and a NULL brush indicates no fill), it is skipped. The border is drawn using the <b>Polyline</b> function; the fill is accomplished using scanlines and is the real component being discussed when "polygon simulation" is the topic.</p>
+<p>
+First, the points that define the polygon are broken up into "walls" that represent the sides of the object. Every time the point progression changes course in the <i>y</i> direction (a down-heading edge starts going up or vice versa), a new wall is defined. GDI uses global memory to track these walls and how they connect; if there is insufficient memory, the call fails. The simulations assume that the memory used for the walls is less than 64K, so if more is needed (each wall requires 30 bytes), the filling fails.</p>
+<p>
+Finally, GDI scans the walls, top to bottom, and generates the scanlines that are used to fill the polygon. The polygonal filling mode (set by the <b>SetPolyFillMode</b> function) is used to determine how the filling occurs. For WINDING mode polygons, the direction of each wall is a factor, while with ALTERNATE mode polygons, only the number of walls intersecting a given scanline is of importance.</p>
+<p>
+Polypolygons represent a specialized case of polygons that fall nicely into the simulations. GDI uses the process described for polygons above with the addition of defining a new wall with each subpolygon. The result is a list of walls, just as happens for a conventional polygon.</p>
+<p>
+When the filling is complete, GDI calls the <b>Polyline</b> function to draw the border, regardless of the success of the filling operation. A wide-line border overwrites a portion of the fill because it is centered on the outline.</p>
+<p>
+When the polygon code is used for simulating wide lines, there is no border and the scanline filling is performed using the current pen instead of the brush. GDI uses the internal version of the polygon function to simulate wide lines.</p>
+<h3>Curves</h3>
+<p>
+The curve-based primitives provided by GDI are <b>Ellipse</b>, <b>RoundRect</b>, <b>Pie</b>, <b>Chord</b>, and <b>Arc</b>. A device driver's curve capabilities are described in the CURVECAPS capability word. CURVECAPS provides bits for the types of supported curves and bits for line and fill styles that the device can use to draw the curves. For example, if a device can draw ellipses with a fill and a styled line border, the CC_ELLIPSES, CC_INTERIORS, and CC_STYLED bits are set. If the curve call to GDI involves a combination of curve type, border/fill style, and clipping needs that the device cannot handle, GDI simulates the entire operation; either the device driver can do it all or the driver's functionality is not used.</p>
+<p>
+The first step of the simulation is to break down the curve into a polygon. This task uses global memory that does not exceed 64K. If more than 64K is needed or if the memory cannot be allocated, the function fails. The amount of memory needed is calculated as follows:</p>
+<p class=indent>
+PolygonSizeInWords = height_of_ellipse + width_of_ellipse + 32</p>
+<p>
+This is sufficient space to hold a worst-case ellipse, where each line segment has a length of 1. The algorithm GDI uses to calculate the ellipse is a standard DDA conversion that generates data for one quarter of the ellipse and then uses mirroring to generate the other three quarters. Note that the entire ellipse is computed for each curve.</p>
+<p>
+GDI then massages these points into the appropriate shape. For pies, GDI calculates the start and end of the curve, finds these points in the point array, and adds lines to the ellipse's center to create the wedge as shown in Figure 2. Similarly, GDI finds the endpoints of chords and arcs in the array, and extracts the appropriate polygon from the ellipse's points. This is done purely with pointers into the original array; no additional memory is used. The DDA code has a special case for building a polygon for round rectangles.</p>
+<p>
+<img src="primitiv_2.gif" border=0></p>
+<p class=label>
+<b>Figure 2. Creating a Pie</b></p>
+<p>
+Once the curve exists in polygonal form, GDI simply calls the internal <b>Polygon</b> routine to draw the primitive. If the shape is an arc, the internal <b>Polyline</b> routine is used because there is no need for filling. GDI passes the return from the actual drawing routine to the application and frees the polygon buffer.</p>
+<p>
+There are some special cases used in curve simulations. If a round rectangle reduces trivially to a rectangle, GDI calls the internal <b>Rectangle</b> routine to perform the output. If the output primitive is either an ellipse or a round rectangle and the current pen is a wide, non-NULL pen, GDI optimizes the simulation process described above. The key to speed here is to avoid using the wide-line code. GDI creates two concentric curves separated by the width of the border, fills the inside curve with the current brush using the <b>Polygon</b> routine, and fills the polygon created by combining the two curves with a brush that has the same color as the current pen.</p>
+<p>
+<img src="primitiv_3.gif" border=0></p>
+<p class=label>
+<b>Figure 3. Wide-Line Ellipse Simulation</b></p>
+<p>
+GDI uses only global memory for this operation; the memory is allocated one curve at a time, so if there is not sufficient memory for the outside curve, the interior is still filled. The <b>GetNearestColor</b> function is used to create a brush with a solid color version of the current pen for non-PS_INSIDELINE pens. If the current brush is a NULL_BRUSH, the interior is not filled. This curve simulation in Windows version 3.0 generates round rectangles with improperly rounded corners; this problem is corrected in version 3.1.</p>
+<p>
+The curve-based region-creation calls, <b>CreateEllipticRgn</b> and <b>CreateRoundRectRgn</b>, also use the curve-generating code and the polygonal-filling code. The scanline information generated by the polygon simulations is used to build the region, one scanline at a time.</p>
+<h3>Stretched Blts</h3>
+<p>
+In some blt operations, the source and destination rectangles are not of the same size. As a result, the operation involves either stretching or shrinking the source to fit into the destination's rectangle. This operation is called a <i>stretched blt</i>. The stretched blt operation also includes bitmap flipping when the source and destination extents have different signs. The two GDI functions that can result in a stretched blt are <b>BitBlt</b> and <b>StretchBlt</b> (also a simulated <b>StretchDIBits</b>, as discussed below). Because the <b>BitBlt</b> function involves two device contexts (DCs) and, hence, two mapping modes, the source and destination extents may differ after GDI converts them into device units, resulting in a stretched blt operation. Similarly, calling <b>StretchBlt</b> with extents that are equal in device units defaults to a simple, nonstretched blt.</p>
+<p>
+Device driver support for the stretched blt operation is desirable because GDI cannot simulate this operation easily. A driver uses the RC_STRETCHBLT capability bit to indicate that it can stretch or compress blts. If the driver cannot perform a stretched blt or supports only a subset of the possibilities (for example, only integral stretches), GDI simulates.</p>
+<p>
+Because the source and destination of a stretched blt are in a device-dependent format, the key to simulating the operation is to use a standardized format for the bits. The Windows environment offers two standard formats: monochrome bitmaps and DIBs. Depending on the specific nature of the source and destination, GDI simulates a stretched blt with either a specialized monochrome algorithm or a more generalized method using DIBs.</p>
+<h4>The monochrome simulation</h4>
+<p>
+GDI uses the monochrome simulation only if <i>all</i> of the following conditions are met:
+<ul type=disc>
+<li>
+Either the source or the destination is monochrome.<br><br></li>
+<li>
+Either the source is a device (not a bitmap) or it is a small bitmap (&lt;64K).<br><br></li>
+<li>
+The destination is a small monochrome bitmap (&lt;64K).<br><br></li>
+<li>
+No mirroring exists in <i>x</i> or <i>y</i>.</li>
+</ul>
+<p>
+GDI creates a single monochrome bitmap (not to exceed 64K in size) in which it performs the stretching. The dimensions of the bitmap are determined solely by the destination if there is no need to make a monochrome shadow of the source. A shadow is needed if any of the following are true:
+<ul type=disc>
+<li>
+The source is a device (not a bitmap).<br><br></li>
+<li>
+The source is a color bitmap.<br><br></li>
+<li>
+The source and destination are from the same bitmap and they overlap.</li>
+</ul>
+<p>
+If a shadow is needed, the source rectangle is blted into the processing bitmap that has the dimensions MAX (<i>source-width, destination-width</i>) by MAX (<i>source-height</i>, <i>destination-height</i>). Now GDI proceeds to stretch the monochrome bits from the source to a rectangle of appropriate size in the processing bitmap. The result is blted to the actual destination. All conversions between color and monochrome formats are handled in the blts.</p>
+<p>
+GDI bands the monochrome case when memory restrictions prevent a single pass. If there is insufficient memory for one scan, the call fails.</p>
+<h4>The generalized simulation using DIBs</h4>
+<p>
+The generalized simulation is used when the conditions for a monochrome simulation cannot be met. In the generalized simulation, GDI uses DIBs to perform the stretching. In the old days of Windows version 2.0, before DIBs, GDI simulated stretched blts by using <b>BitBlt</b> to copy rows and columns of device-dependent bitmaps that could not be accessed directly. Needless to say, the overhead was large. DIBs, on the other hand, can be directly manipulated because they have a standard format, so the driver is called only to convert the bitmap to and from the DIB format.</p>
+<p>
+GDI chooses a DIB resolution that most closely matches device resolution without losing any color information and converts the source bitmap into the DIB format. GDI then performs the actual stretching or shrinking on the bits, first horizontally and then vertically. Only a single work space is allocated, so the DIB is stretched "in place" and becomes a copy of the destination when the operation is complete. GDI then converts the DIB back into a device-dependent bitmap and blts it to the destination.</p>
+<p>
+The total memory usage in this operation is significant. GDI creates shadow source and destination (device-dependent) bitmaps so that the DIB conversion functions can be used. These also need memory DCs so that blting operations can be performed. On top of that, GDI allocates global memory for the DIB data used in the simulation. In the ideal case, when there is enough memory to do everything, the DIB work area's dimensions are MAX (<i>source-width</i>, <i>destination-width</i>) by MAX (<i>source-height</i>, <i>destination-height</i>). Fortunately, GDI bands the simulations (in the vertical direction only) if there is insufficient memory to do them in one pass. The DIB allocated cannot be larger than 64K, so banding may be necessary even if there is sufficient memory for the whole operation. If there is not enough memory for one scan, the call fails.</p>
+<p>
+Some side effects occur when GDI is performing the DIB-based simulations for a palette device. If the source and destination DCs involved have different palettes selected, <b>GetDIBits</b> uses the source palette, and the post-stretching <b>SetDIBits</b> uses the destination palette. GDI processes the DIB with DIB_RGB_COLORS so that the colors in the bitmap are automatically mapped from one palette to the other. This convenient palette mapping does not take place with nonstretched blts. If, on the other hand, both the source and destination DCs have the same palette selected, GDI uses DIB_PAL_COLORS to create the DIB's color table with palette-based indexes. This results in faster <b>SetDIBits</b> execution because the color table does not have to be color matched, but it also creates problems for a source bitmap that contains colors not present in the source palette. These colors fall through the cracks, and the Palette Manager maps them to black in the destination.</p>
+<p>
+One special case that GDI simulates differently is the almost one-to-one blt. If the <i>x</i> and <i>y</i> extents of the source and destination rectangles differ by no more than one, GDI completes the operation by using up to three <b>BitBlt</b> calls. If the source is being stretched by one, the left edge and/or bottom scan of the source is blted again. If the source is being shrunk by one, the left edge and/or bottom scan is not blted to the destination.</p>
+<p>
+The GDI simulations in Windows version 3.0 have two noteworthy problems that are corrected in version 3.1. When GDI simulates a stretched blt for devices that have more than 8 bits of color resolution (in other words, devices that require the DIB-based simulation using 24-bit DIBs), it does not allocate sufficient memory for DIB processing, which results in a GP fault. These devices usually work around this problem by supporting the <b>StretchBlt</b> functionality themselves. If the device driver does support the <b>StretchBlt</b> functionality, the GDI preprocessing inadvertently loses all flipping information that the application may have requested; all extents passed to the driver are positive. The origins are adjusted so that the blt operation is lined up and sized properly, but it is not flipped. The simulations do handle flipping correctly. An application can work around this flaw by manually flipping the bitmap, which is best done by using a DIB representation of the bitmap.</p>
+<p>
+One limitation in Windows version 3.0 that remains in Windows version 3.1 is that the current stretch mode (set with the <b>SetStretchBltMode</b> function) is not passed to the driver in cases where the driver can perform the operation. The driver usually assumes COLORONCOLOR. Because drivers that support stretched blts are usually color drivers, this limitation may not be a concern.</p>
+<h3>DIB Functions</h3>
+<p>
+GDI provides only rudimentary simulations for the DIB functions in that all simulations use only monochrome device-dependent bitmaps. Color bitmaps, although they are the desired medium, are not usable for simulations because they are device-dependent and because pixel information cannot be accessed without assuming a format. Using the <b>Pixel</b> function to set separate pixels is simply too slow. Because of this monochrome limitation in GDI, it is highly recommended that all color devices support at least the basic DIB-to-device-dependent-bitmap (DDB) and DDB-to-DIB conversions. The capability bits that define a device's handling of DIBs are RC_DI_BITMAP, RC_DIBTODEV, and RC_STRETCHDIB. Although a device that claims to support a DIB function should be able to handle any valid DIB that comes its way, the truth is that some drivers do not handle all the cases. For example, it is not uncommon for a printer driver to fail to support run-length encoded (RLE) DIBs. In these cases, the driver asks for help, and GDI simulates the operation.</p>
+<h4>SetDIBits</h4>
+<p>
+The <b>SetDIBits</b> function is simulated by decoding the DIB into a monochrome bitmap of the appropriate size. GDI creates a monochrome bitmap and sets the bits as appropriate. (This can be done because the monochrome format is a device-independent standard.) The DIB's colors are mapped to black and white, using the following method:</p>
+<pre><code>if (((5*Green + 2*Red + 1*Blue) / 8) &gt; 0.5)
+ &nbsp;&nbsp; use white
+else
+ &nbsp;&nbsp; use black
+</code></pre>
+<p>
+This calculation provides a better visual representation of monochrome brightness than that produced by simply adding up the three values. When the DIB is completely decoded, the monochrome bitmap is blted to the destination bitmap. The height of the monochrome bitmap is based on the <i>cScanLines<b> </b></i>parameter. This operation can fail if GDI cannot create the monochrome bitmap and two temporary memory DCs.</p>
+<h4>GetDIBits</h4>
+<p>
+The <b>GetDIBits</b> function is simulated by following the steps for simulating <b>SetDIBits</b>, only in the reverse order. GDI blts the source device-dependent bitmap to a temporary monochrome bitmap with the same width and a height determined by the <i>cScanLines</i> parameter and encodes the DIB information as appropriate. Separate subroutines for each of the possible DIB formats are used. The device driver maps the colors in the source bitmap to black and white during the initial blt process. The resulting DIB has an appropriately sized color table, but the bits only have two possible indexes, one for white and one for black. This simulation has the same failure potential as the <b>SetDIBits </b>function.</p>
+<h4>SetDIBitsToDevice</h4>
+<p>
+GDI simulates the <b>SetDIBitsToDevice</b> function by using <b>SetDIBits</b>. The source DIB is converted to a device-dependent bitmap and is then blted to the destination. GDI converts the entire DIB, not just the part that is actually being set (well, actually, the <i>cScanLines<b> </b></i>parameter defines how much of the DIB is converted). Of course, GDI "flips" the source coordinates to properly place the blt.</p>
+<h4>StretchDIBits</h4>
+<p>
+The <b>StretchDIBits</b> function is simulated in much the same way, except that <b>StretchBlt</b> is used for the final blting operation instead of <b>BitBlt</b>. There is also a special case when the operation is basically a <b>SetDIBitsToDevice</b> call (the destination DC is not a memory bitmap, the source and destination extents are the same, and the ROP specified is SRCCOPY) and the device supports that call (RC_DIBTODEV capability bit). In this case, GDI calls the device driver's <b>SetDIBitsToDevice</b> function to perform the operation.</p>
+<h4>RLE bitmaps</h4>
+<p>
+DIB calls that involve RLE bitmaps follow all of the rules described above. GDI simulates these functions only in monochrome. On devices that support some DIB operations but that may not support RLE bitmaps, an application can significantly improve the output by decoding the RLE bitmap into a standard DIB so that color information is not lost. Unfortunately, the capability bits do not provide enough granularity to determine exactly what types of DIBs the driver actually supports. To be on the safe side, it's a good idea to manually decode RLE bitmaps and use only non-encoded DIBs for printing, where extensive support is usually lacking.</p>
+<h2>Special Support for Printers</h2>
+<p>
+A mechanism built into GDI allows a printer to use the current display driver to output to a monochrome bitmap. This mechanism targets simple, monochrome, dot-matrix printers that can download bitmaps directly to the paper. The interface supports all of the major primitives (including the required pixel, bitblt, and scanline operations), as well as object realization. A printer driver that uses this interface is simply responsible for downloading monochrome bitmaps; the display driver produces the actual output. The disadvantage is that the printer ends up relying on perhaps the least tested component of a display driver—the output to a monochrome bitmap—and the printer's output is, therefore, affected by the current display driver that is being used. The mechanism does simplify the task of writing a printer driver, and with the variety of printer hardware available, it encourages a driver for every printer.</p>
+<p>
+The printer driver begins the process when it initializes an output DC by creating a monochrome bitmap. Depending on the printer, this bitmap may be the size of the whole page or the size of a single band on a banding printer. When GDI calls the driver to perform an output operation, the driver calls one of the special functions in GDI, passing in the bitmap as a parameter. GDI then calls the display driver (there's only one in a given session of Windows) to perform the operation on the bitmap. To the display driver, this is equivalent to operating on an application-supplied monochrome bitmap, and it carries out the task to the bitmap. When the application is finished outputting to the given page or band, the driver downloads the bitmap to the actual printer to produce output.</p>
+<p>
+The display driver cannot output fonts that are specific to the printer hardware, so if any of these exist, the printer driver is responsible for their printing. This creates a few inconsistencies in the ordering of primitives, because the text and the other output are not actually drawn at the same time. With the introduction of TrueType® in Windows version 3.1, many simple printers rely on the display driver to output TrueType text to the monochrome bitmap instead of downloading the TrueType fonts, eliminating the problems with hardware fonts.</p>
+</BODY>
+</HTML>

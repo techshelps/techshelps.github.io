@@ -1,0 +1,230 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>TN053: Custom DFX Routines for DAO Database Classes</title>
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY>
+<font face="verdana,arial,helvetica" size="2">
+<h1><a name="_mfcnotes_tn053"></a>TN053: Custom DFX Routines for DAO Database Classes</h1>
+<p>
+This technical note describes the DAO record field exchange (DFX) mechanism. To help understand what is happening in the DFX routines, the <b>DFX_Text</b> function will be explained in detail as an example. As an additional source of information to this technical note, you can simply examine the code for the other the individual DFX functions.You probably won’t need a custom DFX routine as often as you might need a custom RFX routine (used with ODBC database classes).</p>
+<p>
+This technical note contains:
+<ul type=disc>
+<li>
+DFX Overview<br><br></li>
+<li>
+<a href="#_mfcnotes_tn053_examples">Examples</a> using DAO Record Field Exchange and Dynamic Binding<br><br></li>
+<li>
+<a href="#_mfcnotes_tn053_how_dfx_works">How DFX Works</a><br><br></li>
+<li>
+<a href="#_mfcnotes_tn053_what_your_custom_dfx_routine_does">What Your Custom DFX Routine Does</a><br><br></li>
+<li>
+<a href="#_mfcnotes_tn053_details_of_dfx_text">Details of DFX_Text</a></li>
+</ul>
+<p class=label>
+<b>DFX Overview</b></p>
+<p>
+The DAO record field exchange mechanism (DFX) is used to simplify the procedure of retrieving and updating data when using the <b>CDaoRecordset</b> class. The process is simplified through the use of data members of the <b>CDaoRecordset</b> class. By deriving from <b>CDaoRecordset</b>, you can add data members to the derived class representing each field in a table or query. This “static binding” mechanism is simple, but it may not be the data fetch/update method of choice for all applications. DFX retrieves every bound field each time the current record is changed. If you are developing a performance-sensitive application that does not require fetching every field when currency is changed, “dynamic binding” via <b>CDaoRecordset::GetFieldValue</b> and <b>CDaoRecordset::SetFieldValue</b> may be the data access method of choice. </p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;DFX and dynamic binding are not mutually exclusive, so a hybrid use of static and dynamic binding can be used.</p>
+<p class=label>
+<b><a name="_mfcnotes_tn053_examples"></a>Example 1 - Use of DAO Record Field Exchange only</b></p>
+<p>
+(assumes <b>CDaoRecordset</b> - derived class <code>CMySet</code> already open)</p>
+<pre><code>// Add a new record to the customers table
+myset.AddNew();
+myset.m_strCustID = _T("MSFT");
+myset.m_strCustName = _T("Microsoft");
+myset.Update();
+</code></pre>
+<p class=label>
+<b>Example 2 - Use of dynamic binding only</b></p>
+<p>
+(assumes using <b>CDaoRecordset</b> class, <code>rs</code>, and it is already open)</p>
+<pre><code>// Add a new record to the customers table
+COleVariant&nbsp; varFieldValue1 ( _T("MSFT"), VT_BSTRT );
+//Note: VT_BSTRT flags string type as ANSI, instead of UNICODE default
+COleVariant&nbsp; varFieldValue2&nbsp; (_T("Microsoft"), VT_BSTRT );
+rs.AddNew();
+rs.SetFieldValue(_T("Customer_ID"), varFieldValue1);
+rs.SetFieldValue(_T("Customer_Name"), varFieldValue2);
+rs.Update();
+</code></pre>
+<p class=label>
+<b>Example 3 - Use of DAO Record Field Exchange and dynamic binding</b></p>
+<p>
+(assumes browsing employee data with <b>CDaoRecordset</b>-derived class <code>emp</code>)</p>
+<pre><code>// Get the employee's data so that it can be displayed
+emp.MoveNext();
+
+// If user wants to see employee's photograph,
+// fetch it
+COleVariant varPhoto;
+if (bSeePicture)
+emp.GetFieldValue(_T("photo"), varPhoto);
+
+// Display the data
+PopUpEmployeeData(emp.m_strFirstName,
+ emp.m_strLastName, varPhoto);
+</code></pre>
+<p class=label>
+<b><a name="_mfcnotes_tn053_how_dfx_works"></a>How DFX Works</b></p>
+<p>
+The DFX mechanism works in a similar fashion to the record field exchange (RFX) mechanism utilized by the MFC ODBC classes. The priciples of DFX and RFX are the same but there are numerous internal differences. The design of the DFX functions was such that virtually all the code is shared by the individual DFX routines. At the highest level DFX only does a few things. 
+<ul type=disc>
+<li>
+DFX constructs the SQL <b>SELECT</b> clause and SQL <b>PARAMETERS</b> clause if necessary.<br><br></li>
+<li>
+DFX constructs the binding structure used by DAO’s <b>GetRows</b> function (more on this later).<br><br></li>
+<li>
+DFX manages the data buffer used to detect dirty fields (if double-buffering is being used)<br><br></li>
+<li>
+DFX manages the <b>NULL</b> and <b>DIRTY</b> status arrays and sets values if necessary on updates.</li>
+</ul>
+<p>
+At the heart of the DFX mechanism is the <b>CDaoRecordset</b> derived class’s <b>DoFieldExchange</b> function. This function dispatches calls to the individual DFX functions of an appropriate operation type. Prior to calling <b>DoFieldExchange</b> the internal MFC functions set the operation type. The following list shows the various operation types and a brief description.</p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=40%><b>Operation </b></td>
+<td class=label width=60%><b>Description</b></td>
+</tr>
+<tr valign=top>
+<td width=40%><b>AddToParameterList</b></td>
+<td width=60%>Builds PARAMETERS clause</td>
+</tr>
+<tr valign=top>
+<td width=40%><b>AddToSelectList</b></td>
+<td width=60%>Builds SELECT clause</td>
+</tr>
+<tr valign=top>
+<td width=40%><b>BindField</b></td>
+<td width=60%>Sets up binding structure</td>
+</tr>
+<tr valign=top>
+<td width=40%><b>BindParam</b></td>
+<td width=60%>Sets parameter values</td>
+</tr>
+<tr valign=top>
+<td width=40%><b>Fixup</b></td>
+<td width=60%>Sets NULL status</td>
+</tr>
+<tr valign=top>
+<td width=40%><b>AllocCache</b></td>
+<td width=60%>Allocates cache for dirty check</td>
+</tr>
+<tr valign=top>
+<td width=40%><b>StoreField</b></td>
+<td width=60%>Saves current record to cache</td>
+</tr>
+<tr valign=top>
+<td width=40%><b>LoadField</b></td>
+<td width=60%>Restores cache to member values</td>
+</tr>
+<tr valign=top>
+<td width=40%><b>FreeCache</b></td>
+<td width=60%>Frees cache</td>
+</tr>
+<tr valign=top>
+<td width=40%><b>SetFieldNull</b></td>
+<td width=60%>Sets field status &amp; value to NULL</td>
+</tr>
+<tr valign=top>
+<td width=40%><b>MarkForAddNew</b></td>
+<td width=60%>Marks fields dirty if not PSEUDO NULL</td>
+</tr>
+<tr valign=top>
+<td width=40%><b>MarkForEdit</b></td>
+<td width=60%>Marks fields dirty if don't match cache</td>
+</tr>
+<tr valign=top>
+<td width=40%><b>SetDirtyField</b></td>
+<td width=60%>Sets field values marked as dirty</td>
+</tr>
+</table><br>
+<p>
+In the next section, each operation will be explained in more detail for <b>DFX_Text</b>.</p>
+<p>
+The most important feature to understand about the DAO record field exchange process is that it uses the <b>GetRows</b> function of the <b>ICDaoRecordset</b> object. The DAO <b>GetRows</b> function can work in several ways. This technical note will only briefly describe <b>GetRows</b> as it is outside of the scope of this technical note.</p>
+<p>
+DAO <b>GetRows</b> can work in several ways. 
+<ul type=disc>
+<li>
+It can fetch multiple records and multiple fields of data at one time. This allows for faster data access with the complication of dealing with a large data structure and the appropriate offsets to each field and for each record of data in the structure. MFC does not take advantage of this multiple record fetching mechanism. <br><br></li>
+<li>
+Another way <b>GetRows</b> can work is to allow programmers to specify binding addresses for the retrieved data of each field for one record of data. <br><br></li>
+<li>
+DAO will also “call back” into the caller for variable length columns in order to allow the caller to allocate memory. This second feature has the benefit of minimizing the number of copies of data as well as allowing direct storage of data into members of a class (the <b>CDaoRecordset</b> derived class). This second mechanism is the method MFC uses to bind to data members in <b>CDaoRecordset</b> derived classes.</li>
+</ul>
+<p class=label>
+<b><a name="_mfcnotes_tn053_what_your_custom_dfx_routine_does"></a>What Your Custom DFX Routine Does</b></p>
+<p>
+It is apparent from this discussion that the most important operation implemented in any DFX function must be the ability to set up the required data structures to successfully call <b>GetRows</b>. There are a number of other operations that a DFX function must support as well, but none as important nor complex as correctly preparing for the <b>GetRows</b> call.</p>
+<p>
+The use of DFX is described in the online documentation. Essentially, there are 2 requirements. First, members must be added to the <b>CDaoRecordset</b> derived class for each bound field and parameter. Following this <b>CDaoRecordset::DoFieldExchange</b> should be overridden. Note that the data type of the member is important. It should match the data from the field in the database or at least be convertable to that type. For example a numeric field in database, such as a long integer, can always be converted to text and bound to a <b>CString</b> member, but a text field in a database may not necessarily be converted to a numeric representation, such as long integer and bound to a long integer member. DAO and the Microsoft Jet database engine are responsible for the conversion (rather than MFC).</p>
+<p class=label>
+<b><a name="_mfcnotes_tn053_details_of_dfx_text"></a>Details of DFX_Text</b></p>
+<p>
+As mentioned previously, probably the best way to explain how DFX works is to simply work through an example. For this purpose going through the internals of <b>DFX_Text</b> should work quite well to help provide at least a basic understanding of DFX.</p>
+<p class=dt>
+<b>AddToParameterList</b></p>
+<p class=indent>
+This operation builds the SQL <b>PARAMETERS</b> clause (“<code>Parameters &lt;param name&gt;, &lt;param type&gt; ... ;</code>”) required by Jet. Each parameter is named and typed (as specified in the RFX call). See the function <b>CDaoFieldExchange::AppendParamType</b> function to see the names of the individual types. In the case of <b>DFX_Text</b>, the type used is <code>text</code>.</p>
+<p class=dt>
+<b>AddToSelectList</b></p>
+<p class=indent>
+Builds the SQL <b>SELECT </b>clause. This is pretty straight forward as the column name specified by the DFX call is simply appended (“<code>SELECT &lt;column name&gt;, ...</code>”).</p>
+<p class=dt>
+<b>BindField</b></p>
+<p class=indent>
+- By far the most complex of the operations. As mentioned previously this is where the DAO binding structure used by <b>GetRows</b> is set up. As you can see from the code in <b>DFX_Text</b> the types of information in the structure include the DAO type used (<b>DAO_CHAR</b> or <b>DAO_WCHAR</b> in the case of <b>DFX_Text</b>). Additionally, the type of binding used is also set up. In an earlier section <b>GetRows</b> was described only briefly, but it was sufficient to explain that the type of binding used by MFC is always direct address binding (<b>DAOBINDING_DIRECT</b>). In addition for variable length column binding (like <b>DFX_Text</b>) callback binding is used so that MFC can control the memory allocation and specify an address of the correct length. What this means is that MFC can always tell DAO “where” to put the data, thus allowing binding directly to member variables. The rest of the binding structure is filled in with things like the address of the memory allocation callback function and the type of column binding (binding by column name).</p>
+<p class=dt>
+<b>BindParam</b></p>
+<p class=indent>
+This is a simple operation which calls <b>SetParamValue</b> with the parameter value specified in your parameter member.</p>
+<p class=dt>
+<b>Fixup</b></p>
+<p class=indent>
+Fills in the <b>NULL</b> status for each field.</p>
+<p class=dt>
+<b>SetFieldNull</b></p>
+<p class=indent>
+This operation only marks each field status as <b>NULL</b> and sets the member variable’s value to <b>PSEUDO_NULL</b>.</p>
+<p class=dt>
+<b>SetDirtyField</b></p>
+<p class=indent>
+Calls <b>SetFieldValue</b> for each field marked dirty.</p>
+<p>
+All of the remaining operations only deal with using the data cache. The data cache is an extra buffer of the data in the current record that is used to make certain things simpler. For instance “dirty” fields can be automatically detected. As described in the online documentation it can be turned off completely or at the field level. The implementation of the buffer utilizes a map. This map is used to match up dynamically allocated copies of the data with the address of the “bound” field (or <b>CDaoRecordset</b> derieved data member).</p>
+<p class=dt>
+<b>AllocCache</b></p>
+<p class=indent>
+Dynamically allocates the cached field value and adds it to the map.</p>
+<p class=dt>
+<b>FreeCache</b></p>
+<p class=indent>
+Deletes the cached field value and removes it from the map.</p>
+<p class=dt>
+<b>StoreField</b></p>
+<p class=indent>
+Copies the current field value into the data cache.</p>
+<p class=dt>
+<b>LoadField</b></p>
+<p class=indent>
+Copies the cached value into the field member.</p>
+<p class=dt>
+<b>MarkForAddNew</b></p>
+<p class=indent>
+Checks if current field value is non-<b>NULL</b> and marks it dirty if necessary.</p>
+<p class=dt>
+<b>MarkForEdit</b></p>
+<p class=indent>
+Compares current field value with data cache and marks dirty if necessary.</p>
+<p>
+<B><b>Tip</b></B>&nbsp;&nbsp;&nbsp;Model your custom DFX routines on the existing DFX routines for standard data types.</p>
+<p>
+<a href="_mfcnotes_technical_notes_by_number.htm">Technical Notes by Number</a>  |&nbsp; <a href="_mfcnotes_technical_notes_by_category.htm">Technical Notes by Category</a></p>
+</font></BODY>
+</HTML>

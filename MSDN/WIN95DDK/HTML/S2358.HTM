@@ -1,0 +1,506 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Introduction</TITLE><META HTTP-EQUIV="CONTENT-TYPE" CONTENT="text/html; charset= iso-8859-1"><style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD><BODY BGCOLOR="#FFFFFF">
+<FONT FACE="verdana,arial,helvetica" SIZE="2">
+<H2>Introduction </H2><P>System Monitor is a tool in Windows&reg; 95 that graphically displays a number of system performance statistics. This document describes how other drivers can report data to the System Monitor. </P>
+<P>Any VxD can report statistics which will be displayed in the System Monitor user interface. To do so, the VxD must do the following: </P>
+<P>    1.     Register itself as a stat server by calling the PERF_Server_Register (usually done at VxD load time) </P>
+<P>    2.     Register one or more statistics by calling PERF_Server_Add_Stat for each statistic (usually done immediately after calling PERF_Server_Register) </P>
+<P>    3.     Unregister the stat server when the VxD unloads </P>
+<P></P>
+<P>Both static and dynamic VxDs may use the service; stat servers and statistics may be added and removed at any time. </P>
+<P>Statistics are obtained in one of two ways, depending on information passed in the PERF_Server_Add_Stat call. Normally the pst0_pStatFunc contains a ring 0 pointer to a DWORD that contains the data to be displayed. The PERF VxD simply dereferences the pointer and retrieves the data whenever it is requested by the UI client. This places the lowest overhead on the stat server VxD and on the system. If the PSTF_FUNCPTR flag is set, however, the pst0_pStatFunc member should be a ring 0 pointer to a function with no parameters that returns the data value in EAX. This is useful if data is expensive to calculate; then the data is only calculated when requested. </P>
+<P>Another useful flag in stat creation is PSTF_RATE, which causes the client to automatically differentiate the reported value by time. For instance, if a driver wishes to report throughput in bytes/sec, it can keep a counter of the bytes it processes in a DWORD and increment the DWORD whenever it processes data. If the PSTF_RATE flag is set then UI clients will divide by elapsed time to arrive at bytes/sec. This is also useful because it allows multiple clients to poll for data at different times and always get correct data. </P>
+<P>The perf.h header file and example code example.asm (both attached below) illustrate the details of how to implement this. </P>
+<P><BR></P>
+<PRE>/*********************************************************************
+ *   (C) Copyright MICROSOFT Corp., 1993-1995
+ *   Title:     PERF.H - Include file for perf monitor
+ *   Version:   1.00
+ *   Date:
+ *   Author:  FCF
+ *----------------------------------------------------------------------
+ *   Change log:
+ *   DATE        REV DESCRIPTION
+ *   ----------- --- ---------------------------------------------------
+ */
+
+/* defines */
+
+#define MAXNAMELEN      50  /* maximum number of characters in
+                   service name, stat name, or key names */
+#define MAXCOMPLEXSUBSTAT  8  /* maximum number of stats making
+                   up a complex stat */
+  
+/* structures and flags used for the ring-0 interface */
+
+struct perf_server_0 {
+    unsigned long  psrv0_Level;  /* Must be zero for this level */
+    unsigned long  psrv0_Flags;
+    char          *psrv0_pszServerName;
+    char         *psrv0_pszServerNodeName;
+    void         *psrv0_pControlFunc;
+};
+
+struct perf_stat_0 {
+    unsigned long  pst0_Level;  /* Must be zero for this level */
+    unsigned long  pst0_Flags;
+    char         *pst0_pszStatName;
+    char         *pst0_pszStatNodeName;
+    char         *pst0_reserved;      // must be NULL
+    char         *pst0_pszStatDescription;
+    void         *pst0_pStatFunc;
+  unsigned long  pst0_ScaleFactor;  // set PSTF_FACTOR_xxx flag to use
+};
+
+/* Values for psrv0_Flags follow */
+
+/* Values for pst0_Flags follow */
+
+/* pst0_pStatFunc points either directly to data (always a DWORD for now) */
+/* or, if PSTF_FUNCPTR_BIT is set, to a _cdecl function.  This function   */
+/* accepts a stat handle as it's argument and returns the stat in eax     */
+
+#define PSTF_FUNCPTR    0x00000001
+</PRE>
+<P>The data referenced by this stat is always a counter, e.g. number of bytes read. It is up to the client to differentiate this into a rate. If PSTF_RATE is set, then the text associated with this stat assumes that the stat will be differentiated with respect to time. It's possible that two stats will refer to the same data - one with this bit set and one without, with help text appropriate for each. </P>
+<P><BR></P>
+<PRE>#define PSTF_COUNT    0x00000000
+#define PSTF_RATE    0x00000002
+
+/* If either of these flags are set, then the output will be scaled
+   (either multiplied or divided) by pst0_ScaleFactor.  */
+#define PSTF_FACTOR_MULTIPLY  0x00000040
+#define PSTF_FACTOR_DIVIDE    0x00000080
+
+/* XLATOFF */
+
+unsigned long PERF_Server_Register( struct perf_server_0 * );
+void PERF_Server_Deregister( unsigned long hReg );
+unsigned long PERF_Server_Add_Stat( unsigned long hReg, struct perf_stat_0 );
+void PERF_Server_Remove_Stat( unsigned long hStat );
+
+/* XLATON */
+</PRE>
+<P>Control messages sent to perf server's control function. The control function is optional, set it to NULL if you don't want any control messages. Perf servers are free to ignore any messages they want. Control functions take two DWORD parameters; a message (dwMsg) and a DWORD of message-dependent data (dwData). </P>
+<P>The following defines are values for dwMsg: </P>
+<P><BR></P>
+<PRE>#define PMSG_START_STAT        0x11
+#define PMSG_STOP_STAT        0x12
+</PRE>
+<P>PMSG_START_STAT: Notifies that a perf client is going to start watching this stat. dwData contains the stat handle. </P>
+<P>PMSG_STOP_STAT: Notifies that a perf client is no longer watching this stat. dwData contains the stat handle. Stats which are expensive to maintain should only be kept while some- one is watching them. Note that there can be more than one stat client, so don't just stop keeping track of a stat if you receive a PMSG_STOP_STAT. The server should keep a counter of the number of PMSG_START_STAT's it receives for a particular counter, decrement it for each PMSG_STOP_STAT and stop keeping track of the stat when thecounter reaches zero. Most stats are trivial to maintain and just involve incrementing a counter. For stats like these, perf servers should always increment the counter and ignore messages to start and stop. </P>
+<P><BR></P>
+<PRE>/* ASM
+
+; Ring-0 macros to aid stat registration
+
+Reg_Perf_Srv MACRO level:REQ, flags:REQ, servername:REQ, nodename:REQ, controlfunc:REQ
+  local  nothere
+  VxDcall  PERF_Get_Version
+  or  eax, eax
+  jz  nothere
+
+  IF (OPATTR(controlfunc)) AND 00010000y   ;; register
+    push  controlfunc
+  ELSE
+    push  OFFSET32 controlfunc
+  ENDIF
+
+  IF (OPATTR(nodename)) AND 00010000y    ;; register
+    push  nodename
+  ELSE
+    push  OFFSET32 nodename
+  ENDIF
+
+  IF (OPATTR(servername)) AND 00010000y    ;; register
+    push  servername
+  ELSE
+    push  OFFSET32 servername
+  ENDIF
+  
+  push  flags
+        push  level
+  push  esp
+  VxDcall  PERF_Server_Register
+  add  esp, 6*4
+nothere:
+  ENDM
+
+Reg_Perf_Stat MACRO srvhandle:REQ, level:REQ, flags:REQ, name:REQ, nodename:REQ, reserved:REQ, desc:REQ, func:REQ
+  IF (OPATTR(func)) AND 00010000y    ;; register
+    push  func
+  ELSE
+    push  OFFSET32 func
+  ENDIF
+
+  IF (OPATTR(desc)) AND 00010000y    ;; register
+    push  desc
+  ELSE
+    push  OFFSET32 desc
+  ENDIF
+
+  IF (OPATTR(reserved)) AND 00010000y  ;; register
+    push  reserved
+  ELSE
+    push  OFFSET32 reserved
+  ENDIF
+
+  IF (OPATTR(nodename)) AND 00010000y  ;; register
+    push  nodename
+  ELSE
+    push  OFFSET32 nodename
+  ENDIF
+
+  IF (OPATTR(name)) AND 00010000y    ;; register
+    push  name
+  ELSE
+    push  OFFSET32 name
+  ENDIF
+  
+  push  flags
+  push  level
+  push  esp
+  push  srvhandle
+  VxDcall  PERF_Server_Add_Stat
+  add  esp, 9*4
+  ENDM
+
+Begin_Service_Table PERF
+PERF_Service PERF_Get_Version, LOCAL
+PERF_Service PERF_Server_Register, LOCAL
+PERF_Service PERF_Server_Deregister, LOCAL
+PERF_Service PERF_Server_Add_Stat, LOCAL
+PERF_Service PERF_Server_Remove_Stat, LOCAL
+End_Service_Table PERF
+
+*/
+
+#define HKEY_PERF_ROOT      HKEY_LOCAL_MACHINE
+#define PERF_REG_KEY      "System\\CurrentControlSet\\Control\\PerfStats\\Enum"
+#define PERF_REG_OTHER_KEY    "System\\CurrentControlSet\\Control\\PerfStats\\Other"
+#define PERF_REG_NAME_SRV_NAME    "Name"
+#define PERF_REG_NAME_VXD_NAME    "VxDName"
+#define PERF_REG_NAME_STAT_NAME    "Name"
+#define PERF_REG_NAME_STAT_COMPLEX  "Complex"
+#define PERF_REG_NAME_STAT_DESC    "Description"
+#define PERF_REG_NAME_STAT_DIFF    "Differentiate"
+
+#define PERF_REG_VAL_STAT_TRUE    "TRUE"
+#define PERF_REG_VAL_STAT_FALSE    "FALSE"
+#define PERF_STAT_PREFIX      "STAT"
+
+/* complex stat defines */
+
+#define PSTF_COMPLEX    0x00000100
+</PRE>
+<P>PSTF_COMPLEX specifies that this is a complex stat. Complex stats have no data of their own, they specify a list of handles to other stats. The values of the other stats in the list are retrieved and added together and the resulting sum displayed. The pst0_pStatFunc member points to an array of stat handles, where the handle values were obtained by previous calls to PERF_Server_Add_Stat. The array is terminated by a NULL handle. </P>
+<P><BR></P>
+<PRE>  PAGE 58,132
+;***************************************************************
+TITLE Example.Asm - VxD performance gathering component
+;***************************************************************
+
+  .386p
+
+;***************************************************************
+;            I N C L U D E S
+;***************************************************************
+
+  .XLIST
+  INCLUDE VMM.Inc
+  INCLUDE Debug.Inc
+  INCLUDE OptTest.Inc
+
+  Create_FakeStat_Service_Table EQU VMM_TRUE
+
+  INCLUDE Perf.Inc
+        INCLUDE VWin32.Inc
+  INCLUDE WinError.Inc
+
+  .LIST
+
+;**********************************************************************
+;    V I R T U A L  D E V I C E   D E C L A R A T I O N
+;**********************************************************************
+
+Begin_Service_Table FAKESTAT
+FAKESTAT_Service FAKESTAT_Get_Version, LOCAL
+End_Service_Table FAKESTAT
+
+FakeStat_Device_ID EQU 44h
+FakeStat_Init_Order EQU 06500000h
+
+Declare_Virtual_Device FAKESTAT, 4, 00h, FakeStat_Control, FakeStat_Device_ID, \
+           FakeStat_Init_Order, ,
+
+;**********************************************************************
+;            E Q U A T E S
+;**********************************************************************
+
+;**********************************************************************
+;**********************************************************************
+
+
+VxD_IDATA_SEG
+  ; NOTE: Strings are not int'l correct for brevity of this example.
+        ; Windows 95 VxDs should use message tables and message macros 
+        ; for strings.
+
+        ; UI names
+  szSrvName    db  "Fake Performance Data",0
+        szStatNameRead    db  "Fake Reads/sec",0
+        szStatNameWrite    db  "Fake Writes/sec",0
+        szStatNameTotal    db  "Total Fake Stuff/sec",0
+
+  ; stat explanations (optional)
+        szReadDesc    db  "Fake stuff read per second.",0
+        szWriteDesc    db  "Fake stuff written per second.",0
+        szTotalDesc    db  "Fake stuff read and written per second.",0
+
+  ; registry key names
+        szStatSrvKeyname  db  "FAKE",0
+  szStatKeynameRead  db  "FReadSec",0
+  szStatKeynameWrite  db  "FWriteSec",0
+  szStatKeynameTotal  db  "FTotalSec",0
+
+VxD_IDATA_ENDS
+
+
+VxD_PAGEABLE_DATA_SEG
+  ALIGN 4
+  hPerfID    DWORD   0  ; perf server handle
+
+        dwReadCounter  DWORD  1024  ; perf stat counters
+        dwWriteCounter  DWORD  4096
+  
+VxD_PAGEABLE_DATA_ENDS
+
+VxD_LOCKED_DATA_SEG
+
+
+VxD_LOCKED_DATA_ENDS
+
+
+;**********************************************************************
+
+  .SALL
+
+  PAGE
+;**********************************************************************
+;      R E A L   M O D E   I N I T  C O D E
+;**********************************************************************
+
+VxD_REAL_INIT_SEG
+
+BeginProc FakeStat_Real_Init
+
+  xor  si, si
+
+  test  bx, Duplicate_From_INT2F OR Duplicate_Device_ID
+  jnz  SHORT RI_Abort_Load
+
+  xor  bx, bx
+  xor  edx, edx
+  mov  ax, Device_Load_Ok
+  ret
+
+RI_Abort_Load:
+  xor  bx, bx
+  mov  ax, Abort_Device_Load + No_Fail_Message
+  ret
+
+EndProc FakeStat_Real_Init
+
+VxD_REAL_INIT_ENDS
+
+
+  PAGE
+;**********************************************************************
+;         P R O T E C T E D   M O D E   I N I T   C O D E
+;**********************************************************************
+
+VxD_ICODE_SEG
+
+BeginProc FAKESTAT_Sys_Critical_Init
+
+  clc
+  ret
+
+EndProc FAKESTAT_Sys_Critical_Init
+
+BeginProc FAKESTAT_Device_Init
+        LocalVar hStatNull, DWORD
+        LocalVar hStat2, DWORD
+  LocalVar hStat1, DWORD
+  EnterProc
+
+ifdef DEBUG
+  Trace_Out "FAKESTAT: Loading"
+endif
+
+        ; register us as a perf client
+  Reg_Perf_Srv 0,PSTF_RATE,szSrvName,szStatSrvKeyname,FakeStat_StatControl
+  or eax,eax
+        jz fdi10
+  mov hPerfId,eax
+
+  ; register 1st stat  (reads/sec)
+        Reg_Perf_Stat eax,0,PSTF_RATE,szStatNameRead,szStatKeynameRead,0,szReadDesc,dwReadCounter
+  mov [hStat1],eax
+
+  ; register 2nd stat  (writes/sec)
+  mov eax,hPerfID
+        Reg_Perf_Stat eax,0,PSTF_RATE,szStatNameWrite,szStatKeynameWrite,0,szWriteDesc,dwWriteCounter
+  mov [hStat2],eax
+
+        ; register 3rd stat  (total/sec)
+        ; this is a complex stat made up of reads/sec + writes/sec--
+        ; specified by list of stats (hStat1 &amp; hStat2)
+        mov eax,hPerfID
+        mov [hStatNull],0  ; null-terminate list of stats
+        lea edx,hStat1
+        Reg_Perf_Stat eax,0,PSTF_RATE | PSTF_COMPLEX,szStatNameTotal,szStatKeynameTotal,0,szTotalDesc,edx
+
+fdi10:
+  clc
+        LeaveProc
+  Return
+
+EndProc FAKESTAT_Device_Init
+
+
+VxD_ICODE_ENDS
+
+  PAGE
+;**********************************************************************
+;        P R O T E C T E D   M O D E   R E S I D E N T   C O D E
+;**********************************************************************
+
+VxD_LOCKED_CODE_SEG
+
+BeginProc FakeStat_Control
+
+  Control_Dispatch Sys_Critical_Init,   FAKESTAT_Sys_Critical_Init
+  Control_Dispatch Device_Init,    FAKESTAT_Device_Init
+        Control_Dispatch Sys_Dynamic_Device_Init, FAKESTAT_Device_Init
+        Control_Dispatch Sys_Dynamic_Device_Exit, FAKESTAT_System_Exit
+  Control_Dispatch System_Exit,    FAKESTAT_System_Exit
+
+IFDEF DEBUG
+  Control_Dispatch Debug_Query, FAKESTAT_Debug_Query
+ENDIF
+
+  clc
+  ret
+
+EndProc FakeStat_Control
+
+VxD_LOCKED_CODE_ENDS
+VxD_PAGEABLE_CODE_SEG
+
+
+;**********************************************************************
+;           S E R V I C E S
+;**********************************************************************
+
+BeginProc FAKESTAT_System_Exit
+
+  ; De-register perf client (this will also de-register stats)
+ifdef DEBUG
+        Trace_Out "FAKESTAT: Unloading"
+endif
+
+  ; make sure perf.386 is still there, if we're loaded dynamically and
+        ; "stuck" (caller died or failed to unload us) we can unload after
+        ; perf
+  VxDcall  PERF_Get_Version
+  or  eax, eax
+  jz  fse40
+         mov eax,hPerfID
+  cmp eax,0
+        je  fse40
+        push eax
+        VxDcall PERF_Server_Deregister
+        add esp,4
+fse40:
+        clc
+  ret
+
+EndProc FAKESTAT_System_Exit
+
+BeginProc FAKESTAT_Get_Version, Service
+
+  mov  eax, 400h      ; Version 4.0
+  clc
+  ret
+
+EndProc FAKESTAT_Get_Version
+</PRE>
+<P>Control function for our perf server. Receives stat turn-on and turn-off notification messages when client is interested in looking at stat. If it's cheap and easy to just always update the stat, you can ignore these messages or not register a control function. For stats that are expensive to update, it's best to only update them while someone is looking at them. Since there can be more than one perf client, if you process control functions you should keep a counter for each stat and increment it with every PMSG_START_STAT and decrement it for each PMSG_STOP_STAT that that stat receives (and stop updating the stat when the client count reaches zero). </P>
+<P><BR></P>
+<PRE>BeginProc FakeStat_StatControl
+  ArgVar  dwMsg, DWORD  ; the control message (PMSG_xxx)
+  ArgVar  dwData, DWORD   ; stat handle
+
+  EnterProc
+
+  cmp dwMsg,PMSG_START_STAT
+        jnz fsc10
+
+  Trace_Out "FAKESTAT: Got stat start msg"
+  ; do stat-starting stuff here
+
+        jmp fsc20
+
+fsc10:
+        ; PMSG_STOP_STAT
+  
+  Trace_Out "FAKESTAT: Got stat stop msg"
+  ; do stat-stopping stuff here
+
+fsc20:  LeaveProc
+        Return
+
+EndProc FakeStat_StatControl
+
+VxD_PAGEABLE_CODE_ENDS
+
+  PAGE
+;***************************************************************
+;     D E B U G G I N G   C O D E
+;***************************************************************
+
+
+IFDEF DEBUG
+VxD_LOCKED_CODE_SEG
+
+;***************************************************************
+;
+;   FakeStat_Debug_Query
+;
+;   DESCRIPTION:
+;
+;   ENTRY:
+;
+;   EXIT:
+;
+;   USES:
+;
+;=======================================================================
+
+
+BeginProc FakeStat_Debug_Query
+
+PF_DQ_Exit:
+  clc
+  ret
+
+EndProc FakeStat_Debug_Query
+
+
+VxD_LOCKED_CODE_ENDS
+ENDIF
+
+  END FakeStat_Real_Init
+
+</PRE></FONT></BODY></HTML>

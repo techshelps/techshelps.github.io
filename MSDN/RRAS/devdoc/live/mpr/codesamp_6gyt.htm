@@ -1,0 +1,266 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>AddInterface Sample</title>
+<link disabled rel=stylesheet href=../../backsdk3.css>
+<style type="text/css">
+@import url(../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h1><a name="_mpr_addinterface_sample"></a>AddInterface Sample</h1>
+<p>
+<span style=color:#FF0000>[This is preliminary documentation and subject to change.]</span> </p>
+<pre><code>DWORD
+APIENTRY
+AddInterface(
+    IN PWCHAR               pwszInterfaceName,
+    IN DWORD                dwIndex,
+    IN NET_INTERFACE_TYPE   dwIfType,
+    IN PVOID                pvConfig
+    )
+/*++
+  Routine Description
+      Called by the IP Router Manager to add an interface when
+      it finds our information block (header) within the interface's
+      configuration.
+      We verify the information and create the structure for the
+      interface.  Then we see all the configured addresses for
+      the interface and create a binding structure for each address.
+      The interface comes up as UNBOUND-DISABLED
+      
+  Arguments
+      pwszInterfaceName The name of the interface. We store it
+                        for logging
+      dwIndex           The positive integer this interface will
+                        be referred to by
+      dwIfType          The type of the interface (WAN/LAN etc)
+      pvConfig          Our config for this interface
+
+  Return Value
+      ERROR_INVALID_PARAMETER
+      ERROR_INVALID_DATA
+      NO_ERROR
+
+--*/
+{
+    ULONG       ulNameLen,i;
+    DWORD       dwResult;
+    PWCHAR      pwszName;
+    PINTRNL_IF  pBind;
+    PNT_IF      pIf,pPrev;
+    PLIST_ENTRY pleNode;
+    
+    
+    PSAMPLE_PROTOCOL_INTERFACE_INFO pIfInfo;
+
+
+    EnterProtocolApi();
+
+    TraceEnter("AddInterface");
+    
+    Trace3(INTF, "AddInterface called for: %S %d %d ",
+           pwszInterfaceName,
+           dwIndex,
+           dwIfType);
+
+    ulNameLen = wcslen(pwszInterfaceName);
+    
+    if((pwszInterfaceName == NULL) ||
+       (pvConfig == NULL) ||
+       (ulNameLen == 0))
+    {
+        Trace0(ERR,
+               "AddInterface: Router Manager called us with NULL info");
+        
+        TraceLeave("AddInterface");
+
+        ExitProtocolApi();
+
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    pIfInfo = (PSAMPLE_PROTOCOL_INTERFACE_INFO)pvConfig;
+    
+    if(!ValidateInterfaceInfo(pIfInfo))
+    {
+        TraceLeave("AddInterface");
+
+        ExitProtocolApi();
+
+        return ERROR_INVALID_DATA;
+    }
+    
+    EnterCriticalSection(&amp;g_csIfListLock);
+
+    //
+    // Create the interface block and the blocks for the binding
+    //
+
+    dwResult = NO_ERROR;
+    
+    __try
+    {
+        pIf = HeapAlloc(g_hPrivateHeap,
+                        HEAP_ZERO_MEMORY,
+                        sizeof(NT_IF));
+
+        if(pIf == NULL)
+        {
+            dwResult = GetLastError();
+            
+            Trace1(ERR,
+                   "AddInterface: Error %d allocating memory for i/f",
+                   dwResult);
+            
+            __leave;
+        }
+
+        InitializeListHead(&amp;pIf-&gt;leInternalIfHead);
+        
+        pwszName = HeapAlloc(g_hPrivateHeap,
+                             HEAP_ZERO_MEMORY,
+                             (ulNameLen + 1)*sizeof(WCHAR));
+
+        if(pwszName == NULL)
+        {
+            dwResult = GetLastError();
+
+            Trace1(ERR,
+                   "AddInterface: Error %d allocating memory for name",
+                   dwResult);
+
+            __leave;
+        }
+
+        wcscpy(pwszName,
+               pwszInterfaceName);
+
+        pIf-&gt;pwszIfName = pwszName;
+
+        ClearNtState(pIf);
+
+        pIf-&gt;dwType = dwIfType;
+        
+        pIf-&gt;ulNumBindings = pIfInfo-&gt;ulNumBindings;
+        
+        for(i = 0; i &lt; pIfInfo-&gt;ulNumBindings; i++)
+        {
+            pBind = HeapAlloc(g_hPrivateHeap,
+                                HEAP_ZERO_MEMORY,
+                                sizeof(INTRNL_IF));
+
+            if(pBind == NULL)
+            {
+                dwResult = GetLastError();
+
+                Trace1(ERR,
+                       "AddInterface: Error %d allocating memory for internal i/f",
+                       dwResult);
+
+                __leave;
+            }
+
+            InsertHeadList(&amp;(pIf-&gt;leInternalIfHead),
+                           &amp;(pBind-&gt;leInternalIfLink));
+
+            //
+            // Copy out binding info
+            //
+            
+            pBind-&gt;dwAddress    = pIfInfo-&gt;rgbiInfo[i].dwAddress;
+            pBind-&gt;dwMask       = pIfInfo-&gt;rgbiInfo[i].dwMask;
+            pBind-&gt;bEnabled     = pIfInfo-&gt;rgbiInfo[i].bEnabled;
+            pBind-&gt;dwState      = BINDING_DOWN;
+            pBind-&gt;sSocket      = INVALID_SOCKET;
+            
+            if(pIfInfo-&gt;ulNumBindings == 1)
+            {
+                //
+                // If we have only one address, we set that to 0.0.0.0
+                // for now even if our config has screwed up
+                //
+
+                pBind-&gt;dwAddress    = 0x00000000;
+                pBind-&gt;dwMask       = 0x00000000;
+            }
+        }
+    }
+    __finally
+    {
+        if(dwResult != NO_ERROR)
+        {
+            //
+            // Clean up all resources
+            //
+
+            if(pIf)
+            {
+                if(pIf-&gt;pwszIfName)
+                {
+                    HeapFree(g_hPrivateHeap,
+                             0,
+                             pIf-&gt;pwszIfName);
+                }
+
+                pleNode  = pIf-&gt;leInternalIfHead.Flink;
+
+                while(pleNode != &amp;pIf-&gt;leInternalIfHead)
+                {
+                    pBind = CONTAINING_RECORD(pleNode,
+                                              INTRNL_IF,
+                                              leInternalIfLink);
+
+                    pleNode = pleNode-&gt;Flink;
+
+                    HeapFree(g_hPrivateHeap,
+                             0,
+                             pBind);
+                }
+            }
+        }
+        else
+        {
+            //
+            // Insert the interface into our link
+            //
+
+            for(pleNode  = g_leIfListHead.Flink;
+                pleNode != &amp;g_leIfListHead;
+                pleNode  = pleNode-&gt;Flink)
+            {
+                pPrev = CONTAINING_RECORD(pleNode,
+                                          NT_IF,
+                                          leNtIfLink);
+
+                if(pPrev-&gt;dwNtIndex &gt; dwIndex)
+                {
+                    break;
+                }
+            }
+
+            //
+            // pPrev now points to the interface with a higher index
+            // pPrev-&gt;Blink &lt; dwIndex so put our interface after
+            // pPrev-&gt;Blink. This way we get an ordered list
+            //
+            
+            InsertHeadList(pPrev-&gt;leNtIfLink.Blink,
+                           &amp;(pIf-&gt;leNtIfLink));
+            
+        }
+    }
+
+
+    LeaveCriticalSection(&amp;g_csIfListLock);
+
+    TraceLeave("AddInterface");
+
+    ExitProtocolApi();
+        
+    return dwResult;
+}</code></pre>
+<p>&nbsp;</p></body>
+</HTML>

@@ -1,0 +1,201 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Completing the Implementation of IRowsetLocateImpl</title>
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY>
+<font face="verdana,arial,helvetica" size="2">
+<h1><a name="vchowcompletingimplementationofirowsetlocateimpl"></a>Completing the Implementation of IRowsetLocateImpl</h1>
+<p>
+To complete your implementation of the <code>IRowsetLocate</code><b> </b>interface, you must implement bookmarks. Bookmarks are indices into a rowset that allow high-speed access to data. The provider determines what bookmarks can uniquely identify a row. This example uses the index of the <code>m_rgAgentInfo</code> array.</p>
+<p>
+The provider can receive a bookmark in any format. To make sure that the bookmark is valid:
+<ol>
+<li>
+Call <b>ValidateBookmark</b> to check that you have a valid bookmark pointer. <br><br></li>
+<li>
+Check the size of the bookmark to make sure it is either the size of a <b>DWORD</b> or one byte. (The User Record, <code>CAgentMan</code>, specifies the <b>dwBookmark</b> entry to be a <b>DWORD</b>. The single-byte length is used for the special bookmarks <b>DBMRK_FIRST</b> and <b>DBMRK_LAST</b>.)<br><br></li>
+<li>
+Check that the index points to a valid location in the array (between <b>DBMRK_FIRST</b> and <b>DBMRK_LAST</b>).</li>
+</ol>
+<p>
+After validating both bookmarks (one for each string), call the <b>Compare</b> method, which takes two bookmarks and determines if one is less than, greater than, or equal to the other.</p>
+<p>
+To fetch rows, implement the <b>GetRowsAt</b> and <b>GetRowsByBookmark</b> functions. </p>
+<p>
+<b>GetRowsAt</b> works the same as the <object id=alink_1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink">
+<PARAM name="DefaultTopic" value="_topic_not_found.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="oledbirowset__getnextrows">
+</object><a href=JavaScript:alink_1.Click()>IRowset::GetNextRows</a> method except that it uses a bookmark to fetch the data. It validates the bookmark and then calls <b>IRowsetImpl::GetNextRows</b> to get the rows. </p>
+<p>
+<b>GetRowsByBookmark</b> fetches one row at a number of locations. Use it to fetch specific rows. <b>GetRowsByBookmark</b> validates each of the bookmarks, then fetches the row by calling <b>IRowsetImpl::CreateRow</b>, which creates a new row, if necessary. The rows are returned in the array pointed to by <code>rghRows</code>.</p>
+<p>
+(Because this example uses simple fixed-length bookmarks, it does not implement the <b>IRowsetLocate::Hash</b> method. If your provider uses variable-length bookmarks or computationally expensive bookmarks, you might want to implement the <b>IRowsetLocate::Hash</b> method as well.)</p>
+<p>
+The complete implementation of <code>IRowsetLocateImpl</code> looks like this:</p>
+<pre><code>/////////////////////////////////////////////////////////////////////////// RowLoc.h
+// class IRowsetLocateImpl
+
+template &lt;class T&gt;
+class ATL_NO_VTABLE IRowsetLocateImpl : public IRowsetImpl&lt;T&gt; 
+{
+public:
+   STDMETHOD (Compare)(HCHAPTER hReserved, ULONG cbBookmark1, 
+      const BYTE * pBookmark1, ULONG cbBookmark2, const BYTE * pBookmark2,
+      DBCOMPARE * pComparison)
+   {
+      ATLTRACE("IRowsetLocateImpl::Compare");
+
+      HRESULT hr = ValidateBookmark(cbBookmark1, pBookmark1);
+      if (hr != S_OK)
+         return hr;
+
+      hr = ValidateBookmark(cbBookmark2, pBookmark2);
+      if (hr != S_OK)
+         return hr;
+
+      // Return the value based on the bookmark values
+      if (*pBookmark1 == *pBookmark2)
+         *pComparison = DBCOMPARE_EQ;
+
+      if (*pBookmark1 &lt; *pBookmark2)
+         *pComparison = DBCOMPARE_LT;
+
+      if (*pBookmark1 &gt; *pBookmark2)
+         *pComparison = DBCOMPARE_GT;
+
+      return S_OK;
+   }
+
+   STDMETHOD (GetRowsAt)(HWATCHREGION hReserved1, HCHAPTER hReserved2,
+      ULONG cbBookmark, const BYTE * pBookmark, LONG lRowsOffset,
+      LONG cRows, ULONG * pcRowsObtained, HROW ** prghRows)
+   {
+      ATLTRACE("IRowsetLocateImpl::GetRowsAt");
+      T* pT = (T*)this;
+
+      // Check bookmark
+      HRESULT hr = ValidateBookmark(cbBookmark, pBookmark);
+      if (hr != S_OK)
+         return hr;
+
+      // Check the other pointers
+      if (pcRowsObtained == NULL || prghRows == NULL)
+         return E_INVALIDARG;
+
+      // Set the current row position to the bookmark.&nbsp; Handle any
+      // normal values
+      pT-&gt;Lock();
+      LONG iRowsetTemp = m_iRowset;&nbsp; // Cache the current rowset 
+      m_iRowset = *pBookmark;
+      if (*pBookmark == DBBMK_FIRST)
+         m_iRowset = 1;
+
+      if (*pBookmark == DBBMK_LAST)
+         m_iRowset = pT-&gt;m_rgRowData.GetSize();
+
+      // Call IRowsetImpl::GetNextRows to actually get the rows.
+      hr = GetNextRows(hReserved2, lRowsOffset,
+         cRows, pcRowsObtained, prghRows);
+      m_iRowset = iRowsetTemp;
+      pT-&gt;Unlock();
+      return hr;
+   }
+
+   STDMETHOD (GetRowsByBookmark)(HCHAPTER hReserved, ULONG cRows,
+      const ULONG rgcbBookmarks[], const BYTE * rgpBookmarks[],
+      HROW rghRows[], DBROWSTATUS rgRowStatus[])
+   {
+      HRESULT hr = S_OK;
+      ATLTRACE("IRowsetLocateImpl::GetRowsByBookmark");
+
+      T* pT = (T*)this;
+      if (rgcbBookmarks == NULL || rgpBookmarks == NULL || rghRows == NULL)
+         return E_INVALIDARG;
+
+      if (cRows == 0)
+         return S_OK;   // No rows fetched in this case.
+
+      bool bErrors = false;
+      pT-&gt;Lock();
+      for (ULONG l=0; l&lt;cRows; l++)
+      {
+         // Validate each bookmark before fetching the row.&nbsp; Note, it is
+         // an error for the bookmark to be one of the standard values
+         hr = ValidateBookmark(rgcbBookmarks[l], rgpBookmarks[l]);
+         if (hr != S_OK)
+         {
+            bErrors = TRUE;
+            if (rgRowStatus != NULL)
+            {
+               rgRowStatus[l] = DBROWSTATUS_E_INVALID;
+               continue;
+            }
+         }
+
+         // Fetch the validated row
+         ULONG ulRowsObtained = 0;
+         if (CreateRow((long)*rgpBookmarks[l], ulRowsObtained, &amp;rghRows[l]) != S_OK)
+         {
+            bErrors = TRUE;
+         }
+         else
+         {
+            if (rgRowStatus != NULL)
+               rgRowStatus[l] = DBROWSTATUS_S_OK;
+         }
+      }
+
+      pT-&gt;Unlock();
+      if (bErrors)
+         return DB_S_ERRORSOCCURRED;
+      else
+         return hr;
+   }
+
+   STDMETHOD (Hash)(HCHAPTER hReserved, ULONG cBookmarks,
+      const ULONG rgcbBookmarks[], const BYTE * rgpBookmarks[],
+      DWORD rgHashedValues[], DBROWSTATUS rgBookmarkStatus[])
+   {
+      ATLTRACENOTIMPL("IRowsetLocateImpl::GetRowsByBookmark");
+   }
+
+   // Implementation
+   protected:
+   HRESULT ValidateBookmark(ULONG cbBookmark, const BYTE* pBookmark)
+   {
+      T* pT = (T*)this;
+      if (cbBookmark == 0 || pBookmark == NULL)
+         return E_INVALIDARG;
+
+      // All of our bookmarks are DWORDs, if they are anything other than 
+      // sizeof(DWORD) then we have an invalid bookmark
+      if ((cbBookmark != sizeof(DWORD)) &amp;&amp; (cbBookmark != 1))
+      {
+         ATLTRACE("Bookmarks are invalid length, should be DWORDs");
+         return DB_E_BADBOOKMARK;
+      }
+
+      // If the contents of our bookmarks are less than 0 or greater than
+      // rowcount, then they are invalid
+      UINT nRows = pT-&gt;m_rgRowData.GetSize();
+      if ((*pBookmark &lt;= 0 || *pBookmark &gt; nRows) 
+         &amp;&amp; *pBookmark != DBBMK_FIRST &amp;&amp; *pBookmark != DBBMK_LAST)
+      {
+         ATLTRACE("Bookmark has invalid range");
+         return DB_E_BADBOOKMARK;
+      }
+
+      return S_OK;
+   }
+};
+</code></pre>
+<p>
+In the next topic, you will see how to dynamically determine the columns returned to the consumer.</p>
+</font></BODY>
+</HTML>

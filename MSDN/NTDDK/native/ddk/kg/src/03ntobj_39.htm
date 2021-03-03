@@ -1,0 +1,186 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML>
+<HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>3.9.4  Mutex Objects</TITLE>
+<style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD>
+<BODY BGPROPERTIES="FIXED" TEXT="#000000" BGCOLOR="#FFFFFF">
+
+<FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<H3><A NAME="DDK_Mutex_Objects_KG"></A>3.9.4  Mutex Objects</H3>
+<P>
+As its name suggests, a mutex object is a synchronization mechanism designed
+to ensure mutually exclusive access to a single resource shared among a set of
+kernel-mode threads. Only highest-level drivers, such as FSDs that use
+executive worker threads, are likely to use a mutex object.
+<P>
+Possibly, a highest-level driver with driver-created threads and/or
+worker-thread callback routines might use a mutex object. However, any driver
+with pageable thread(s) or worker-thread callbacks must manage the
+acquisitions of, waits on, and releases of its mutex object(s) very carefully.
+<P>
+As already mentioned in the preceding section, NT mutex objects have built-in
+features that provide system (kernel-mode only) threads mutually exclusive,
+deadlock-free access to shared resources in SMP machines. Every NT mutex
+object has two basic built-in features that provide this protection for
+resources shared between or among system threads:
+<UL>
+<LI>
+<B>Ownership</B>
+<P>
+The NT Kernel assigns ownership of a given mutex to a single thread at a time,
+which has the following effects:
+<P>
+<UL>
+<LI>
+Raises the owning thread’s runtime priority to the lowest real-time priority
+if that thread’s priority is not already in the real-time range
+<P>
+<LI>
+Prevents the owning thread’s process from leaving the balance set: that is,
+from being paged out to secondary storage
+<P>
+<LI>
+Prevents the delivery of normal kernel-mode asynchronous procedure calls
+(APCs): that is, from being preempted by an APC unless the Kernel issues an
+APC_LEVEL software interrupt to run a special kernel APC, such as the I/O
+Manager’s IRP completion routine that returns results to the original
+requestor of an I/O operation
+</UL>
+<P>
+A thread can acquire ownership of a mutex object that it already owns
+(recursive ownership), but a recursively acquired mutex object is not set to
+the Signaled state until the thread releases its ownership completely. Such a
+thread must explicitly releases the mutex as many times as it acquired
+ownership before another thread can acquire the mutex.
+<P>
+The Kernel <I>never</I>&nbsp;permits a thread that owns a mutex to cause a
+transition to user mode without first releasing the mutex and setting it to
+the Signaled state. If any FSD- or driver-created thread that owns a mutex
+attempts to return control to the I/O Manager before releasing ownership of
+the mutex, the Kernel brings down the system.
+<P>
+<LI>
+<B>Level</B>
+<P>
+If a driver thread acquires more than one mutex, the driver should be designed
+such that the Level of a given mutex object determines whether such a thread
+can acquire ownership of the mutex at any particular time. In such a case, the
+driver should enforce the following policy:
+<P>
+<UL>
+<LI>
+A thread should acquire mutexes in ascending order of assigned Level. The
+driver can assign a nonzero Level when it initializes the mutex.
+</UL>
+<P>
+Thus, the owner of a mutex must not attempt to acquire another mutex with a
+lower Level since this other mutex might already be owned by another thread
+that is trying to acquire the first thread’s higher Level mutex. If a driver
+does not enforce this policy, the scenario that results would cause deadlocks
+since neither thread could acquire ownership of the other thread’s currently
+held mutex.
+</UL>
+<P>
+<A NAME="DDK_Figure_3.26_KG"></A>Any NT driver that uses a mutex object must call <B>KeInitializeMutex</B>
+once before it waits on or releases its mutex object. Figure 3.26 illustrates
+how two system threads might use a mutex object.
+<P>
+<B><IMG SRC="../art/3mutxobj.gif" BORDER=0></B>
+<P>
+<B>Figure 3.26    Waiting on a Mutex Object</B>
+<P>
+As Figure 3.26 shows, such a driver must provide the storage for the mutex
+object. Because drivers can wait on and release mutexes only within a thread
+context, a driver that creates its own system threads can provide storage for
+its mutex objects in paged pool, allocated by the driver.
+<P>
+If such a highest-level driver uses system worker threads or waits on the
+mutex in its Dispatch routines, it must provide resident storage in the device
+extension of a driver-created device object (see <A HREF="03ntobj_2.htm">Section
+3.2</A>), in the controller extension if it uses a controller object (see <A HREF="03ntobj_20.htm">Section
+3.4</A>), or in nonpaged pool allocated by the driver.
+<P>
+When the <B>DriverEntry</B>&nbsp;or Reinitialize routine calls <B>KeInitializeMutex</B>
+it must pass a pointer to the driver’s storage for the mutex object, which the
+Kernel initializes to the Signaled state. In addition, the caller can specify
+a nonzero <I>Level</I>&nbsp;for the mutex object, as shown in Figure 3.26 to
+control the order of acquisition if the caller uses more than one mutex.
+<P>
+After such a highest-level driver has initialized, it can manage mutually
+exclusive access to a shared resource as shown in Figure 3.26. For example, a
+driver’s Dispatch routines for inherently synchronous operations and thread(s)
+might use a mutex to protect a driver-created queue for IRPs.
+<P>
+Because <B>KeInitializeMutex</B>&nbsp;<I>always</I>&nbsp;sets the initial state of a
+mutex object to Signaled, as Figure 3.26 shows:
+<OL>
+<LI>
+A Dispatch routine’s initial call to <B>KeWaitForSingleObject</B>&nbsp;with the <I>Mutex</I>
+pointer puts the current thread immediately into the ready state, gives the
+thread ownership of the mutex, and resets the mutex state to Not-Signaled. As
+soon as the Dispatch routine resumes running, it can safely insert an IRP into
+the mutex-protected queue.
+<P>
+<LI>
+When a second thread (another Dispatch routine, driver-supplied worker-thread
+callback routine, or driver-created thread) calls <B>KeWaitForSingleObject</B>
+with the <I>Mutex</I>&nbsp;pointer, the second thread is put into the wait state.
+<P>
+<LI>
+When the Dispatch routine finishes queueing the IRP as described in Step 1, it
+calls <B>KeReleaseMutex</B>&nbsp;with the <I>Mutex</I>&nbsp;pointer and a Boolean <I>Wait</I>
+value, which indicates whether it intends to call <B>KeWaitForSingleObject</B>
+(or <B>KeWaitForMutexObject</B>) with the <I>Mutex</I>&nbsp;as soon as <B>KeReleaseMutex</B>
+returns control.
+<P>
+<LI>
+Assuming the Dispatch routine released its ownership of the mutex in Step 3 (<I>Wait</I>
+set to FALSE), the mutex is set to the Signaled state by <B>KeReleaseMutex</B>.
+The mutex currently has no owner, so the Kernel determines whether another
+thread is waiting on that mutex. If so, the Kernel makes the second thread
+(see Step 2) the mutex owner, possibly boosts the thread’s priority to the
+lowest real-time priority value, and changes its state to ready.
+<P>
+<LI>
+The Kernel dispatches the second thread for execution as soon as a processor
+is available: that is, no other thread with a higher priority is currently in
+the ready state and there are no kernel-mode routines to be run at raised IRQL
+(greater than PASSIVE_LEVEL). The second thread (a Dispatch routine queueing
+an IRP, or the driver’s worker-thread callback routine or driver-created
+thread dequeueing an IRP) can now safely access the mutex-protected queue of
+IRPs until it calls <B>KeReleaseMutex</B>.
+</OL>
+<P>
+If a thread acquires ownership of a mutex object recursively, that thread must
+explicitly call <B>KeReleaseMutex</B>&nbsp;as many times as it waited on the mutex
+in order to set the mutex object to the Signaled state. For example, if a
+thread calls <B>KeWaitForSingleObject</B>&nbsp;and then <B>KeWaitForMutexObject</B>
+with the same <I>Mutex</I>&nbsp;pointer, it must call <B>KeReleaseMutex</B>&nbsp;twice
+when it acquires the mutex in order to set that mutex object to the Signaled
+state.
+<P>
+Calling <B>KeReleaseMutex</B>&nbsp;with the <I>Wait</I>&nbsp;parameter set to TRUE
+indicates the caller’s intention to immediately call a <B>KeWait..Object(s)</B>
+support routine on return from <B>KeReleaseMutex</B>.
+<H5><IMG SRC="../../../wedge.gif" BORDER=0>&nbsp; &nbsp; NT driver writers should consider the following guidelines for setting the <I>Wait</I>&nbsp;parameter to KeReleaseMutex: </H5>
+<P>
+A pageable thread or pageable driver routine that runs at IRQL PASSIVE_LEVEL
+should <I>never</I>&nbsp;call <B>KeReleaseMutex</B>&nbsp;with the <I>Wait</I>&nbsp;parameter
+set to TRUE. Such a call causes a fatal page fault if the caller happens to be
+paged out between the calls to <B>KeReleaseMutex</B>&nbsp;and <B>KeWait..Object(s)</B>.
+<P>
+Any standard driver routine that runs at an IRQL greater than PASSIVE_LEVEL <I>cannot</I>
+wait for a nonzero interval on any dispatcher object(s) without bringing down
+the system (see <A HREF="03ntobj_35.htm">Section 3.9</A>,).
+However, such a routine can call <B>KeReleaseMutex</B>&nbsp;if it owns the mutex
+while running at an IRQL less than or equal to DISPATCH_LEVEL.
+<P>
+For a summary of the IRQLs at which standard NT driver routines run, see
+Chapter 16. For support-routine-specific IRQL requirements, see the <I>Kernel-Mode
+Driver Reference</I>.
+<P>
+&nbsp;
+<P></FONT>
+</BODY>
+</HTML>

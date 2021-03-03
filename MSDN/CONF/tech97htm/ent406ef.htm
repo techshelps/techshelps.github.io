@@ -1,0 +1,1483 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Microsoft Visual  C++ 5.0 Compiler Native COM Support</title>
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"><style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000>
+
+
+
+	<BODY bgcolor="#FFFFFF" link=#003399 vlink=#996699>
+
+
+
+	<FONT FACE="Verdana, Arial, Helvetica" SIZE="2">
+
+	<!--TOOLBAR_START-->
+	<!--TOOLBAR_EXEMPT-->
+	<!--TOOLBAR_END-->
+
+<h1>Microsoft Visual  C++ 5.0 Compiler Native COM Support</h1>
+<p>
+Presented by: Philip Lucido<BR>Software Design Engineer<BR>Microsoft Visual C++ Compiler Development<BR>Microsoft Corporation</p>
+<h2>1. Introduction</h2>
+<p>
+The Microsoft&reg; Visual C++&reg; compiler in Visual C++ 5.0 has been extended to include native support for COM programming, primarily on the client side. The major new feature is the ability to directly read type libraries, translating the contents into C++ source that is included in the compilation source. In addition, there are language extensions for COM support. Finally, we’ve added library and runtime support needed by the compiler typelib translation.</p>
+<p>
+The intent is not to radically extend the C++ language. Instead, the compiler reads a type library and converts it into a header file that captures the typelib’s contents as equivalent C++ classes, mostly describing the COM interfaces described therein. This converted header file uses normal C++ syntax, with a few modifications to expose COM semantics.</p>
+<p>
+Except as noted all changes are available only for the C++ compiler. Since COM is, in effect, based on vtables, it is most natural to express a typelib’s contents as C++ abstract base classes, with non-virtual inline member functions to provide wrappers for easier access. This can be done with almost no language extensions. Where reasonable, the actual language extensions are available in both C and C++. </p>
+<p>
+Note: This paper explains what has been added to the Visual C++ 5.0 compiler.  It does not explain how to use the new features. Example code exercising these features can be found in the samples.</p>
+<h2>2. Reading Type Libraries</h2>
+<h3>2.1 The #import Preprocessor Directive</h3>
+<p>
+A new preprocessor directive, #import, is used to read a type library. It has the syntax</p>
+<pre><FONT FACE="Courier New" SIZE="2">#import &quot;filename&quot; [attributes]
+#import &lt;filename&gt; [attributes]
+</font></pre>
+<p>
+where the filename is either a typelib, an EXE or DLL containing a typelib resource (e.g.,  an ActiveX control OCX), a compound document holding a typelib, or any other file which is understood by the LoadTypeLib API. The compiler searches for the named file first, if using the quoted name form, in the directories of the parent files (same as for #include). Both forms then search along the PATH environment variable path list, then along the LIB list, then along the paths specified by the /I compiler option, then the INCLUDE list. The search logic duplicates that of #include, except for looking along the PATH and LIB environment variable lists. #import is only available in the C++ compiler.</p>
+<p>
+#import works by creating two header files that reconstitute the typelib contents as C++ source code. The primary header file is given the base filename of the typelib, with an extension of .tlh. The secondary header file is given the same basename, with an extension of .tli. Both headers are placed in the output directory, as named in the -Fo option. The primary header is similar to that produced by MIDL, but with additional compiler-generated code and data. The secondary header holds the actual implementations for compiler-generated member functions, and is #included by the primary header. After the headers have been created, they are read and compiled as if the primary header was named in a #include directive.</p>
+<p>
+#import can optionally include one or more attributes, which are directives to the compiler to modify the contents of the typelib header files. A description of the syntax and meaning of these attributes is found in section 0.</p>
+<p>
+This process of converting a typelib to C++ source code solves a thorny problem by giving the compiler a place to issue an error message if something goes wrong, such as a name collision. Without source, it would be difficult pointing a programmer at the actual problem encountered somewhere within a binary-format typelib.</p>
+<p>
+There are a few optimizations here. The headers, when created, are given the same timestamp as the typelib. When a #import is processed, the compiler first checks if the headers exist and are up-to-date. If yes, then they do not need to be recreated. Also, #import participates in MinRebuild and can be placed in a PCH, which will avoid a lot of unnecessary work (the created headers can be tens of thousands of lines long for some typelibs). The compiler also delays initializing the OLE subsystem until the first #import that really needs to create new headers is encountered.</p>
+<h3>2.2 The typelib Headers</h3>
+<p>
+Example versions of the typelib headers can be found in section 0.</p>
+<p>
+The primary typelib header consists of these sections:
+<ul>
+<li>
+Heading boilerplate<br><br></li>
+<li>
+Forward references and typedefs<br><br></li>
+<li>
+Smart pointer declarations<br><br></li>
+<li>
+Typeinfo declarations<br><br></li>
+<li>
+Optional old-style GUID declarations<br><br></li>
+<li>
+Inclusion of the secondary typelib header<br><br></li>
+<li>
+Footer boilerplate</li>
+</ul>
+<p>
+The heading boilerplate consists of comments, a #include of a standard include header, comdef.h, which defines some standard macros used within the header, and other miscellaneous setup. The footer boilerplate just does a #pragma pop.</p>
+<p>
+The other primary header items are all enclosed within a namespace that is identified by the name defined in the library statement in the original ODL. This is done to avoid name collision problems. Names from the typelib header either have to be used fully qualified with the namespace name, or a statement like using namespace MyLib; must appear after doing a #import. The namespace can be suppressed by using the no_namespace import attribute, or renamed via the rename_namespace or rename attributes.</p>
+<h3>2.3 Typeinfo Definitions in the typelib Header</h3>
+<p>
+The bulk of the typelib header consists of class definitions and other items exposing the individual typeinfo items returned via ITypeLib::GetTypeInfo. This is preceded by forward reference declarations, e.g.,  struct IMyInterface, typedefs for any TKIND_ALIAS items, and smart pointer declarations (see section 0). These must be exposed before the full typeinfo definitions to avoid out-of-order compile errors.</p>
+<p>
+After the forward declarations and typedefs, each typeinfo from the typelib is echoed to the header in a form dependent on the typeinfo kind.</p>
+<p>
+<b>2.3.1 TKIND_MODULE - module declarations</b></p>
+<p>
+In this compiler release, a module definition is ignored.</p>
+<p>
+<b>2.3.2 TKIND_ENUM, TKIND_RECORD, TKIND_UNION</b></p>
+<p>
+These three kinds of typeinfo items are trivially exposed, as normal enum, C-style structure or union definitions.</p>
+<p>
+<b>2.3.3 TKIND_INTERFACE - COM interfaces</b></p>
+<p>
+A COM interface is exposed as an abstract base class, with some of the pure virtual member functions wrapped in nonvirtual inline members that primarily help hide checking the HRESULT error code. The following example code will help explain. First, here’s the ODL script for an interface:</p>
+<pre><FONT FACE="Courier New" SIZE="2">[ uuid(eec57af0-d8e9-11cf-82c6-00aa003d90f3), odl ]
+interface IMyInterface : IUnknown
+{
+    [ propget ] HRESULT Sound( [out, retval] long *freq );
+    [ propput ] HRESULT Sound( [in] long freq );
+    HRESULT Method1( [in] long input );
+    HRESULT Method2( [out, retval] long *output );
+    HRESULT RetBSTR( [out, retval] BSTR *pbstr);
+    HRESULT VarTest( [in] VARIANT var, [out, retval] VARIANT *pvar);
+    HRESULT PtrTest( [out, retval] IMyInterface ** pinterface);
+    long Query( [in] int index );
+};
+</font></pre>
+<p>
+This is translated into a definition of struct IMyInterface in the primary header, and definitions of the inline member functions in the secondary header. First, here is the definition of IMyInterface in the primary header:</p>
+<pre><FONT FACE="Courier New" SIZE="2">struct __declspec(uuid(&quot;eec57af0-d8e9-11cf-82c6-00aa003d90f3&quot;))
+IMyInterface : IUnknown
+{
+    //
+    // Property data
+    //
+    __declspec(property(get=GetSound,put=PutSound))
+    long Sound;
+    //
+    // Wrapper methods for error-handling
+    //
+    long GetSound ( );
+    void PutSound (
+        long freq );
+    HRESULT Method1 (
+        long input );
+    long Method2 ( );
+    _bstr_t RetBSTR ( );
+    _variant_t VarTest (
+        const _variant_t &amp; var );
+    IMyInterfacePtr PtrTest ( );
+    //
+    // Raw methods provided by interface
+    //
+    virtual HRESULT __stdcall get_Sound (
+        long * freq ) = 0;
+    virtual HRESULT __stdcall put_Sound (
+        long freq ) = 0;
+    virtual HRESULT __stdcall raw_Method1 (
+        long input ) = 0;
+    virtual HRESULT __stdcall raw_Method2 (
+        long * output ) = 0;
+    virtual HRESULT __stdcall raw_RetBSTR (
+        BSTR * pbstr ) = 0;
+    virtual HRESULT __stdcall raw_VarTest (
+        VARIANT var,
+        VARIANT * pvar ) = 0;
+    virtual HRESULT __stdcall raw_PtrTest (
+        struct IMyInterface * * pinterface ) = 0;
+    virtual long __stdcall Query (
+        int index ) = 0;
+};
+</font></pre>
+<p>
+Here are the member function implementations from the secondary header:</p>
+<pre><FONT FACE="Courier New" SIZE="2">//
+// interface IMyInterface wrapper method implementations
+//
+inline long IMyInterface::GetSound ( ) {
+    long _result;
+    HRESULT _hr = get_Sound(&amp;_result);
+    if (FAILED(_hr)) _com_issue_errorex(_hr, this, __uuidof(this));
+    return _result;
+}
+inline void IMyInterface::PutSound ( long freq ) {
+    HRESULT _hr = put_Sound(freq);
+    if (FAILED(_hr)) _com_issue_errorex(_hr, this, __uuidof(this));
+}
+inline HRESULT IMyInterface::Method1 ( long input ) {
+    HRESULT _hr = raw_Method1(input);
+    if (FAILED(_hr)) _com_issue_errorex(_hr, this, __uuidof(this));
+    return _hr;
+}
+inline long IMyInterface::Method2 ( ) {
+    long _result;
+    HRESULT _hr = raw_Method2(&amp;_result);
+    if (FAILED(_hr)) _com_issue_errorex(_hr, this, __uuidof(this));
+    return _result;
+}
+inline _bstr_t IMyInterface::RetBSTR ( ) {
+    BSTR _result;
+    HRESULT _hr = raw_RetBSTR(&amp;_result);
+    if (FAILED(_hr)) _com_issue_errorex(_hr, this, __uuidof(this));
+    return _bstr_t(_result, false);
+}
+inline _variant_t IMyInterface::VarTest ( const _variant_t &amp; var ) {
+    VARIANT _result;
+    VariantInit(&amp;_result);
+    HRESULT _hr = raw_VarTest(var, &amp;_result);
+    if (FAILED(_hr)) _com_issue_errorex(_hr, this, __uuidof(this));
+    return _variant_t(_result, false);
+}
+inline IMyInterfacePtr IMyInterface::PtrTest ( ) {
+    struct IMyInterface * _result;
+    HRESULT _hr = raw_PtrTest(&amp;_result);
+    if (FAILED(_hr)) _com_issue_errorex(_hr, this, __uuidof(this));
+    return IMyInterfacePtr(_result, false);
+}
+</font></pre>
+<p>
+First off, this exposes the raw interface. The interface is declared as a struct, suitably inherited as per the typelib. The interface methods appear as pure virtuals with signatures matching those in the typelib. The raw methods appear last within the struct, so the easier error-handling alternatives are more prominent.</p>
+<p>
+Next, the IID is exposed. For old-style code expecting to use IID_IMyInterface, this symbol can optionally be defined in a later part of the primary header (see the named_guids attribute, section 0). Alternately, a new intrinsic, __uuidof, is introduced. When applied to an interface, it returns the GUID for that interface. This works via __declspec(uuid(…)), which is used to attach a GUID to a struct or class. This is discussed further in section 0.</p>
+<p>
+The next items to notice are the wrapper functions for any methods that return an HRESULT. These wrappers are non-virtual inline functions that call the virtual method, then check the return code. If a failure code is returned, then a runtime error handler, _com_issue_errorex, is called. The actual behavior of this error handling is discussed in section 0. For now, I’ll examine the various wrapper functions.</p>
+<p>
+If an HRESULT-returning method has an argument with out and retval attributes, then a wrapper is created with the same function name, but with the retval argument removed and the return type changed to a dereference of the retval pointer type. See Method2 for an example.</p>
+<p>
+If an HRESULT-returning non-property method has no retval argument, as for Method1, then the wrapper will return an HRESULT. The wrapper will still throw an error in case of a failure code, but this allows a user to check for non-S_OK success codes in the most common case. This and the similar case for dispinterfaces are the only places where HRESULT success codes are visible when using the error-handling wrappers.</p>
+<p>
+Method and property names are derived from the raw names found in the typelib by adding a prefix. The non-virtual wrapper functions for non-property methods are given the actual typelib method name, unprefixed. The raw virtual functions for non-property methods are prefixed by raw_. Respectively, Get, Put, and PutRef prefix the error-handling wrapper functions for propget, propput, and propputref methods. Raw virtual functions for propget, propput, and propputref methods are prefixed by get_, put_, and _putref. These prefixes can be modified by using the raw_interfaces_only, raw_method_prefix, high_method_prefix, raw_property_prefixes, and high_property_prefixes attributes.</p>
+<p>
+Methods RetBSTR, VarTest, and PtrTest illustrate the wrapping of native COM data types in the error-handling wrappers. A BSTR is passed and returned as a _bstr_t, a VARIANT is passed and returned as a _variant_t, and a COM interface pointer is returned as a specialization of template class _com_ptr_t.  These three classes, made available via comdef.h and its associated headers, handle the appropriate allocation and release of resources for these types, freeing the user from the details. More explanation is available in sections 0 and 0.</p>
+<p>
+The actual wrapper implementations are all found in the secondary header. This allows sophisticated users to avoid compiling all the implementations for every object, via the no_implementation attribute.</p>
+<p>
+Finally, the __declspec(property()) declaration of member data Sound is there to allow data-oriented access to properties, e.g.,  pMyInterface-&gt;Sound += 5; instead of pMyInterface-&gt;PutSound(pMyInterface-&gt;GetSound()+5);. This language extension is described in section 0.</p>
+<p>
+<b>2.3.4 TKIND_DISPATCH - dispatch interfaces</b></p>
+<p>
+A dispatch interface is exposed as an abstract base class derived from IDispatch, with non-virtual member functions wrapping the IDispatch::Invoke calls. Again, an explanation by example, with the ODL script first:</p>
+<pre><FONT FACE="Courier New" SIZE="2">[ uuid(eec57af1-d8e9-11cf-82c6-00aa003d90f3) ]
+dispinterface IMyDispInterface
+{
+properties:
+    [ id(1) ] long Sound;
+methods:
+    [ id(2) ] void Method1( [in] long input );
+    [ id(3) ] long Method2( );
+    [ id(4) ] long Query( [in] int index );
+    [ id(5) ] BSTR RetBSTR( );
+    [ id(6) ] VARIANT VarTest( [in] VARIANT var );
+    [ id(7) ] IMyDispInterface* PtrTest( );
+    [ propget, id(8) ] long Channel( long index );
+    [ propput, id(8) ] void Channel( long index, long value );
+};
+</font></pre>
+<p>
+The following definition will be injected into the primary typelib header:</p>
+<pre><FONT FACE="Courier New" SIZE="2">struct __declspec(uuid(&quot;eec57af1-d8e9-11cf-82c6-00aa003d90f3&quot;))
+IMyDispInterface : IDispatch
+{
+    //
+    // Property data
+    //
+    __declspec(property(get=GetChannel,put=PutChannel))
+    long Channel[];
+    __declspec(property(get=GetSound,put=PutSound))
+    long Sound;
+    //
+    // Wrapper methods for error-handling
+    //
+    // Methods:
+    HRESULT Method1 (
+        long input );
+    long Method2 ( );
+    long Query (
+        int index );
+    _bstr_t RetBSTR ( );
+    _variant_t VarTest (
+        const _variant_t &amp; var );
+    IMyDispInterfacePtr PtrTest ( );
+    long GetChannel (
+        long index );
+    void PutChannel (
+        long index,
+        long _arg2 );
+    // Properties:
+    long GetSound ( );
+    void PutSound ( long _val );
+};
+</font></pre>
+<p>
+And here are the wrapper implementations from the secondary header:</p>
+<pre><FONT FACE="Courier New" SIZE="2">//
+// dispinterface IMyDispInterface wrapper method implementations
+//
+inline HRESULT IMyDispInterface::Method1 ( long input ) {
+    return _com_dispatch_method(this, 0x2, DISPATCH_METHOD, VT_EMPTY, NULL, 
+        L&quot;\x0003&quot;, input);
+}
+inline long IMyDispInterface::Method2 ( ) {
+    long _result;
+    _com_dispatch_method(this, 0x3, DISPATCH_METHOD, VT_I4, (void*)&amp;_result,
+        NULL);
+    return _result;
+}
+inline long IMyDispInterface::Query ( int index ) {
+    long _result;
+    _com_dispatch_method(this, 0x4, DISPATCH_METHOD, VT_I4, (void*)&amp;_result, 
+        L&quot;\x0003&quot;, index);
+    return _result;
+}
+inline _bstr_t IMyDispInterface::RetBSTR ( ) {
+    BSTR _result;
+    _com_dispatch_method(this, 0x5, DISPATCH_METHOD, VT_BSTR, (void*)&amp;_result,
+        NULL);
+    return _bstr_t(_result, false);
+}
+inline _variant_t IMyDispInterface::VarTest ( const _variant_t &amp; var ) {
+    VARIANT _result;
+    _com_dispatch_method(this, 0x6, DISPATCH_METHOD, VT_VARIANT,
+        (void*)&amp;_result, L&quot;\x000c&quot;, &amp;var);
+    return _variant_t(_result, false);
+}
+inline IMyDispInterfacePtr IMyDispInterface::PtrTest ( ) {
+    struct IMyDispInterface * _result;
+    _com_dispatch_method(this, 0x7, DISPATCH_METHOD, VT_DISPATCH,
+        (void*)&amp;_result, NULL);
+    return IMyDispInterfacePtr(_result, false);
+}
+inline long IMyDispInterface::GetChannel ( long index ) {
+    long _result;
+    _com_dispatch_method(this, 0x8, DISPATCH_PROPERTYGET, VT_I4,
+        (void*)&amp;_result, L&quot;\x0003&quot;, index);
+    return _result;
+}
+inline void IMyDispInterface::PutChannel ( long index, long _arg2 ) {
+    _com_dispatch_method(this, 0x8, DISPATCH_PROPERTYPUT, VT_EMPTY, NULL, 
+        L&quot;\x0003\x0003&quot;, index, _arg2);
+}
+inline long IMyDispInterface::GetSound ( ) {
+    long _result;
+    _com_dispatch_propget(this, 0x1, VT_I4, (void*)&amp;_result);
+    return _result;
+}
+inline void IMyDispInterface::PutSound ( long _val ) {
+    _com_dispatch_propput(this, 0x1, VT_I4, _val);
+}
+</font></pre>
+<p>
+This code is similar to that provided by the ClassWizard when importing an OLE typelib. The main difference is the dispinterface is directly exposed as a child of IDispatch, with no per-instance data, instead of being derived from COleDispatchDriver. Accordingly, the helper functions that do all the real work are no longer member functions, and the interface pointer is passed to the helpers as a regular argument.</p>
+<p>
+The runtime helper functions package the incoming arguments as appropriate, call IDispatch::Invoke, then handle any output or error that results. By default, wrappers are generated for high-level access, which process any failure by calling the error handling code described in section 0. The raw_dispinterfaces attribute generates low-level wrappers that call IDispatch::Invoke, but still return an HRESULT on failure.</p>
+<p>
+The other item of interest here is the parameterized property data member Channel. This allows data-oriented array indexing access to properties which take extra arguments, e.g.,  x&nbsp;=&nbsp;pMyDispInterface-&gt;Channel[10]; instead of x&nbsp;=&nbsp;pMyDispInterface-&gt;GetChannel(10);. See section 0 for further explanation.</p>
+<p>
+<b>2.3.5 TKIND_COCLASS - COM classes</b></p>
+<p>
+The typelib headers expose a coclass in order to attach a CLSID and perhaps the default interfaces. See the discussions of __declspec(uuid()) in section 0.</p>
+<h3>2.4 Configuring the typelib Header Contents With #import Attributes</h3>
+<p>
+The #import directive can optionally include one or more import attributes after the filename string. These attributes are used to control the contents of the typelib headers, either by enabling or disabling large sections of the headers, or giving more fine-grained control over individual header elements.</p>
+<p>
+An import attribute is an identifier plus any required arguments. If an attribute takes arguments, they consist of one or more string constants in a comma-separated list inside a single set of parentheses, following the attribute identifier. String concatenation is performed on individual attribute arguments, so multiple attributes can be separated by whitespace or commas. Macro substitution is performed on a #import directive before it is processed, so the import attributes can be specified using #define macros. The backslash-newline sequence may also be used to include additional physical lines in a single #import directive.</p>
+<p>
+As an example, the following code fragment will create typelib headers test.tlh and test.tli without wrapping the contents in a namespace. A message pragma is included which will display the text “importing test.tlh” while compiling. Finally, any instance of the identifier OldName in the typelib will be replaced by NewName in the typelib headers.</p>
+<pre><FONT FACE="Courier New" SIZE="2">#define IMPATTRIBS no_namespace \
+    inject_statement(&quot;#pragma message(\&quot;importing \&quot; __FILE__)&quot;)
+#import “test.tlb” IMPATTRIBS \
+    rename(“OldName”,”NewName”)
+</font></pre>
+<p>
+<b>2.4.1 no_namespace</b></p>
+<p>
+The typelib header contents are normally wrapped within a namespace with the name of the typelib declared in the library statement of the original ODL. If the no_namespace attribute is specified, this namespace wrapper is omitted. To use the namespace wrapper but give it some other name, use the rename_namespace attribute.</p>
+<p>
+<b>2.4.2 rename_namespace(“NewName”)</b></p>
+<p>
+The rename_namespace attribute is used to give a specific name to the namespace that wraps the contents of the typelib headers. It takes a single argument, which is the name to use for the namespace. To omit the namespace wrapper, use the no_namespace attribute.</p>
+<p>
+<b>2.4.3 raw_interfaces_only</b></p>
+<p>
+The raw_interfaces_only attribute will suppress generation of error-handling wrappers and __declspec(property) declarations using those wrappers. By default, the typelib headers are geared toward easy access to the contents of type libraries, hiding the HRESULT error codes and simplifying the need to worry about leaking interface pointers, VARIANTs, and BSTRs. Since some users are just interested in using #import as a replacement for the MIDL-generated headers now in use, or as a way to get access in C++ to objects which didn’t originate as IDL/ODL script, this attribute allows exposing just the raw low-level contents of a typelib.</p>
+<p>
+The raw_interfaces_only attribute changes the default prefix used on the raw non-property methods. Normally, the prefix is raw_. This attribute causes no prefix to be used, so raw methods get the name actually used in the typelib.</p>
+<p>
+<b>2.4.4 raw_dispinterfaces</b></p>
+<p>
+The raw_dispinterfaces attribute triggers generation of low-level wrappers for dispinterface methods and properties that call IDispatch::Invoke and return the HRESULT error code. Usually, only high-level wrappers are generated, which normally throw a C++ exception in case of failure.</p>
+<p>
+<b>2.4.5 rename(“OldName”,”NewName”)</b></p>
+<p>
+The rename attribute is used to work around name collision problems by replacing all uses of a specific name from a typelib with another. It takes two arguments, the first being the old name from the typelib, the second the name to be used in its place.</p>
+<p>
+This attribute is primarily useful in cases where a name from the typelib is also that of a macro definition in the system headers. This situation is apparent when errors or warnings like “not enough actual parameters for macro ‘OldName’” or “syntax error : ‘constant’” occur in the typelib headers.</p>
+<p>
+Note that the replacement is for a name from the typelib, not for a name used in the typelib header. For instance, suppose a property named MyParent exists within a typelib, and that a macro GetMyParent is defined in some header used before the #import. Since GetMyParent is also the default name of the error-handling property get wrapper, a name collision will occur. To work around the problem, use rename(“MyParent”,”MyParentX”), and not rename(“GetMyParent”,”GetMyParentX”).</p>
+<p>
+<b>2.4.6 exclude(“Name1”,“Name2”, Ö)</b></p>
+<p>
+The exclude attribute takes one or more arguments, each of which names a top-level typelib item (e.g.,  interfaces, coclasses, and typedefs). Each named item is excluded from the typelib headers.</p>
+<p>
+This attribute is useful when importing typelibs generated by MIDL. In some cases, names from the system headers are also defined by these typelibs. If this leads to compile errors, exclude can be used to eliminate the troublesome items.</p>
+<p>
+<b>2.4.7 inject_statement(“source text”)</b></p>
+<p>
+The inject_statement attribute inserts its single argument as raw source text into the typelib header, immediately following the start of the namespace that wraps the contents of the typelib headers.</p>
+<p>
+<b>2.4.8 named_guids</b></p>
+<p>
+The named_guids attribute triggers generation of definitions and initializations of old-style GUID variables, giving them the form LIBID_MyLib, CLSID_MyCoClass, IID_MyInterface, and DIID_MyDispInterface.</p>
+<p>
+<b>2.4.9 no_implementation</b></p>
+<p>
+The no_implementation attribute suppresses the generation of the .tli typelib header, which contains all the implementations of wrapper member functions. The .tlh typelib header, with all the declarations to expose typelib items, will be generated without a #include of the .tli header. See the description of the implementation_only attribute for a description of how to use this attribute.</p>
+<p>
+<b>2.4.10 implementation_only</b></p>
+<p>
+The implementation_only attribute suppresses the generation of the .tlh typelib header, which contains all the declarations to expose typelib items. The .tli typelib header, with all the implementations of wrapper member functions, will still be generated. After generating the .tli, the compiler will directly include it, instead of including the .tlh header as normal.</p>
+<p>
+The contents of the .tli header are wrapped by the same namespace that would normally wrap the .tlh header. In addition, the member functions are not declared as inline, as is normally done when the .tlh header includes the .tli header.</p>
+<p>
+The implementation_only attribute is intended for use in conjunction with the no_implementation attribute, on paired #import directives, as a way of keeping the implementations out of the precompiled header file. A #import with the no_implementation attribute is put within the source region used to create the PCH, so it is used by a number of source files. A #import with the implementation_only attribute is then used, after the PCH region, in one source file only. This will generate all the wrapper member functions that might be required by other source files, but not require recompiling the implementations with each source.</p>
+<p>
+Note that using a #import directive with implementation_only makes sense only when it follows, in the same source, a #import of the same typelib with the no_implementation attribute. Otherwise, the implementation_only #import will result in compile errors, since the wrapper class definitions will not be seen before the implementations of member functions of those classes.</p>
+<p>
+<b>2.4.11 raw_native_types</b></p>
+<p>
+By default, the high-level error-handling methods use special classes in place of the raw BSTR and VARIANT data types and raw COM interface pointers. These classes, discussed later, handle the details of allocating and deallocating the raw data at the proper time, and greatly reduce the need to perform type casts and other conversions. The raw_native_types attribute is used to disable the use of these handler classes in the high-level method wrappers, and force the use of the low-level data types instead.</p>
+<p>
+<b>2.4.12 raw_method_prefix(“Prefix”)</b></p>
+<p>
+By default, low-level properties and methods are exposed via member functions with a prefix of raw_, to avoid name collisions with the high-level error-handling member functions. The raw_method_prefix attribute is used to specify an alternate prefix. It takes a single argument, the prefix to be used. Note that the raw_interfaces_only attribute acts as if the attribute raw_method_prefix(“”) is also present.</p>
+<p>
+<b>2.4.13 high_method_prefix(“Prefix”)</b></p>
+<p>
+By default, high-level error-handling properties and methods are exposed via member functions without a prefix, using the name from the typelib. The high_method_prefix attribute is used to specify a prefix to be used instead. It takes a single argument, the prefix to be used.</p>
+<p>
+<b>2.4.14 raw_property_prefixes(“GetPrefix”,”PutPrefix”,”PutRefPrefix”)</b></p>
+<p>
+By default, low-level propget, propput, and propputref methods are exposed via member functions with prefixes of, respectively, get_, put_, and putref_, for compatibility with the names used in MIDL-generated headers. The raw_property_prefixes attribute is used to specify alternate prefixes for all three kinds of property methods. It takes three arguments, the prefixes to be used for propget, propput, and propputref methods.</p>
+<p>
+<b>2.4.15 high_property_prefixes(“GetPrefix”,”PutPrefix”,”PutRefPrefix”)</b></p>
+<p>
+By default, high-level error-handling propget, propput, and propputref methods are exposed via member functions with prefixes of, respectively, Get, Put, and PutRef. The high_property_prefixes attribute is used to specify alternate prefixes for all three kinds of property methods. It takes three arguments, the prefixes to be used for propget, propput, and propputref methods.</p>
+<h2>3. Language Extensions</h2>
+<p>
+Since #import works by creating a header file which is then included, everything injected into the compilation stream by #import must be expressible as C++ source. This requires a few language extensions which are also available to a user outside of the context of #import. These extensions are all exposed via new __declspec attributes.</p>
+<h3>3.1 __declspec(selectany)</h3>
+<p>
+Normally, a global data item may be initialized once and only once in all the objects contributing to an EXE or DLL. This complicates initializing global data defined by the typelib header, since the same #import will likely appear in more than one source file. Without a language extension, a programmer would need to somehow flag one particular #import to define and initialize the global data, and all others to just declare and not define that data.</p>
+<p>
+Instead, there’s a new __declspec attribute, __declspec(selectany). This can only be applied to the actual initialization of global data items that are externally visible. It causes the item to be specially flagged when emitted to the object file. The item is also forcibly emitted to the object even if no references are seen in that object. At link time, if multiple definitions of the item are seen, the linker picks one and discards the rest. Further, if linking -opt:ref, then transitive COMDAT elimination will cause any unreferenced selectany data items to be removed from the link output. </p>
+<pre><FONT FACE="Courier New" SIZE="2">Some examples of __declspec(selectany):
+// OK - x1 is initialized and visible externally
+int __declspec(selectany) x1 = 1;
+// error in C++ - const is by default static, so x2 isn’t visible externally
+const int __declspec(selectany) x2 = 2;
+// OK - x3 is extern const, so visible externally
+extern const int __declspec(selectany) x3 = 3;
+// OK - x4 is extern const, so visible externally
+extern const int x4;
+const int __declspec(selectany) x4 = 4;
+// error - __declspec(selectany) must be on the initialization
+int x5 = 5;
+extern int __declspec(selectany) x5;
+</font></pre>
+<p>
+__declspec(selectany) is available in both the C and C++ compilers. While useful for COM support in the typelib header, where it is used for declaring old-style GUID constants if the named_guids attribute is used, it is actually useful far more generally.</p>
+<h3>3.2 __declspec(uuid(Ö)) and __uuidof(Ö)</h3>
+<p>
+Previously, GUIDs were defined for interfaces and coclasses via a naming convention, e.g.,  IID_IFoo and CLSID_Foo. Now, the compiler can natively support attaching a GUID to a struct or class that represents a COM item via a new __declspec attribute, __declspec(uuid(...)). The uuid attribute takes a string which names a GUID in normal registry format, with or without {} delimiters:</p>
+<pre><FONT FACE="Courier New" SIZE="2">struct __declspec(uuid(“00000000-0000-0000-c000-000000000046”)) IUnknown;
+struct __declspec(uuid(“{00020400-0000-0000-c000-000000000046}”)) IDispatch;
+</font></pre>
+<p>
+__declspec(uuid()) can be used on a declaration, as shown here, or a full definition, as shown in the COM interface example of section 0.</p>
+<p>
+To retrieve the attached GUID, a new intrinsic, __uuidof(), is available. This takes as an argument a reference to an item which was declared with __declspec(uuid()). The argument may be the type name, or a pointer, reference, or array of that type, a template specialized on these types, or a variable of these types, as long as the compiler can resolve back to find the attached GUID.</p>
+<p>
+__declspec(uuid()) is permitted on a redeclaration. This allows the system headers to supply the definitions of interfaces such as IUnknown, with a redeclaration in comdef.h or some related header later supplying IUnknown’s GUID.</p>
+<h3>3.3 __declspec(property(Ö)) and Data-Oriented Property Access</h3>
+<p>
+Interface and dispinterface properties can be accessed functionally through the HRESULT-handling wrappers, e.g., </p>
+<pre><FONT FACE="Courier New" SIZE="2">IBeeperPtr pBeep;
+pBeep-&gt;PutSound(pBeep-&gt;GetSound() + 5);
+It’s useful to make properties look like regular data members:
+IBeeperPtr pBeep;
+pBeep-&gt;Sound = pBeep-&gt;Sound + 5;
+// or even
+pBeep-&gt;Sound += 5;
+</font></pre>
+<p>
+This code fragment generates exactly the same code as the previous fragment, using the non-virtual wrapper functions.</p>
+<p>
+The key to this is a way of declaring, in effect, “virtual data members” inside of interfaces. Yet another attribute, __declspec(property()), provides the linkage. It can be applied to non-static data members within a class or struct definition. It takes one or two arguments, one of which is get=get_func_name, the other put=put_func_name.</p>
+<p>
+When the compiler sees a data member with the property attribute on the right-hand-side of a dot or points-to operator, it will convert the reference into the applicable get or put function, depending on whether the name is used in an lvalue or rvalue context. In more complicated contexts, such as +=, an appropriate rewrite is done to do both get and put. Note that expressions attempting to use the value of a property used in an lvalue context, as in a cascaded assign like pFoo-&gt;Prop1 = pFoo-&gt;Prop2 = 0; will not work, since this translates into pFoo-&gt;PutProp1(pFoo-&gt;PutProp2(0)), and the PutProp2 method generally returns void.</p>
+<p>
+Parameterized properties are also handled through this mechanism. In this case, the data property is declared as an array with unspecified dimension. Multiple dimensions may be specified, but are unnecessary. When a parameterized data property is seen in an expression, the expressions used as array indices are collected and treated as function call arguments for the appropriate get or put function. For a put, the new value to be sent to the put function becomes the last argument, after the array index expressions. Function overloading resolution is then applied to check for legality, which is why the number of array dimensions doesn’t need to be declared up front.</p>
+<p>
+__declspec(property(…)), while invented to support COM properties, is actually independent of COM. It could conceivably be used to write code that appears to be directly accessing a public data member, but is instead calling method functions which perform whatever extra processing is desired, e.g.,  data validation.</p>
+<h2>4. Runtime and Library Support</h2>
+<h3>4.1 HRESULT Error Handling</h3>
+<p>
+The main point of the high-level COM interface wrappers is to hide the checking of HRESULT error codes. But what should occur when an error is detected? The HRESULT, IDispatch EXCEPINFO, and any IErrorInfo data should all be made available.</p>
+<p>
+_com_raise_error is the support routine that dispatches an error detected by the typelib header error-handling methods or one of the COM support routines or native type wrapper classes. It is passed an HRESULT and a pointer to an IErrorInfo object (or NULL if no object is required/available). All it does is throw a _com_error object constructed from its arguments. A program can override this default behavior by supplying its own version of _com_raise_error.</p>
+<p>
+_com_issue_error and _com_issue_errorex are the main support routine used to communicate errors from the typelib methods for vtable interfaces and native type wrapper classes to _com_raise_error. _com_issue_error takes an HRESULT, and passes it along without an IErrorInfo object to _com_raise_error. _com_issue_errorex takes an HRESULT, an interface pointer, and the interface’s IID. It checks if the interface supports error info on the given IID, and if yes retrieves the IErrorInfo object (if any). It then calls _com_raise_error with the HRESULT and IErrorInfo object.</p>
+<p>
+For dispinterfaces, the runtime helpers that call IDispatch::Invoke handle a returned HRESULT of DISP_E_EXCEPTION by calling CreateErrorInfo to save the EXCEPINFO status in an IErrorInfo object. The low-level wrappers then call SetErrorInfo and return the HRESULT failure, so user code can call GetErrorInfo to retrieve the IErrorInfo object. The high-level wrappers just call _com_raise_error with the HRESULT and IErrorInfo object.</p>
+<h3>4.2 Smart Pointers</h3>
+<p>
+So far, what I've described is a pretty basic exposure of the contents of a typelib via struct definitions, with fairly minimal compiler extensions. Its main utility is in gathering together a number of disparate data sources, e.g.,  midl or mktyplib-generated headers, ClassWizard dispinterface access methods, and GUID definitions, into a single context, the typelib and #import-generated headers. That's a useful framework, but we'd like some higher-level support.</p>
+<p>
+Primarily, we'd like a smart-pointer implementation which encapsulates interface pointers and eliminates AddRef, Release, and QueryInterface calls, as well as hides the CoCreateInstance call to create a new COM object. Such a smart-pointer is provided as template class _com_ptr_t in header comip.h</p>
+<p>
+The linkage between the typelib header and the smart pointer implementation is provided through a number of standard macros. The header will contain lines like:</p>
+<pre><FONT FACE="Courier New" SIZE="2">__COM_SMARTPTR_TYPEDEF(IFoo, __uuidof(IFoo));
+</font></pre>
+<p>
+This will by default expand to:</p>
+<pre><FONT FACE="Courier New" SIZE="2">typedef _com_ptr_t&lt;_com_IIID&lt;IFoo, __uuidof(IFoo)&gt; &gt; IFooPtr;
+</font></pre>
+<p>
+Type IFooPtr can then be used in place of the raw interface pointer IFoo*, removing the need for calling the various IUnknown member functions.</p>
+<p>
+Users wishing to use their own smart pointer implementation can override most parts of this expansion. The following lines appear in comdef.h:</p>
+<pre><FONT FACE="Courier New" SIZE="2">#if !defined(_COM_SMARTPTR)
+ #if !defined(_INC_COMIP)
+  #include &lt;comip.h&gt;
+ #endif
+ #define _COM_SMARTPTR        _com_ptr_t
+ #define _COM_SMARTPTR_LEVEL2 _com_IIID
+#endif
+#if defined(_COM_SMARTPTR)
+ #if !defined(_COM_SMARTPTR_TYPEDEF)
+  #if defined(_COM_SMARTPTR_LEVEL2
+   #define _COM_SMARTPTR_TYPEDEF(Interface, IID) \
+    typedef _COM_SMARTPTR&lt;_COM_SMARTPTR_LEVEL2&lt;Interface, &amp;IID&gt; &gt; \
+            Interface ## Ptr
+  #else
+   #define _COM_SMARTPTR_TYPEDEF(Interface, IID) \
+    typedef _COM_SMARTPTR&lt;Interface, &amp;IID&gt; \
+            Interface ## Ptr
+  #endif
+ #endif
+#endif
+</font></pre>
+<p>
+A program can define custom versions of macros _COM_SMARTPTR, _COM_SMARTPTR_LEVEL2, or _COM_SMARTPTR_TYPEDEF before the first #import or #include of comdef.h to modify the declaration of the smart pointer typedefs in the typelib header. The standard suffix used to name a smart pointer, Ptr, is not configurable, since that suffix is relied upon by the code that creates the typelib header.</p>
+<p>
+The default smart pointer implementation has some knowledge of the VC++ COM runtime support. In contexts where an HRESULT cannot be returned, such as failure of a CoCreateInstance while constructing a new smart pointer, the error will instead be passed off to _com_issue_error.</p>
+<p>
+The typelib header assumes the existence of smart pointers, as described in section 0. Specifically, whenever a COM method returns an interface pointer, the error-handling wrapper will instead return the appropriate smart pointer. This helps to make sure Release is called on the interface in case of exceptions or instances where the COM methods is used to generate a temporary interface pointer.</p>
+<p>
+Smart pointer definitions are provided for all interfaces whose GUIDs are found in uuid.lib. These are found in comdef.h, along with the struct declarations for the uuid.lib interfaces and coclasses to attach the GUIDs to those structs using __declspec(uuid(…)).</p>
+<h3>4.3 Native Support for COM Types</h3>
+<p>
+Header comutil.h provides a pair of C++ classes that help use the COM types BSTR and VARIANT. BSTRs are wrapped by class _bstr_t, which hides the need for calling SysAllocString and SysFreeString, as well as providing a number of useful operators and other methods. VARIANTs are wrapped by class _variant_t, which takes care of doing VariantInit and VariantClear as necessary, and provides a large number of constructors, assignment operators, conversion extractors, and other methods.</p>
+<p>
+As in the smart pointer case, these standard classes have knowledge of the VC++ COM runtime support to handle failure HRESULTs. For instance, when trying to assign a _variant_t to some other type, if the type coercion fails in VariantChangeType, the error will be passed off to _com_issue_error.</p>
+<p>
+These standard classes are used in the typelib header high-level error-handling wrappers. For instance, a low-level method</p>
+<pre><FONT FACE="Courier New" SIZE="2">HRESULT Method([in] BSTR bstr, [in] VARIANT vt, [out,retval] IFoo** ppFoo)
+</font></pre>
+<p>
+is exposed via the high-level wrapper</p>
+<pre><FONT FACE="Courier New" SIZE="2">IFooPtr Method( _bstr_t bstr, _variant_t vt)
+</font></pre>
+<p>
+This use of wrapper classes can be disabled using the raw_native_types import attribute. There is no way to use the wrapper classes for the raw low-level methods.</p>
+<h2>5. Workarounds and Manual Editing</h2>
+<p>
+Occasionally, the typelib contains items that cannot be directly translated into C++ source. For instance, the names within a typelib are Unicode strings that may or may not be useable as C++ identifiers. In some cases, simple workarounds are automatically performed while creating the header files. In other cases, it’s left up to the user to find a workaround.</p>
+<h3>5.1 Duplicate enum Members</h3>
+<p>
+Some typelibs built by MKTYPLIB have multiple definitions of the same enum member name, within separate enums. For instance, grid32.ocx defines grdNone = 0 once in enum BorderStyleConstants, and again in enum ScrollbarsConstants. Since this is not legal in C++, the typelib header will comment out all duplicate enum member definitions after the first.</p>
+<p>
+Sometimes, duplicate enum member names are found with different definitions. For instance, threed32.ocx defines _Inset = 0 in enum enumShadowStyleConstants, and later defines _Inset = 1 in enum enumBevelConstants. Again, all but the first definition is commented out, but in addition a #pragma message is injected which describes the name conflict.</p>
+<h3>5.2 Method/Property Name Conflicts with Enclosing Interface</h3>
+<p>
+Typelibs are able to have method or property names that duplicate the name of the enclosing interface or dispinterface. This is not allowed in C++, since it looks like an invalid constructor declaration. To avoid this, the typelib header will prefix the name of the offending method or property with a single underscore. No attempt is made to determine if the resulting name is still illegal for whatever reason.</p>
+<h3>5.3 Method/Property Name Conflicts with Non-enclosing Interface</h3>
+<p>
+Typelibs sometimes use the same name for either a property or method and some interface other than that enclosing the property or method. For instance, comctl32.ocx has, within dispinterface _DToolbar, a property defined as ImageList* ImageList, where ImageList is a dispinterface also defined within the typelib. The wrapped propget is ImageList* GetImageList(). That is invalid C++, since the ImageList property hides the ImageList interface while within _DToolbar. To work around this, the compiler will inject the record type before a user-defined name, e.g.,  struct ImageList* GetImageList().</p>
+<h3>5.4 Name Collisions and Illegal Identifiers</h3>
+<p>
+Names from the typelib are injected as-is into the header, except for the limited workarounds already mentioned. No attempt is made to detect and repair names which are not legal C++ identifiers, or which conflict with existing names, primarily those of #define macros. Instead, it is up to the user to repair these problems using the rename(“OldName”,”NewName”) import attribute. For instance, the Microsoft&reg; Excel 5.0 typelib xl5en32.olb defines a method DialogBox. This conflicts with the macro of the same name, leading to compile errors. To fix this, use an attribute like rename(“DialogBox”,“DialogBoxXL”).</p>
+<p>
+The compiler does not try to automatically handle these collisions with the preprocessor because it’s not clear what should be done, and because the same typelib header might work just fine in another compile with a different preprocessor context. Creating the typelib header is done independently of the current context, so the same typelib header is always created given the same input typelib and import attributes.</p>
+<p>
+To fix a naming problem with the namespace used to wrap the typeinfo items, either the rename or rename_namespace import attributes may be used.</p>
+<h3>5.5 Unhandled typelib Problems</h3>
+<p>
+If the typelib header is not usable, for whatever reason, and #defines and import attribute are insufficient to work around the problem, the user will have to resort to manual editing. The idea is to create the .TLH and .TLI files via #import, then move the files out of the object directory, edit them appropriately, and change the #import to a #include. Obviously, this should be a last resort.</p>
+<h2>6. Support Classes</h2>
+<p>
+There are four classes defined in comdef.h and the associated COM support headers. Class _com_error defines the error object that is thrown by _com_raise_error in most failures. Template class _com_ptr_t wraps COM interface pointers, hiding the need for AddRef, Release, and QueryInterface. Classes _bstr_t and _variant_t wrap the BSTR and VARIANT types to provide resource management and other conveniences.</p>
+<h3>6.1 Class _com_error</h3>
+<p>
+A _com_error object represents an exception condition detected by the error-handling method wrappers from the typelib headers or by one the of COM support classes. The _com_error class encapsulates the HRESULT error code and any associated IErrorInfo object.</p>
+<p>
+<b>Constructors:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">_com_error(HRESULT hr, IErrorInfo* perrinfo = NULL) throw()
+_com_error(const _com_error&amp; that) throw()
+</font></pre>
+<p>
+Constructs a _com_error object. The first constructor creates a new object given an HRESULT and optional IErrorInfo object. The second creates a copy of an existing object.</p>
+<p>
+<b>Destructor:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">virtual ~_com_error() throw()
+</font></pre>
+<p>
+Destructs an existing _com_error object. The encapsulated IErrorInfo object, if present, is released.</p>
+<p>
+<b>Assignment operator:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">_com_error&amp; operator=(const _com_error&amp; that) throw()
+</font></pre>
+<p>
+Assigns an existing _com_error object into another.</p>
+<p>
+<b>Extractors:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">HRESULT Error() const throw()
+IErrorInfo * ErrorInfo() const throw()
+WORD WCode() const throw()
+</font></pre>
+<p>
+Retrieves the encapsulated items within a _com_error object. The Error and ErrorInfo methods return the raw HRESULT and IErrorInfo items as passed into the constructor.</p>
+<p>
+The WCode method retrieves a 16-bit error code that has been mapped into the encapsulated HRESULT. If the HRESULT is within the range 0x80040200 to 0x8004FFFF, the WCode method returns the HRESULT minus 0x80040200, else it returns zero.</p>
+<p>
+The WCode method exists to undo a mapping that happens in the COM support code. The wrapper for a dispinterface property or method calls a support routine which packages up the arguments and calls IDispatch::Invoke. On return, if a failure HRESULT of DISP_E_EXCEPTION is returned, the error information is retrieved from the EXCEPINFO structure passed to IDispatch::Invoke. The error code can either be a 16-bit value in EXCEPINFO.wCode or a full 32-bit value in EXCEPINFO.scode. If a 16-bit wCode is returned, it must first be mapped to a 32-bit failure HRESULT. This is done by adding 0x80040200 to the wCode, and capping the result at 0x8004FFFF.</p>
+<p>
+<b>IErrorInfo method intermediaries:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">_bstr_t Description() const throw()
+DWORD HelpContext() const throw()
+_bstr_t HelpFile() const throw()
+_bstr_t Source() const throw()
+GUID GUID() const throw()
+</font></pre>
+<p>
+Calls the various IErrorInfo interface methods (e.g.,  Source calls IErrorInfo::GetSource). If no IErrorInfo is recorded within the _com_error object, return an empty _bstr_t, zero, or GUID_NULL as appropriate. Any failure while calling the IErrorInfo method is ignored.</p>
+<p>
+<b>FormatMessage accessors:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">const TCHAR * ErrorMessage() const throw()
+</font></pre>
+<p>
+Returns the string message for the HRESULT recorded within the _com_error object by calling the Win32 API FormatMessage to retrieve the appropriate system message text. The string returned is allocated by the FormatMessage API, and will be released when the _com_error object is destroyed. If the HRESULT is a mapped 16-bit wCode (see the WCode method), then a generic message “IDispatch error #&lt;wCode&gt;” is returned. If no other message can be found, then a generic message “Unknown error #&lt;hresult&gt;” is returned. The returned string is either a Unicode or multi-byte string, depending on the state of the _UNICODE macro.</p>
+<p>
+<b>EXCEPINFO.wCode ? HRESULT mappers:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">static HRESULT WCodeToHRESULT(WORD wCode) throw()
+static WORD HRESULTToWCode(HRESULT hr) throw()
+</font></pre>
+<p>
+These two static member functions perform the 16-bit wCode to 32-bit HRESULT mapping, and vice-versa, as described above for the WCode method.</p>
+<h3>6.2 Class _bstr_t </h3>
+<p>
+A _bstr_t object encapsulates the BSTR data type. The class manages resource allocation and deallocation, calling SysAllocString, SysFreeString, and the other BSTR APIs as appropriate. The _bstr_t class uses reference counting to avoid excessive overhead.</p>
+<p>
+<b>Constructors:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">_bstr_t() throw()
+</font></pre>
+<p>
+Constructs a default _bstr_t object, encapsulating a NULL BSTR.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_bstr_t(const _bstr_t&amp; s) throw()
+</font></pre>
+<p>
+Constructs a _bstr_t object as a copy of another. This does a shallow copy, incrementing the reference count of the encapsulated BSTR instead of creating a new one.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_bstr_t(const char* s) throw(_com_error)
+_bstr_t(const wchar_t* s) throw(_com_error)
+</font></pre>
+<p>
+Constructs a _bstr_t object, calling SysAllocString to create a new BSTR and encapsulate it in the new object. The char* constructor first does a multi-byte to Unicode conversion.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_bstr_t(const _variant_t&amp; var) throw(_com_error)
+</font></pre>
+<p>
+Constructs a _bstr_t object from a _variant_t (see section 0), retrieving a BSTR from the encapsulated VARIANT.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_bstr_t(BSTR bstr, bool fCopy) throw(_com_error)
+</font></pre>
+<p>
+Constructs a _bstr_t object from an existing BSTR (as opposed to a simple wchar_t*). If fCopy is false, the incoming BSTR is attached to the new object, without making a new copy via SysAllocString. This is the method used by the typelib header wrappers to encapsulate and take ownership of a BSTR returned by an interface method as a _bstr_t.</p>
+<p>
+<b>Destructor:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">~_bstr_t() throw()
+</font></pre>
+<p>
+Destructs an existing _bstr_t object. Decrements the reference count on the encapsulated BSTR, and if this is the last _bstr_t holding a reference, calls SysFreeString to release the BSTR.</p>
+<p>
+<b>Assignment operators:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">_bstr_t&amp; operator=(const _bstr_t&amp; s) throw()
+_bstr_t&amp; operator=(const char* s) throw(_com_error)
+_bstr_t&amp; operator=(const wchar_t* s) throw(_com_error)
+_bstr_t&amp; operator=(const _variant_t&amp; var) throw(_com_error)
+</font></pre>
+<p>
+Assigns a new value to an existing _bstr_t object, with the same semantics as the four corresponding constructors.</p>
+<p>
+<b>Operators:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">_bstr_t&amp; operator+=(const _bstr_t&amp; s) throw(_com_error)
+_bstr_t operator+(const _bstr_t&amp; s) const throw(_com_error)
+friend _bstr_t operator+(const char* s1, const _bstr_t&amp; s2)
+friend _bstr_t operator+(const wchar_t* s1, const _bstr_t&amp; s2)
+</font></pre>
+<p>
+These two methods and two friend functions perform string concatenation. The first appends characters to the end of this object. The rest create a new _bstr_t.</p>
+<p>
+<b>Extractors:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">operator const wchar_t*() const throw()
+operator wchar_t*() const throw()
+operator const char*() const throw(_com_error)
+operator char*() const throw(_com_error)
+</font></pre>
+<p>
+These methods are used to extract raw pointers to the encapsulated Unicode BSTR or a multi-byte version of the same. They all do a shallow copy, returning a pointer to the actual internal buffer, so the resulting string should not be modified.</p>
+<p>
+<b>Comparison operators:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">bool operator!() const throw()
+</font></pre>
+<p>
+Checks if the encapsulated BSTR is the NULL string, returning true if yes, false if not.</p>
+<pre><FONT FACE="Courier New" SIZE="2">bool operator==(const _bstr_t&amp; str) const throw()
+bool operator!=(const _bstr_t&amp; str) const throw()
+bool operator&lt;(const _bstr_t&amp; str) const throw()
+bool operator&gt;(const _bstr_t&amp; str) const throw()
+bool operator&lt;=(const _bstr_t&amp; str) const throw()
+bool operator&gt;=(const _bstr_t&amp; str) const throw()
+</font></pre>
+<p>
+These operators compare this object and another lexicographically, via wcscmp. </p>
+<p>
+<b>Low-level helper functions:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">BSTR copy() const throw(_com_error)
+</font></pre>
+<p>
+Returns a newly allocated copy of the encapsulated BSTR. It is up to the caller to free the new copy.</p>
+<pre><FONT FACE="Courier New" SIZE="2">unsigned int length() const throw()
+</font></pre>
+<p>
+Returns the length of the encapsulated BSTR, as returned by SysStringLen.</p>
+<h3>6.3 Class _variant_t</h3>
+<p>
+A _variant_t object encapsulates the VARIANT data type. The class manages resource allocation and deallocation, calling VariantInit and VariantClear as appropriate.</p>
+<p>
+<b>Constructors:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">_variant_t() throw()
+</font></pre>
+<p>
+Constructs a default _variant_t object using VariantInit to set the VARIANT’s vt field to VT_EMPTY.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_variant_t(const VARIANT&amp; varSrc) throw(_com_error)
+_variant_t(const VARIANT* pSrc) throw(_com_error)
+_variant_t(const _variant_t&amp; varSrc) throw(_com_error)
+</font></pre>
+<p>
+Constructs a _variant_t object from a raw or encapsulated VARIANT using VariantCopy.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_variant_t(VARIANT&amp; varSrc, bool fCopy) throw(_com_error)
+</font></pre>
+<p>
+Constructs a _variant_t object from an existing VARIANT. If fCopy is false, the incoming VARIANT is attached to the new object, without making a new copy via VariantCopy. This is the method used by the typelib header wrappers to encapsulate and take ownership of a VARIANT returned by an interface method as a _variant_t.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_variant_t(short sSrc, VARTYPE vtSrc = VT_I2) throw(_com_error)
+</font></pre>
+<p>
+Constructs a _variant_t object of type VT_I2 or VT_BOOL from a short. Any other VARTYPE results in an E_INVALIDARG error being raised.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_variant_t(long lSrc, VARTYPE vtSrc = VT_I4) throw(_com_error)
+</font></pre>
+<p>
+Constructs a _variant_t object of type VT_I4, VT_BOOL, or VT_ERROR from a long. Any other VARTYPE results in an E_INVALIDARG error being raised.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_variant_t(float fltSrc) throw()
+</font></pre>
+<p>
+Constructs a _variant_t object of type VT_R4 from a float.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_variant_t(double dblSrc, VARTYPE vtSrc = VT_R8) throw(_com_error)
+</font></pre>
+<p>
+Constructs a _variant_t object of type VT_R8 or VT_DATE from a double. Any other VARTYPE results in an E_INVALIDARG error being raised.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_variant_t(const CY&amp; cySrc) throw()
+</font></pre>
+<p>
+Constructs a _variant_t object of type VT_CY from a CY item.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_variant_t(const _bstr_t&amp; bstrSrc) throw(_com_error)
+_variant_t(const wchar_t *pSrc) throw(_com_error)
+_variant_t(const char* pSrc) throw(_com_error)
+</font></pre>
+<p>
+Constructs a _variant_t object of type VT_BSTR from a _bstr_t object or raw string. A new BSTR is allocated in all cases.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_variant_t(bool bSrc) throw()
+</font></pre>
+<p>
+Constructs a _variant_t object of type VT_BOOL from a bool.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_variant_t(IUnknown* pSrc, bool fAddRef = true) throw()
+_variant_t(IDispatch* pSrc, bool fAddRef = true) throw()
+</font></pre>
+<p>
+Constructs a _variant_t object of type VT_UNKNOWN or VT_DISPATCH from a COM interface pointer. If fAddRef is true, then AddRef is called on the incoming pointer to match the call to Release that will occur when the _variant_t object is destructed, and it is up to the caller to call Release on the incoming argument. If fAddRef is false, this constructor in effect takes ownership of the incoming pointer, so the caller should not call Release on it.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_variant_t(const DECIMAL&amp; decSrc) throw()
+</font></pre>
+<p>
+Constructs a _variant_t object of type VT_DECIMAL from a DECIMAL item.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_variant_t(BYTE bSrc) throw()
+</font></pre>
+<p>
+Constructs a _variant_t object of type VT_UI1 from a BYTE.</p>
+<p>
+<b>Destructor:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">~_variant_t() throw(_com_error)
+</font></pre>
+<p>
+Destroys a _variant_t object by calling VariantClear to release any resources.</p>
+<p>
+<b>Extractors:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">operator short() const throw(_com_error)
+operator long() const throw(_com_error)
+operator float() const throw(_com_error)
+operator double() const throw(_com_error)
+operator CY() const throw(_com_error)
+operator bool() const throw(_com_error)
+operator DECIMAL() const throw(_com_error)
+operator BYTE() const throw(_com_error)
+</font></pre>
+<p>
+Extracts raw data from an encapsulated VARIANT. If the VARIANT is not already the proper type, VariantChangeType is used to attempt a conversion, and an error is raised on failure.</p>
+<pre><FONT FACE="Courier New" SIZE="2">operator IUnknown*() const throw(_com_error)
+operator IDispatch*() const throw(_com_error)
+</font></pre>
+<p>
+Extracts a COM interface or dispinterface pointer from an encapsulated VARIANT. AddRef is called on the pointer, so it is up to the caller to call Release to free the returned pointer. If the VARIANT is not already the proper type, VariantChangeType is used to attempt a conversion, and an error is raised on failure.</p>
+<pre><FONT FACE="Courier New" SIZE="2">operator _bstr_t() const throw(_com_error)
+</font></pre>
+<p>
+Extracts a string from an encapsulated VARIANT. If the VARIANT is not already a VT_BSTR, VariantChangeType is used to attempt a conversion, and an error is raised on failure. The string is encapsulated in a _bstr_t object so it is properly destroyed on going out of scope.</p>
+<p>
+<b>Assignment operations:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">_variant_t&amp; operator=(const VARIANT&amp; varSrc) throw(_com_error)
+_variant_t&amp; operator=(const VARIANT* pSrc) throw(_com_error)
+_variant_t&amp; operator=(const _variant_t&amp; varSrc) throw(_com_error)
+_variant_t&amp; operator=(short sSrc) throw(_com_error)
+_variant_t&amp; operator=(long lSrc) throw(_com_error)
+_variant_t&amp; operator=(float fltSrc) throw(_com_error)
+_variant_t&amp; operator=(double dblSrc) throw(_com_error)
+_variant_t&amp; operator=(const CY&amp; cySrc) throw(_com_error)
+_variant_t&amp; operator=(const _bstr_t&amp; bstrSrc) throw(_com_error)
+_variant_t&amp; operator=(const wchar_t* pSrc) throw(_com_error)
+_variant_t&amp; operator=(const char* pSrc) throw(_com_error)
+_variant_t&amp; operator=(IDispatch* pSrc) throw(_com_error)
+_variant_t&amp; operator=(bool bSrc) throw(_com_error)
+_variant_t&amp; operator=(IUnknown* pSrc) throw(_com_error)
+_variant_t&amp; operator=(const DECIMAL&amp; decSrc) throw(_com_error)
+_variant_t&amp; operator=(BYTE bSrc) throw(_com_error)
+</font></pre>
+<p>
+Assigns a new value to an existing _variant_t object.</p>
+<p>
+<b>Comparison operations:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">bool operator==(const VARIANT&amp; varSrc) const throw(_com_error)
+bool operator==(const VARIANT* pSrc) const throw(_com_error)
+bool operator!=(const VARIANT&amp; varSrc) const throw(_com_error)
+bool operator!=(const VARIANT* pSrc) const throw(_com_error)
+</font></pre>
+<p>
+Compares this _variant_t object with another, testing for equality or inequality.</p>
+<p>
+<b>Low-level operations:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">void Clear() throw(_com_error)
+</font></pre>
+<p>
+Calls VariantClear on the encapsulated VARIANT object, releasing any resources held.</p>
+<pre><FONT FACE="Courier New" SIZE="2">void Attach(VARIANT&amp; varSrc) throw(_com_error)
+</font></pre>
+<p>
+Takes ownership of the VARIANT by encapsulating it. Releases any existing encapsulated VARIANT, then copies the argument VARIANT, and sets the argument VARIANT empty without releasing its resources.</p>
+<pre><FONT FACE="Courier New" SIZE="2">VARIANT Detach() throw(_com_error)
+</font></pre>
+<p>
+Extracts and returns the encapsulated VARIANT, then clears this _variant_t object without releasing its resources. This removes the VARIANT from encapsulation, so it is up to the caller to release its resources via VariantInit.</p>
+<p>
+void ChangeType(VARTYPE vartype, const _variant_t* pSrc = NULL)</p>
+<pre><FONT FACE="Courier New" SIZE="2">throw(_com_error)
+</font></pre>
+<p>
+Calls VariantChangeType to force a _variant_t object to the indicated VARTYPE. If pSrc is NULL, the conversion is done in place, otherwise this _variant_t object is copied from the pSrc object and converted.</p>
+<pre><FONT FACE="Courier New" SIZE="2">void SetString(const char* pSrc) throw(_com_error) 
+</font></pre>
+<p>
+Convert a multi-byte character string to a Unicode BSTR and assign to this _variant_t object.</p>
+<h3>6.4 Template class _com_ptr_t</h3>
+<p>
+A _com_ptr_t object encapsulates a COM interface pointer. The template class manages resource allocation and deallocation, calling the IUnknown members QueryInterface, AddRef, and Release as appropriate.</p>
+<p>
+A smart pointer is usually referenced via the typedef definition provided by the _COM_SMARTPTR_TYPEDEF macro. This macro takes an interface name and the IID, and declares a _com_ptr_t specialization with the name of the interface and a suffix of Ptr. For example,</p>
+<pre><FONT FACE="Courier New" SIZE="2">_COM_SMARTPTR_TYPEDEF(IMyInterface, __uuidof(IMyInterface));
+</font></pre>
+<p>
+will declare the _com_ptr_t specialization IMyInterfacePtr.</p>
+<p>
+<b>Constructors:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">_com_ptr_t() throw()
+</font></pre>
+<p>
+Constructs a default, NULL, smart pointer.</p>
+<pre><FONT FACE="Courier New" SIZE="2">template&lt;&gt; _com_ptr_t(const _com_ptr_t&amp; cp) throw()
+</font></pre>
+<p>
+Constructs a smart pointer as a copy of another instance of the same smart pointer type. AddRef is called to increment the reference count for the encapsulated interface pointer.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_com_ptr_t(Interface* pInterface) throw()
+</font></pre>
+<p>
+Constructs a smart pointer from a raw interface pointer of this smart pointer’s type. AddRef is called to increment the reference count for the encapsulated interface pointer.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_com_ptr_t(Interface* pInterface, bool fAddRef) throw()
+</font></pre>
+<p>
+Constructs a smart pointer from a raw interface pointer of this smart pointer’s type. If fAddRef is true, AddRef is called to increment the reference count for the encapsulated interface pointer. If fAddRef is false, this constructor takes ownership of the raw interface pointer, without calling AddRef.</p>
+<pre><FONT FACE="Courier New" SIZE="2">template&lt;typename _InterfacePtr&gt; _com_ptr_t(const _InterfacePtr&amp; p)
+throw(_com_error)
+</font></pre>
+<p>
+Constructs a smart pointer from a different smart pointer type or from a different raw interface pointer. QueryInterface is called to find an interface pointer of this smart pointer’s type. If the QueryInterface fails with E_NOINTERFACE, a NULL smart pointer results, otherwise a _com_error is raised.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_com_ptr_t(int null) throw(_com_error)
+</font></pre>
+<p>
+Constructs a NULL smart pointer. The null argument must be a zero.</p>
+<pre><FONT FACE="Courier New" SIZE="2">template&lt;&gt; _com_ptr_t(const _variant_t&amp; varSrc) throw(_com_error)
+</font></pre>
+<p>
+Constructs a smart pointer from a _variant_t object. The encapsulated VARIANT must have type VT_DISPATCH or VT_UNKNOWN, or be convertible to one of the two. If QueryInterface fails with E_NOINTERFACE, a NULL smart pointer results, otherwise a _com_error is raised.</p>
+<pre><FONT FACE="Courier New" SIZE="2">explicit _com_ptr_t(const CLSID&amp; clsid, DWORD dwClsContext = CLSCTX_ALL)
+throw(_com_error)
+</font></pre>
+<p>
+Constructs a smart pointer given the CLSID of a coclass. This will call CoCreateInstance, via member CreateInstance, to create a new COM object and then query for this smart pointer’s interface type. If QueryInterface fails with E_NOINTERFACE, a NULL smart pointer results, otherwise a _com_error is raised.</p>
+<pre><FONT FACE="Courier New" SIZE="2">explicit _com_ptr_t(LPOLESTR str, DWORD dwClsContext = CLSCTX_ALL)
+throw(_com_error)
+</font></pre>
+<p>
+Constructs a smart pointer given a Unicode string which holds either a CLSID, if the string starts with ‘{‘, or a ProgID. This will call CoCreateInstance, via member CreateInstance, to create a new COM object and then query for this smart pointer’s interface type. If QueryInterface fails with E_NOINTERFACE, a NULL smart pointer results, otherwise a _com_error is raised.</p>
+<pre><FONT FACE="Courier New" SIZE="2">explicit _com_ptr_t(LPCSTR str, DWORD dwClsContext = CLSCTX_ALL)
+throw(_com_error)
+</font></pre>
+<p>
+Constructs a smart pointer given a multi-byte character string which holds either a CLSID, if the string starts with ‘{‘, or a ProgID. This will call CoCreateInstance, via member CreateInstance, to create a new COM object and then query for this smart pointer’s interface type. If QueryInterface fails with E_NOINTERFACE, a NULL smart pointer results, otherwise a _com_error is raised.</p>
+<p>
+<b>Destructor:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">~_com_ptr_t() throw()
+</font></pre>
+<p>
+Destructs a smart pointer. If the encapsulated interface pointer isn’t NULL, calls Release to decrement the reference count.</p>
+<p>
+<b>Assignment operations:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">template&lt;&gt; _com_ptr_t&amp; operator=(const _com_ptr_t&amp; cp) throw()
+</font></pre>
+<p>
+Sets a smart pointer to be a copy of another instance of the same smart pointer type. AddRef is called to increment the reference count for the encapsulated interface pointer, and Release is called to decrement the reference count for the previously encapsulated pointer.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_com_ptr_t&amp; operator=(Interface* pInterface) throw()
+</font></pre>
+<p>
+Encapsulates a raw interface pointer of this smart pointer’s type. AddRef is called to increment the reference count for the encapsulated interface pointer, and Release is called to decrement the reference count for the previously encapsulated pointer.</p>
+<pre><FONT FACE="Courier New" SIZE="2">template&lt;typename _InterfacePtr&gt; _com_ptr_t&amp; operator=(const _InterfacePtr&amp; p)
+throw(_com_error)
+</font></pre>
+<p>
+Sets a smart pointer from a different smart pointer type or from a different raw interface pointer. QueryInterface is called to find an interface pointer of this smart pointer’s type, and Release is called to decrement the reference count for the previously encapsulated pointer. If QueryInterface fails with E_NOINTERFACE, a NULL smart pointer results, otherwise a _com_error is raised.</p>
+<pre><FONT FACE="Courier New" SIZE="2">_com_ptr_t&amp; operator=(int null) throw(_com_error)
+</font></pre>
+<p>
+Sets a smart pointer to NULL. The null argument must be a zero.</p>
+<pre><FONT FACE="Courier New" SIZE="2">template&lt;&gt; _com_ptr_t&amp; operator=(const _variant_t&amp; varSrc) throw(_com_error)
+</font></pre>
+<p>
+Sets a smart pointer from a _variant_t object. The encapsulated VARIANT must have type VT_DISPATCH or VT_UNKNOWN, or be convertible to one of the two. If QueryInterface fails with E_NOINTERFACE, a NULL smart pointer results, otherwise a _com_error is raised.</p>
+<p>
+<b>Extractors:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">operator Interface*() const throw()
+</font></pre>
+<p>
+Returns the encapsulated interface pointer, which may be NULL.</p>
+<pre><FONT FACE="Courier New" SIZE="2">operator Interface&amp;() const throw(_com_error)
+</font></pre>
+<p>
+Returns a reference to the encapsulated interface pointer, and issues an error if the pointer is NULL.</p>
+<pre><FONT FACE="Courier New" SIZE="2">Interface&amp; operator*() const throw(_com_error)
+</font></pre>
+<p>
+Allows this smart pointer object to act as though it were the actual encapsulated interface when dereferenced.</p>
+<pre><FONT FACE="Courier New" SIZE="2">Interface* operator-&gt;() const throw(_com_error)
+</font></pre>
+<p>
+Allows this smart pointer object to act as though it were the actual encapsulated interface when dereferenced.</p>
+<pre><FONT FACE="Courier New" SIZE="2">Interface** operator&amp;() throw()
+</font></pre>
+<p>
+Releases any encapsulated interface pointer, replacing it with NULL, and returns the address of the encapsulated pointer. This allows the smart pointer to be passed by address to a function that has an out parameter through which it returns an interface pointer.</p>
+<pre><FONT FACE="Courier New" SIZE="2">operator bool() const throw()
+</font></pre>
+<p>
+Allows this smart pointer object to be tested in a conditional expression. Returns true if the pointer is not NULL.</p>
+<p>
+<b>Comparison operations:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">template&lt;typename _InterfacePtr&gt; bool operator==(_InterfacePtr p)
+throw(_com_error)
+template&lt;&gt; bool operator==(Interface* p) throw(_com_error)
+template&lt;&gt; bool operator==(_com_ptr_t&amp; p) throw()
+template&lt;&gt; bool operator==(int null) throw(_com_error)
+template&lt;typename _InterfacePtr&gt; bool operator!=(_InterfacePtr p)
+throw(_com_error)
+template&lt;&gt; bool operator!=(Interface* p) throw(_com_error)
+template&lt;&gt; bool operator!=(_com_ptr_t&amp; p) throw(_com_error)
+template&lt;&gt; bool operator!=(int null) throw(_com_error)
+template&lt;typename _InterfacePtr&gt; bool operator&lt;(_InterfacePtr p)
+throw(_com_error)
+template&lt;&gt; bool operator&lt;(Interface* p) throw(_com_error)
+template&lt;&gt; bool operator&lt;(_com_ptr_t&amp; p) throw(_com_error)
+template&lt;&gt; bool operator&lt;(int null) throw(_com_error)
+template&lt;typename _InterfacePtr&gt; bool operator&gt;(_InterfacePtr p)
+throw(_com_error)
+template&lt;&gt; bool operator&gt;(Interface* p) throw()
+template&lt;&gt; bool operator&gt;(_com_ptr_t&amp; p) throw(_com_error)
+template&lt;&gt; bool operator&gt;(int null) throw(_com_error)
+template&lt;typename _InterfacePtr&gt; bool operator&lt;=(_InterfacePtr p)
+throw(_com_error)
+template&lt;&gt; bool operator&lt;=(Interface* p) throw()
+template&lt;&gt; bool operator&lt;=(_com_ptr_t&amp; p) throw(_com_error)
+template&lt;&gt; bool operator&lt;=(int null) throw(_com_error)
+template&lt;typename _InterfacePtr&gt; bool operator&gt;=(_InterfacePtr p)
+throw(_com_error)
+template&lt;&gt; bool operator&gt;=(Interface* p) throw(_com_error)
+template&lt;&gt; bool operator&gt;=(_com_ptr_t&amp; p) throw(_com_error)
+template&lt;&gt; bool operator&gt;=(int null) throw(_com_error)
+</font></pre>
+<p>
+Compare this smart pointer object to another smart pointer, raw interface pointer, or NULL. Except for the NULL pointer tests these all work by querying both pointers for IUnknown, and comparing the results.</p>
+<pre><FONT FACE="Courier New" SIZE="2">template&lt;typename _InterfaceType&gt; bool operator==
+(int null, _com_ptr_t&lt;_InterfaceType&gt;&amp; p) throw(_com_error)
+template&lt;typename _Interface, typename _InterfacePtr&gt; bool operator==
+(_Interface* i, _com_ptr_t&lt;_InterfacePtr&gt;&amp; p) throw(_com_error)
+template&lt;typename _Interface&gt; bool operator!=
+(int null, _com_ptr_t&lt;_Interface&gt;&amp; p) throw(_com_error)
+template&lt;typename _Interface, typename _InterfacePtr&gt; bool operator!=
+(_Interface* i, _com_ptr_t&lt;_InterfacePtr&gt;&amp; p) throw(_com_error)
+template&lt;typename _Interface&gt; bool operator&lt;
+(int null, _com_ptr_t&lt;_Interface&gt;&amp; p) throw(_com_error)
+template&lt;typename _Interface, typename _InterfacePtr&gt; bool operator&lt;
+(_Interface* i, _com_ptr_t&lt;_InterfacePtr&gt;&amp; p) throw(_com_error)
+template&lt;typename _Interface&gt; bool operator&gt;
+(int null, _com_ptr_t&lt;_Interface&gt;&amp; p) throw(_com_error)
+template&lt;typename _Interface, typename _InterfacePtr&gt; bool operator&gt;
+(_Interface* i, _com_ptr_t&lt;_InterfacePtr&gt;&amp; p) throw(_com_error)
+template&lt;typename _Interface&gt; bool operator&lt;=
+(int null, _com_ptr_t&lt;_Interface&gt;&amp; p) throw(_com_error)
+template&lt;typename _Interface, typename _InterfacePtr&gt; bool operator&lt;=
+(_Interface* i, _com_ptr_t&lt;_InterfacePtr&gt;&amp; p) throw(_com_error)
+template&lt;typename _Interface&gt; bool operator&gt;=
+(int null, _com_ptr_t&lt;_Interface&gt;&amp; p) throw(_com_error)
+template&lt;typename _Interface, typename _InterfacePtr&gt; bool operator&gt;=
+(_Interface* i, _com_ptr_t&lt;_InterfacePtr&gt;&amp; p) throw(_com_error)
+</font></pre>
+<p>
+These are not members of _com_ptr_t. Instead, they are function templates which allow comparison with a smart pointer on the right-hand side of the comparison operator.</p>
+<p>
+<b>Low-level operations:</b></p>
+<pre><FONT FACE="Courier New" SIZE="2">HRESULT CreateInstance(const CLSID&amp; rclsid, DWORD dwClsContext = CLSCTX_ALL)
+throw()
+</font></pre>
+<p>
+Creates a new running instance of an object given a CLSID. This will call CoCreateInstance to create a new COM object and then query for this smart pointer’s interface type. The resulting pointer is then encapsulated within this smart pointer object. Release is called to decrement the reference count for the previously encapsulated pointer. This routine does not raise any error on failure, but instead returns the HRESULT.</p>
+<pre><FONT FACE="Courier New" SIZE="2">HRESULT CreateInstance(LPOLESTR clsidString, DWORD dwClsContext = CLSCTX_ALL)
+throw()
+</font></pre>
+<p>
+Creates a new running instance of an object given a Unicode string which holds either a CLSID, if the string starts with ‘{‘, or a ProgID. This will call CoCreateInstance to create a new COM object and then query for this smart pointer’s interface type. The resulting pointer is then encapsulated within this smart pointer object. Release is called to decrement the reference count for the previously encapsulated pointer. This routine does not raise any error on failure, but instead returns the HRESULT.</p>
+<pre><FONT FACE="Courier New" SIZE="2">HRESULT CreateInstance(LPCSTR clsidStringA, DWORD dwClsContext = CLSCTX_ALL)
+throw()
+</font></pre>
+<p>
+Creates a new running instance of an object given a multi-byte character string which holds either a CLSID, if the string starts with ‘{‘, or a ProgID. This will call CoCreateInstance to create a new COM object and then query for this smart pointer’s interface type. The resulting pointer is then encapsulated within this smart pointer object. Release is called to decrement the reference count for the previously encapsulated pointer. This routine does not raise any error on failure, but instead returns the HRESULT.</p>
+<pre><FONT FACE="Courier New" SIZE="2">void Attach(Interface* pInterface) throw()
+</font></pre>
+<p>
+Encapsulates a raw interface pointer of this smart pointer’s type. AddRef is not called, so ownership of the interface is passed to the object. Release is called to decrement the reference count for the previously encapsulated pointer.</p>
+<pre><FONT FACE="Courier New" SIZE="2">void Attach(Interface* pInterface, bool fAddRef) throw()
+</font></pre>
+<p>
+Encapsulates a raw interface pointer of this smart pointer’s type. If fAddRef is true, AddRef is called to increment the reference count for the encapsulated interface pointer. If fAddRef is false, this object takes ownership of the raw interface pointer, without calling AddRef. Release is called to decrement the reference count for the previously encapsulated pointer.</p>
+<pre><FONT FACE="Courier New" SIZE="2">Interface* Detach() throw()
+</font></pre>
+<p>
+Extracts and returns the encapsulated interface pointer, then clears the encapsulated pointer storage to</p>
+<p>
+NULL. This removes the interface pointer from encapsulation, so it is up to the caller to call Release.</p>
+<pre><FONT FACE="Courier New" SIZE="2">void Release() throw(_com_error)
+</font></pre>
+<p>
+Calls IUnknown::Release on the encapsulated interface pointer, raising an E_POINTER error if the pointer is NULL.</p>
+<pre><FONT FACE="Courier New" SIZE="2">void AddRef() throw(_com_error)
+</font></pre>
+<p>
+Calls IUnknown::AddRef on the encapsulated interface pointer, raising an E_POINTER error if the pointer is NULL.</p>
+<pre><FONT FACE="Courier New" SIZE="2">Interface* GetInterfacePtr() const throw()
+</font></pre>
+<p>
+Returns the encapsulated interface pointer, which may be NULL.</p>
+<pre><FONT FACE="Courier New" SIZE="2">template&lt;typename _InterfaceType&gt; HRESULT QueryInterface
+(const IID&amp; iid, _InterfaceType*&amp; p) throw ()
+template&lt;typename _InterfaceType&gt; HRESULT QueryInterface
+(const IID&amp; iid, _InterfaceType** p) throw()
+</font></pre>
+<p>
+Calls IUnknown::QueryInterface on the encapsulated interface pointer for the specified IID, returning the resulting raw interface pointer in p. This routine does not raise any error on failure, but instead returns the HRESULT.</p>
+<h2>7. Source Code Examples</h2>
+<h3>7.1 Xltest.cpp: Microsoft Excel 97 Driver</h3>
+<p>
+This example demonstrates a real-world use of native COM support.  It first spawns an instance of Microsoft Excel, makes it visible, and then populates a worksheet with some data.  After pausing, xltest displays a chart built from the worksheet data, pauses a bit more, and then exits.</p>
+<p>
+<b>7.1.1 Xltest.bas</b></p>
+<p>
+First, here’s the example written in Visual Basic:</p>
+<pre><FONT FACE="Courier New" SIZE="2">Attribute VB_Name = &quot;XLTest&quot;
+Declare Sub Sleep Lib &quot;kernel32&quot; (ByVal dwMilliseconds As Long)
+Sub main()
+Dim xl As Excel.Application
+Dim Books As Workbooks
+Dim Book As Workbook
+Dim Sheet As Worksheet
+Dim Range As Range
+Dim Charts As Sheets
+Dim Chart As Chart
+Set xl = CreateObject(&quot;excel.application&quot;)
+xl.Visible = True
+Set Books = xl.Workbooks
+Set Book = Books.Add(xlWorksheet)
+Set Sheet = xl.ActiveSheet
+Sheet.Range(&quot;A2&quot;).Value = &quot;North&quot;
+Sheet.Range(&quot;B2&quot;).Value = &quot;South&quot;
+Sheet.Range(&quot;C2&quot;).Value = &quot;East&quot;
+Sheet.Range(&quot;D2&quot;).Value = &quot;West&quot;
+Sheet.Range(&quot;A3&quot;).Value = 5.2
+Sheet.Range(&quot;B3&quot;).Value = 10
+Sheet.Range(&quot;C3&quot;).Value = 8
+Sheet.Range(&quot;D3&quot;).Value = 20#
+Sleep 2000
+Set Range = Sheet.Range(&quot;A2:D3&quot;)
+Set Charts = Book.Charts
+Set Chart = Charts.Add
+Chart.ChartWizard Range, xl3DPie, 7, xlRows, 1, 0, 2, &quot;Sales Percentages&quot;
+ 
+Sleep 5000
+ 
+Book.Saved = True
+xl.Quit
+End Sub
+</font></pre>
+<p>
+<b>7.1.2 Xltest.cpp</b></p>
+<p>
+Here’s the same example, this time written in C++ using native COM support.</p>
+<pre><FONT FACE="Courier New" SIZE="2">// Compile: cl -GX -YX xltest.cpp
+//
+// Assumes Office 97 has been installed in &quot;C:\Program Files&quot;
+#define IMPATTRS rename(&quot;DocumentProperties&quot;, &quot;DocProps&quot;)
+#import &lt;C:\Program Files\Microsoft Office\Office\mso97.dll&gt; IMPATTRS
+#import &lt;C:\Program Files\Common Files\Microsoft Shared\VBA\vbeext1.olb&gt;
+#import &lt;C:\Program Files\Microsoft Office\Office\excel8.olb&gt; IMPATTRS \
+        rename(&quot;DialogBox&quot;, &quot;DialogBoxXL&quot;) rename(&quot;RGB&quot;, &quot;RBG_XL&quot;)
+#include &lt;stdio.h&gt;
+#pragma hdrstop()
+class OleInit {
+public:
+    OleInit() { OleInitialize(NULL); }
+    ~OleInit() { OleUninitialize(); }
+} OleInitGlobal;
+void dump_com_error(_com_error &amp;);
+void main()
+{
+    try {
+        using namespace Excel;
+        _ApplicationPtr pXL(&quot;Excel.Application&quot;);
+        // The following line demonstrates calling a property-put method.
+        // It translates to pXL-&gt;PutVisible(VARIANT_TRUE);
+        pXL-&gt;Visible = true;
+        // The following line demonstrates calling a property-get method.
+        // It translates to pBooks = pXL-&gt;GetWorkbooks();
+        WorkbooksPtr pBooks = pXL-&gt;Workbooks;
+        _WorkbookPtr  pBook  = pBooks-&gt;Add((long)xlWorksheet);
+        _WorksheetPtr pSheet = pXL-&gt;ActiveSheet;
+        // The following series of lines demonstrate how parameterized
+        // properties can be accessed using array indexing syntax.
+        pSheet-&gt;Range[&quot;A2&quot;]-&gt;Value = &quot;North&quot;;
+        pSheet-&gt;Range[&quot;B2&quot;]-&gt;Value = &quot;South&quot;;
+        pSheet-&gt;Range[&quot;C2&quot;]-&gt;Value = &quot;East&quot;;
+        pSheet-&gt;Range[&quot;D2&quot;]-&gt;Value = &quot;West&quot;;
+        pSheet-&gt;Range[&quot;A3&quot;]-&gt;Value = 5.2;
+        pSheet-&gt;Range[&quot;B3&quot;]-&gt;Value = (long)10;
+        pSheet-&gt;Range[&quot;C3&quot;]-&gt;Value = (short)8;
+        pSheet-&gt;Range[&quot;D3&quot;]-&gt;Value = (float)20.0;
+        Sleep(2000);
+        RangePtr  pRange  = pSheet-&gt;Range[&quot;A2&quot;][&quot;D3&quot;];
+        SheetsPtr pCharts = pBook-&gt;Charts;
+        _ChartPtr pChart  = pCharts-&gt;Add();
+        pChart-&gt;ChartWizard((IDispatch*)pRange, (long)xl3DPie, 7L,
+                            (long)xlRows, 1L, 0L, 2L, &quot;Sales Percentages&quot;);
+        Sleep(5000);
+        pBook-&gt;Saved = true;
+        pXL-&gt;Quit();
+    } catch(_com_error &amp;e) {
+        dump_com_error(e);
+    }
+}
+void dump_com_error(_com_error &amp;e)
+{
+    printf(&quot;Oops - hit an error!\n&quot;);
+    printf(&quot;\tCode = %08lx\n&quot;, e.Error());
+    printf(&quot;\tWCode = %04x\n&quot;, e.WCode());
+    printf(&quot;\tCode meaning = %s\n&quot;, e.ErrorMessage());
+    _bstr_t bstrSource(e.Source());
+    _bstr_t bstrDescription(e.Description());
+    printf(&quot;\tSource = %S\n&quot;, (wchar_t*)bstrSource);
+    printf(&quot;\tDescription = %S\n&quot;, (wchar_t*)bstrDescription);
+}
+</font></pre>
+<h3>7.2 Test.tlh, test.tli: Example Typelib Headers</h3>
+<p>
+This example demonstrates how #import transforms an IDL script, by way of the binary type library, into the typelib headers.</p>
+<p>
+<b>7.2.1 Test.idl</b></p>
+<p>
+First, here’s the IDL:</p>
+<pre><FONT FACE="Courier New" SIZE="2">[
+    uuid(e6457ff0-d8e9-11cf-82c6-00aa003d90f3),
+    version(1.0),
+    helpstring(&quot;COM Support Test&quot;)
+]
+library ComSupportTestLib
+{
+    importlib(&quot;stdole32.tlb&quot;);
+    [ uuid(eec57af0-d8e9-11cf-82c6-00aa003d90f3), odl ]
+    interface IMyInterface : IUnknown
+    {
+        [ propget ] HRESULT Sound( [out, retval] long *freq );
+        [ propput ] HRESULT Sound( [in] long freq );
+        HRESULT Method1( [in] long input );
+        HRESULT Method2( [out, retval] long *output );
+        HRESULT RetBSTR( [out, retval] BSTR *pbstr);
+        HRESULT VarTest( [in] VARIANT var, [out, retval] VARIANT *pvar);
+        HRESULT PtrTest( [out, retval] IMyInterface ** pinterface);
+        long Query( [in] int index );
+    };
+    [ uuid(eec57af1-d8e9-11cf-82c6-00aa003d90f3) ]
+    dispinterface IMyDispInterface
+    {
+    properties:
+        [ id(1) ] long Sound;
+    methods:
+        [ id(2) ] void Method1( [in] long input );
+        [ id(3) ] long Method2( );
+        [ id(4) ] long Query( [in] int index );
+        [ id(5) ] BSTR RetBSTR( );
+        [ id(6) ] VARIANT VarTest( [in] VARIANT var );
+        [ id(7) ] IMyDispInterface* PtrTest( );
+        [ propget, id(8) ] long Channel( long index );
+        [ propput, id(8) ] void Channel( long index, long value );
+    };
+    [ uuid(060247e0-d8ea-11cf-82c6-00aa003d90f3) ]
+    coclass MyCoClass {
+        [ default ] interface IMyInterface;
+        dispinterface IMyDispInterface;
+    };
+}
+</font></pre>
+<p>
+<b>7.2.2 Test.tlh</b></p>
+<p>
+Next, here’s the TLH, the primary typelib header file. It has been created with the preprocessor directive #import “test.tlb”, without any import attributes.</p>
+<pre><FONT FACE="Courier New" SIZE="2">// Created by Microsoft (R) C/C++ Compiler Version 11.00.0000 (3f78811f).
+//
+// test.tlh
+//
+// C++ source equivalent of Win32 type library test.tlb
+// compiler-generated file created 01/23/97 at 17:19:26 - DO NOT EDIT!
+#pragma once
+#pragma pack(push, 8)
+#include &lt;comdef.h&gt;
+namespace ComSupportTestLib {
+//
+// Forward references and typedefs
+//
+struct __declspec(uuid(&quot;eec57af0-d8e9-11cf-82c6-00aa003d90f3&quot;))
+/* interface */ IMyInterface;
+struct __declspec(uuid(&quot;eec57af1-d8e9-11cf-82c6-00aa003d90f3&quot;))
+/* dispinterface */ IMyDispInterface;
+struct /* coclass */ MyCoClass;
+//
+// Smart pointer typedef declarations
+//
+_COM_SMARTPTR_TYPEDEF(IMyInterface, __uuidof(IMyInterface));
+_COM_SMARTPTR_TYPEDEF(IMyDispInterface, __uuidof(IDispatch));
+//
+// Type library items
+//
+struct __declspec(uuid(&quot;eec57af0-d8e9-11cf-82c6-00aa003d90f3&quot;))
+IMyInterface : IUnknown
+{
+    //
+    // Property data
+    //
+    __declspec(property(get=GetSound,put=PutSound))
+    long Sound;
+    //
+    // Wrapper methods for error-handling
+    //
+    long GetSound ( );
+    void PutSound (
+        long freq );
+    HRESULT Method1 (
+        long input );
+    long Method2 ( );
+    _bstr_t RetBSTR ( );
+    _variant_t VarTest (
+        const _variant_t &amp; var );
+    IMyInterfacePtr PtrTest ( );
+    //
+    // Raw methods provided by interface
+    //
+    virtual HRESULT __stdcall get_Sound (
+        long * freq ) = 0;
+    virtual HRESULT __stdcall put_Sound (
+        long freq ) = 0;
+    virtual HRESULT __stdcall raw_Method1 (
+        long input ) = 0;
+    virtual HRESULT __stdcall raw_Method2 (
+        long * output ) = 0;
+    virtual HRESULT __stdcall raw_RetBSTR (
+        BSTR * pbstr ) = 0;
+    virtual HRESULT __stdcall raw_VarTest (
+        VARIANT var,
+        VARIANT * pvar ) = 0;
+    virtual HRESULT __stdcall raw_PtrTest (
+        struct IMyInterface * * pinterface ) = 0;
+    virtual long __stdcall Query (
+        int index ) = 0;
+};
+struct __declspec(uuid(&quot;eec57af1-d8e9-11cf-82c6-00aa003d90f3&quot;))
+IMyDispInterface : IDispatch
+{
+    //
+    // Property data
+    //
+    __declspec(property(get=GetChannel,put=PutChannel))
+    long Channel[];
+    __declspec(property(get=GetSound,put=PutSound))
+    long Sound;
+    //
+    // Wrapper methods for error-handling
+    //
+    // Methods:
+    HRESULT Method1 (
+        long input );
+    long Method2 ( );
+    long Query (
+        int index );
+    _bstr_t RetBSTR ( );
+    _variant_t VarTest (
+        const _variant_t &amp; var );
+    IMyDispInterfacePtr PtrTest ( );
+    long GetChannel (
+        long index );
+    void PutChannel (
+        long index,
+        long _arg2 );
+    // Properties:
+    long GetSound ( );
+    void PutSound ( long _val );
+};
+struct __declspec(uuid(&quot;060247e0-d8ea-11cf-82c6-00aa003d90f3&quot;))
+MyCoClass;
+    // [ default ] interface IMyInterface
+    // dispinterface IMyDispInterface
+//
+// Wrapper method implementations
+//
+#include &quot;test.tli&quot;
+} // namespace ComSupportTestLib
+#pragma pack(pop)
+</font></pre>
+<p>
+<b>7.2.3 Test.tli</b></p>
+<p>
+Finally, here’s the TLI, the typelib header implementation file.</p>
+<pre><FONT FACE="Courier New" SIZE="2">// Created by Microsoft (R) C/C++ Compiler Version 11.00.0000 (3f78811f).
+//
+// test.tli
+//
+// Wrapper implementations for Win32 type library test.tlb
+// compiler-generated file created 01/23/97 at 17:19:26 - DO NOT EDIT!
+#pragma once
+//
+// interface IMyInterface wrapper method implementations
+//
+inline long IMyInterface::GetSound ( ) {
+    long _result;
+    HRESULT _hr = get_Sound(&amp;_result);
+    if (FAILED(_hr)) _com_issue_errorex(_hr, this, __uuidof(this));
+    return _result;
+}
+inline void IMyInterface::PutSound ( long freq ) {
+    HRESULT _hr = put_Sound(freq);
+    if (FAILED(_hr)) _com_issue_errorex(_hr, this, __uuidof(this));
+}
+inline HRESULT IMyInterface::Method1 ( long input ) {
+    HRESULT _hr = raw_Method1(input);
+    if (FAILED(_hr)) _com_issue_errorex(_hr, this, __uuidof(this));
+    return _hr;
+}
+inline long IMyInterface::Method2 ( ) {
+    long _result;
+    HRESULT _hr = raw_Method2(&amp;_result);
+    if (FAILED(_hr)) _com_issue_errorex(_hr, this, __uuidof(this));
+    return _result;
+}
+inline _bstr_t IMyInterface::RetBSTR ( ) {
+    BSTR _result;
+    HRESULT _hr = raw_RetBSTR(&amp;_result);
+    if (FAILED(_hr)) _com_issue_errorex(_hr, this, __uuidof(this));
+    return _bstr_t(_result, false);
+}
+inline _variant_t IMyInterface::VarTest ( const _variant_t &amp; var ) {
+    VARIANT _result;
+    VariantInit(&amp;_result);
+    HRESULT _hr = raw_VarTest(var, &amp;_result);
+    if (FAILED(_hr)) _com_issue_errorex(_hr, this, __uuidof(this));
+    return _variant_t(_result, false);
+}
+inline IMyInterfacePtr IMyInterface::PtrTest ( ) {
+    struct IMyInterface * _result;
+    HRESULT _hr = raw_PtrTest(&amp;_result);
+    if (FAILED(_hr)) _com_issue_errorex(_hr, this, __uuidof(this));
+    return IMyInterfacePtr(_result, false);
+}
+//
+// dispinterface IMyDispInterface wrapper method implementations
+//
+inline HRESULT IMyDispInterface::Method1 ( long input ) {
+    return _com_dispatch_method(this, 0x2, DISPATCH_METHOD, VT_EMPTY, NULL, 
+        L&quot;\x0003&quot;, input);
+}
+inline long IMyDispInterface::Method2 ( ) {
+    long _result;
+    _com_dispatch_method(this, 0x3, DISPATCH_METHOD, VT_I4, (void*)&amp;_result,
+        NULL);
+    return _result;
+}
+inline long IMyDispInterface::Query ( int index ) {
+    long _result;
+    _com_dispatch_method(this, 0x4, DISPATCH_METHOD, VT_I4, (void*)&amp;_result, 
+        L&quot;\x0003&quot;, index);
+    return _result;
+}
+inline _bstr_t IMyDispInterface::RetBSTR ( ) {
+    BSTR _result;
+    _com_dispatch_method(this, 0x5, DISPATCH_METHOD, VT_BSTR, (void*)&amp;_result,
+        NULL);
+    return _bstr_t(_result, false);
+}
+inline _variant_t IMyDispInterface::VarTest ( const _variant_t &amp; var ) {
+    VARIANT _result;
+    _com_dispatch_method(this, 0x6, DISPATCH_METHOD, VT_VARIANT,
+        (void*)&amp;_result, L&quot;\x000c&quot;, &amp;var);
+    return _variant_t(_result, false);
+}
+inline IMyDispInterfacePtr IMyDispInterface::PtrTest ( ) {
+    struct IMyDispInterface * _result;
+    _com_dispatch_method(this, 0x7, DISPATCH_METHOD, VT_DISPATCH,
+        (void*)&amp;_result, NULL);
+    return IMyDispInterfacePtr(_result, false);
+}
+inline long IMyDispInterface::GetChannel ( long index ) {
+    long _result;
+    _com_dispatch_method(this, 0x8, DISPATCH_PROPERTYGET, VT_I4,
+        (void*)&amp;_result, L&quot;\x0003&quot;, index);
+    return _result;
+}
+inline void IMyDispInterface::PutChannel ( long index, long _arg2 ) {
+    _com_dispatch_method(this, 0x8, DISPATCH_PROPERTYPUT, VT_EMPTY, NULL, 
+        L&quot;\x0003\x0003&quot;, index, _arg2);
+}
+inline long IMyDispInterface::GetSound ( ) {
+    long _result;
+    _com_dispatch_propget(this, 0x1, VT_I4, (void*)&amp;_result);
+    return _result;
+}
+inline void IMyDispInterface::PutSound ( long _val ) {
+    _com_dispatch_propput(this, 0x1, VT_I4, _val);
+}
+</font></pre>
+<p>
+&copy; 1997 Microsoft Corporation. All rights reserved.</p>
+<p>
+The information contained in this document represents the current view of Microsoft Corporation on the issues discussed as of the date of publication. Because Microsoft must respond to changing market conditions, it should not be interpreted to be a commitment on the part of Microsoft, and Microsoft cannot guarantee the accuracy of any information presented after the date of publication.</p>
+<p>
+This document is for informational purposes only. MICROSOFT MAKES NO WARRANTIES, EXPRESS OR IMPLIED, IN THIS SUMMARY.</p>
+<p>
+Microsoft and Visual C++ are registered trademarks of Microsoft Corporation.</p>
+<p>
+Other product or company names mentioned herein may be the trademarks of their respective owners.</p>
+</font></BODY>
+</HTML>

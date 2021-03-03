@@ -1,0 +1,557 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>The Win32 Debugging Application Programming Interface</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_debug"></a></sup>The Win32 Debugging Application Programming Interface</h1>
+<p>
+Randy Kath<br>
+Microsoft Developer Network Technology Group</p>
+<p>
+November 5, 1992</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="287">
+</OBJECT><a href="javascript:sample1.Click()">Click to open or copy the files in the DebugApp sample application for this technical article.</a></p>
+<h2>Abstract</h2>
+<p>
+This article demonstrates how the debugging support in the Microsoft® Win32™ Application Programming Interface (API) can be used by developers to create custom debugging applications that behave exactly the way they want, including any specific features they desire. Specifically, this article discusses the following topics:
+<ul type=disc>
+<li>
+Exploring the built-in debugging support of Win32, including Win32 debug events and Win32 debug functions<br><br></li>
+<li>
+Looking at the relationship between a debugger and the process being debugged<br><br></li>
+<li>
+Representing information about a process being debugged<br><br></li>
+<li>
+Using event objects for communicating between debugger threads<br><br></li>
+<li>
+Managing the debugger's graphical user interface (GUI)<br><br></li>
+<li>
+Responding to user commands in debug threads<br><br></li>
+<li>
+Controlling the threads of a process being debugged<br><br></li>
+<li>
+Accessing thread context information from threads of a process being debugged<br><br></li>
+<li>
+Terminating and exiting a process being debugged<br><br></li>
+<li>
+Calling debug functions from a process being debugged<br><br></li>
+<li>
+Expanding on this debugger model</li>
+</ul>
+<p>
+Each of the key concepts presented is supported with code segments extracted from a sample debugging application called DEBUGAPP.EXE, whose source is included with this article. The sample application stands on its own as a multiprocess debugging application, or its source code can be used as the framework for a more elaborate custom debugger.</p>
+<h2>Introduction</h2>
+<p>
+Of the time a programmer spends developing an application, a large portion is usually spent debugging that application. Consequently, developers rely on third-party debuggers almost as much as they do editors. Unlike editors, however, debuggers can rarely be customized much. If a debugger lacks an important feature or behaves in an unusual or irritating way, developers are simply forced to put up with it.</p>
+<p>
+Microsoft® Win32™ appears ready to break this cumbersome debugging tradition with new, built-in debugging support included as part of the standard application programming interface (API). Now developers have the flexibility to create their own personal debugger that behaves exactly the way they wish. And once that is complete, having the source code to that debugger makes it all the more flexible. Developers can repeatedly add new features directly to the source code of the debugger as needed in the future.</p>
+<p>
+The Win32 debugging architecture consists of a clean, relatively straightforward set of functions and events that make it useful to all developers, not just debugger builders. Simply being familiar with Microsoft Windows NT™ and, more importantly, the Win32 API is enough to build an understanding of the debugging support. The debugger sample application described in this article required only about three weeks for implementation, including the time required to make sense of the API.</p>
+<h2>Exploring the Built-In Debugging Support of Win32</h2>
+<p>
+DebugApp, the sample application associated with this article, is a high-level debugger that meets a number of important requirements for a Win32 debugger. It can debug multiple applications simultaneously, controlling the execution of each process being debugged and presenting feedback about noteworthy events that occur in each of the processes. It can also be used to view the 2 gigabyte (GB) heap space of each process for learning how memory allocations are organized. These are only some of the capabilities that could be added to a debugger designed for the Win32 subsystem. To get a better feel for what capabilities can be implemented in a Win32 debugger, you will need to gain some knowledge of how the Win32 debugging API works.</p>
+<h3>Win32 Debug Events</h3>
+<p>
+<i>Debug events</i> are the objects of interest to a debugger in Win32—they're noteworthy incidents that occur within the process being debugged, causing the kernel to notify the debugger when they occur. As defined by Win32, debug events are one of the following:
+<ul type=disc>
+<li>
+CREATE_PROCESS_DEBUG_EVENT occurs before a new process being debugged initializes or at the time a debugger attaches to an active process.<br><br></li>
+<li>
+EXIT_PROCESS_DEBUG_EVENT occurs when the process being debugged exits.<br><br></li>
+<li>
+CREATE_THREAD_DEBUG_EVENT occurs when the process being debugged creates a new thread.<br><br></li>
+<li>
+EXIT_THREAD_DEBUG_EVENT occurs when a thread in the process being debugged exits.<br><br></li>
+<li>
+LOAD_DLL_DEBUG_EVENT occurs when the process being debugged loads a DLL (either explicitly or implicitly).<br><br></li>
+<li>
+UNLOAD_DLL_DEBUG_EVENT occurs when the process being debugged frees a DLL.<br><br></li>
+<li>
+EXCEPTION_DEBUG_EVENT occurs when an exception occurs in the process being debugged.<br><br></li>
+<li>
+OUTPUT_DEBUG_STRING_DEBUG_EVENT occurs when the process being debugged makes a call to the <b>OutputDebugString</b> function.</li>
+</ul>
+<p>
+When a debug event is generated, it comes to the debugger packaged in a <b>DEBUG_EVENT</b> structure. The structure contains fields that represent an event code (listed above), the process ID of the process that generated the debug event, the thread ID of the thread executing when the debug event occurred, and a union of eight structures, one for each of the different events. This structure provides information necessary for the debugger to distinguish between different debug events and process them individually based on their unique requirements. The <b>DEBUG_EVENT</b> structure is:</p>
+<pre><code>typedef struct _DEBUG_EVENT {&nbsp;&nbsp; /* de */
+ &nbsp;&nbsp; DWORD dwDebugEventCode;
+ &nbsp;&nbsp; DWORD dwProcessId;
+ &nbsp;&nbsp; DWORD dwThreadId;
+ &nbsp;&nbsp; union {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; EXCEPTION_DEBUG_INFO Exception;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CREATE_THREAD_DEBUG_INFO CreateThread;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CREATE_PROCESS_DEBUG_INFO CreateProcess;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; EXIT_THREAD_DEBUG_INFO ExitThread;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; EXIT_PROCESS_DEBUG_INFO ExitProcess;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; LOAD_DLL_DEBUG_INFO LoadDll;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; UNLOAD_DLL_DEBUG_INFO UnloadDll;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OUTPUT_DEBUG_STRING_INFO DebugString;
+ &nbsp;&nbsp; } u;
+} DEBUG_EVENT, *LPDEBUG_EVENT;
+</code></pre>
+<h3>Win32 Debug Functions</h3>
+<p>
+Two functions in Win32, <b>WaitForDebugEvent</b> and <b>ContinueDebugEvent</b>, are designed specifically for managing debug events as they occur in a process being debugged. These functions permit a debugger to wait for a debug event to occur, suspend execution of the process being debugged, process each debug event, and resume execution of the process being debugged when finished. Additionally, while the process being debugged is suspended, the debugger is able to change the thread context information of each of its threads. This ability provides a mechanism through which the debugger can alter normal execution of one or more threads in the process being debugged. It can, for example, change the instruction pointer for a thread to refer to an instruction at a new location. Then, when the thread resumes execution, it begins executing code at the new location. A discussion of this subject is presented later in the "Accessing Thread Context Information from Threads of a Process Being Debugged" section.</p>
+<p>
+When called, the <b>WaitForDebugEvent</b> function does not return until a debug event occurs in the process being debugged or a time-out value is reached. The time-out value is set as one of the parameters in the function. The function returns TRUE if an event occurs, and FALSE if the function times out.</p>
+<p>
+<b>DEBUG.C</b></p>
+<pre><code>while (TRUE)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; /* Wait for 1/10 second for a debug event. */
+ &nbsp;&nbsp; if (WaitForDebugEvent (&amp;de, (DWORD)100))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; switch (de.dwDebugEventCode)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case EXCEPTION_DEBUG_EVENT:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ProcessExceptionEvent (&amp;de);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case CREATE_PROCESS_DEBUG_EVENT:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ProcessCreateProcessEvent (&amp;de);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case default:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ProcessUnknownDebugEvent (&amp;de);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ContinueDebugEvent (de.dwProcessId,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; de.dwThreadId,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DBG_CONTINUE);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Perform periodic debugger responsibilities. */
+ &nbsp;&nbsp; }
+</code></pre>
+<p>
+In the code fragment above, notice that <b>WaitForDebugEvent</b> returns a Boolean value where a value of TRUE indicates that a debug event occurred and FALSE means that the function timed out. This example waits for 1/10 second for a debug event to occur, but if an event does not occur in that amount of time, it uses the time-out indicator to perform some other periodic debugger responsibilities. Since time-outs only happen when there are no debug events, this time is analogous to the idle time a CPU observes. Specifically, the DEBUGAPP.EXE sample uses this time to communicate with the main debugger thread in order to process user commands.</p>
+<p>
+When a debug event occurs, execution of that process is suspended until the debugger calls the <b>ContinueDebugEvent</b> function. Consequently, all threads in the process are suspended while the debugger is processing the debug event. A debugger needs to be mindful of the performance impact this will impose on the process being debugged. A good design, in this case, is one that allows the process being debugged to continue as soon as possible after a debug event occurs. On the other hand, when the <b>WaitForDebugEvent</b> function times out, the process being debugged is able to run concurrently with the debugger process and no performance impact is observed. Any debug events that occur during the time-out period are queued until the debugger calls the <b>WaitForDebugEvent</b> function again. So, no need to worry—there is no possibility of missing a debug event because of this circumstance.</p>
+<p>
+To call the <b>ContinueDebugEvent</b> function, the debugger must supply as parameters the thread ID and process ID of the process that generated the last debug event. Both the process and thread IDs are included as part of the <b>DEBUG_EVENT</b> structure with each debug event. They're also returned as part of the <b>PROCESS_INFORMATION</b> structure filled out by the <b>CreateProcess</b> function when starting a process for debugging. A debugger can attach to an active process for debugging, but an ID for that process is required prior to the attachment. Once the debugger has attached, the thread ID is retrieved from the <b>DEBUG_EVENT</b> structure.</p>
+<h3>The Relationship Between a Debugger and the Process Being Debugged</h3>
+<p>
+For one application (process) to become the debugger of another, it must either create the process as a debug process or attach to an active process. In both cases, a parent/child relationship is established between the debugger and the process being debugged. If the debugger process ends without ending the process being debugged, the latter process is terminated by the system. If the process being debugged ends, the debugger process becomes a normal process, able to start or attach to another process to debug.</p>
+<p>
+When the parent/child association is made, the debugger thread responsible for establishing this dependence—the thread that attaches or starts the process to be debugged—becomes the parent thread to the process being debugged. Only the parent thread of a process being debugged is capable of receiving debug events for that process. Consequently, the parent thread is the only thread able to call the <b>WaitForDebugEvent</b> and <b>ContinueDebugEvent</b> functions. If another thread calls these functions, they simply return FALSE. The basis for the design of the sample application, DEBUGAPP.EXE, is inherent in this requirement.</p>
+<h4>Creating a process to debug</h4>
+<p>
+To create a process for debugging, the debugger calls the <b>CreateProcess</b> function with the <i>fdwCreate</i> parameter set to either DEBUG_PROCESS or DEBUG_ONLY_THIS_PROCESS. DEBUG_PROCESS sets up the parent/child relationship so that the debugger will receive debug events from a process being debugged and any other processes created by that process. In this case, processes created by the process being debugged are automatically debugged by the same debugger. Using DEBUG_ONLY_THIS_PROCESS restricts debugging to the immediate process being debugged only. Processes created by the process being debugged are normal processes that have no debugging relationship established with any other process. </p>
+<p>
+An abbreviated definition of <b>CreateProcess</b> is found below. A complete definition of the <b>CreateProcess</b> function is in the Microsoft Win32 Preliminary Software Development Kit (SDK) for Windows NT <i>Programmer's Reference: Application Programming Interface, Part 1</i>.</p>
+<pre><code>BOOL CreateProcess(
+ &nbsp; LPCTSTR lpszImageName,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* address of image file name */
+ &nbsp; LPCTSTR lpszCommandLine,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* address of the command line */
+ &nbsp; LPSECURITY_ATTRIBUTES lpsaProcess,&nbsp; /* optional process attrs */
+ &nbsp; LPSECURITY_ATTRIBUTES lpsaThread,&nbsp;&nbsp; /* optional thread attrs */
+ &nbsp; BOOL fInheritHandles,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* new process inherits handles? */
+ &nbsp; DWORD fdwCreate,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* creation flags */
+ &nbsp; LPVOID lpvEnvironment,&nbsp;&nbsp;&nbsp; /* address of optional environment */
+ &nbsp; LPTSTR lpszCurDir,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* address of new current directory */
+ &nbsp; LPSTARTUPINFO lpsi,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* address of STARTUPINFO */
+ &nbsp; LPPROCESS_INFORMATION lppi);&nbsp; /* address of PROCESSINFORMATION */
+</code></pre>
+<p>
+<b>CreateProcess</b> includes several parameters for establishing the environment of the process being debugged, passing command-line arguments to the process being debugged, specifying security attributes about the process, and indicating how to start the application. The LPPROCESS_INFORMATION parameter is used for receiving information about the process being started. Specifically, it consists of the process and thread IDs of the process being debugged that are used in <b>ContinueDebugEvent</b> and handles to both the process being debugged and its initial thread.</p>
+<h4>Attaching a debugger to an active process</h4>
+<p>
+A debugger can attach to any existing process in the system, providing that it has the ID of that process. Through the <b>DebugActiveProcess</b> function, a debugger can establish the same parent/child relationship described earlier with active processes. In theory, then, the debugger should be able to present a list of active processes to the user, allowing them to select which one they would like to debug. Upon selection, the debugger could determine the ID of the selected process and begin debugging it by means of the <b>DebugActiveProcess</b> function. All that is needed then is a mechanism for enumerating the handles of each active process in the system. Unfortunately, NT™ provides no support for determining the ID of other processes in the system. While this seems to render the function useless, it really just limits the way it can be used. On its own, a debugger process cannot determine the ID of other active processes, but with some help from the system it can get the ID of a specific process in need of debugging.</p>
+<p>
+Built into NT is the ability for the system to start a debugger upon the occurrence of an unhandled exception in a process. When such an exception occurs, NT starts the default debugger and passes it the ID of the process to be debugged as a command-line parameter. NT also passes an event handle as a second command-line parameter. The debugger then calls the <b>DebugActiveProcess</b> function using the process ID passed as a command-line parameter. Once the debugger has established the debugging relationship with the offending process, it signals that it is ready to begin debugging by calling the <b>SetEvent</b> function on the event handle. At that time the system releases control of the process to the debugger.</p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;The system administrator can change the default debugger in NT to be any third-party debugger or any other debugger you choose. To do this, an entry must be added to the WIN.INI file as indicated:</p>
+<pre><code>[AeDebug]
+  Debugger = ntsd -d -p %d -e %d -g
+</code></pre>
+<p class=indent>
+To change from the standard default debugger, ntsd (NT System Debugger), to one of your choosing, simply replace the name <i>ntsd</i> with the name of the debugger you want. Also, make sure that the debugger resides in a directory in the path. For more information, consult the release notes that are included as part of the NT SDK.</p>
+<p>
+An application can take advantage of this built-in behavior as a way of invoking a debugger to debug itself if, and only if, a special circumstance occurs. For example, an application could be executing normally when a condition occurs that warrants debugging. The application could then start the debugger by calling the <b>CreateProcess</b> function similar to the way it was described above, only not as a process to debug. Also, the process needs to pass its ID as a single command-line parameter to the debugger process. The debugger is then started and passed an ID of the process to debug. One requirement of this technique is that the debugger must differentiate between the two ways that it can be created. The difference is that, when the system starts the debugger, there is a second command-line parameter representing a valid wait event that the debugger must eventually signal. When the process wishing to be debugged creates the debugger, there is no second command-line parameter and no wait event to signal.</p>
+<h2>DEBUGAPP.EXE, A Sample Implementation</h2>
+<p>
+Combining a knowledge of the Win32 debugging API and some idea of the features a custom debugger should have is important for devising the architecture of a debugger application. For example, Figure 1 portrays the architecture that was used in implementing the sample custom debugger, DebugApp.</p>
+<p>
+<img src="debug_1.gif" border=0></p>
+<p class=label>
+<b>Figure 1. DebugApp's architecture. A main debugger thread manages the debugger interface, while one thread exists for each process being debugged.</b></p>
+<p>
+DebugApp consists of one main thread and one or more debug threads. The main thread is responsible for handling the entire graphical user interface (GUI) of the debugger. Each of the other debug threads is created and destroyed as new debug sessions are started and ended. This structure serves to contain the debug-specific functionality in the debug threads and the GUI-specific functionality in the main thread. Embedded, then, is a layer of encapsulation that promotes maintenance and revision of the source code. Further, the source code for these two types of threads is located in separate source modules, DEBUG.C and MAIN.C, making it easier to go back and add functionality to one part of the system without having an adverse impact on the other.</p>
+<p>
+Once the underlying structure for the debugger is in place, the next issue is how to represent the debugger and, more specifically, each process being debugged in a single Windows™ interface. This implementation uses multiple document interface (MDI) because MDI supports multiple process debugging simultaneously and offers basic multiple window management functionality for free. It turns out MDI is also a good selection because each MDI child window can be used as a separate object capable of maintaining its own private data structures. In that case, writing the interface code to support multiple processes for debugging is no more work than writing it for one.</p>
+<p>
+A final consideration concerns the bells and whistles that should be added to the debugger. DEBUGAPP.EXE need only meet the basic requirements stated earlier in this article, but at this point many more features and behaviors could easily be applied to the underlying debugger architecture. Specifically, DEBUGAPP.EXE implements support for controlling the execution of individual threads in each of the processes being debugged. It also records all debug events chronologically and provides a mechanism for saving this log to a file for post-mortem review. </p>
+<h2>Representing Information About a Process Being Debugged</h2>
+<p>
+DEBUGAPP.EXE uses a single data structure for representing all of the information associated with a process being debugged and its threads. The structure is a simple, singly-linked list where the header (<b>DBGPROCESS</b> structure) represents the information of the process being debugged, and each node (<b>DBGTHREAD</b> structure) in the list represents information about each thread in the process. Figure 2 depicts this information and how it is organized.</p>
+<p>
+<img src="debug_2.gif" border=0></p>
+<p class=label>
+<b>Figure 2. A linked list stores information about the process being debugged and its threads.</b></p>
+<p>
+As the process being debugged creates and destroys new threads, the linked list grows and shrinks dynamically. Storage for this data structure is allocated within the debugger process in the form of a <i>serialized heap</i>. Since all threads in the debugger process have access to a shared heap, their access must be serialized to allow one thread to finish accessing the heap before another thread begins accessing it. Win32 provides serialized heaps as a mechanism to prevent access contention between threads that share a heap.</p>
+<p>
+In addition to information about the process being debugged, Win32 uses the linked-list header as a place to store information that is communicated between the main thread and the debug thread. Such information includes the MDI child window handle representing a specific debug session, the module path and filename of the process being debugged, a thread number for control information, and a handle to the heap itself, which is used both for destroying the heap when the debug session ends and allocating additional linked-list nodes. Both the linked-list header and node structures are presented in the code below.</p>
+<p>
+<b>DEBUG.H</b></p>
+<pre><code>// Define structures for debugging processes and threads.
+typedef struct DBGTHREAD&nbsp;&nbsp;&nbsp; *LPDBGTHREAD;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+typedef struct tagDbgThread&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; HANDLE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hThread;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; LPTHREAD_START_ROUTINE&nbsp;&nbsp;&nbsp; lpStartAddress;&nbsp; 
+ &nbsp;&nbsp; BOOL&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; bfState;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; LPDBGTHREAD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Next;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; }DBGTHREAD;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+typedef struct tagDbgProcess&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; HANDLE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hDbgHeap;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dwProcessID;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dwThreadID;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; HANDLE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hProcess;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; HANDLE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hFile;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; LPVOID&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lpImage;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dwDbgInfoOffset;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nDbgInfoSize;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; DBGTHREAD&nbsp;&nbsp;&nbsp; *lpThreads;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; HWND&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hWnd;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ProcessPriority;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; HANDLE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hThread;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ThreadPriority;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; szModule[MAX_PATH];&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; }DBGPROCESS;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+</code></pre>
+<p>
+DebugApp's main thread creates a serialized heap for each debug thread prior to creating the thread, and a pointer to the heap is passed to the debug thread at creation time. Both the debug thread and the main thread, each keeping a separate copy of the pointer to the structure, maintain the heap independently. The main thread stores its heap pointer in the window extra bytes of the MDI child window responsible for the process being debugged. This way each window can keep track of its own structures, independent of every other window. </p>
+<p>
+Because the debug thread is implemented as a function (similar to a <b>WinMain</b> function) that returns only when the thread has completed, and because each thread has its own stack in Win32, each debug thread can keep the pointer to the heap as an automatic variable on its stack. In this way, each debug thread can access its pointer as a local variable because it resides permanently on the stack for that thread. When the thread exits (returns from the function), its stack is deallocated and the pointer is automatically freed. Keep in mind that the heap itself is not freed by this action; it must be explicitly freed through a call to <b>DestroyHeap</b>. When and where the heap gets deallocated is discussed in the "Terminating and Exiting a Process Being Debugged" section later in this article.</p>
+<h2>Using Event Objects for Communicating Between Debugger Threads</h2>
+<p>
+Because, as described above, the debug thread and the main thread both share access to the same heap, some type of synchronization is necessary for at least creating and destroying that heap. Also, because both the debug thread and the main thread independently perform functions that occasionally must be coordinated, it stands to reason that a debugger needs a mechanism to communicate between threads. DEBUGAPP.EXE uses wait event objects for this purpose.</p>
+<p>
+Win32 uses wait events as a signaling mechanism much like a traffic signal, except there's no yellow light. A wait event represents either a signaled or unsignaled state. A thread can wait for one or more of these events to become signaled and then perform some related action. While waiting for an event to become signaled, a thread is idle. Consequently, events are perfect synchronization objects that allow one thread to wait for a signal from another before performing a specific task. In DEBUGAPP.EXE, the main thread opens a set of event objects, one for each debug thread, and stores the handles in a segment of global memory. The memory is treated as an array of object handles called <i>lpDbgEvents</i> and is kept in the window extra bytes of the responsible child window, along with the linked-list structure mentioned in the previous section.</p>
+<p>
+In Win32, threads cannot share handles to event objects, so the debug thread must open its own array of handles to access the same event objects. The strategy so far is reasonable, but a potential problem lurks here. Since the debug thread must open handles to the same event objects, it has to do so by referring to these objects by name. Win32 provides support for naming objects when they are created and referring to objects by name when they are opened for exactly this purpose. Consequently, the wait event objects must be named so that both the main thread and the debug thread can refer to identical objects. The problem arises when you start a second debug session. The second debug session requires a unique set of wait event objects—objects that can be referred to by both the debug thread and the main thread, but that also must be distinguishable from the first debug session's objects.</p>
+<p>
+To solve this problem, DEBUGAPP.EXE uses the process ID of each process being debugged as part of the name used to identify each object, as in the following example.</p>
+<p>
+<b>DEBUG.C</b></p>
+<pre><code>/* Local function creates debug event objects for thread */
+/* synchronization. */
+BOOL CreateDebugEvents (
+ &nbsp;&nbsp; LPHANDLE&nbsp;&nbsp;&nbsp; lpDbgEvents,
+ &nbsp;&nbsp; DWORD&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dwProcessID)
+{
+ &nbsp;&nbsp; char&nbsp;&nbsp;&nbsp; szEvent[MAX_PATH];
+ &nbsp;&nbsp; char&nbsp;&nbsp;&nbsp; Buff[15];
+
+
+ &nbsp;&nbsp; LoadString (GetModuleHandle (NULL), 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; IDS_DBGEVNTACTIVE,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; szEvent,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sizeof (szEvent));
+ &nbsp;&nbsp; strcat (szEvent, itoa (dwProcessID, Buff, 10));
+ &nbsp;&nbsp; if (!(lpDbgEvents[DEBUGACTIVE] = CreateEvent (NULL,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; TRUE,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; FALSE,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; szEvent)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return FALSE;
+.
+.
+.
+</code></pre>
+<p>
+Each wait event object is given a static name that is stored in a string resource table. Then, when creating a new event or opening a new handle to an existing event, the ID of the process being debugged is appended to the end of the static string. Together the static string and the process ID uniquely identify an object belonging to a specific process.</p>
+<p>
+Because each thread is responsible for storing its own array of wait event handles, each thread creates its own handles independently. Fortunately, Win32 is robust enough that no synchronization is needed for this process. In fact, both threads can make the same call to <b>CreateEvent</b> using the same object name, but only the first call will actually create new objects. The second call will return a valid handle to the same object. For that reason, both threads use one function (<b>CreateDebugEvents</b>) to retrieve valid handles without regard to which one calls first. The debug thread stores its debug event handle array on the stack as an automatic variable.</p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;In an effort to make the code in DebugApp more readable, I defined constants to represent array indexes by name rather than number. Refer to DEBUG.H to find the array index value that corresponds to a specific wait event handle.</p>
+<p>
+In addition to the array of wait events used for communication between the two threads, DebugApp uses two other wait events, one for synchronizing startup and one for shutdown of the debug thread. These two event objects need only be created and used for a relatively short duration, so no accommodation is needed for them. Instead, they are created, freed, and released, all within the context of a single window message in the main thread. In both cases they are used as in the following example.</p>
+<p>
+<b>DEBUG.C</b></p>
+<pre><code>/* Create initialize event. */
+LoadString (GetModuleHandle (NULL),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; IDS_DBGEVNTINITACK,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; szEvent,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; MAX_PATH);
+hEvent = CreateEvent (NULL, TRUE, FALSE, szEvent);
+
+/* Create debug thread. */
+if (!(CreateThread ((LPSECURITY_ATTRIBUTES)NULL,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 4096,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (LPTHREAD_START_ROUTINE)DebugEventThread,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (LPVOID)lpDbgProcess,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;TID)))
+ &nbsp;&nbsp; return NULL;
+
+/* Wait for debugger to complete initialization before opening */
+/* debug events. */
+WaitForSingleObject (hEvent, INFINITE);
+CloseHandle (hEvent);
+</code></pre>
+<p>
+First, the main thread creates an event by name with an initial value of FALSE. Then, it starts the debug thread and waits for the object it created. At this point, the thread stops execution until the wait event becomes TRUE, its signaled state. Meanwhile, the debug thread starts execution at the same time. The following code fragment shows how the debug thread signals the same wait event, identified by a common name, once it has completed its initialization.</p>
+<p>
+<b>DEBUG.C</b></p>
+<pre><code>/* Create process to be debugged. */
+.
+.
+.
+/* Signal completion of initialization to calling thread. */
+LoadString (GetModuleHandle (NULL),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; IDS_DBGEVNTINITACK,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; szEvent,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; MAX_PATH);
+hEvent = OpenEvent (EVENT_ALL_ACCESS, FALSE, szEvent);
+SetEvent (hEvent);
+CloseHandle (hEvent);
+</code></pre>
+<p>
+The main thread is able to continue execution after the event is signaled. Then, it is free to release the event object because the synchronization is complete. A similar wait event is used for synchronization when the debug thread shuts down.</p>
+<h2>Managing the Debugger's Graphical User Interface</h2>
+<p>
+When DEBUGAPP.EXE begins, the first thread in the process gets started. This thread behaves exactly like a basic, single-threaded MDI Windows-based application. It registers window classes for the frame and debug windows, creates the frame and MDI client windows, and initializes application-specific data. When complete, the thread enters a continuous <b>GetMessage</b> loop, awaiting commands from the user.</p>
+<p>
+When the command is sent to load a process for debugging, the main thread first calls the <b>GetOpenFileName</b> common dialog routine, validates the selected filename, and informs the MDI client to create a new child window. The MDI client then creates the new child window, allowing it to perform its own window initialization. </p>
+<p>
+The following initialization is performed during the WM_CREATE message of the debugger window:
+<ol>
+<li>
+The child window creates an edit control, used for recording debug information for this debug process, that completely fills its client area. <br><br></li>
+<li>
+The child window allocates a segment of global memory for storing the array of wait event object handles.<br><br></li>
+<li>
+The child window calls the <b>StartDebugger</b> function to create the debug thread and the process for debugging.</li>
+</ol>
+<p>
+The segment of global memory is passed as a parameter and returned with the array filled with valid event handles. The <b>StartDebugger</b> function also returns a pointer to the serialized heap for this debugger. Both of these pointers are then placed in window extra bytes for this window. The new child window then returns—eventually back to the frame window where the command to load the process for debugging was originally sent—permitting the main thread to continue executing in support of the graphical user interface. </p>
+<p>
+All subsequent file-loading commands work in exactly the same way, permitting the user to load simultaneously as many processes for debugging as the system can accommodate, given the amount of resources available. Other menu commands are distributed as appropriate by the frame window. Some of the commands are handled by the MDI client window, while others are processed only by the frame window. Still other commands, like <b>View Thread</b> and <b>View Process</b>, are intended for the debug window that is currently active. The frame distributes these messages directly to the active debugger window.</p>
+<p>
+Most commands intended for a specific debugger window involve communication between that window and the corresponding debug thread. In these cases, the debugger window signals a wait event for the debug thread. The debug thread can then act upon that event the next time it waits for it. Once the event has been signaled, the main thread simply returns back to the message loop for the next user command. Since the debug thread has access to the window handle of the debug window in its <b>DBGPROCESS</b> data structure, it is able to submit data to the edit control directly. This permits the user free access to commands without having to wait for any prolonged processing on the part of the debug thread.</p>
+<h2>Responding to User Commands in Debug Threads</h2>
+<p>
+Besides handling debug events in the process being debugged, the debug thread also handles all user commands once they have been signaled as wait events in the debug window. To accommodate user command events from the main thread and still be able to debug the process, the debug thread implements a multiple-object wait loop.</p>
+<p>
+<b>DEBUG.C</b></p>
+<pre><code>while (TRUE)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; int&nbsp;&nbsp;&nbsp; nIndex;
+
+ &nbsp;&nbsp; /* Wait for debugger active. */
+ &nbsp;&nbsp; switch (nIndex = WaitForMultipleObjects (nDEBUGEVENTS,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hDbgEvent,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; FALSE,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; INFINITE))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case CLOSEDEBUGGER:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; int&nbsp;&nbsp;&nbsp; i;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Terminate process being debugged. */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; TerminateProcess (lpDbgProcess-&gt;hProcess, 0);
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Signal close command acknowledged event. */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; LoadString (GetModuleHandle (NULL),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; IDS_DBGEVNTCLOSEACK,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; szEvent,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; MAX_PATH);
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hEvent = OpenEvent (EVENT_ALL_ACCESS,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; FALSE,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; szEvent);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SetEvent (hEvent);
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Close all debug events. */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; for (i=0; i&lt;nDEBUGEVENTS; i++)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CloseHandle (hDbgEvent[i]);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CloseHandle (hEvent);
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Exit debugger now. */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return TRUE;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case SUSPENDDEBUGGER:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SuspendDebuggeeProcess (lpDbgProcess);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ResetEvent (hDbgEvent[DEBUGACTIVE]);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ResetEvent (hDbgEvent[SUSPENDDEBUGGER]);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case RESUMEDEBUGGER:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ResumeDebuggeeProcess (lpDbgProcess);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SetEvent (hDbgEvent[DEBUGACTIVE]);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ResetEvent (hDbgEvent[RESUMEDEBUGGER]);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case DEBUGACTIVE:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* If debug active */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if ((WaitForDebugEvent (&amp;de, (DWORD)100)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (de.dwProcessId == lpDbgProcess-&gt;dwProcessID)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; switch (de.dwDebugEventCode)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case EXCEPTION_DEBUG_EVENT:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ProcessExceptionEvent (&amp;de);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case CREATE_PROCESS_DEBUG_EVENT:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ProcessCreateProcessDebugEvent (&amp;de);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; default:
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ProcessDefaultDebugEvent (&amp;de);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Notify of sibling process debug event. */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; AppendEditText (lpDbgProcess-&gt;hWnd,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; de.dwDebugEventCode +
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; IDS_SIBLING,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL);
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ContinueDebugEvent (de.dwProcessId,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; de.dwThreadId,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DBG_CONTINUE);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; }
+</code></pre>
+<p>
+In the example above, the debug thread begins a loop and immediately calls <b>WaitForMultipleObjects</b> to await the signaling of any debugger event. The debugger events are described below:
+<ul type=disc>
+<li>
+CLOSEDEBUGGER signals the debug thread to abort debugging the current process. Highest priority event.<br><br></li>
+<li>
+SUSPENDDEBUGGER signals the debugger to suspend debugging the current process.<br><br></li>
+<li>
+RESUMEDEBUGGER signals the debugger to resume debugging the process.<br><br></li>
+<li>
+DEBUGACTIVE signals the debug thread to debug the process because there is nothing else to do. Lowest priority event.</li>
+</ul>
+<p>
+The debug thread remains suspended upon this call until an event becomes signaled. Then, the <b>WaitForMultipleObjects</b> function returns the index of the event that was signaled. If more than one debugger event is signaled at a time, the one with the highest priority is returned. Events are assigned priorities according to how they are ordered in the array of event handles, where the lower the array position the higher the priority. The array of handles is passed as an argument to the <b>WaitForMultipleObjects</b> function. DEBUGAPP.EXE places the highest priority on exiting the debugger and the lowest priority on actual debugging. That means that debugging is performed only when the debug thread has nothing else to do. Really this means that the debugger is able to respond immediately to commands that do not occur frequently—such as exit.</p>
+<p>
+Also, debug events are separate events from the events that are signaled by the main thread in a debug window. Consequently, another wait loop is embedded within the first for handling debug events alone. However, the debug thread must break from the debug event loop periodically to wait for debugger events. To facilitate this requirement, a time-out is used on the debug event loop to allow the debug thread a way of breaking out of the debug event loop when no debug events are occurring. When the debugger is no longer debugging, as it were, it is able to check for other events that may have become signaled in the interim. While doing so, the debugger does not need to suspend the process being debugged. Any debug events that occur while the debugger is not waiting for them are queued until the debugger resumes its call to <b>WaitForDebugEvent</b>.</p>
+<p>
+Wait events, as used by the debugger, can be either automatic or manual reset types. DebugApp uses manual reset events for more control over when the events become acknowledged. This is necessary because, while the debugger is handling (or waiting for) debug events, more than one debugger event command might have become signaled. When the debugger returns to handle the events, it must handle them one at a time. Two automatic wait events would automatically become reset as soon as the debugger returned from the <b>WaitForMultipleObjects</b>. Yet the debugger prioritizes itself so that it responds only to the signaled event with lowest priority. When complete, it returns to handle any others that are still signaled. While handling each one, it resets the event manually to acknowledge the completion of the task for that event. This prevents events from slipping through the cracks while other events are being processed.</p>
+<h2>Controlling the Threads of a Process Being Debugged</h2>
+<p>
+In preemptive, multithreaded operating systems like NT, a mechanism often referred to as the <i>system scheduler</i> exists for scheduling each thread in the system. The system scheduler assigns each thread a rank or priority that it uses to determine how much processing to attribute to a thread before switching to the next thread. Specifically in NT, each thread has a base priority in the range 1–31, where the higher the priority, the more processing time is attributed to the thread. NT establishes the base priority by combining the specific thread priority and the priority class of its process, as shown in the diagram in Figure 3.</p>
+<p>
+<img src="debug_3.gif" border=0></p>
+<p class=label>
+<b>Figure 3. Base thread priorities for each of the process priority classes.</b></p>
+<p>
+NT provides processes with the capability of determining and adjusting their threads' base priorities. The Win32 subsystem provides this feature through the <b>SetPriorityClass</b>, <b>GetPriorityClass</b>, <b>SetThreadPriority</b>, and <b>GetThreadPriority</b> functions. Using these functions, processes can adjust their threads' base priority values. To adjust the base priority of threads belonging to a process other than itself, a process needs special access rights.</p>
+<p>
+By default, a debugger process has PROCESS_SET_INFORMATION access to the process it is debugging and THREAD_SET_INFORMATION access to all threads in that process. These accesses permit the debugger process to change both the priority class of the process being debugged and the thread priority value for each thread in the process. In addition, unlike debug events, any thread in the debugger process can adjust both the process priority class and thread priority values of the process it is debugging. This means that the main debugger thread is able to perform these functions directly without having to synchronize the procedure with the appropriate debug thread.</p>
+<p>
+Because of this, the GUI thread of the debugger can perform execution control for all processes being debugged. In DEBUGAPP.EXE, execution control is handled by a single dialog box, Thread Execution Control. When the dialog box is invoked, the process being debugged is suspended until the dialog box is dismissed by the user. In the interim, the user is able to modify the priority value for each thread and the priority class for the process being debugged. The dialog box lists each of the threads in the process being debugged, showing their base priorities for comparison. After adjusting priorities for the threads and process, the user exits the dialog box by clicking either OK or Cancel. Clicking OK changes the priorities in the process being debugged and resumes its execution. Clicking Cancel simply causes the process being debugged to resume with the priorities left unchanged.</p>
+<p>
+In addition to adjusting the base priority of threads, the debugger process can also suspend and terminate the threads of the process being debugged. Specifically, suspending and resuming threads is only available to processes with THREAD_SUSPEND_RESUME access and termination to processes with THREAD_TERMINATE access, but again a debugger process has these access rights by default. The aforementioned Thread Execution Control dialog box in DEBUGAPP.EXE provides support for suspending and resuming threads, but not for terminating threads. Win32 provides support for controlling threads through the <b>SuspendThread</b>, <b>ResumeThread</b>, and <b>TerminateThread</b> functions.</p>
+<h3>Accessing Thread Context Information from Threads of a Process Being Debugged</h3>
+<p>
+By default, a debugger can change the context of any thread in the process being debugged by virtue of the fact that it has access to the handle for each thread of that process. In DEBUGAPP.EXE, the thread handles of the process being debugged are saved as the thread is created in the linked-list structure described earlier in "Representing Information About a Process Being Debugged." To change the context of a thread in the process being debugged, the debugger calls the <b>SetThreadContext</b> function. The arguments to this function are simply a handle to the thread to be affected and a pointer to a <b>CONTEXT</b> structure filled with information describing how the thread context will exist after making the call. Similarly, to view the state of a thread's context, the debugger calls <b>GetThreadContext</b>. Any process can call <b>Set/GetThreadContext</b> for any other thread, providing that it has a valid handle to that thread.</p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;A thread context is implementation-specific, differing from one hardware architecture to another. The fields of the <b>CONTEXT</b> structure vary, depending on whether you're running on an Intel platform or a MIPS platform. For details on implementing the <b>CONTEXT</b> structure for a specific platform, refer to the specific header file where the structure is defined. For the current release of the Win32 SDK for Windows NT, the structure is defined in NTI386.H and NTMIPS.H for Intel and MIPS hardware, respectively. Keep in mind, however, that the pre-release version of the Win32 SDK for Windows NT is subject to file reorganization—header files may change names and could be combined or split apart before the final version is released. The thread <b>CONTEXT</b> structure may be relocated to another header file during that time. The QGREP utility can be used to find the header file containing the <b>CONTEXT</b> structure for your particular version of the SDK.</p>
+<h3>Terminating and Exiting a Process Being Debugged</h3>
+<p>
+There is more than one way to end a process in Windows NT. Win32 provides support for terminating a process, given the handle to that process, in the <b>TerminateProcess</b> function. Yet, using this function prevents the process from having the opportunity to clean up volatile data. <b>TerminateProcess</b> ends the process immediately without calling the <b>DllEntryPoint</b> function of any dynamic-link libraries (DLLs) that the application may have loaded. <b>TerminateProcess</b> does not send any last messages to window procedures (like WM_DESTROY); it simply terminates. The Win32 subsystem, however, is robust enough to clean up all system resources owned by the process and associated DLLs. Unlike Windows version 3.1, a Win32 process does not leave the system in an unstable state solely by calling this function.</p>
+<p>
+Terminating a process from the debugger may, in fact, be the appropriate way to end a process being debugged. If at any time a user of the debugger commands the process being debugged to exit from the debugger, it is understood that the process is closing abnormally. If the user wants to gracefully exit the process, the user can simply exit it normally directly from the application interface. In fact, abruptly exiting a process—but only after it's allowed to save its changes—is, in itself, a contradiction.</p>
+<p>
+Another method of exiting a process is to have a process call <b>ExitProcess</b> itself. This method is considered a "graceful" exit because all associated DLLs get a chance to clean up before being detached. In this case, the <b>DllEntryPoint</b> function gets called for each thread as it terminates and once for when the process goes away. This function permits the process to save volatile data before exiting. Yet, since <b>DllEntryPoint</b> does not include a parameter for a process handle, it cannot be called by one process in the hope of exiting another process. So, the debugger cannot command the process being debugged to exit gracefully by calling this function.</p>
+<p>
+The final technique a debugger process could employ to command the process being debugged to exit gracefully does not use a straightforward API call. Instead, it involves manipulating the context information of a thread in the process being debugged. Because <b>ExitProcess</b> can only be called from the process that intends to exit, the debugger can change the context information of the main thread in the process being debugged so that the next instruction it executes is a call to <b>ExitProcess</b>. </p>
+<p>
+To do this, the debugger must:
+<ol>
+<li>
+Suspend the process being debugged.<br><br></li>
+<li>
+Get the context information of a thread in the process being debugged. (It can be any thread in the process, as long as it is not a suspended thread.)<br><br></li>
+<li>
+Replace the instruction-pointer contents with the address of the <b>ExitProcess</b> function as referenced by the process being debugged.<br><br></li>
+<li>
+Set the altered context information structure back into the thread of the process being debugged.<br><br></li>
+<li>
+Resume execution of the process.</li>
+</ol>
+<p>
+The process being debugged behaves as though it made a call to <b>ExitProcess</b> itself. (Actually that is exactly what it does.) The following function illustrates this technique.</p>
+<p>
+<b>DEBUG.C</b></p>
+<pre><code>void ExitDebuggee (
+ &nbsp;&nbsp; DBGPROCESS *lppr)
+{
+ &nbsp;&nbsp; CONTEXT&nbsp;&nbsp;&nbsp; thContext;
+
+ &nbsp;&nbsp; GetThreadContext (((DBGTHREAD *)lppr-&gt;lpThreads)-&gt;hThread,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;thContext);
+ &nbsp;&nbsp; thContext.Eip = lppr-&gt;ExitProcess;
+ &nbsp;&nbsp; SetThreadContext (((DBGTHREAD *)lppr-&gt;lpThreads)-&gt;hThread,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;thContext);
+}
+</code></pre>
+<p>
+Obtaining the address of the <b>ExitProcess</b> function is problematic in the above procedure. While it is relatively easy to determine the whereabouts of the function in a process that is executing (it is a member of the system DLL, KERNEL32.DLL), finding the exact address of that function in the process being debugged is more difficult. Each application in Win32 maps all of the DLLs it uses into its own address space, based mostly on the order in which the DLLs are loaded. This means that, while more than one application may use a given DLL, two processes may or may not have loaded the same system DLL into the same location in their respective address spaces. Consequently, the same function called from a common DLL might be located at different virtual addresses in the two applications. It is tempting to draw the conclusion that system DLLs are loaded into the same base address in every application, for that would make this problem simply go away. <b>This conclusion, however, is invalid. It may work in some cases, but it cannot be considered a fail-safe assumption. Developers are wise not to draw this conclusion about the system.</b></p>
+<p>
+So, to make the <b>ExitDebuggee</b> function work properly (see code fragment above), the address of the <b>ExitProcess</b> function must be known in the context of the address space of the process being debugged.</p>
+<h4>Determining the location of ExitProcess</h4>
+<p>
+One safe assumption to make is that the location of a function in a DLL is always at the same offset from the DLL's base address. This assumption provides the necessary information to develop a technique that is fail-safe. The debugger is already notified when the process being debugged loads each of its DLLs, and at that time the base address of the DLL is provided to the debugger. All the debugger needs to do at this point is determine which DLL being loaded contains the <b>ExitProcess</b> function and the offset of that function within the DLL.</p>
+<p>
+To determine the offset of the function in the DLL, call <b>GetProcAddress</b> with the handle to the appropriate DLL and a string identifying the <b>ExitProcess</b> function. This can be done within the context of the debugger process since the offset is consistent across processes. The handle to this DLL can be obtained by making a call to <b>LoadLibrary</b>, specifying KERNEL32.DLL by name. Then, subtract the base address of the DLL from the address returned from <b>GetProcAddress</b>. The difference is the offset into the DLL. The base address of KERNEL32.DLL can be determined by calling the <b>VirtualQuery</b> function, supplying the address of the <b>ExitProcess</b> function as the base address for the region of memory. <b>VirtualQuery</b> returns a filled-out <b>MEMORY_BASIC_INFORMATION</b> structure. One field of that structure is the base address for the region of memory. In this case, that will be the base address of the DLL code region.</p>
+<p>
+Even more difficult is the task of determining which DLL is being loaded in the process being debugged when LOAD_DLL_DEBUG_EVENT occurs. During this debug event, the debugger receives the base address for the DLL being loaded, but only a module file handle with which to identify the DLL. Fortunately, the file handle can be used to read information about the file. To identify the file as the correct DLL, the debugger must determine the name of the DLL by extracting the filename, assigned by the linker, from the executable image. The name is found after tracing through a maze of offsets and tables of data embedded within the executable file. </p>
+<p class=indent>
+<B><b>Note</b></B>&nbsp;&nbsp;&nbsp;Exact details of the executable format can be found in the "Portable Executable Format" document located on the Microsoft Developer Network CD (Specs and Strategy, Specifications) or in the NTIMAGE.H file. NTIMAGE.H is included as part of the Win32 SDK for Windows NT. </p>
+<p>
+A limitation, though, exists in this technique. Since the name of the executable is embedded in the file during the link process, there is no way of knowing whether the file was renamed by a user after linking. Unfortunately, there is no way around this limitation. No other way exists to determine the name of the DLL that is being loaded in the debugger—yet, one can always hope that this will be a feature included in a future release of NT.</p>
+<p>
+Once the name is extracted, it can be compared to see if, in fact, the DLL is the KERNEL32.DLL file. If so, the debugger saves this base address in the process structure for use in the <b>ExitDebuggee</b> function as shown in the code fragment in the previous section.</p>
+<h2>Debug Functions a Process Being Debugged Can Call</h2>
+<p>
+A few functions are provided as part of the Win32 API for applications that are being debugged. Each of these functions generates a debug event in the debugger process:
+<ul type=disc>
+<li>
+<b>DebugBreak</b> is provided simply to insert a break point in an application. This function generates the EXCEPTION_DEBUG_EVENT event and with it an <b>EXCEPTION_DEBUG_INFO</b> structure that includes an <b>EXCEPTION_RECORD</b> structure, which includes an EXCEPTION_BREAKPOINT exception code for this event.<br><br></li>
+<li>
+<b>OutputDebugString</b> provides the opportunity for the process being debugged to pass a string to the debugger application. This function can be extremely useful in a custom debugger application because it provides a mechanism for the process being debugged to pass information to the debugger. The debugger can then log these strings when they occur or respond according to their content. This function generates the OUTPUT_DEBUG_STRING_DEBUG_EVENT event and is accompanied by an <b>OUTPUT_DEBUG_STRING_INFO</b> structure. This structure contains the address and length of the string in the process being debugged and a Unicode® flag, indicating the type of string it is. The debugger can access the string by calling <b>ReadProcessMemory</b> and indicating the length and address of the string to read along with the process handle.<br><br></li>
+<li>
+<b>FatalExit</b> and <b>FatalAppExit</b> are functions provided for an application to exit immediately but pass control to the debugger before going away.</li>
+</ul>
+<p>
+The debugger handles each of the above calls as any application calling them would when encountering any other debug event. The only distinction is the type of event itself. If it is desirable to have the debugger execute special processing after one of these types of events, the debugger simply treats each of these debug events uniquely. The debug event loop is already prepared to handle this eventuality.</p>
+<h2>Expanding on This Debugger Model</h2>
+<p>
+The debugger presented in this article falls short of a full-fledged, source-level debugger in several ways. It does not provide any source-level functionality, like single-step execution and break points. It also lacks any symbolic information support. Many features could easily be added to this debugger—many without too much effort and some that would require considerable effort. The purpose of DEBUGAPP.EXE is to provide a base upon which a complete debugging environment could be built while at the same time introducing the debugging API of Win32. To that extent, this debugger is a solid debugging foundation, and it demonstrates extensive use of the debugging API. Don't be surprised to see future samples and technical articles based on this debugging sample!</p>
+</BODY>
+</HTML>

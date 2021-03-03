@@ -1,0 +1,222 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Handling Long Data Types</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+<h1><a name="ole4odbc_handle"></a><sup></sup>Handling Long Data Types</h1>
+<p>
+To a rowset, a BLOB or OLE storage object is a large sequence of uninterpreted bytes that a consumer stores in a column. It is the consumer's responsibility to interpret this sequence of bytes. BLOBs and OLE storage objects are categorized as:
+<ul type=disc>
+<li>
+BLOB. Uninterpreted sequence of bytes. The type indicator of a BLOB column is DBTYPE_BYTES, DBTYPE_STR, or DBTYPE_WSTR.<br><br></li>
+<li>
+IPersist * Object. An OLE object supporting either <b>IPersistStream</b>, <b>IPersistStreamInit</b>, or <b>IPersistStorage</b>. The type indicator is DBTYPE_UNKNOWN.</li>
+</ul>
+<p>
+A consumer can determine what types of BLOBs, OLE storage objects, and other types of OLE objects that a provider supports by calling <b>IDBProperties</b> with the DBPROP_OLEOBJECTS property.</p>
+<h3><a name="ole4odbc_bloblong"></a>BLOBs as Long Data</h3>
+<p>
+If the entire BLOB can be held in memory, it is treated as long in-memory data. To read the BLOB data, the consumer binds the column with a type identifier DBTYPE_BYTES, DBTYPE_STR, or DBTYPE_WSTR, and calls <b>IRowset::GetData</b> with an accessor containing this binding. The provider then returns the entire contents of the BLOB to the consumer. </p>
+<h3><a name="ole4odbc_blobstore"></a>BLOBs as Storage Objects</h3>
+<p>
+If a BLOB is too large to hold in memory, the consumer manipulates it through the <b>ISequentialStream</b> storage interface. The rows in the rowset are containers of the storage objects. </p>
+<p>
+On retrieval, BLOB columns are deferred by default. Their data is not retrieved and storage objects are not created until <b>GetData</b> is called. In particular, methods that retrieve rows, such as <b>GetNextRows</b>, do not return data for BLOB columns in the data cache.</p>
+<p>
+A storage object created by the provider remains valid until one of the following occurs:
+<ul type=disc>
+<li>
+The consumer calls <b>IRowset::ReleaseRows</b> to release the row containing the storage object, or <b>IRowset::Release</b> to release the rowset containing the row.<br><br></li>
+<li>
+The consumer calls <b>ITransaction::Commit</b> or <b>ITransaction::Abort</b>, and the retaining flag is not set.</li>
+</ul>
+<p>
+It is the consumer's responsibility to release the storage object, even if the containing row has been released.</p>
+<h4>Accessing BLOB data with storage objects</h4>
+<p>
+To bind to a BLOB data as a storage object, a consumer creates an accessor that includes a binding to the BLOB column. The consumer:
+<ol>
+<li>
+Sets the <i>dwType</i> element of the DBBINDING structure for the BLOB column to DBTYPE_IUNKNOWN.<br><br></li>
+<li>
+Sets the <i>iid</i> element of the DBOBJECT structure in the binding to IID_ISequentialStream.<br><br></li>
+<li>
+Sets the <i>dwFlags</i> element of the DBOBJECT structure in the binding.</li>
+</ol>
+<p>
+To read data from a BLOB column using a storage object, the consumer:
+<ol>
+<li>
+Creates an accessor that includes a binding for the column.<br><br></li>
+<li>
+Calls <b>IRowset::GetData</b> with this accessor. The provider creates a storage object over the BLOB's data and returns a pointer to the requested storage interface (<b>ISequentialStream</b>) on this object.<br><br></li>
+<li>
+Calls methods on the storage interface to read the BLOB's data (<b>ISequentialStream::Read</b>).</li>
+</ol>
+<p>
+If the consumer calls <b>GetData</b>, <b>GetVisibleData</b>, or <b>GetOriginalData</b> multiple times for the BLOB column, the provider returns distinct pointers to storage interfaces on each call. This is similar to opening a file a number of times and returning a different file handle each time. It is the consumer's responsibility to call <b>Release</b> on each of these storage interfaces.</p>
+<p>
+For example, the following code example binds to a BLOB column and uses <b>ISequentialStream::Read</b> to read the data. For the complete source code listing, see Appendix B. The general flow of control is:
+<ol>
+<li>
+Create a binding structure to retrieve the <b>ISequentialStream</b> interface from an OLE storage object.<br><br></li>
+<li>
+Obtain the <b>IAccessor</b> interface.<br><br></li>
+<li>
+Call <b>CreateAccessor</b> to create the accessor.<br><br></li>
+<li>
+Call <b>GetNextRows</b> to retrieve the row handles.<br><br></li>
+<li>
+Call <b>GetData</b> to retrieve the storage object from a row.<br><br></li>
+<li>
+Call <b>ISequentialStream</b> to read the data from the stream.<br><br></li>
+<li>
+Repeat steps 4, 5, and 6 to retrieve new storage objects and get the data.</li>
+</ol>
+<pre><code>/********************************************************************
+* Retrieve data from an ODBC LONG_VARCHAR column (Notes in 
+* Employees).
+********************************************************************/
+void myGetBLOBData
+ &nbsp;&nbsp; (
+ &nbsp;&nbsp; IRowset*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIRowset&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // [in]
+ &nbsp;&nbsp; )
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp; DBOBJECT&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ObjectStruct;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // For binding, retrieve 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // an object pointer.
+ &nbsp;&nbsp; DBBINDING&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rgBinding[1];&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Bind a single column.
+
+ &nbsp;&nbsp; IAccessor*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIAccessor = NULL;&nbsp;&nbsp;&nbsp; // Accessor creation
+ &nbsp;&nbsp; HACCESSOR&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hAccessor = NULL;
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ulErrorBinding;
+
+ &nbsp;&nbsp; void*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pData;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Bound consumer buffer
+ &nbsp;&nbsp; HROW&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rghRows[1];
+ &nbsp;&nbsp; HROW*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pRows = &amp;rghRows[0];
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cRows;
+
+ &nbsp;&nbsp; char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; szNotes[BLOCK_SIZE + 1];&nbsp;&nbsp;&nbsp; // Text data from
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // "Notes"
+ &nbsp;&nbsp; ULONG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cbRead;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Count of bytes read
+
+ &nbsp;&nbsp; // Set up the object structure for accessor creation. Ask the
+ &nbsp;&nbsp; // provider to return an ISequentialStream interface for reading.
+ &nbsp;&nbsp; ObjectStruct.dwFlags = STGM_READ; 
+ &nbsp;&nbsp; ObjectStruct.iid = IID_ISequentialStream;
+
+ &nbsp;&nbsp; // Set up the binding structure for the accessor.
+ &nbsp;&nbsp; rgBinding[0].iOrdinal = 1;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Only one column
+ &nbsp;&nbsp; rgBinding[0].obValue&nbsp; = 0;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Offset to data
+ &nbsp;&nbsp; rgBinding[0].obLength = 0;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Ignore length 
+ &nbsp;&nbsp; rgBinding[0].obStatus = sizeof(IUnknown*);&nbsp; // Offset to status 
+ &nbsp;&nbsp; rgBinding[0].pTypeInfo = NULL;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Reserved
+ &nbsp;&nbsp; rgBinding[0].pObject&nbsp; = &amp;ObjectStruct;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Our interface
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // request
+ &nbsp;&nbsp; rgBinding[0].pBindExt = NULL;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Reserved
+ &nbsp;&nbsp; rgBinding[0].dwPart&nbsp;&nbsp; = DBPART_VALUE |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Get both VALUE...
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DBPART_STATUS;&nbsp; // ...and STATUS 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // parts.
+ &nbsp;&nbsp; rgBinding[0].dwMemOwner = DBMEMOWNER_CLIENTOWNED;
+ &nbsp;&nbsp; rgBinding[0].eParamIO = DBPARAMIO_NOTPARAM;
+ &nbsp;&nbsp; rgBinding[0].cbMaxLen = 0;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Not applicable
+ &nbsp;&nbsp; rgBinding[0].dwFlags&nbsp; = 0;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Reserved
+ &nbsp;&nbsp; rgBinding[0].wType = DBTYPE_IUNKNOWN;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Type 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // DBTYPE_IUNKNOWN
+ &nbsp;&nbsp; rgBinding[0].bPrecision = 0;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Not applicable
+ &nbsp;&nbsp; rgBinding[0].bScale = 0;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Not applicable
+
+ &nbsp;&nbsp; // Get the accessor interface and create the accessor.
+ &nbsp;&nbsp; pIRowset-&gt;QueryInterface(IID_IAccessor, (void**) &amp;pIAccessor);
+
+ &nbsp;&nbsp; if (FAILED(pIAccessor-&gt;CreateAccessor(DBACCESSOR_ROWDATA, 1,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rgBinding, sizeof(IUnknown*) + sizeof(ULONG), &amp;hAccessor,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;ulErrorBinding)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("CreateAccessor failed.");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; // Allocate memory for the returned pointer and the status 
+ &nbsp;&nbsp; // field. The first sizeof(IUnknown*) bytes are for the pointer 
+ &nbsp;&nbsp; // to the object; the next sizeof(ULONG) bytes are for the 
+ &nbsp;&nbsp; // status.
+ &nbsp;&nbsp; pData = new BYTE[sizeof(IUnknown*) + sizeof(ULONG)];
+
+ &nbsp;&nbsp; while (TRUE)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Get the next row.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (FAILED(pIRowset-&gt;GetNextRows(NULL, 0, 1, &amp;cRows, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;pRows)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("GetNextRows failed.\n");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (cRows == 0)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Get the row data, the pointer to an ISequentialStream*.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (FAILED(pIRowset-&gt;GetData(*pRows, hAccessor, pData)))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DumpError("GetData failed.\n");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Read and process BLOCK_SIZE bytes at a time.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if ((ULONG)((BYTE*)pData)[rgBinding[0].obStatus] == 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DBSTATUS_S_ISNULL)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Process NULL data.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printf("&lt;null&gt;");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else if ((ULONG)((BYTE*)pData)[rgBinding[0].obStatus] == 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DBSTATUS_S_OK)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; do
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (*((ISequentialStream**) pData))-&gt;Read(szNotes, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BLOCK_SIZE, &amp;cbRead);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (cbRead &gt; 0)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Process data.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; szNotes[cbRead] = (char) NULL;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printf(szNotes);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; while (cbRead &gt;= BLOCK_SIZE);
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (*((ISequentialStream**) pData))-&gt;Release();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printf("\n\n");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pIRowset-&gt;ReleaseRows(cRows, pRows, NULL, NULL, NULL);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+ &nbsp;&nbsp; // Clean up.
+ &nbsp;&nbsp; pIAccessor-&gt;ReleaseAccessor(hAccessor, NULL);
+ &nbsp;&nbsp; pIAccessor-&gt;Release();
+
+ &nbsp;&nbsp; delete [] pData;
+ &nbsp;&nbsp; }
+</code></pre>
+<p>
+To write data to a BLOB column using a storage object, the consumer first creates an accessor that includes a binding for the column and then:
+<ol>
+<li>
+Calls <b>IRowset::GetData</b> with the accessor that binds the BLOB column. The provider creates a storage object over the BLOB's data and returns a pointer to the requested storage interface (<b>ISequentialStream</b>) on this object.<br><br></li>
+<li>
+Calls a method on the storage interface to write data (<b>ISequentialStream::Write</b>).</li>
+</ol>
+<p>
+OLE's structured storage model supports both transacted and direct modes. In transacted mode, all changes are buffered, and the buffered changes are persisted or discarded only when an explicit commit or abort request is done. In direct mode, every change is followed by an automatic commit. If the storage object is transacted (that is, the STGM_TRANSACTED flag is set in the <i>dwFlags</i> element of the DBOBJECT structure in the binding), the storage object does not publish the changes to the containing rowset until the consumer calls <b>Commit</b> on the storage interface. If the storage object is not transacted (that is, the STGM_DIRECT flag is set), the storage object publishes the changes to the containing rowset when the consumer calls a method on the storage interface to write the changes.</p>
+<p>
+Alternately, the consumer calls <b>IRowsetChange::SetData</b> or <b>IRowsetChange::InsertRow</b> with the accessor that binds the BLOB column, passing a pointer to a storage interface on a separate storage object.</p>
+</BODY>
+</HTML>

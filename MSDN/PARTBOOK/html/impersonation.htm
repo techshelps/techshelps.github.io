@@ -1,0 +1,175 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Impersonation</title>
+<style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000 dir=ltr>
+<h1><a name="impersonation"></a>Impersonation</h1>
+<p>
+IIS takes certain steps towards security by handling most of the requirements for simple ISAPI applications. Before a request thread is used to invoke an ISAPI application, IIS sets the thread to impersonate the client that submitted the request. Remember that the client must been locally authenticated, either against client-supplied credentials or the anonymous access account. Impersonating the client does two things: it protects resources that the client doesn't have the right to access and potentially allows for network access (by default, the system account is a local account and can't access network resources—network access is only possible when HTTP Basic authentication is used, not when NTLM authentication is used).</p>
+<p>
+However, not all of the extensions are invoked through an impersonated thread. Here's a table showing which entry points to an ISAPI application or filter are called in which security context: </p>
+<table border=1 cellpadding=5 cols=3 frame=below rules=rows>
+<tr valign=top>
+<td class=blue width=217><b>Exported functions</b></td>
+<td class=blue width=136><b>Impersonated (client)</b></td>
+<td class=blue width=169><b>Non-impersonated (system)</b></td>
+</tr>
+<tr valign=top>
+<td width=217><b><code>GetExtensionVersion()</code></b></td>
+<td width=136></td>
+<td width=169><font face="Wingdings">ü</font></td>
+</tr>
+<tr valign=top>
+<td width=217><b><code>HttpExtensionProc()</code></b></td>
+<td width=136><font face="Wingdings">ü</font></td>
+<td width=169></td>
+</tr>
+<tr valign=top>
+<td width=217><b><code>TerminateExtension()</code></b></td>
+<td width=136></td>
+<td width=169><font face="Wingdings">ü</font></td>
+</tr>
+<tr valign=top>
+<td width=217><b><code>GetFilterVersion()</code></b></td>
+<td width=136></td>
+<td width=169><font face="Wingdings">ü</font></td>
+</tr>
+<tr valign=top>
+<td width=217><b><code>HttpFilterProc()</code></b> (except for some notifications)</td>
+<td width=136></td>
+<td width=169><font face="Wingdings">ü</font></td>
+</tr>
+<tr valign=top>
+<td width=217><b><code>TerminateFilter()</code></b></td>
+<td width=136></td>
+<td width=169><font face="Wingdings">ü</font></td>
+</tr>
+</table><br>
+<p>
+It's obvious that if we want protected access to resources, we must in some way 'cache' the access token from an impersonated call (from the above table <b><code>HttpExtensionProc()</code></b> is the prime candidate) and use it when necessary, let's say from <b><code>TerminateExtension()</code></b>.</p>
+<p>
+Even invoking <b><code>HttpExtensionProc()</code></b> by an impersonating thread may not be sufficient. Consider an ISAPI application that must handle requests that do take some amount of time to complete. In this case, the extension must not take up a request thread by staying in <b><code>HttpExtensionProc()</code></b> until the call completes. Request threads are scarce resources. Instead, the right architecture calls for setting up a pool of worker threads that are dealt stored requests from a queue. The main purpose of <b><code>HttpExtensionProc()</code></b> in this case is to queue the incoming request (that is the extension control block) and return with status <b><code>HSE_STATUS_PENDING</code></b>. When a worker thread finishes with the request later, it returns through the control block's <b><code>ServerSupportFunction()</code></b> with <b><code>HSE_REQ_DONE_WITH_SESSION</code></b> so that IIS can free the resources tied up to the request. </p>
+<p>
+The big problem from the standpoint of security is: how can the worker thread acquire the security context of the client? The request thread is long gone by the time the worker thread gets ready to handle the request.</p>
+<p>
+The answer lies in the access token of the request thread. <b><code>HttpExtensionProc()</code></b> is invoked by the request thread. Along with storing the extension control block with the incoming request, it can acquire the access token of the calling thread and store it with the request. When the request thread gets to handle the request, it can use the access token in order to impersonate the client.</p>
+<p>
+Let's first examine the relevant Win32 API functions before we delve into the code.</p>
+<pre><code>BOOL ImpersonateLoggedOnUser( HANDLE hToken );</code></pre>
+<p>
+where <b><code>hToken</code></b> is an access token that represents the logged-on user. The token may have been returned by a call to, among others, <b><code>LogonUser()</code></b>, <b><code>OpenProcessToken()</code></b> or <b><code>OpenThreadToken()</code></b>. It could be either a primary token (produced by the NT executive) or an impersonation token, acquired from an impersonating thread. </p>
+<p>
+The calling thread needs no special privileges in order to successfully invoke this function. Upon success, with a nonzero return code, the calling thread will continue running in the security context of the access token <b><code>hToken</code></b>. The impersonation lasts until either the thread exits or it invokes the function <b><code>RevertToSelf()</code></b>.</p>
+<pre><code>BOOL RevertToSelf( VOID );</code></pre>
+<p>
+Upon success, the function returns <b><code>TRUE</code></b> and terminates the impersonation of a client.</p>
+<p>
+Let's go back, now, to the worker pool example we mentioned before. We need to keep track of an extension control block along with an impersonation token for each request. We'll skip the code for storing each request's data to an appropriate data structure as well as the synchronization code necessary to allow multithreaded access to it.</p>
+<pre><code>struct  Request
+{
+   EXTENSION_CONTROL_BLOCK *   lpEcb;      // from request
+   HANDLE            hImpToken;   // impersonation token of calling thread
+};
+
+// add a request to a list
+BOOL AddRequest( const Request&amp; req );
+
+// get a request from the list
+Request* GetRequest( void );</code></pre>
+<p>
+For simplicity, in the code snippets below we'll deal with one worker thread. </p>
+<pre><code>// worker thread handle
+HANDLE   worker;</code></pre>
+<p>
+In the worker pool situation we mentioned above, the first entry point in the extension DLL is <b><code>DllMain()</code></b>. It's a good place to create our worker threads, but not as good a place to terminate them. The threads should be terminated in the <b><code>TerminateExtension()</code></b> call. Since the threads are created before any requests have arrived, they inherit the security context of the parent process—that's the local system account that IIS is running under.</p>
+<pre><code>BOOL WINAPI DllMain( HANDLE hInst,  ULONG reason_for_call,  LPVOID  reserved)
+{
+   switch (reason_for_call)
+   {
+      DWORD   threadId;
+
+      case DLL_PROCESS_ATTACH:
+         worker = CreateThread ( 
+               NULL,   // the thread gets the default security descriptor
+               0,      // default stack size – same as main thread
+               (LPTHREAD_START_ROUTINE ) DoWork,  // thread function ptr
+               NULL,      // argument to thread function
+               0,      // creation flags – 0 means thread runs immediately
+               &amp;threadId );   // thread identifier
+         break;
+
+      case DLL_PROCESS_DETACH:
+         // cleanup
+         break;
+   }
+}</code></pre>
+<p>
+When <b><code>HttpExtensionProc()</code></b> is invoked it should acquire the access token of the calling thread and store it in the list along with the control block:</p>
+<pre><code>DWORD HttpExtensionProc( LPEXTENSION_CONTROL_BLOCK lpEcb )
+{
+   Request*  pReq = new Request;
+   if (pReq) 
+   {
+      // get the thread access token
+      if ( ! OpenThreadToken( GetCurrentThread() ,
+            TOKEN_QUERY | TOKEN_IMPERSONATE,
+            TRUE,
+            &amp; pReq-&gt;hImpToken ) )
+      {
+         // handle error
+      }
+      pReq-&gt;lpEcb = lpEcb;
+
+      // add to list
+      AddRequest( *pReq );
+
+      // instruct IIS to hold on to request resources
+      return HSE_STATUS_PENDING;
+   }
+   else
+      // handle error
+
+}</code></pre>
+<p>
+The worker thread would effectively wait on a synchronization object to signal that work was added to the list. It would then get a request from the list, impersonate the request client, do the actual work and revert back to its previous security context. We're now done with the request, and we can inform IIS that this is the case. </p>
+<p>
+We should also not forget to close the handle to the impersonation token: otherwise, the resource will remain open until the process exits. Perhaps this doesn't seem a terrible waste and might not be a great concern if your process takes a few milliseconds to run. Memory leaks, however, are of considerable concern for the stability of IIS (under which the extension runs) which in a production environment may stay up for days on end, processing millions of requests. You should employ every means at your disposal to ensure that IIS extensions are as free from memory-related bugs as possible.</p>
+<pre><code>DWORD  WINAPI   DoWork( LPVOID parm )
+{
+   // wait until there is work to do
+   ...
+   // get a request from the queue
+   Request*   pReq = GetRequest();
+   if ( pReq )
+   {
+      // impersonate client
+      ImpersonateLoggedOnUser( pReq-&gt;hImpToken );
+
+      // do the actual work 
+      ...
+
+      // revert to previous security context
+      RevertToSelf();
+      
+      // notify IIS we are done
+      pReq-&gt;lpEcb-&gt;ServerSupportFunction( pReq-&gt;lpEcb-&gt;ConnID,
+               HSE_REQ_DONE_WITH_SESSION,
+               NULL,
+               NULL,
+               NULL );
+      // close token handle
+      CloseHandle( pReq-&gt;hImpToken );
+
+      // free request
+      delete pReq;
+   }
+   ...
+}</code></pre>
+<p>
+This concludes our coverage of security issues and techniques related to IIS and ISAPI applications. The basic principals are very straightforward and simple; incorporating them into the design and coding them requires careful planning and meticulous attention to details.</p>
+</BODY>
+</HTML>

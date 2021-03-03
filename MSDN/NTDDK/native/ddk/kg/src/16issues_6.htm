@@ -1,0 +1,140 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML>
+<HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>16.2.4  Releasing Spin Locks Promptly</TITLE>
+<style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD>
+<BODY BGPROPERTIES="FIXED" TEXT="#000000" BGCOLOR="#FFFFFF">
+
+<FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<H3><A NAME="DDK_Releasing_Spin_Locks_Promptly_KG"></A>16.2.4  Releasing Spin Locks Promptly</H3>
+<P>
+<A NAME="DDK_Figure_16..2_NG"></A>An NT driver writer who minimizes the time that
+the driver holds spin locks can significantly improve both the performance of
+the driver and of the system overall. For example, consider Figure 16.2, which
+shows how an interrupt spin lock protects device-specific data that must be
+shared between an ISR and the StartIo and DpcForIsr routines in an SMP
+machine. 
+<P>
+<B><IMG SRC="../art/16ispnlk.gif" BORDER=0></B>
+<P>
+<B>Figure 16.2    Using an Interrupt Spin Lock</B>
+<OL>
+<LI>
+While the driver’s ISR runs at DIRQL on one processor, its StartIo routine
+runs at DISPATCH_LEVEL on a second processor. The Kernel interrupt handler
+holds the InterruptSpinLock for the driver’s ISR, which accesses protected,
+device-specific data, such as state or pointers to device registers
+(SynchronizeContext), in the driver’s device extension. The StartIo routine,
+which is ready to access SynchronizeContext, calls <B>KeSynchronizeExecution</B>,
+passing a pointer to the associated interrupt object(s), the shared
+SynchronizeContext, and the driver’s SynchCritSection routine (AccessDevice in
+Figure 16.2). 
+<P>
+Until the ISR returns, thereby releasing the driver’s InterruptSpinLock, <B>KeSynchronizeExecution</B>
+<I>spins</I>&nbsp;on the second processor, preventing AccessDevice from touching
+SynchronizeContext. However, <B>KeSynchronizeExecution</B>&nbsp;also raises IRQL on
+the second processor to the SynchronizeIrql of the interrupt object(s),
+thereby preventing another device interrupt from occurring on that processor
+so AccessDevice can be run at DIRQL as soon as the ISR returns. However,
+higher DIRQL interrupts for other devices, clock interrupts, and power-fail
+interrupts can still occur on either processor, as shown in <A HREF="16issues_1.htm#DDK_Figure_16..1_NG">Figure
+16.1</A>. 
+<P>
+<LI>
+When the ISR queues the driver’s DpcForIsr and returns, AccessDevice runs on
+the second processor at the SynchronizeIrql of the associated interrupt
+object(s) and accesses SynchronizeContext. Meanwhile, the DpcForIsr is run on
+another processor at DISPATCH_LEVEL IRQL. The DpcForIsr also is ready to
+access SynchronizeContext, so it calls <B>KeSynchronizeExecution</B>&nbsp;with the
+same parameters as the StartIo routine did in Step 1. 
+<P>
+Note that when <B>KeSynchronizeExecution</B>&nbsp;acquires the spin lock and runs
+AccessDevice on behalf of the StartIo routine, the driver-supplied
+synchronization routine AccessDevice is given exclusive access to
+SynchronizeContext. Because AccessDevice runs at the SynchronizeIrql, the
+driver’s ISR cannot acquire the spin lock and access the same area until the
+spin lock is released, even if the device interrupts on another processor
+while AccessDevice is executing. 
+<P>
+<LI>
+AccessDevice returns and the spin lock is released, so the StartIo routine
+resumes running at DISPATCH_LEVEL on the second processor. <B>KeSynchronizeExecution</B>
+now runs AccessDevice on the third processor, so it can access
+SynchronizeContext on behalf of the DpcForIsr. However, if a device interrupt
+had occurred before the DpcForIsr called <B>KeSynchronizeExecution</B>&nbsp;in Step
+2, the ISR might run on another processor before <B>KeSynchronizeExecution</B>
+could acquire the spin lock and run AccessDevice on the third processor. 
+</OL>
+<P>
+As Figure 16.2 shows, while a routine running on one processor holds a spin
+lock, every other routine trying to acquire that spin lock gets no work done.
+Each routine trying to acquire an already held spin lock simply spins on its
+current processor until the holder releases the spin lock. When a spin lock is
+released, one and only one routine can acquire it so every other routine
+currently trying to acquire the same spin lock will continue to spin. 
+<P>
+As explained in <A HREF="16issues_5.htm">Section
+16.2.3</A>, the holder of any spin lock runs at raised IRQL: either at
+DISPATCH_LEVEL for an executive spin lock, or at a DIRQL for an interrupt spin
+lock. Callers of <B>KeAcquireSpinLock</B>&nbsp;run at DISPATCH_LEVEL until they
+call <B>KeReleaseSpinLock</B>. Callers of <B>KeSynchronizeExecution</B>
+automatically raise IRQL on the current processor to the SynchronizeIrql of
+the interrupt object(s) until the caller-supplied SynchCritSection routine
+exits and <B>KeSynchronizeExecution</B>&nbsp;returns control. 
+<H5><IMG SRC="../../../wedge.gif" BORDER=0>&nbsp; &nbsp; NT driver writers should always keep in mind the following fact about using spin locks: </H5>
+<P>
+<I>All code that runs at a lower IRQL cannot get any work done on the set of
+processors occupied by a spin-lock holder and by other routines trying to
+acquire the same spin lock.</I>&nbsp;
+<P>
+Consequently, NT driver writers who minimize the time their drivers hold spin
+locks get significantly better performance from their drivers. They also
+contribute significantly to better overall system performance. 
+<P>
+As <A HREF="#DDK_Figure_16..2_NG">Figure 16.2</A>&nbsp;shows, the Kernel interrupt
+handler executes routines running at the same IRQL in a multiprocessor machine
+on a first-come, first-served basis, and the Kernel also does the following: 
+<UL>
+<LI>
+When a driver routine calls <B>KeSynchronizeExecution</B>, the Kernel causes
+the driver’s SynchCritSection routine to run on the same processor from which
+the call to <B>KeSynchronizeExecution</B>&nbsp;occurred (see Steps 1 and 3). 
+<P>
+<LI>
+When a driver’s ISR queues its DpcForIsr, the Kernel causes the DPC to run on
+the first available processor on which IRQL falls below DISPATCH_LEVEL. This
+is not necessarily the same processor from which the <B>IoRequestDpc</B>&nbsp;call
+occurred (see Step 2). 
+</UL>
+<P>
+Note that a given driver’s interrupt-driven I/O operations would tend to be
+serialized in a uniprocessor machine, but that the same operations can be
+truly asynchronous in an SMP machine. As <A HREF="#DDK_Figure_16..2_NG">Figure
+16.2</A>&nbsp;shows, a driver’s ISR could run on CPU4 in an SMP machine before its
+DpcForIsr begins processing an IRP for which the ISR has already handled a
+device interrupt on CPU1. 
+<P>
+In other words, NT device driver writers should not assume that an interrupt
+spin lock can protect operation-specific data, saved by the ISR when it runs
+on one processor, from being overwritten by the ISR when a device interrupt
+occurs on another processor prior to the execution of the DpcForIsr or
+CustomDpc routine. 
+<P>
+Although a device driver writer could try to serialize all interrupt-driven
+I/O operations in order to preserve data collected by the ISR, such a driver
+would not run much faster in an SMP machine than it did in a uniprocessor
+machine. To get the best possible driver performance while remaining portable
+across Windows NT uniprocessor and multiprocessor platforms, NT drivers should
+use some other technique to save operation-specific data obtained by the ISR
+for subsequent processing by the DpcForIsr. 
+<P>
+For example, an ISR can save operation-specific data in the IRP it passes to
+the DpcForIsr. A refinement of this technique is to implement a DpcForIsr that
+consults an ISR-augmented count, processes the count’s number of IRPs using
+ISR-supplied data, and resets the count to zero before returning. Of course,
+such a count must be protected by the driver’s interrupt spin lock because its
+ISR and a SynchCritSection would maintain its value dynamically. 
+<P></FONT>
+</BODY>
+</HTML>

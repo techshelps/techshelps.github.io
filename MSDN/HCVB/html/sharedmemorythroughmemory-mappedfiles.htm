@@ -1,0 +1,52 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Shared Memory Through Memory-Mapped Files</title>
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000>
+
+<font face="verdana,arial,helvetica" size="2"><h1><a name="sharedmemorythroughmemory-mappedfiles"></a>Shared Memory Through Memory-Mapped Files</h1>
+<BR>
+Memory-mapped files provide a way to look at a file as a chunk of memory. This feature is very useful in languages that support examining memory at &shy;arbitrary addresses. You map the file and get back a pointer to the mapped memory. You can simply read or write to memory from any location in the file mapping, just as you would from an array. When you’ve processed the file and closed the file mapping, the file is automatically updated. In other words, the operating system takes care of all the details of file I/O.</p>
+<BR>
+The API calls to create a file mapping are relatively simple, and you could &shy;easily call them from Visual Basic. There’s only one problem. See if you can spot it:</p>
+<pre><code>' Open file<BR>hFile = CreateFile(sFileName, GENERIC_READ Or GENERIC_WRITE, 0, _<BR>                   pNull, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, _<BR>                   pNull)<BR>' Open file mapping called MySharedMapping<BR>hFileMap = CreateFileMapping(hFile, pNull, PAGE_READWRITE, 0, 0, _<BR>                             &quot;MySharedMapping&quot;)<BR>' Get pointer to memory representing file<BR>pFileMap = MapViewOfFile(hFileMap, FILE_MAP_WRITE, 0, 0, 0)</code></pre>
+<BR>
+At this point, <i>pFileMap </i>is the address of a block of memory containing the file contents. Now, what can you do in Visual Basic with a pointer you receive from an API function? Repeat after me: “Pass it to another API function.” In other words, you’re stuck.</p>
+<BR>
+In C, you can treat a pointer like an array:</p>
+<pre><code>pFileMap[0] = 'A'<BR>bTest = pFileMap[1]</code></pre>
+<BR>
+But Visual Basic provides no similar capability. You can use CopyMemory to copy the file mapping to some other location in memory, but that usually &shy;defeats the purpose. The idea is to be able to use it in place. The fact is, memory-mapped files won’t be much use to Visual Basic programmers until they’re integrated into the language. Imagine this code:</p>
+<pre><code>Dim abFileMap() As Integer<BR>hFileMap = FreeFile<BR>Open sFileName For FileMap With abFileMap As #hFileMap<BR>For i = 0 to UBound(abFileMap)<BR>    abFileMap(i) = CalculateMagicNumber(abFileMap(i))<BR>Next<BR>Close hFileMap</code></pre>
+<BR>
+This might not be the best syntax. In fact, the next version of Visual Basic might implement file mapping behind the scenes with the existing syntax.</p>
+<BR>
+Although Visual Basic doesn’t support using memory-mapped files for file I/O, it doesn’t stand in your way if you want to use them for shared memory. You can create a file mapping that isn’t mapped to a file by passing a magic number (<font face="Symbol"><span style="font-family:symbol">&#45;</span></font>1) instead of a handle to the CreateFileMapping function. This gives you a pointer to a named chunk of memory. Any program that knows the name can also get a pointer to the memory. You still can’t access the memory at that <BR>location directly in Visual Basic, but any program can use CopyMemory to read or write to the memory.</p>
+<BR>
+The process is a little complicated, so I encapsulated it in the CSharedString class. You’ll need to run more than one instance of the test program shown in Figure 11-5 (TSHARE.VBP) to see the point. Change the text in one copy, and click the Set String button. Go to another instance of the program, and click the Get String button to read the current value.</p>
+<BR><img src="f11te05.gif"></p><BR>
+<b>Figure 11-5. Sharing strings.</b></p>
+<BR>
+Here’s the code to use a shared object:</p>
+<pre><code>Private ss As New CSharedString<BR><BR>Private Sub Form_Load()<BR>    ss.Create &quot;MyShare&quot;<BR>    If ss = sEmpty Then<BR>        ss = &quot;Hello from the Creator&quot;<BR>    End If<BR>    txtShare = ss<BR>End Sub<BR><BR>Private Sub cmdSet_Click()<BR>    ss = txtShare<BR>End Sub<BR><BR>Private Sub cmdGet_Click()<BR>    txtShare = ss<BR>End Sub</code></pre>
+<BR>
+Default members make using a shared string look a lot like using an ordinary string. Of course with normal strings you don’t have to call a Create method to assign a string name, which is different from the string value and different from the variable name. And you don’t have to remember that name any time you want to access that string from another program. But then you can’t access normal strings from another program anyway.</p>
+<BR>
+When the first test program creates a CSharedString object, the value is an empty string, so the program initializes to a string of its choice. When subsequent programs create objects, the value is whatever the previous program set. You can specifically destroy a shared string object by setting it to Nothing, but that’s usually unnecessary. The object is destroyed automatically when it goes out of scope during program destruction.</p>
+<BR>
+Most of the implementation work is done in the Create method, where the &shy;internal variables (<i>h</i> for handle and <i>p</i> for pointer) are initialized. The Class&shy;_Terminate method undoes what Create did:</p>
+<pre><code>Private h As Long, p As Long<BR><BR>Sub Create(sName As String)<BR>    Dim e As Long<BR>    If sName = sEmpty Then ApiRaise ERROR_BAD_ARGUMENTS<BR>    ' Try to create file mapping of 65535 (only used pages matter)<BR>    h = CreateFileMapping(-1, pNull, PAGE_READWRITE, 0, 65535, sName)<BR>    ' Save &quot;error&quot; value which may not be an error value<BR>    e = Err.LastDllError<BR>    If h = hNull Then ApiRaise e<BR>    <BR>    ' Get pointer to mapping<BR>    p = MapViewOfFile(h, FILE_MAP_WRITE, 0, 0, 0)<BR>    If p = pNull Then<BR>        CloseHandle h   ' Undo what we did<BR>        ApiRaise Err.LastDllError<BR>    End If<BR>    ' Check cached value to see if new value<BR>    If e &lt;&gt; ERROR_ALREADY_EXISTS Then<BR>        ' Set size of new file mapping by copying 0 to first 4 bytes<BR>        CopyMemory ByVal p, 0, 4<BR>    ' Else<BR>        ' Existing file mapping already initialized<BR>    End If<BR>End Sub<BR><BR>Private Sub Class_Terminate()<BR>    UnmapViewOfFile p<BR>    CloseHandle h<BR>End Sub</code></pre>
+<BR>
+First the code calls CreateFileMapping to create a read-write memory mapping that is 65,535 bytes in length, with the name passed in the Create method. Wait a minute! You don’t want 65,535 bytes of memory just to share a 20-byte string. Don’t worry. Through the wonders of memory paging, you’ll use only the pages you touch. In other words, you’ll use one page of memory (4 KB) for that <BR>20-byte string. That’s enough to make you a little careful about how many shared memory objects you create, but it’s not the same as throwing away 64 KB. Still, you’ll probably want to use CSharedString for large strings and create some other shared memory class (perhaps a CSharedStrings array) for sharing lots of little strings.</p>
+<BR>
+After you create a file mapping (memory mapping would be more accurate in this context), you need to call MapViewOfFile to get a pointer to it. You’ll get the same return (a pointer) whether you’re opening an existing mapping or creating a new one. You need to distinguish these two cases, and the only way to do so is to check the error value for ERROR_ALREADY_EXISTS, which isn’t really an error. If it’s a new mapping, you need to initialize the data. Here is my code to read and write the data:</p>
+<pre><code>' Default property<BR>Property Get Item() As String<BR>    If h = hNull Then ErrRaise ERROR_INVALID_DATA<BR>    BugAssert p &lt;&gt; pNull<BR>    ' Copy length out of first 4 bytes of data<BR>    Dim c As Long<BR>    CopyMemory c, ByVal p, 4<BR>    If c Then<BR>        ' Copy the data<BR>        Item = String$(c, 0)<BR>        CopyMemoryToStr Item, ByVal (p + 4), c * 2<BR>    End If<BR>End Property<BR><BR>Property Let Item(s As String)<BR>    If h = hNull Then ErrRaise ERROR_INVALID_DATA<BR>    BugAssert p &lt;&gt; pNull<BR>    Dim c As Long<BR>    c = Len(s)<BR>    ' Copy length to first 4 bytes and string to remainder<BR>    CopyMemory ByVal p, c, 4<BR>    CopyMemoryStr ByVal (p + 4), s, c * 2<BR>End Property</code></pre>
+<BR>
+In your own shared memory classes, you can initialize and organize the data anyway you like as long as everyone who uses the data knows the convention. I save a shared string as a Long containing the string length, followed by the bytes of the string. I thought about various schemes for allowing multiple chunks of data and perhaps multiple data types—such as arrays. But I decided to leave you to design the CSharedCollection class.</p>
+<BR>
+When you test shared string objects, don’t terminate by using the End toolbar button, the End item on the Run menu, or the End statement. Instead, unload your forms. This is good practice in general, but it’s particularly important with the shared string class. Ending a program short-circuits the normal destruction mechanism, and you’ll “End” up with dangling copies of the shared memory. A shared memory mapping is destroyed only when all of its clients have unmapped it. If a program dies without unmapping, its mapping handle dies with it. The only way to get rid of the shared data is to log off.</p>
+</font></BODY>
+</HTML>

@@ -1,0 +1,608 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Wicked Code</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF">
+<font face="verdana,arial,helvetica" size="2">
+<H1>Wicked Code</H1><P>Jeff Prosise</P>
+<P>Jeff Prosise is the author of Programming Windows 95 with MFC (Microsoft Press). He also teaches Visual C++/MFC programming seminars. For more information, visit http://www.solsem.com.</P>
+<P>One of the features of Windows&reg; 95 and Windows NT&reg; 4.0 that users quickly grow accustomed to is that right-clicking an item in a shell folder or Explorer window invokes a context menu with a concise list of&nbsp;actions that may be performed on that item.&nbsp;Many programmers find out the hard way that if their application displays&nbsp;files,&nbsp;folders, and other file system objects, it should also support Explorer-like context menus. Otherwise, their users might wonder why right-clicking a readme.txt file icon in Explorer pops up a context menu, but right-clicking an identical icon in their application does not.</P>
+<P>Given an IShellFolder pointer to the folder in which an item&nbsp;resides and a pointer to an item ID list (PIDL) identifying the item itself, it's relatively easy to display a context menu&nbsp;identical&nbsp;to&nbsp;the one in Explorer. The basic code, without error checking, is shown in Figure 1. First, the folder's IShellFolder::GetUIObjectOf function is called with IContextMenu's interface ID and a pointer to the PIDL. On return, pContextMenu holds a pointer to the item's IContextMenu interface.&nbsp;Next, a context menu is created withCreatePopupMenu, initialized with IContextMenu::QueryContextMenu, and displayed with TrackPopupMenu. A nonzero return from TrackPopupMenu means you selected a command from the context menu (as opposed to dismissing it without selecting anything), in which case IContextMenu::InvokeCommand is called to execute the command.</P>
+<P>Figure 1  Displaying an Explorer Context Menu</P>
+
+<PRE>// ON ENTRY:
+// hwnd      = Handle of the window that will own the context menu.
+// psfFolder = IShellFolder pointer for the itemís container.
+// ppidl     = Pointer to PIDL identifying the item.
+// x, y      = Screen coordinates where menu will be displayed.
+
+//
+// Get an IContextMenu pointer for the item.
+//
+LPCONTEXTMENU pContextMenu;
+psfFolder-&gt;lpVtbl-&gt;GetUIObjectOf (psfFolder, hwnd, 1, ppidl,
+                                  &amp;IID_IContextMenu, NULL, &amp;pContextMenu);
+
+//
+// Create an empty context menu.
+//
+HMENU hMenu = CreatePopupMenu ();
+
+//
+// Let Explorer fill the menu with menu items.
+//
+pContextMenu-&gt;lpVtbl-&gt;QueryContextMenu (pContextMenu, hMenu, 0, 1,
+                                        0x7FFF, CMF_EXPLORE);
+
+//
+// Display the menu.
+//
+UINT nCmd = TrackPopupMenu (hMenu, TPM_LEFTALIGN | TPM_LEFTBUTTON |
+                            TPM_RIGHTBUTTON&nbsp;|&nbsp;TPM_RETURNCMD,&nbsp;x,&nbsp;y,&nbsp;0,&nbsp;hwnd,&nbsp;NULL);
+
+//
+// If a command was selected from the menu, execute it.
+//
+if (nCmd) {
+    CMINVOKECOMMANDINFO ici;
+    ici.cbSize = sizeof (CMINVOKECOMMANDINFO);
+    ici.fMask = 0;
+    ici.hwnd = hwnd;
+    ici.lpVerb = MAKEINTRESOURCE (nCmd - 1);
+    ici.lpParameters = NULL;
+    ici.lpDirectory = NULL;
+    ici.nShow = SW_SHOWNORMAL;
+    ici.dwHotKey = 0;
+    ici.hIcon = NULL;
+
+    pContextMenu-&gt;lpVtbl-&gt;InvokeCommand (pContextMenu, &amp;ici);
+}
+
+//
+// Clean up.
+//
+DestroyMenu (hMenu);
+pContextMenu-&gt;lpVtbl-&gt;Release (pContextMenu);</PRE>
+<P></P>
+<P>If you've never written code that deals with objects in the shell's namespace, Figure 1 probably looks a little intimidating. But take my word for it: once you've used IShellFolder and other COM-based shell interfaces a few times, it'll seem pretty straightforward. The good news is that you don't have to understand the nuts and bolts of COM and shell interfaces to display an Explorer-like context menu; you can simply use the code in Figure 1. The bad news is that before you can use my code, you'll have to initialize psfFolder with a pointer to the proper IShellFolder interface and ppidl with a pointer to a PIDL. And that, unfortunately, can be difficult.</P>
+<P>To make matters easier, I've written a C-style function named DoExplorerMenu that takes a path name to an arbitrary file or folder and displays Explorer's context menu for that item. If you select a command from the menu, the command is executed, too. DoExplorerMenu makes it simple to add Explorer-like context menu support to applications that display file system objects because it reduces the amount of code that you have to write to a single function call. My code does the rest, including the not-so-fun task of converting the path name into a PIDL and an IShellFolder pointer.</P>
+<P></P>
+<H2><A NAME="sec0"></A>The ExpMenu Application</H2><P>The ExpMenu application in Figure 2 places a list view control inside a top-level window and initializes the list view with items representing the files and folders found in the host PC's Windows directory. When an item from the list view is clicked with the right mouse button, the item's Explorer context menu is displayed (see Figure 3). Selecting a command from the menu executes the command just as if it had been selected from a real Explorer menu.</P>
+<P>Figure 2  ExpMenu</P>
+<P></P>
+<P>ExpMenu.h</P>
+
+<PRE>//***************************************************************************
+//
+//  ExpMenu.h
+//
+//***************************************************************************
+
+#define ID_LISTVIEW     100
+#define ID_BITMAP       101
+</PRE>
+<P></P>
+<P>ExpMenu.rc</P>
+
+<PRE>//***************************************************************************
+//
+//  ExpMenu.rc
+//
+//***************************************************************************
+
+#include "ExpMenu.h"
+
+ID_BITMAP BITMAP "Images.gif"
+</PRE>
+<P></P>
+<P>ExpMenu.c</P>
+
+<PRE>//***************************************************************************
+//
+//  ExpMenu.c
+//
+//***************************************************************************
+
+#include &lt;windows.h&gt;
+#include &lt;commctrl.h&gt;
+#include &lt;shlobj.h&gt;
+#include "ExpMenu.h"
+
+/////////////////////////////////////////////////////////////////////////////
+// Function prototypes
+
+LRESULT CALLBACK WndProc (HWND, UINT, WPARAM, LPARAM);
+
+void PopulateListView (HWND);
+void AddItemToListView (HWND, WIN32_FIND_DATA*);
+
+BOOL DoExplorerMenu (HWND, LPCTSTR, POINT);
+UINT GetItemCount (LPITEMIDLIST);
+LPITEMIDLIST GetNextItem (LPITEMIDLIST);
+LPITEMIDLIST DuplicateItem (LPMALLOC, LPITEMIDLIST);
+
+/////////////////////////////////////////////////////////////////////////////
+// WinMain
+
+int WINAPI WinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance,
+    LPSTR lpszCmdLine, int nCmdShow)
+{
+    static char szWndClassName[] = "ExpMenuWndClass";
+    WNDCLASS wc;
+    HWND hwnd;
+    MSG msg;
+
+    wc.style = 0;
+    wc.lpfnWndProc = (WNDPROC) WndProc;
+    wc.cbClsExtra = 0;
+    wc.cbWndExtra = 0;
+    wc.hInstance = hInstance;
+    wc.hIcon = LoadIcon (NULL, IDI_WINLOGO);
+    wc.hCursor = LoadCursor (NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH) (COLOR_WINDOW + 1);
+    wc.lpszMenuName = NULL;
+    wc.lpszClassName = szWndClassName;
+
+    RegisterClass (&amp;wc);
+
+    hwnd = CreateWindow (szWndClassName, "Explorer Context Menu Demo",
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+        CW_USEDEFAULT, HWND_DESKTOP, NULL, hInstance, NULL);
+
+    ShowWindow (hwnd, nCmdShow);
+    UpdateWindow (hwnd);
+
+    while (GetMessage (&amp;msg, NULL, 0, 0)) {
+        TranslateMessage (&amp;msg);
+        DispatchMessage (&amp;msg);
+    }
+    return msg.wParam;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Window procedure
+
+LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    HBITMAP hBitmap;
+    HINSTANCE hInstance;
+    LV_HITTESTINFO hti; 
+    LPNMHDR pnmhdr;
+    char szLabel[MAX_PATH];
+    char szPath[MAX_PATH];
+    DWORD dwPos;
+
+    static HWND hwndListView;
+    static HIMAGELIST hImageList;
+
+    switch (msg) {
+
+    case WM_CREATE:
+        //
+        // Create a list view control in the main window.
+        //
+        InitCommonControls ();
+        hInstance = ((LPCREATESTRUCT) lParam)-&gt;hInstance;
+
+        hwndListView = CreateWindowEx (WS_EX_CLIENTEDGE, WC_LISTVIEW, "",
+            WS_CHILD | WS_VISIBLE | LVS_ICON | LVS_SINGLESEL | LVS_AUTOARRANGE,
+            0, 0, 0, 0, hwnd, (HMENU) ID_LISTVIEW, hInstance, NULL);
+
+        hBitmap = LoadBitmap (hInstance, MAKEINTRESOURCE (ID_BITMAP));
+        hImageList = ImageList_Create (32, 32, ILC_MASK, 2, 1);
+        ImageList_AddMasked (hImageList, hBitmap, RGB (255, 0, 255));
+        DeleteObject (hBitmap);
+
+        ListView_SetImageList (hwndListView, hImageList, LVSIL_NORMAL);
+        PopulateListView (hwndListView);
+        return 0;
+
+    case WM_SIZE:
+        //
+        // Resize the list view to fit the client area of its parent.
+        //
+        if ((wParam == SIZE_RESTORED) || (wParam == SIZE_MAXIMIZED))
+            SetWindowPos (hwndListView, NULL, 0, 0, (int) LOWORD (lParam),
+                          (int) HIWORD (lParam), SWP_NOMOVE | SWP_NOZORDER); 
+        return 0;
+
+    case WM_NOTIFY:
+        //
+        // Display a context menu when something is right-clicked.
+        //
+        pnmhdr = (LPNMHDR) lParam;
+
+        if (pnmhdr-&gt;code == NM_RCLICK) {
+            dwPos = GetMessagePos ();
+            hti.pt.x = (int) LOWORD (dwPos);
+            hti.pt.y = (int) HIWORD (dwPos);
+            ScreenToClient (hwnd, &amp;hti.pt);
+
+            ListView_HitTest (hwndListView, &amp;hti);
+
+            if (hti.flags &amp; LVHT_ONITEM) {
+                ListView_GetItemText (hwndListView, hti.iItem, 0, szLabel,
+                                      sizeof (szLabel));
+
+                GetWindowsDirectory (szPath, sizeof (szPath));
+                if (szPath[lstrlen (szPath) - 1] != '\\')
+                    lstrcat (szPath, "\\");
+                lstrcat (szPath, szLabel);
+
+                DoExplorerMenu (hwnd, szPath, hti.pt);
+
+                //
+                // NOTE: Here's a great place to refresh the list view control
+                // in case a file or folder was created, renamed, or deleted
+                // as a result of a context menu command. We don't do it here
+                // because that's not the point of this example.
+                //
+            }
+            return 0;
+        }
+        break;
+
+    case WM_DESTROY:
+        //
+        // Clean up and terminate.
+        //
+        DestroyWindow (hwndListView);
+        DeleteObject (hImageList);
+        PostQuitMessage (0);
+        return 0;
+    }
+    return DefWindowProc (hwnd, msg, wParam, lParam);
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Window procedure helper functions
+
+void PopulateListView (HWND hwnd)
+{
+    WIN32_FIND_DATA fd;
+    char szPath[MAX_PATH];
+    HANDLE hFind;
+
+    //
+    // Get the path to the Windows directory and append "*.*".
+    //
+    GetWindowsDirectory (szPath, sizeof (szPath));
+    if (szPath[lstrlen (szPath) - 1] != '\\')
+        lstrcat (szPath, "\\");
+    lstrcat (szPath, "*.*");
+
+    //
+    // Create one list view item for each file or folder.
+    //
+    if ((hFind = FindFirstFile (szPath, &amp;fd)) != INVALID_HANDLE_VALUE) {
+        AddItemToListView (hwnd, &amp;fd);
+        while (FindNextFile (hFind, &amp;fd))
+            AddItemToListView (hwnd, &amp;fd);
+        FindClose (hFind);
+    }
+}
+
+void AddItemToListView (HWND hwnd, WIN32_FIND_DATA* pfd)
+{
+    LV_ITEM lvi;
+
+    //
+    // Initialize the LV_ITEM structure's iImage field to display a file or
+    // folder icon, and skip "." and ".." folders.
+    //
+    if (pfd-&gt;dwFileAttributes &amp; FILE_ATTRIBUTE_DIRECTORY) {
+        if (pfd-&gt;cFileName[0] == '.')
+            return;
+        lvi.iImage = 1; // Folder
+    }
+    else
+        lvi.iImage = 0; // File
+
+    //
+    // Initialize the remaining members of the LV_ITEM structure.
+    //
+    lvi.mask = LVIF_TEXT | LVIF_IMAGE;
+    lvi.iItem = ListView_GetItemCount (hwnd);
+    lvi.iSubItem = 0;
+    lvi.pszText = pfd-&gt;cFileName;
+
+    //
+    // Add the item to the list view.
+    //
+    ListView_InsertItem (hwnd, &amp;lvi);
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Context menu functions
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//
+//  FUNCTION:       DoExplorerMenu
+//
+//  DESCRIPTION:    Given a path name to a file or folder object, displays
+//                  the shell's context menu for that object and executes
+//                  the menu command (if any) selected by the user.
+//
+//  INPUT:          hwnd    = Handle of the window in which the menu will be
+//                            displayed.
+//
+//                  pszPath = Pointer to an ANSI or Unicode string
+//                            specifying the path to the object.
+//
+//                  point   = x and y coordinates of the point where the
+//                            menu's upper left corner should be located, in
+//                            client coordinates relative to hwnd.
+//  
+//  RETURNS:        TRUE if successful, FALSE if not.
+//
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+BOOL DoExplorerMenu (HWND hwnd, LPCTSTR pszPath, POINT point)
+{
+    LPMALLOC pMalloc;
+    LPSHELLFOLDER psfFolder, psfNextFolder;
+    LPITEMIDLIST pidlMain, pidlItem, pidlNextItem, *ppidl;
+    LPCONTEXTMENU pContextMenu;
+    CMINVOKECOMMANDINFO ici;
+    ULONG ulCount, ulAttr;
+    TCHAR tchPath[MAX_PATH];
+    WCHAR wchPath[MAX_PATH];    
+    UINT nCount, nCmd;
+    BOOL bResult;
+    HMENU hMenu;
+
+    //
+    // Make sure the file name is fully qualified and in Unicode format.
+    //
+    GetFullPathName (pszPath,&nbsp;sizeof (tchPath) / sizeof (TCHAR), tchPath, NULL);
+
+    if (IsTextUnicode (tchPath, lstrlen (tchPath), NULL))
+        lstrcpy ((char *) wchPath, tchPath);
+    else
+        MultiByteToWideChar (CP_ACP, 0, pszPath, -1, wchPath,
+                             sizeof (wchPath) / sizeof (WCHAR));
+
+    //
+    // Get pointers to the shell's IMalloc interface and the desktop's
+    // IShellFolder interface.
+    //
+    bResult = FALSE;
+
+    if (!SUCCEEDED (SHGetMalloc (&amp;pMalloc)))
+        return bResult;
+
+    if (!SUCCEEDED (SHGetDesktopFolder (&amp;psfFolder))) {
+        pMalloc-&gt;lpVtbl-&gt;Release (pMalloc);
+        return bResult;
+    }
+
+    //
+    // Convert the path name into a pointer to an item ID list (pidl).
+    //
+    if (SUCCEEDED (psfFolder-&gt;lpVtbl-&gt;ParseDisplayName (psfFolder, hwnd,
+        NULL, wchPath, &amp;ulCount, &amp;pidlMain, &amp;ulAttr)) &amp;&amp; (pidlMain != NULL)) {
+
+        if (nCount = GetItemCount (pidlMain)) { // nCount must be &gt; 0
+            //
+            // Initialize psfFolder with a pointer to the IShellFolder
+            // interface of the folder that contains the item whose context
+            // menu we're after, and initialize pidlItem with a pointer to
+            // the item's item ID. If nCount &gt; 1, this requires us to walk
+            // the list of item IDs stored in pidlMain and bind to each
+            // subfolder referenced in the list.
+            //
+            pidlItem = pidlMain;
+
+            while (--nCount) {
+                //
+                // Create a 1-item item ID list for the next item in pidlMain.
+                //
+                pidlNextItem = DuplicateItem (pMalloc, pidlItem);
+                if (pidlNextItem == NULL) {
+                    pMalloc-&gt;lpVtbl-&gt;Free (pMalloc, pidlMain);
+                    psfFolder-&gt;lpVtbl-&gt;Release (psfFolder);
+                    pMalloc-&gt;lpVtbl-&gt;Release (pMalloc);
+                    return bResult;
+                }
+
+                //
+                // Bind to the folder specified in the new item ID list.
+                //
+                if (!SUCCEEDED (psfFolder-&gt;lpVtbl-&gt;BindToObject (psfFolder,
+                    pidlNextItem, NULL, &amp;IID_IShellFolder, &amp;psfNextFolder))) {
+                    pMalloc-&gt;lpVtbl-&gt;Free (pMalloc, pidlNextItem);
+                    pMalloc-&gt;lpVtbl-&gt;Free (pMalloc, pidlMain);
+                    psfFolder-&gt;lpVtbl-&gt;Release (psfFolder);
+                    pMalloc-&gt;lpVtbl-&gt;Release (pMalloc);
+                    return bResult;
+                }
+
+                //
+                // Release the IShellFolder pointer to the parent folder
+                // and set psfFolder equal to the IShellFolder pointer for
+                // the current folder.
+                //
+                psfFolder-&gt;lpVtbl-&gt;Release (psfFolder);
+                psfFolder = psfNextFolder;
+
+                //
+                // Release the storage for the 1-item item ID list we created
+                // just a moment ago and initialize pidlItem so that it points
+                // to the next item in pidlMain.
+                //
+                pMalloc-&gt;lpVtbl-&gt;Free (pMalloc, pidlNextItem);
+                pidlItem = GetNextItem (pidlItem);
+            }
+
+            //
+            // Get a pointer to the item's IContextMenu interface and call
+            // IContextMenu::QueryContextMenu to initialize a context menu.
+            //
+            ppidl = &amp;pidlItem;
+            if (SUCCEEDED (psfFolder-&gt;lpVtbl-&gt;GetUIObjectOf (psfFolder,
+                hwnd, 1, ppidl, &amp;IID_IContextMenu, NULL, &amp;pContextMenu))) {
+
+                hMenu = CreatePopupMenu ();
+                if (SUCCEEDED (pContextMenu-&gt;lpVtbl-&gt;QueryContextMenu (
+                    pContextMenu, hMenu, 0, 1, 0x7FFF, CMF_EXPLORE))) {
+
+                    ClientToScreen (hwnd, &amp;point);
+
+                    //
+                    // Display the context menu.
+                    //
+                    nCmd = TrackPopupMenu (hMenu, TPM_LEFTALIGN |
+                        TPM_LEFTBUTTON | TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                        point.x, point.y, 0, hwnd, NULL);
+
+                    //
+                    // If a command was selected from the menu, execute it.
+                    //
+                    if (nCmd) {
+                        ici.cbSize          = sizeof (CMINVOKECOMMANDINFO);
+                        ici.fMask           = 0;
+                        ici.hwnd            = hwnd;
+                        ici.lpVerb          = MAKEINTRESOURCE (nCmd - 1);
+                        ici.lpParameters    = NULL;
+                        ici.lpDirectory     = NULL;
+                        ici.nShow           = SW_SHOWNORMAL;
+                        ici.dwHotKey        = 0;
+                        ici.hIcon           = NULL;
+
+                        if (SUCCEEDED (
+                            pContextMenu-&gt;lpVtbl-&gt;InvokeCommand (
+                            pContextMenu, &amp;ici)))
+                            bResult = TRUE;
+                    }
+                }
+                DestroyMenu (hMenu);
+                pContextMenu-&gt;lpVtbl-&gt;Release (pContextMenu);
+            }
+        }
+        pMalloc-&gt;lpVtbl-&gt;Free (pMalloc, pidlMain);
+    }
+
+    //
+    // Clean up and return.
+    //
+    psfFolder-&gt;lpVtbl-&gt;Release (psfFolder);
+    pMalloc-&gt;lpVtbl-&gt;Release (pMalloc);
+
+    return bResult;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//
+//  FUNCTION:       GetItemCount
+//
+//  DESCRIPTION:    Computes the number of item IDs in an item ID list.
+//
+//  INPUT:          pidl = Pointer to an item ID list.
+//
+//  RETURNS:        Number of item IDs in the list.
+//
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+UINT GetItemCount (LPITEMIDLIST pidl)
+{
+    USHORT nLen;
+    UINT nCount;
+
+    nCount = 0;
+    while ((nLen = pidl-&gt;mkid.cb) != 0) {
+        pidl = GetNextItem (pidl);
+        nCount++;
+    }
+    return nCount;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//
+//  FUNCTION:       GetNextItem
+//
+//  DESCRIPTION:    Finds the next item in an item ID list.
+//
+//  INPUT:          pidl = Pointer to an item ID list.
+//
+//  RETURNS:        Pointer to the next item.
+//
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+LPITEMIDLIST GetNextItem (LPITEMIDLIST pidl)
+{
+    USHORT nLen;
+
+    if ((nLen = pidl-&gt;mkid.cb) == 0)
+        return NULL;
+    
+    return (LPITEMIDLIST) (((LPBYTE) pidl) + nLen);
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//
+//  FUNCTION:       DuplicateItem
+//
+//  DESCRIPTION:    Makes a copy of the next item in an item ID list.
+//
+//  INPUT:          pMalloc = Pointer to an IMalloc interface.
+//                  pidl    = Pointer to an item ID list.
+//
+//  RETURNS:        Pointer to an ITEMIDLIST containing the copied item ID.
+//
+//  NOTES:          It is the caller's responsibility to free the memory
+//                  allocated by this function when the item ID is no longer
+//                  needed. Example:
+//
+//                    pidlItem = DuplicateItem (pMalloc, pidl);
+//                      .
+//                      .
+//                      .
+//                    pMalloc-&gt;lpVtbl-&gt;Free (pMalloc, pidlItem);
+//
+//                  Failure to free the ITEMIDLIST will result in memory
+//                  leaks.
+//
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+LPITEMIDLIST DuplicateItem (LPMALLOC pMalloc, LPITEMIDLIST pidl)
+{
+    USHORT nLen;
+    LPITEMIDLIST pidlNew;
+
+    nLen = pidl-&gt;mkid.cb;
+    if (nLen == 0)
+        return NULL;
+
+    pidlNew = (LPITEMIDLIST) pMalloc-&gt;lpVtbl-&gt;Alloc (pMalloc,
+        nLen + sizeof (USHORT));
+    if (pidlNew == NULL)
+        return NULL;
+
+    CopyMemory (pidlNew, pidl, nLen);
+    *((USHORT*) (((LPBYTE) pidlNew) + nLen)) = 0;
+
+    return pidlNew;
+}</PRE>
+<P><img src="wicked3.gif"></P>
+<P>Figure 3  An Explorer context menu</P>
+<P>There's nothing remarkable about ExpMenu's source code except for the fact that it includes the source code for DoExplorerMenu and a trio of helper functions named GetItemCount, GetNextItem, and DuplicateItem. You can import these functions into your own applications with good old cut and paste, or you can compile them to create a separate OBJ file and link them into your EXE. Then you can display the Explorer context menu for a file named Foo.txt that's stored in the FooFiles folder of drive C by calling DoExplorerMenu:</P>
+
+<PRE>DoExplorerMenu (hwnd, "C:\\FooFiles\\Foo.txt", point);
+</PRE>
+<P>hwnd is the handle of the window that will own the menu (the window whose handle is passed to TrackPopupMenu), and point is a POINT structure whose <I>x</I> and <I>y</I> coordinates specify where the context menu will be positioned; specifically, where its upper-left corner will be located. point should contain client coordinates, not screen coordinates. DoExplorerMenu returns a nonzero value if the menu is successfully displayed and a command is successfully selected and executed. A zero return means either the menu couldn't be displayed (which shouldn't happen unless you specify an invalid path name) or the user dismissed the menu without selecting a command.</P>
+<P>How does DoExplorerMenu work? The flow of logic goes something like this. First, call the Win32&reg; GetFullPathName API to make sure the path name is fully qualified (that is, it specifies a complete path from the root directory of a drive). Also, convert the path name to Unicode characters (if it isn't Unicode already) because IShellFolder::ParseDisplayName expects a Unicode text string.</P>
+<P>Next, use the shell APIs SHGetMalloc and SHGetDesktopFolder to get an IMalloc pointer for the shell and an IShellFolder pointer for the desktop. The IMalloc interface is used by DuplicateItem to allocate memory. The IShellFolder interface is used to call IShellFolder functions used by DoExplorerMenu. Then, use IShellFolder::ParseDisplay Name to convert the path from the item we're interested in to an item ID list, which is simply an array of SHITEMID structures describing the item and its location relative to the shell's desktop folder. Walk this list of item IDs, alternately extracting each item ID from the list with DuplicateItem and binding to it with IShellFolder::BindToObject, until psfFolder holds an IShellFolder pointer for the folder that contains the item in question (the item's "container") and pidlItem points to the item ID for the item itself.</P>
+<P>Next, get a pointer to the container's IContextMenu interface with IShellFolder::GetUIObjectOf, then create an empty popup menu and call IContextMenu::QueryContextMenu to allow Explorer to fill it with items. Convert the coordinates in the POINT structure passed to DoExplorerMenu to screen coordinates with ClientToScreen, and display the menu with TrackPopupMenu. Call TrackPopupMenu with a TPM_RETURNCMD flag so it will return the integer ID of the item, if any, that the user selects from the menu. (TPM_RETURNCMD is an undocumented flag, but feel free to use it because it was inadvertently omitted from the Win32 documentation.) If TrackPopupMenu returns a nonzero value indicating that a command was selected from the menu, execute the command by initializing a CMINVOKECOMMANDINFO structure and calling IContextMenu::InvokeCommand. This may sound like a lot of work for you, the programmer, but it's not—DoExplorerMenu does it all for you. </P>
+<P>One quirk in ExpMenu is that, if an item is created, renamed, or deleted as a result of a context menu operation, the list view doesn't show the Windows directory's updated contents. That's because ExpMenu doesn't update the list view when DoExplorerMenu returns. This brings to light an important point: when DoExplorerMenu returns, you have no idea what the user might have done through the context menu. Therefore, you should assume the worst and refresh anything—your application's window or its internal data structures, for example—that might be affected by an action invoked through the context menu. DoExplorerMenu could be rewritten to return the ID of the command that the user selected, but chances are the ID would only be meaningful to Explorer. Even if you were to make a list of the undocumented IDs that Explorer assigns to its menu items, you couldn't account for items added by third-party context menu shell extensions.</P>
+<P>Since it's almost impossible to work backwards from an Explorer menu item ID and determine what the menu item does, you must resort to other methods. In ExpMenu's case, one option would be to erase all the items in the list view and call PopulateListView each time DoExplorerMenu returned. That would result in a lot of unnecessary flashing, so it's hardly an ideal solution. A better solution would be to compare the items in the list view to the files and folders in the&nbsp;Windows&nbsp;directory&nbsp;and&nbsp;add&nbsp;or&nbsp;delete&nbsp;items&nbsp;as&nbsp;necessary. </P>
+<P>A more elegant solution would be to create a background thread to monitor events in the file system and have it block on a file change notification object associated with the target directory. The thread would be awakened when a file or folder was created, renamed, or deleted, and it could update the list view accordingly. This approach would conserve CPU cycles because it would restrict the updating of the list view control to times when the contents of the folder have changed. For an example of how background threads and file change notification objects may be used to monitor file system activity, refer to the Wicked Code column in the October 1996 issue of MSJ.</P>
+<P></P>
+<H2><A NAME="sec1"></A>What About Multiple Items?</H2><P>DoExplorerMenu does not provide a solution for displaying an Explorer context menu for more than one item. You can see what I mean by bringing up the Windows 95 (or Windows NT 4.0) Find utility and searching on *.* to generate a list of every file and folder on, say, drive C. Once the list is displayed, select several objects of different types (for example, a .TXT file, an .XLS file, and a folder) and then right-click one of the items. A composite context menu forms from commands in the items' individual context menus.</P>
+<P>Unfortunately, there is not a convenient mechanism (at least none that I know of) to build a composite context menu using operating system-supplied functions. For example, there is no magic way to call QueryContextMenu and have it fill in a context menu pertaining to multiple items. When I asked Microsoft how they did it, the response I got was something like "Well, we kludged it up with some code that we're not too proud of, and our code also relies on some information that's available only to Explorer, so don't try this at home."</P>
+<P>The obvious solution is to display Explorer menus for just one item at a time. If you select multiple items and click one of them with the right mouse button, either the context menu for that item should be displayed or nothing should be displayed. You might get clever and call IContextMenu::QueryContextMenu once for each item (each time using a separate HMENU) and then combine all the unique items into one composite menu, but I wouldn't go to that much trouble unless I had to. Let your conscience be your guide. Meanwhile,&nbsp;cross&nbsp;your&nbsp;fingers&nbsp;and hope that this is an omission Microsoft will remedy in a future version of Windows.</P>
+<P></P>
+<H2><A NAME="sec2"></A>Your Needs, Your Ideas</H2><P>Are there tough Win32 programming questions you'd like to see answered in this column? If so, email me at the address listed below. I regret that time doesn't permit me to respond individually to all questions, but rest assured that I'll read every one and consider each for inclusion in a future installment of Wicked Code.   </P>
+<P></P>
+<P>Have a tricky issue dealing with Windows? Send your questions via email to Jeff Prosise: 72241.44@compuserve.com</P>
+<P><I>This article is reproduced from Microsoft Systems Journal. Copyright &copy; 1997 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S. and Canada, or (303) 678-0439 in all other countries. For other inquiries, call (415) 905-2200.</P>
+<P></P></font></body></HTML>

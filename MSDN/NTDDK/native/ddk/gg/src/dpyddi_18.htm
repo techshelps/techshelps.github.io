@@ -1,0 +1,152 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML>
+<HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Supporting Banked Frame Buffers</TITLE>
+<style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD>
+<BODY BGPROPERTIES="FIXED" TEXT="#000000" BGCOLOR="#FFFFFF">
+
+<FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<H2><A NAME="DDK_Supporting_Banked_Frame_Buffers_GG"></A>Supporting Banked Frame Buffers</H2>
+<P>
+To reduce its size, a driver can be designed to implement the functions it can
+perform faster than GDI and have GDI perform all other operations. GDI can be
+used to draw directly to all standard 1, 4, 8, 16, 24, and 32-bit-per-pixel
+bitmaps and it is common to have GDI do much of the drawing. This scheme
+allows a display driver to hook any call it can accelerate and let GDI handle
+all other calls. This type of GDI support works best when the entire frame
+buffer can be mapped linearly into the CPU’s address space. However, GDI
+cannot directly access banked memory associated with a banked frame buffer.
+Consequently, the display driver must divide the frame buffer into a series of
+contiguous banks and provide a means for GDI to perform its draw operations to
+the appropriate frame buffer banks. That is, GDI is made to write data to one
+bank of the frame buffer before being moved to subsequent banks as necessary
+to complete the draw operation through a mechanism referred to as “banked
+callbacks.”
+<P>
+Figure 5.3<B>&nbsp;</B>shows that the accelerator’s frame buffer, a 1024-by-768 VGA
+display buffer, is divided into several banks. In this example, the contents
+of the video memory are written to the accelerator through a series of draw
+operations that address contiguous banks of the frame buffer. As far as GDI is
+concerned, each of its draw operations appear to be to the standard frame
+buffer and not to different banks of the accelerator’s frame buffer. The
+device driver for the accelerator handles the banking operations that cause
+GDI to draw to the accelerator’s frame buffer on a bank by bank basis.
+<P>
+Figure 5.3 is provided for the purpose of illustration only. The display
+driver does not specifically use the physical address A000 but uses a logical
+address passed to it by the miniport driver.
+<P>
+<IMG SRC="../art/banking1.gif" BORDER=0>
+<P>
+<B>Figure 5.3    Example of Mapping Video Memory to a Banked Frame Buffer</B>
+<P>
+When an accelerator that employs a banked frame buffer is in use in a system,
+the frame buffer is a device-managed surface and so the display driver hooks
+the draw function calls. When the display driver hooks a call, such as draw
+path, fill path, or block transfer, it determines which banks in the frame
+buffer are affected by the called draw function.
+<P>
+If the driver elects to have GDI perform the draw function, the driver calls
+the appropriate <B>EngXxx</B>&nbsp;function. However, before making the call, the
+display driver must modify the clip and surface objects it received in the
+hooked call and pass these modified objects in the call back to GDI. The clip
+and surface objects are modified to prevent GDI from drawing beyond the
+extents of the bank. That is, if GDI is called to draw a path that exists
+partially in the next bank, and if there is no modification of the clip and
+surface objects, GDI will write to memory beyond the extents of the current
+bank. Attempts by GDI to draw outside the extents of the bank will result in
+access violations that may be difficult to track.
+<P>
+The example banked frame buffer in Figure 5.4 shows how an elliptical object
+drawn on the display spans two banks of the banked frame buffer, BANK_1 and
+BANK_2. For GDI to draw this object, it must be made to draw the top portion
+of the ellipse (appearing in BANK_1) to the standard frame buffer and then the
+lower portion of the ellipse to the same standard buffer. It is up to the
+device driver to map these two successive writes by GDI to BANK_1 and BANK_2
+of the banked frame buffer for display and also prevent GDI from writing
+beyond the limits of each bank.
+<P>
+When performing banked frame buffering, the display driver can determine the
+bounds of the object (the size of the destination rectangle) by checking the
+parameters of the call or by calling back to GDI. From the bounds of the
+object, the driver can determine how many banks are spanned by the object. For
+every bank that the bounding rectangle touches, the display driver calls back
+to the appropriate GDI draw function, altering values for each call.
+<P>
+One set of values that need to be altered are members of the CLIPOBJ
+originally passed by GDI. Changes to this structure inform GDI of the bounds
+of the bank. That is, the top and bottom scan values that GDI must draw to are
+redefined so that it doesn’t attempt to draw beyond the limits of the bank.
+The bank manager (<I>bankmgr.c</I>&nbsp;of the VGA64K driver) takes the original
+CLIPOBJ data obtained from GDI, saves the values away for later restoration,
+and alters the bounds values. The bounds are changed to provide new <B>rclBounds.top</B>
+and <B>rclBounds.bottom</B>&nbsp;values that describe the extents of the bank being
+drawn to. That is, it is necessary during banking that GDI perform clipping to
+a size that avoids drawing the entire path and overwriting the limits of the
+current bank in the process.
+<P>
+<IMG SRC="../art/pvscan0.gif" BORDER=0>
+<P>
+<B>Figure 5.4    Drawn Objects Span Multiple Banks in the Frame Buffer</B>
+<P>
+If the original <A HREF="grstrcts_4.htm">CLIPOBJ</A>&nbsp;passed by GDI was defined as
+null or DC_TRIVIAL, the display driver passes a subsititute CLIPOBJ, created
+via <B><A HREF="grfncs_70.htm">EngCreateClip</A></B>, that is modified to
+define a clip window and cause GDI to clip to the extents of a single bank. If
+the CLIPOBJ is complex, such as with a triangular-shaped clip object on top of
+the ellipse as shown in Figure 5.4, the display driver modifies the complex
+CLIPOBJ with the <B>rclBounds.top</B>&nbsp;and <B>rclBounds.bottom</B>&nbsp;values so
+that there is an additive effect between the two clip objects. The net result
+is that GDI is prevented from writing off the end of the bank. The driver must
+also restore the original bounds of the CLIPOBJ data previously obtained from
+GDI.
+<P>
+In addition to altering the bounds values, the display driver sets the
+OC_BANK_CLIP flag in the <A HREF="grstrcts_4.htm">clip object</A>&nbsp;to inform GDI
+that this is a banked callback. The example code for this clipping operation
+is located in <I>bankmgr.c</I>&nbsp;of the VGA64K sample driver.
+<P>
+Not only does GDI need to be informed of the clipping required when drawing to
+the banked frame buffer, but it must also be made to draw with reference to
+the beginning of the standard frame buffer. When called to draw, GDI simply
+gets a pointer to a SURFOBJ which includes the <B>pvScan0</B>, <B>lDelta</B>,
+and <B>iBitmapFormat</B>&nbsp;members. GDI calculates where to draw on the surface
+by using these values as follows:
+<PRE><FONT FACE="Courier" SIZE="2">start_draw_point = pvScan0 + (y*lDelta) + (x*PixelSize(iBitmapFormat))
+</FONT></PRE>
+<P>
+where <I>x</I>&nbsp;and <I>y</I>&nbsp;are coordinates at which drawing is to begin and <I>start_draw_point</I>
+is the address at which the address of the first pixel to be drawn. GDI
+performs this calculation on every drawing call and always references the
+SURFOBJ for <B>pvScan0</B>, which is the logical address for the start of the
+standard frame buffer.
+<P>
+To further illustrate, if it is the case that GDI needs to “draw” the entire
+contents of a 8 bits-per-pixel 64K frame buffer, beginning at a logical
+address of <B>pvScan0</B>&nbsp;= 0x100000, it would end the draw operation at
+0x10FFFF (0x100000 + (63*1024)+(1023)), where <I>y</I>&nbsp;is 63, <B>lDelta</B>&nbsp;is
+1024, and <I>x</I>&nbsp;is 1023 (the position of the last pixel in the last scan
+line).
+<P>
+When the display driver next calls GDI to draw that part of the object that
+falls within the <I>next</I>&nbsp;bank of the banked frame buffer, the value of <I>y</I>,
+as far as GDI is concerned, is 64. With a value of 0x100000 for <B>pvScan0</B>
+and and 64 for <I>y</I>, GDI would begin to write data at 0x110000 if allowed
+to. However, 0x110000 is beyond the 0x10FFFF extent of the 64K frame buffer
+and must not be written to by GDI during this operation.
+<P>
+Consequently, when the display driver wants GDI to write the data that is to
+appear in the second and subsequent banks of the frame buffer, the driver must
+decrement the value of <B>pvScan0</B>&nbsp;so that the starting point calculated by
+GDI is still referenced to the example address of 0x100000. Continuing in the
+example, this means decrementing the value of <B>pvScan0</B>&nbsp;to a value of
+0x090000 when drawing to the second bank of the frame buffer. The net result
+of this <B>pvScan0</B>&nbsp;alteration is that GDI still draws with reference to
+address 0x100000. That is, 0x090000 + (64*1024) + 0 is equal to 0x100000,
+which is where GDI is required to draw in order for the data to be mapped into
+the second bank of the frame buffer. The adjustment of <B>pvScan0</B>&nbsp;can be
+found in <I>vga64k\bankmgr.c</I>.
+<P></FONT>
+</BODY>
+</HTML>

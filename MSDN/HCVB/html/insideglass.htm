@@ -1,0 +1,44 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Inside the Glass</title>
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000>
+
+<font face="verdana,arial,helvetica" size="2"><h1><a name="insideglass"></a>Inside the Glass</h1>
+<BR>
+The Create method does most of what CPictureGlass does. This is a long function, so we’ll step through it in pieces. But first, here are the private variables used by the Create method and other CPictureGlass methods and properties:</p>
+<pre><code>Private cvsDst As Object, hdcDst As Long, clrMask As Long<BR>Private hdcImage As Long, hbmpImage As Long, hbmpImageOld As Long<BR>Private hdcMask As Long, hbmpMask As Long, hbmpMaskOld As Long<BR>Private hdcBack As Long, hbmpBack As Long, hbmpBackOld As Long<BR>Private hdcCache As Long, hbmpCache As Long, hbmpCacheOld As Long<BR>Private fExist As Boolean, fVisible As Boolean<BR>Private xOld As Long, yOld As Long<BR>Private dxSrc As Long, dySrc As Long<BR>Private xLeft As Long, yTop As Long</code></pre>
+<BR>
+This list gives you some idea of the complexity we’re going to be dealing with. Notice that the destination canvas <i>cvsDst</i> has type Object. That’s so you can draw on a form, on a PictureBox, or on a UserControl. But late binding imposes a performance penalty that must be minimized in any animation technique. CPic&shy;tureGlass does this by saving all the useful properties of the destination canvas in variables. You do this in the Create method, which is called only once and is not speed-critical. You don’t want to access late-bound members in the Draw method, which will be called constantly. But this strategy assumes that whatever you save in Create will be unchanged when Draw tries to use it. That’s one of the reasons the Fun ’n Games form isn’t resizable. Keep this in mind when using CPictureGlass in your own programs. You’ll need to call Create again any time important properties of the destination canvas change.</p>
+<BR>
+Create starts out by saving data from its arguments and querying the system for additional data:</p>
+<pre><code>Sub Create(cvsDstA As Object, picSrc As Picture, clrMaskA As Long, _<BR>           Optional x As Variant, Optional y As Variant)<BR><BR>    ‘ Clean up any old instance before creating a new one<BR>    If fExist Then Destroy<BR>    ‘ Save at module level for use in properties and methods<BR>    clrMask = clrMaskA<BR>    Set cvsDst = cvsDstA<BR>    If picSrc.Type &lt;&gt; vbPicTypeBitmap Then ErrRaise eePictureNotBitmap<BR><BR>    ‘ Catch any errors from canvas that doesn’t have needed properties<BR>    On Error GoTo CreateErrorCanvas<BR>    With cvsDst<BR>        hdcDst = .hDC<BR>        ‘ Get size and position of image in pixels<BR>        dxSrc = .ScaleX(picSrc.Width, vbHimetric, vbPixels)<BR>        dySrc = .ScaleY(picSrc.Height, vbHimetric, vbPixels)<BR>        ‘ Default is the center<BR>        If IsMissing(x) Then x = .ScaleWidth / 2<BR>        If IsMissing(y) Then y = .ScaleHeight / 2<BR>        xLeft = .ScaleX(x, .ScaleMode, vbPixels)<BR>        yTop = .ScaleY(y, .ScaleMode, vbPixels)<BR>    End With<BR>    Dim cPlanes As Long, cPixelBits As Long<BR>    cPlanes = GetDeviceCaps(hdcDst, PLANES)<BR>    cPixelBits = GetDeviceCaps(hdcDst, BITSPIXEL)</code></pre>
+<BR>
+The next step is to create a copy of the Picture we’re going to make transparent. We can’t work on the original because we’re going to modify the picture. This is a temporary variable that can be destroyed when we’re finished.</p>
+<pre><code>‘ Create memory DC compatible with screen for picture copy<BR>Dim hdcSrc As Long, hdcSrcOld As Long, hbmpSrcOld As Long<BR>hdcSrc = CreateCompatibleDC(0&amp;)<BR>’ Select bitmap into DC<BR>hbmpSrcOld = SelectObject(hdcSrc, picSrc.Handle)</code></pre>
+<BR>
+This code first creates a memory DC compatible with the screen. It then selects the bitmap from the picture into the DC. This copy now has the same bits and colors as the picture. But we don’t need the same bits for transparency—we need an inverted copy of them. So we create another memory DC:</p>
+<pre><code>‘ Create memory DC for image with inverted background (AND mask)<BR>hdcImage = CreateCompatibleDC(0&amp;)<BR>’ Create color bitmap same as screen<BR>hbmpImage = CreateBitmap(dxSrc, dySrc, cPlanes, cPixelBits, 0&amp;)<BR>hbmpImageOld = SelectObject(hdcImage, hbmpImage)<BR>’ Make copy of picture because we don’t want to modify original<BR>Call BitBlt(hdcImage, 0, 0, dxSrc, dySrc, hdcSrc, 0, 0, vbSrcCopy)</code></pre>
+<BR>
+This is the first of four permanent memory DCs that we’ll blit to and from during the animation. In some cases, we could blit directly to the destination, but it’s faster to blit to a memory DC than to a screen DC so we’ll delay modifying the real destination until the last moment.</p>
+<BR>
+Before we can invert the background of the image, we have to create the mask:</p>
+<pre><code>‘ Create DC for monochrome mask of image (XOR mask)<BR>hdcMask = CreateCompatibleDC(0&amp;)<BR>’ Create bitmap (monochrome by default)<BR>hbmpMask = CreateCompatibleBitmap(hdcMask, dxSrc, dySrc)<BR>’ Select it into DC<BR>hbmpMaskOld = SelectObject(hdcMask, hbmpMask)<BR>’ Set background of source to the mask color<BR>Call SetBkColor(hdcSrc, clrMask)<BR>’ Copy color bitmap to monochrome DC to create mono mask<BR>Call BitBlt(hdcMask, 0, 0, dxSrc, dySrc, hdcSrc, 0, 0, vbSrcCopy)</code></pre>
+<BR>
+This is the same technique described earlier in “Creating Masks,” page 404. The <i>clrMask</i> color determines which color will be transparent.</p>
+<BR>
+At this point, we’re finished with the picture object and the copy we made of it, so we can throw it away:</p>
+<pre><code>‘ We’ve copied and used the source picture, so give it back<BR>Call SelectObject(hdcSrc, hbmpSrcOld)<BR>Call DeleteDC(hdcSrc)</code></pre>
+<BR>
+The image DC still contains an exact duplicate of the original picture, but we’re about to throw away the last vestiges of what we started with. A transparent picture has no use for its background color, and, in fact, that background had better be a known color—black. “Blitting Images onto Backgrounds,” page 401, explains why this inversion is necessary.</p>
+<pre><code>‘ Invert background of image to create AND Mask<BR>Call SetBkColor(hdcImage, vbBlack)<BR>Call SetTextColor(hdcImage, vbWhite)<BR>Call BitBlt(hdcImage, 0, 0, dxSrc, dySrc, hdcMask, 0, 0, vbSrcAnd)</code></pre>
+<BR>
+At this point, the CPictureGlass object contains an XOR mask and an AND mask, just as an icon does—and it will use them in the same way.</p>
+<BR>
+Finally we create a DC to save the background and one to draw a temporary pic&shy;ture (but don’t blit anything to them yet) and wrap up with some error <BR>handling:</p>
+<pre><code>    ‘ Create memory DCs for old background and cache<BR>    hdcBack = CreateCompatibleDC(0&amp;)<BR>    hbmpBack = CreateBitmap(dxSrc, dySrc, cPlanes, cPixelBits, 0&amp;)<BR>    hbmpBackOld = SelectObject(hdcBack, hbmpBack)<BR>    hdcCache = CreateCompatibleDC(0&amp;)<BR>    hbmpCache = CreateBitmap(dxSrc, dySrc, cPlanes, cPixelBits, 0&amp;)<BR>    hbmpCacheOld = SelectObject(hdcCache, hbmpCache)<BR>    <BR>    ‘ Invalid x and y indicate first move hasn’t occurred<BR>    xOld = -1: yOld = -1<BR>    fExist = True: fVisible = True<BR>    Exit Sub<BR>CreateErrorCanvas:<BR>    ErrRaise eeInvalidCanvas<BR>End Sub</code></pre>
+</font></BODY>
+</HTML>

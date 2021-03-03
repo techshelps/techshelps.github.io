@@ -1,0 +1,274 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>A streambuf Derivation Example</title>
+<style>@import url(stylesheets/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="stylesheets/msdn_ie3.css"></HEAD>
+<BODY>
+<font face="verdana,arial,helvetica" size="2">
+<h1><a name="_iostream_a_streambuf_derivation_example"></a><sup></sup>A streambuf Derivation Example</h1>
+<p>
+The following example modifies the <b>cout</b> object to print in two-column landscape (horizontal) mode on a printer that uses the PCL control language (for example, Hewlett-Packard LaserJet printer). As the test driver program shows, all member functions and manipulators that work with the original <b>cout</b> object work with the special version. The application programming interface is the same.</p>
+<p>
+The example is divided into three source files:
+<ul type=disc>
+<li>
+HSTREAM.H — the LaserJet class declaration that must be included in the implementation file and application file<br><br></li>
+<li>
+HSTREAM.CPP — the LaserJet class implementation that must be linked with the application<br><br></li>
+<li>
+EXIOS204.CPP — the test driver program that sends output to a LaserJet printer</li>
+</ul>
+<p>
+HSTREAM.H contains only the class declaration for <code>hstreambuf</code>, which is derived from the <b>filebuf</b> class and overrides the appropriate <b>filebuf</b> virtual functions.</p>
+<pre><code>// hstream.h - HP LaserJet output stream header
+#include &lt;fstream.h&gt; // Accesses filebuf class
+#include &lt;string.h&gt;
+#include &lt;stdio.h&gt; // for sprintf
+
+class hstreambuf : public filebuf
+{
+public:
+ &nbsp;&nbsp; hstreambuf( int filed );
+ &nbsp;&nbsp; virtual int sync();
+ &nbsp;&nbsp; virtual int overflow( int ch );
+ &nbsp;&nbsp; ~hstreambuf();
+private:
+ &nbsp;&nbsp; int column, line, page;
+ &nbsp;&nbsp; char* buffer;
+ &nbsp;&nbsp; void convert( long cnt );
+ &nbsp;&nbsp; void newline( char*&amp; pd, int&amp; jj );
+ &nbsp;&nbsp; void heading( char*&amp; pd, int&amp; jj );
+ &nbsp;&nbsp; void pstring( char* ph, char*&amp; pd, int&amp; jj );
+};
+ostream&amp; und( ostream&amp; os );
+ostream&amp; reg( ostream&amp; os );
+</code></pre>
+<p>
+HSTREAM.CPP contains the <code>hstreambuf</code> class implementation.</p>
+<pre><code>// hstream.cpp&nbsp; - HP LaserJet output stream
+#include "hstream.h"
+
+const int REG&nbsp; = 0x01;&nbsp;&nbsp; // Regular font code
+const int UND&nbsp; = 0x02;&nbsp;&nbsp; // Underline font code
+const int CR&nbsp;&nbsp; = 0x0d;&nbsp;&nbsp; // Carriage return character
+const int NL&nbsp;&nbsp; = 0x0a;&nbsp;&nbsp; // Newline character
+const int FF&nbsp;&nbsp; = 0x0c;&nbsp;&nbsp; // Formfeed character
+const int TAB&nbsp; = 0x09;&nbsp;&nbsp; // Tab character
+const int LPP&nbsp; = 57;&nbsp;&nbsp;&nbsp;&nbsp; // Lines per page
+const int TABW = 5;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Tab width
+
+// Prolog defines printer initialization (font, orientation, etc.
+char prolog[] =
+{ 0x1B, 0x45,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Reset printer
+  0x1B, 0x28, 0x31, 0x30, 0x55,         // IBM PC char set
+  0x1B, 0x26, 0x6C, 0x31, 0x4F,         // Landscape
+  0x1B, 0x26, 0x6C, 0x38, 0x44,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // 8 lines per inch
+  0x1B, 0x26, 0x6B, 0x32, 0x53};    &nbsp;&nbsp;&nbsp; // Lineprinter font
+
+// Epilog prints the final page and terminates the output
+char epilog[] = { 0x0C, 0x1B, 0x45 };&nbsp;&nbsp; // Formfeed, reset
+
+char uon[] = { 0x1B, 0x26, 0x64, 0x44, 0 }; // Underline on
+char uoff[] = { 0x1B, 0x26, 0x64, 0x40, 0 };// Underline off
+
+hstreambuf::hstreambuf( int filed ) : filebuf( filed )
+{
+ &nbsp;&nbsp; column = line = page = 0;
+ &nbsp;&nbsp; int size = sizeof( prolog );
+ &nbsp;&nbsp; setp( prolog, prolog + size );
+ &nbsp;&nbsp; pbump( size );&nbsp;&nbsp; // Puts the prolog in the put area
+ &nbsp;&nbsp; filebuf::sync(); // Sends the prolog to the output file
+ &nbsp;&nbsp; buffer = new char[1024]; // Allocates destination buffer
+}
+
+hstreambuf::~hstreambuf()
+{
+ &nbsp;&nbsp; sync(); // Makes sure the current buffer is empty
+ &nbsp;&nbsp; delete buffer; // Frees the memory
+ &nbsp;&nbsp; int size = sizeof( epilog );
+ &nbsp;&nbsp; setp( epilog, epilog + size );
+ &nbsp;&nbsp; pbump( size );&nbsp;&nbsp; // Puts the epilog in the put area
+ &nbsp;&nbsp; filebuf::sync(); // Sends the epilog to the output file
+}
+int hstreambuf::sync()
+{
+ &nbsp;&nbsp; long count = out_waiting();
+   if ( count ) {
+      convert( count );
+   }
+   return filebuf::sync();
+}
+
+int hstreambuf::overflow( int ch )
+{
+ &nbsp;&nbsp; long count = out_waiting();
+   if ( count ) {
+      convert( count );
+   }
+   return filebuf::overflow( ch );
+}
+// The following code is specific to the HP LaserJet printer
+
+// Converts a buffer to HP, then writes it
+void hstreambuf::convert( long cnt )
+{
+ &nbsp;&nbsp; char *bufs, *bufd; // Source, destination pointers
+ &nbsp;&nbsp; int j = 0;
+
+ &nbsp;&nbsp; bufs = pbase();
+ &nbsp;&nbsp; bufd = buffer;
+ &nbsp;&nbsp; if( page == 0 ) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; newline( bufd, j );
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; for( int i = 0; i &lt; cnt; i++ ) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; char c = *( bufs++ );&nbsp; // Gets character from source buffer
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if( c &gt;= ' ' ) {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Character is printable
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; * ( bufd++ ) = c;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; j++;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; column++;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+
+else if( c == NL ) {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Moves down one line
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *( bufd++ ) = c;&nbsp;&nbsp;&nbsp; // Passes character through
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; j++;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; line++;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; newline( bufd, j ); // Checks for page break, etc.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else if( c == FF ) {&nbsp;&nbsp;&nbsp; // Ejects paper on formfeed
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; line = line - line % LPP + LPP;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; newline( bufd, j ); // Checks for page break, etc.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else if( c == TAB ) {&nbsp;&nbsp; // Expands tabs
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; do {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *( bufd++ ) = ' ';
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; j++;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; column++;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; } while ( column % TABW );
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else if( c == UND ) { // Responds to und manipulator
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pstring( uon, bufd, j );
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else if( c == REG ) { // Responds to reg manipulator
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pstring( uoff, bufd, j );
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; setp( buffer, buffer + 1024 ); // Sets new put area
+ &nbsp;&nbsp; pbump( j ); // Tells number of characters in the dest buffer
+}
+
+// simple manipulators - apply to all ostream classes
+ostream&amp; und( ostream&amp; os ) // Turns on underscore mode
+{
+ &nbsp;&nbsp; os &lt;&lt; (char) UND; return os;
+}
+
+ostream&amp; reg( ostream&amp; os ) // Turns off underscore mode
+{
+ &nbsp;&nbsp; os &lt;&lt; (char) REG; return os;
+}
+
+void hstreambuf::newline( char*&amp; pd, int&amp; jj ) {
+// Called for each newline character
+   column = 0;
+   if ( ( line % ( LPP*2 ) ) == 0 ) { // Even page
+      page++;
+      pstring( "\033&amp;a+0L", pd, jj );&nbsp; // Set left margin to zero
+      heading( pd, jj );    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Print heading
+      pstring( "\033*p0x77Y", pd, jj );// Cursor to (0,77) dots
+   }
+   if ( ( ( line % LPP ) == 0 ) &amp;&amp; ( line % ( LPP*2 ) ) != 0 ) {
+   //&nbsp; Odd page; prepare to move to right column
+      page++;
+      pstring( "\033*p0x77Y", pd, jj ); // Cursor to (0,77) dots
+      pstring( "\033&amp;a+88L", pd, jj );&nbsp; // Left margin to col 88
+   }
+}
+
+void hstreambuf::heading( char*&amp; pd, int&amp; jj ) // Prints heading
+{
+   char hdg[20];
+   int i;
+
+   if( page &gt; 1 ) {
+      *( pd++ ) = FF;
+      jj++;
+   }
+   pstring( "\033*p0x0Y", pd, jj ); // Top of page
+   pstring( uon, pd, jj );&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Underline on
+   sprintf( hdg, "Page %-3d", page );
+   pstring( hdg, pd, jj );
+   for( i=0; i &lt; 80; i++ ) {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Pads with blanks
+      *( pd++ ) = ' ';
+      jj++;
+   }
+   sprintf( hdg, "Page %-3d", page+1 ) ;
+   pstring( hdg, pd, jj );
+   for( i=0; i &lt; 80; i++ ) {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Pads with blanks
+      *( pd++ ) = ' ';
+      jj++;
+   }
+   pstring( uoff, pd, jj ); // Underline off
+}
+// Outputs a string to the buffer
+void hstreambuf::pstring( char* ph, char*&amp; pd, int&amp; jj )
+{
+ &nbsp;&nbsp; int len = strlen( ph );
+ &nbsp;&nbsp; strncpy( pd, ph, len );
+ &nbsp;&nbsp; pd += len;
+ &nbsp;&nbsp; jj += len;
+}
+</code></pre>
+<p>
+EXIOS204.CPP reads text lines from the <b>cin</b> object and writes them to the modified <b>cout</b> object.</p>
+<pre><code>// exios204.cpp
+// hstream Driver program copies cin to cout until end of file
+#include "hstream.h"
+
+hstreambuf hsb( 4 ); // 4=stdprn
+
+void main()
+{
+ &nbsp;&nbsp; char line[200];
+ &nbsp;&nbsp; cout = &amp;hsb; // Associates the HP LaserJet streambuf to cout
+ &nbsp;&nbsp; while( 1 ) {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cin.getline( line, 200 );
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if( !cin.good() ) break;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cout &lt;&lt; line &lt;&lt; endl;
+ &nbsp;&nbsp; }
+}
+</code></pre>
+<p>
+Here are the main points in the preceding code:
+<ul type=disc>
+<li>
+The new class <code>hstreambuf</code> is derived from <b>filebuf</b>, which is the buffer class for disk file I/O. The <b>filebuf</b> class writes to disk in response to commands from its associated <b>ostream</b> class. The <code>hstreambuf</code> constructor takes an argument that corresponds to the operating system file number, in this case 1, for <b>stdout</b>. This constructor is invoked by this line:<pre><code>hstreambuf hsb( 1 );
+</code></pre>
+</li>
+<li>
+The <b>ostream_withassign</b> assignment operator associates the <code>hstreambuf</code> object with the <b>cout</b> object:<pre><code>ostream&amp; operator =( streambuf* sbp );
+</code></pre>
+<p class=tl>
+This statement in EXIOS204.CPP executes the assignment:</P><pre><code>cout = &amp;hsb;
+</code></pre>
+</li>
+<li>
+The <code>hstreambuf</code> constructor prints the prolog that sets up the laser printer, then allocates a temporary print buffer.<br><br></li>
+<li>
+The destructor outputs the epilog text and frees the print buffer when the object goes out of scope, which happens after the exit from <b>main</b>.<br><br></li>
+<li>
+The <b>streambuf</b> virtual <b>overflow</b> and <b>sync</b> functions do the low-level output. The <code>hstreambuf</code> class overrides these functions to gain control of the byte stream. The functions call the private <code>convert</code> member function.<br><br></li>
+<li>
+The <code>convert</code> function processes the characters in the <code>hstreambuf</code> buffer and stores them in the object’s temporary buffer. The <b>filebuf</b> functions process the temporary buffer.<br><br></li>
+<li>
+The details of <code>convert</code> relate more to the PCL language than to the iostream library. Private data members keep track of column, line, and page numbers.<br><br></li>
+<li>
+The <code>und</code> and <code>reg</code> manipulators control the underscore print attribute by inserting codes 0x02 and 0x03 into the stream. The <code>convert</code> function later translates these codes into printer-specific sequences.<br><br></li>
+<li>
+The program can be extended easily to embellish the heading, add more formatting features, and so forth.<br><br></li>
+<li>
+In a more general program, the <code>hstreambuf</code> class could be derived from the <b>streambuf</b> class rather than the <b>filebuf</b> class. The <b>filebuf</b> derivation shown gets the most leverage from existing iostream library code, but it makes assumptions about the implementation of <b>filebuf</b>, particularly the <b>overflow</b> and <b>sync</b> functions. Thus you cannot necessarily expect this example to work with other derived <b>streambuf</b> classes or with <b>filebuf</b> classes provided by other software publishers.</li>
+</ul>
+</font></BODY>
+</HTML>

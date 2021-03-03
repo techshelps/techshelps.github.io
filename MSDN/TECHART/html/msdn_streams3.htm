@@ -1,0 +1,833 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Streaming Wave Files with DirectSound</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><a name="msdn_streams3"></a>Streaming Wave Files with DirectSound</h1>
+<p>
+Mark McCulley<br>
+Microsoft Corporation</p>
+<p>
+July 30, 1996</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="4997">
+</OBJECT><a href="javascript:sample1.Click()">Click to open or copy the files in the STREAMS sample application for this technical article.</a></p>
+<h2>Abstract</h2>
+<p>
+Playing small wave files with Microsoft® DirectSound® requires little buffer management; you can simply load the entire sound into memory and play it. With larger wave files, though, you should be more efficient in your memory usage, especially if you will be playing multiple sounds simultaneously. Streaming is a technique of using a small buffer to play a large file by filling the buffer with data from the file at the same rate that data is taken from the buffer and played.</p>
+<p>
+In this article I discuss the techniques required to stream wave files from disk and play them using the DirectSound application programming interface (API). I chose to implement my solution in C++, but the techniques presented here apply to a C implementation as well.</p>
+<h2>Introduction to DirectSound</h2>
+<p>
+Microsoft® DirectSound® is the 32-bit audio application programming interface (API) for Microsoft Windows® 95 and Windows NT® that replaces the 16-bit wave API introduced in Windows 3.1. It provides device-independent access to audio accelerator hardware, giving you access to features like real-time mixing of audio streams and control over volume, panning (left/right balance control), and frequency shifting during playback. DirectSound also provides low-latency playback (on the order of 20 milliseconds) so that you can better synchronize sounds with other events. DirectSound is available in both the DirectX™ 2 and the DirectX 3 SDKs.</p>
+<h3>Just the Facts, Ma'am</h3>
+<p>
+I'm going to stick to the subject of streaming wave files and not rehash all of the basics of DirectSound. If you want a thorough overview of DirectSound, check out Dave Edson's article, "Get World-Class Noise and Total Joy from Your Games with DirectSound and DirectInput" in the MSDN Library (Microsoft Systems Journal, 1996 Volume 11, February 1996 Number 2).</p>
+<p>
+If you want to experiment with DirectSound or build the STREAMS sample application, you'll need the DirectX 2 or the DirectX 3 SDK. The DirectX 3 SDK is available in the January release of the Development Platform.</p>
+<p>
+If you're already familiar with DirectSound and don't want to read this entire article to get the goodies, skip to the <a href="#quickfix">Quick Fix</a> section for a summary of what you need to know about streaming wave files with DirectSound.</p>
+<h2>How Streaming Works</h2>
+<p>
+The purpose of streaming is to use a relatively small buffer to play a large file. Specific implementations vary, but visualize streaming by imagining continually pouring water into a barrel with a hole in it. The idea is to keep enough water in the barrel so that the flow out of it is uninterrupted. In our case, the barrel is a sound buffer and the water is wave data. Let's carry this metaphor a bit further and say that to put water in the barrel, we have to fetch it from a lake with a bucket. The challenge of streaming, then, is to get the proper-sized bucket and a helper who can carry the bucket between the lake and the barrel fast enough to keep up with the outflow from the barrel. If the barrel (buffer) runs out of water (wave data), the flow (sound) is interrupted.</p>
+<h3>Streaming with DirectSound</h3>
+<p>
+If you've worked with the low-level wave API in Windows 3.1, you're probably familiar with the <b>waveOutWrite</b> function. This function sends a block of wave data to the driver; and when the driver is finished playing the buffer, it notifies the application and returns the buffer. To keep the drivers satisfied, the application must use at least two buffers and be able to fill a buffer with data in less time than it takes the driver to play a buffer. The following diagram illustrates the streaming mechanism used with the low-level wave API:</p>
+<p>
+<img src="streams3_1.gif" border=0></p>
+<p class=label>
+<b>Double-buffer streaming with 16-bit wave API</b></p>
+<p>
+The streaming mechanism used with DirectSound is a different beast altogether. With DirectSound, you create a looping secondary buffer object (I'll explain the "looping secondary" part of this jargon in a bit). This buffer is owned by DirectSound, and you must query the buffer to determine how much of the wave data has been played and how much space in the buffer is available to be filled with additional data. Conceptually, this mechanism is identical to a traditional circular buffer with head and tail pointers. The following diagram illustrates the streaming mechanism used with DirectSound:</p>
+<p>
+<img src="streams3_2.gif" border=0></p>
+<p class=label>
+<b>Single-buffer streaming with DirectSound</b></p>
+<p>
+With single-buffer streaming, the application is responsible for writing sound data into the buffer before the driver plays the data. The application should keep the buffer as full as possible to prevent any interruptions in sound playback.</p>
+<h3>Polling vs. Interrupt-Driven Buffer Monitoring</h3>
+<p>
+Single-buffer streaming requires that the application monitor the buffer and supply it with sound data when necessary. There are two approaches to implementing buffer monitoring:
+<ul type=disc>
+<li>
+Continuously polling the buffer.<br><br></li>
+<li>
+Periodically monitoring the buffer with an interrupt-driven routine.</li>
+</ul>
+<p>
+The second approach, using interrupts to periodically monitor the buffer levels, is the most commonly used solution to the problem of maintaining a streaming buffer. This is the solution I chose to implement in the STREAMS sample application. The first approach, continuous polling, needlessly consumes CPU cycles.</p>
+<h2>A C++ Implementation of Streaming</h2>
+<p>
+The STREAMS sample application includes a C++ implementation of streaming with DirectSound. I chose to do a C++ implementation of streaming for several reasons:
+<ul type=disc>
+<li>
+DirectSound's native interface is based on C++<br><br></li>
+<li>
+I have not seen any other C++ implementations of streaming with DirectSound<br><br></li>
+<li>
+I like to program in C++</li>
+</ul>
+<p>
+You don't have to use C++ to work with DirectSound, but since DirectSound is based on the Component Object Model (COM), C++ is the native interface. If you choose to use C, the DirectX 2 and 3 SDKs provide macros that allow you to access DirectSound methods in C-language programs. For a C-language implementation of streaming with DirectSound, check out the DSSTREAM sample in the DirectX SDK.</p>
+<h3>Design Goals</h3>
+<p>
+My primary design goal was to create some reusable objects that implement streaming with DirectSound. I didn't want to introduce the complexities of COM or OLE, so the objects are reusable at the source-code level. I wanted the objects to have high-level interfaces and be easy to use in an application.</p>
+<p>
+The STREAMS sample application uses the Microsoft Foundation Class (MFC) Library , a C++ application framework. I didn't base any of my streaming classes on MFC, so if you're using a different application framework, you should be able to reuse this code easily.</p>
+<h3>Building the STREAMS Sample Application</h3>
+<p>
+The STREAMS sample-application package includes source code for one target executable, STREAMS.EXE. I've included a project file for Visual C++®, Version 4.0. The following table summarizes the files required to make STREAMS.EXE. If you're not using Visual C++, you can use this table to easily recreate the project in your favorite IDE.</p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=26%><b>File</b></td>
+<td class=label width=74%><b>Description</b></td>
+</tr>
+<tr valign=top>
+<td width=26%>ASSERT.C</td>
+<td width=74%>Source file containing basic assert services</td>
+</tr>
+<tr valign=top>
+<td width=26%>DEBUG.C</td>
+<td width=74%>Source file containing basic debug services</td>
+</tr>
+<tr valign=top>
+<td width=26%>AUDIOSTREAM.CPP</td>
+<td width=74%>Source file containing implementation of <b>AudioStreamServices</b> and <b>AudioStream</b> objects</td>
+</tr>
+<tr valign=top>
+<td width=26%>TIMER.CPP</td>
+<td width=74%>Source file containing implementation of <b>Timer</b> object</td>
+</tr>
+<tr valign=top>
+<td width=26%>WAVEFILE.CPP</td>
+<td width=74%>Source file containing implementation of <b>WaveFile</b> object</td>
+</tr>
+<tr valign=top>
+<td width=26%>STREAMS.CPP</td>
+<td width=74%>Source file for application</td>
+</tr>
+<tr valign=top>
+<td width=26%>STREAMS.RC</td>
+<td width=74%>Resource script file</td>
+</tr>
+<tr valign=top>
+<td width=26%>WINMM.LIB</td>
+<td width=74%>System library file</td>
+</tr>
+<tr valign=top>
+<td width=26%>DSOUND.LIB</td>
+<td width=74%>System library file</td>
+</tr>
+</table><br>
+<p>
+The key source files are AUDIOSTREAM.CPP, TIMER.CPP, and WAVEFILE.CPP. These files contain the source for all of the objects required to implement wave streaming with DirectSound. The ASSERT.C and DEBUG.C files contain source for some simple debug and assert macros. The remaining source file, STREAMS.CPP, contains the source for a basic MFC-based application.</p>
+<p>
+To build the STREAMS sample application, you'll need the Win32 SDK and the DirectX 2 or DirectX 3 SDK. To run STREAMS.EXE, you need the DirectX SDK runtime libraries and, of course, a sound card.</p>
+<h3>A Top-Down View</h3>
+<p>
+Before I get into the implementation of the objects that support streaming (the <b>AudioStreamServices, AudioStream, Timer,</b> and <b>WaveFile</b> objects), let's take a look at how these objects are used in the STREAMS sample application.</p>
+<p>
+STREAMS is built on a basic two-object MFC model for frame window applications. The two objects are <b>CMainWindow </b>and <b>CTheApp,</b> based on <b>CFrameWnd,</b> and <b>CWinApp, </b>respectively. The following is the declaration of the <b>CMainWindow</b> class taken from STREAMS.H:</p>
+<pre><code>class CMainWindow : public CFrameWnd
+{
+public:
+  AudioStreamServices * m_pass;&nbsp;&nbsp; // ptr to AudioStreamServices object
+  AudioStream *m_pasCurrent;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // ptr to current AudioStream object
+  
+  CMainWindow();
+
+  //{{AFX_MSG( CMainWindow )
+  afx_msg void OnAbout();
+  afx_msg void OnFileOpen();
+  afx_msg void OnTestPlay();
+  afx_msg void OnTestStop();
+  afx_msg void OnUpdateTestPlay(CCmdUI* pCmdUI);
+  afx_msg void OnUpdateTestStop(CCmdUI* pCmdUI);
+  afx_msg int&nbsp; OnCreate(LPCREATESTRUCT lpCreateStruct);
+  afx_msg void OnDestroy();
+  //}}AFX_MSG
+
+  DECLARE_MESSAGE_MAP()
+};
+</code></pre>
+<p>
+Note the two data members <b>m_pass</b> and <b>m_pasCurrent.</b> These data members hold pointers to an <b>AudioStreamServices</b> and <b>AudioStream</b> object. For simplicity, the STREAMS sample application allows only a single wave file to be opened at a time. The <b>m_pasCurrent</b> member contains a pointer to an <b>AudioStream</b> object created from the currently open wave file.</p>
+<h4>Creating and initializing the AudioStreamServices object</h4>
+<p>
+Before a window uses streaming services, it must create an <b>AudioStreamServices</b> object. The following code shows how the <b>OnCreate</b> handler for the <b>CMainWindow</b> class creates and initializes an <b>AudioStreamsServices</b> object:</p>
+<pre><code>int CMainWindow::OnCreate(LPCREATESTRUCT lpCreateStruct) 
+{
+  if (CFrameWnd ::OnCreate(lpCreateStruct) == -1)
+ &nbsp;&nbsp; return -1;
+
+  // Create and initialize AudioStreamServices object.
+  m_pass = new AudioStreamServices;
+  if (m_pass)
+  {
+ &nbsp;&nbsp; m_pass-&gt;Initialize (m_hWnd);
+  }
+
+  // Initialize ptr to current AudioStream object
+  m_pasCurrent = NULL;
+  
+  return 0;
+}
+</code></pre>
+<p>
+Each window using streaming services must create an <b>AudioStreamServices</b> object and initialize it with a window handle. This requirement comes directly from the architecture of DirectSound, which apportions services on a per-window basis so that the sounds associated with a window can be muted when the window loses focus.</p>
+<h4>Creating an AudioStream object</h4>
+<p>
+Once a window has created and initialized an <b>AudioStreamServices</b> object, the window can create one or more <b>AudioStream</b> objects. The following code is the command handler for the File Open menu item:</p>
+<pre><code>void CMainWindow::OnFileOpen() 
+{
+  CString cstrPath;
+
+  // Create standard Open File dialog
+  CFileDialog * pfd 
+ &nbsp;&nbsp; = new CFileDialog (TRUE, NULL, NULL,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; OFN_EXPLORER | OFN_NONETWORKBUTTON | OFN_HIDEREADONLY,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "Wave Files (*.wav) | *.wav||", this);
+
+  // Show dialog
+  if (pfd-&gt;DoModal () == IDOK)
+  {
+ &nbsp;&nbsp; // Get pathname
+ &nbsp;&nbsp; cstrPath = pfd-&gt;GetPathName();
+
+ &nbsp;&nbsp; // Delete current AudioStream object
+ &nbsp;&nbsp; if (m_pasCurrent)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; delete (m_pasCurrent);
+ &nbsp;&nbsp; }
+
+ &nbsp;&nbsp; // Create new AudioStream object
+ &nbsp;&nbsp; m_pasCurrent = new AudioStream;
+ &nbsp;&nbsp; m_pasCurrent-&gt;Create ((LPSTR)(LPCTSTR (cstrPath)), m_pass);
+  }
+ &nbsp;&nbsp; 
+  delete (pfd);
+}
+</code></pre>
+<p>
+Two lines of code are required to create an <b>AudioStream</b> object:</p>
+<pre><code>m_pasCurrent = new AudioStream;
+m_pasCurrent-&gt;Create ((LPSTR)(LPCTSTR (cstrPath)), m_pass);
+</code></pre>
+<p>
+What looks like typecasting to LPCTSTR on the <i>cstrPath</i> parameter is actually a <b>CString</b> operator that extracts a pointer to a read-only C-style null-terminated string from a <b>CString</b> object. You might also be wondering why I didn't just create a constructor for the <b>AudioStream</b> class that accepts a pointer to a filename instead of making a <b>Create</b> member function to take the filename. I didn't do this because it's possible for the operation to fail and in C++ you can't easily return an error code from a constructor.</p>
+<h4>Controlling an AudioStream object</h4>
+<p>
+Once you've created an <b>AudioStream</b> object, you can begin playback with the <b>Play</b> method. The following is the command handler for the Test Play menu item:</p>
+<pre><code>void CMainWindow::OnTestPlay() 
+{
+  if (m_pasCurrent)
+  {
+ &nbsp;&nbsp; m_pasCurrent-&gt;Play ();
+  }
+}
+</code></pre>
+<p>
+And here's the command handler for the Test Stop menu item:</p>
+<pre><code>void CMainWindow::OnTestStop() 
+{
+  if (m_pasCurrent)
+  {
+ &nbsp;&nbsp; m_pasCurrent-&gt;Stop ();
+  }
+}
+</code></pre>
+<p>
+This code is so simple, I don't think it really needs any explanation. The only control methods I implemented for <b>AudioStream</b> objects are <b>Play</b> and <b>Stop.</b> In a real application, you'd probably want to add some more functionality.</p>
+<h3>The Timer and WaveFile Objects</h3>
+<p>
+Now that I've given you a look at how to use the <b>AudioStreamServices</b> and <b>AudioStream</b> objects in an application, let's dig into their implementation. I'll begin with two helper objects, <b>Timer</b> and <b>WaveFile</b>, that are used by <b>AudioStream</b> objects.</p>
+<h4>The Timer object</h4>
+<p>
+The <b>Timer</b> object is used to provide timer services that allow <b>AudioStream</b> objects to service the sound buffer periodically. Here's the declaration for the<b> Timer</b> class:</p>
+<pre><code>class Timer
+{
+public:
+  Timer (void);
+  ~Timer (void);
+  BOOL Create (UINT nPeriod, UINT nRes, DWORD dwUser,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; TIMERCALLBACK pfnCallback);
+protected:
+  static void CALLBACK TimeProc(UINT uID, UINT uMsg, DWORD dwUser,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DWORD dw1, DWORD dw2);
+  TIMERCALLBACK m_pfnCallback;
+  DWORD m_dwUser;
+  UINT m_nPeriod;
+  UINT m_nRes;
+  UINT m_nIDTimer;
+};
+</code></pre>
+<p>
+The <b>Timer</b> object uses the multimedia timer services provided through the Win32 <b>timeSetEvent</b> function. These services call a user-supplied callback function at a periodic interval specified in milliseconds. The <b>Create</b> member does all of the work here:</p>
+<pre><code>BOOL Create (UINT nDelay, UINT nRes, DWORD dwUser, TIMERCALLBACK pfnCallback);
+</code></pre>
+<p>
+The <i>nPeriod</i> and <i>nRes</i> parameters specify the timer period and resolution in milliseconds. The <i>dwUser</i> parameter specifies a DWORD that is passed back to you with each timer callback. The <i>pfnCallback</i> parameter specifies the callback function. Here's the source for <b>Create</b>:</p>
+<pre><code>BOOL Timer::Create (UINT nPeriod, UINT nRes, DWORD dwUser,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; TIMERCALLBACK pfnCallback)
+
+{
+  BOOL bRtn = SUCCESS;&nbsp; // assume success
+  
+  // Set data members
+  m_nPeriod = nPeriod;
+  m_nRes = nRes;
+  m_dwUser = dwUser;
+  m_pfnCallback = pfnCallback;
+
+  // Create multimedia timer
+  if ((m_nIDTimer = timeSetEvent (m_nPeriod, m_nRes, TimeProc, 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (DWORD) this, TIME_PERIODIC)) == NULL)
+  {
+ &nbsp;&nbsp; bRtn = FAILURE;
+  }
+
+  return (bRtn);
+}
+</code></pre>
+<p>
+After stuffing the four parameters into data members, <b>Create</b> calls <b>timeSetEvent</b> and passes the <b>this</b> pointer as the user-supplied data to the multimedia timer callback. This data is passed back to the callback to identify which <b>Timer</b> object is associated with the callback.</p>
+<p>
+Before I lose you here, take a look at the declaration of the <b>Timer::TimeProc</b> member function. It must be declared as static so that it can be used as a C-style callback for the multimedia timer set with <b>timeSetEvent</b>. Because <b>TimeProc</b> is a static member function, it's not associated with a <b>Timer</b> object and does not have access to the <b>this</b> pointer. Here's the source for <b>TimeProc</b>:</p>
+<pre><code>void CALLBACK Timer::TimeProc(UINT uID, UINT uMsg, DWORD dwUser,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DWORD dw1, DWORD dw2)
+{
+  // dwUser contains ptr to Timer object
+  Timer * ptimer = (Timer *) dwUser;
+
+  // Call user-specified callback and pass back user specified data
+  (ptimer-&gt;m_pfnCallback) (ptimer-&gt;m_dwUser);
+}
+</code></pre>
+<p>
+<b>TimeProc</b> contains two action-packed lines of code. The first line simply casts the <i>dwUser</i> parameter to a pointer to a <b>Timer</b> object and saves it in a local variable, <i>ptimer</i>. The second line of code dereferences <i>ptimer</i> to call the user-supplied callback and pass back the user-supplied data. I could have done away with the first line of code altogether and just cast <i>dwUser</i> to access the data members of the associated <b>Timer</b> object but I wrote it this way to better illustrate what's going on. Note that when I say "user-supplied" here, I'm talking about the user of the <b>Timer</b> object, which in this case is an <b>AudioStream</b> object.</p>
+<p>
+In similar fashion, any object that uses a <b>Timer</b> object must supply a callback that is a static member function and supply its <b>this</b> pointer as the user-supplied data for the callback. For example, here's the code from <b>AudioStream::Play</b> that creates the <b>Timer</b> object:</p>
+<pre><code>// Kick off timer to service buffer
+m_ptimer = new Timer ();
+if (m_ptimer)
+{
+  m_ptimer-&gt;Create (m_nBufService, m_nBufService, DWORD (this), TimerCallback);
+}
+</code></pre>
+<p>
+And here's the static member function that serves as a callback for the <b>Timer</b> object:</p>
+<pre><code>BOOL AudioStream::TimerCallback (DWORD dwUser)
+{
+  // dwUser contains ptr to AudioStream object
+  AudioStream * pas = (AudioStream *) dwUser;
+
+  return (pas-&gt;ServiceBuffer ());
+}
+</code></pre>
+<p>
+All the important work is done in the <b>AudioStream::ServiceBuffer</b> routine. You could move everything into <b>AudioStream::TimerCallback</b>, but because it's static, you'd have to use the <b>this</b> pointer contained in <i>dwUser</i> to access all class members. I think using a separate nonstatic member function results in code that is easier to read.</p>
+<h4>The WaveFile object</h4>
+<p>
+In addition to an object to encapsulate multimedia timer services, I needed an object to represent a wave file, so I created the <b>WaveFile</b> class. The following is the class declaration for the <b>WaveFile</b> class:</p>
+<pre><code>class WaveFile
+{
+public:
+  WaveFile (void);
+  ~WaveFile (void);
+  BOOL Open (LPSTR pszFilename);
+  BOOL Cue (void);
+  UINT Read (BYTE * pbDest, UINT cbSize);
+  UINT GetNumBytesRemaining (void) { return (m_nDataSize - m_nBytesPlayed); }
+  UINT GetAvgDataRate (void) { return (m_nAvgDataRate); }
+  UINT GetDataSize (void) { return (m_nDataSize); }
+  UINT GetNumBytesPlayed (void) { return (m_nBytesPlayed); }
+  UINT GetDuration (void) { return (m_nDuration); }
+  BYTE GetSilenceData (void);
+  WAVEFORMATEX * m_pwfmt;
+protected:
+  HMMIO m_hmmio;
+  MMRESULT m_mmr;
+  MMCKINFO m_mmckiRiff;
+  MMCKINFO m_mmckiFmt;
+  MMCKINFO m_mmckiData;
+  UINT m_nDuration;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // duration of sound in msec
+  UINT m_nBlockAlign;&nbsp;&nbsp;&nbsp; // wave data block alignment spec
+  UINT m_nAvgDataRate;&nbsp;&nbsp; // average wave data rate
+  UINT m_nDataSize;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // size of data chunk
+  UINT m_nBytesPlayed;&nbsp;&nbsp; // offset into data chunk
+};
+</code></pre>
+<p>
+This class was designed expressly to stream wave file data, hence there are none of the traditional file I/O functions for operations such as seeking, writing, and creating new files. The following table describes the purpose of each of the member functions in the <b>WaveFile</b> class:</p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=30%><b>Function</b></td>
+<td class=label width=70%><b>Description</b></td>
+</tr>
+<tr valign=top>
+<td width=30%><b>Open</b></td>
+<td width=70%>Opens a wave file.</td>
+</tr>
+<tr valign=top>
+<td width=30%><b>Cue</b></td>
+<td width=70%>Cues a wave file for playback.</td>
+</tr>
+<tr valign=top>
+<td width=30%><b>Read</b></td>
+<td width=70%>Reads a given number of data bytes.</td>
+</tr>
+<tr valign=top>
+<td width=30%><b>GetNumBytesRemaining</b></td>
+<td width=70%>Returns the number of data bytes remaining to be read.</td>
+</tr>
+<tr valign=top>
+<td width=30%><b>GetAvgDataRate</b></td>
+<td width=70%>Returns the average data rate in bytes per second.</td>
+</tr>
+<tr valign=top>
+<td width=30%><b>GetDataSize</b></td>
+<td width=70%>Returns the total number of wave data bytes.</td>
+</tr>
+<tr valign=top>
+<td width=30%><b>GetNumBytesPlayed</b></td>
+<td width=70%>Returns the number of data bytes that have been read.</td>
+</tr>
+<tr valign=top>
+<td width=30%><b>GetDuration</b></td>
+<td width=70%>Gets the duration of the wave file in milliseconds.</td>
+</tr>
+<tr valign=top>
+<td width=30%><b>GetSilenceData</b></td>
+<td width=70%>Returns a byte of data representing silence.</td>
+</tr>
+</table><br>
+<p>
+I chose to use the Win32 Multimedia File I/O services (MMIO) for implementation of <b>WaveFile</b> objects because these services take care of the basics of parsing the chunks in Resource Interchange File Format (RIFF) files. Since the point of this article is to explain streaming with DirectSound, I'm not going to explain the <b>WaveFile</b> code in detail. Take my word for it: The biggest challenge in writing this code was properly handling the myriad of errors that can occur when accessing files.</p>
+<h4>Silence, please!</h4>
+<p>
+There is one detail I do want to explain. Implementing the <b>AudioStream</b> class required that blocks of data representing silence be written to the sound buffer. (If you read the remainder of this article, you'll learn why.) Since the data representing silence depends on the format of the wave file, I added a <b>GetSilenceData</b> member function to the <b>WaveFile</b> class. Word size for pulse-code modulation (PCM) formats can range from one byte for 8-bit mono to four bytes for 16-bit stereo, as shown in the following table.</p>
+<table border=1 cellpadding=5 cols=3 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=33%><b>PCM Format</b></td>
+<td class=label width=33%><b>Word Size</b></td>
+<td class=label width=34%><b>Silence Data</b></td>
+</tr>
+<tr valign=top>
+<td width=33%>8-bit mono</td>
+<td width=33%>1 byte</td>
+<td width=34%>0x80</td>
+</tr>
+<tr valign=top>
+<td width=33%>8-bit stereo</td>
+<td width=33%>2 bytes</td>
+<td width=34%>0x8080</td>
+</tr>
+<tr valign=top>
+<td width=33%>16-bit mono</td>
+<td width=33%>2 bytes</td>
+<td width=34%>0x0000</td>
+</tr>
+<tr valign=top>
+<td width=33%>16-bit stereo</td>
+<td width=33%>4 bytes</td>
+<td width=34%>0x00000000 </td>
+</tr>
+</table><br>
+<p>
+Rather than make the <b>AudioStream</b> code deal with the different word sizes for different wave file formats, I took advantage of the fact that regardless of word size, silence data for PCM formats can be represented by a single byte. Thus, the <b>GetSilenceData</b> function returns a BYTE. This shortcut saved me from having to write a lot of extra code.</p>
+<h3>The AudioStreamServices Object</h3>
+<p>
+The DirectSound interface consists of two objects, <b>IDirectSound</b> and <b>IDirectSoundBuffer.</b> The <b>IDirectSound</b> object represents the DirectSound services for a single window. Services are apportioned on a per-windows basis to facilitate muting a sound stream when a window loses the input focus. I created the <b>AudioStreamServices</b> class to wrap the <b>IDirectSound</b> object:</p>
+<pre><code>class AudioStreamServices
+{
+public:
+  AudioStreamServices (void);
+  ~AudioStreamServices (void);
+  BOOL Initialize (HWND hwnd);
+  LPDIRECTSOUND GetPDS (void) { return m_pds; }
+protected:
+  HWND m_hwnd;
+  LPDIRECTSOUND m_pds;
+};
+</code></pre>
+<p>
+As you can see, this is a pretty light class. In addition to a constructor and destructor, there are two member functions, <b>Initialize</b> and <b>GetPDS.</b> The <b>GetPDS</b> function returns the pointer to the <b>IDirectSound</b> object created by the <b>Initialize</b> function. The <b>Initialize</b> function takes a window handle and creates and initializes an <b>IDirectSound</b> object. Here's the code for the <b>Initialize</b> function:</p>
+<pre><code>// Initialize
+BOOL AudioStreamServices::Initialize (HWND hwnd)
+{
+  BOOL fRtn = SUCCESS;&nbsp; // assume success
+
+  if (m_pds == NULL)
+  {
+ &nbsp;&nbsp; if (hwnd)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; m_hwnd = hwnd;
+
+ &nbsp;&nbsp;&nbsp;&nbsp; // Create IDirectSound object
+ &nbsp;&nbsp;&nbsp;&nbsp; if (DirectSoundCreate (NULL, &amp;m_pds, NULL) == DS_OK)
+ &nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Set cooperative level for DirectSound. Normal means our
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // sounds will be silenced when our window loses input focus.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (m_pds-&gt;SetCooperativeLevel (m_hwnd, DSSCL_NORMAL) == DS_OK)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Any additional initialization goes here.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Error
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DOUT ("ERROR: Unable to set cooperative level\n\r");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fRtn = FAILURE;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Error
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DOUT ("ERROR: Unable to create IDirectSound object\n\r");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fRtn = FAILURE;
+ &nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; else
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; // Error, invalid hwnd
+ &nbsp;&nbsp;&nbsp;&nbsp; DOUT ("ERROR: Invalid hwnd, unable to initialize services\n\r");
+ &nbsp;&nbsp;&nbsp;&nbsp; fRtn = FAILURE;
+ &nbsp;&nbsp; }
+  }
+
+  return (fRtn);
+}
+</code></pre>
+<p>
+The <b>Initialize</b> function creates an <b>IDirectSound</b> object by calling the <b>DirectSoundCreate</b> function. The first parameter to the <b>DirectSoundCreate</b> call is NULL to request the default DirectSound device. The second parameter is a pointer to a location that <b>DirectSoundCreate</b> fills with a pointer to an <b>IDirectSound</b> object. The pointer returned by <b>DirectSoundCreate</b> provides an interface for accessing <b>IDirectSound</b> member functions.</p>
+<p>
+After successfully creating an <b>IDirectSound</b> object, the <b>Initialize</b> code calls the <b>SetCooperativeLevel</b> member function specifying the DSSCL_NORMAL flag to set the normal cooperative level. This is the lowest cooperative level—other levels are available if you require more control of DirectSound's buffers. For example, in normal cooperative level, the format of audio output is always 8-bit 22kHz mono. To change to another output format, you have to set the priority cooperative level (DSSCL_PRIORITY) and call the <b>SetFormat</b> function.</p>
+<h3>The AudioStream Object</h3>
+<p>
+Now we're down to the good stuff. I've explained how to use <b>AudioStreamServices</b> and <b>AudioStream</b> objects in an application. I've described the <b>Timer</b> and <b>WaveFile</b> objects that are used to provide periodic timer services and read wave files. Now I'm going to explain the implementation of the <b>AudioStream</b> object, the object that actually streams wave files using DirectSound. Here's the <b>AudioStream</b> class declaration:</p>
+<pre><code>class AudioStream
+{
+public:
+  AudioStream (void);
+  ~AudioStream (void);
+  BOOL Create (LPSTR pszFilename, AudioStreamServices * pass);
+  BOOL Destroy (void);
+  void Play (void);
+  void Stop (void);
+protected:
+  void Cue (void);
+  BOOL WriteWaveData (UINT cbSize);
+  BOOL WriteSilence (UINT cbSize);
+  DWORD GetMaxWriteSize (void);
+  BOOL ServiceBuffer (void);
+  static BOOL TimerCallback (DWORD dwUser);
+  AudioStreamServices * m_pass;&nbsp; // ptr to AudioStreamServices object
+  LPDIRECTSOUNDBUFFER m_pdsb;&nbsp;&nbsp;&nbsp; // sound buffer
+  WaveFile * m_pwavefile;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // ptr to WaveFile object
+  Timer * m_ptimer;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // ptr to Timer object
+  BOOL m_fCued;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // semaphore (stream cued)
+  BOOL m_fPlaying;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // semaphore (stream playing)
+  DSBUFFERDESC m_dsbd;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // sound buffer description
+  LONG m_lInService;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // reentrancy semaphore
+  UINT m_cbBufOffset;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // last write position
+  UINT m_nBufLength;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // length of sound buffer in msec
+  UINT m_cbBufSize;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // size of sound buffer in bytes
+  UINT m_nBufService;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // service interval in msec
+  UINT m_nDuration;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // duration of wave file
+  UINT m_nTimeStarted;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // time (in system time) playback started
+  UINT m_nTimeElapsed;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // elapsed time in msec since playback started
+};
+</code></pre>
+<p>
+In addition to a standard constructor and destructor, there are four public interface methods: <b>Create, Destroy, Play,</b> and <b>Stop.</b> The purpose of these methods should be obvious from the names I've given them.</p>
+<p>
+The main players here are the <b>Create</b> and <b>Play </b>methods, and a third method, <b>ServiceBuffer,</b> that is not an interface. Here is an explanation of the role each of these methods plays in streaming wave files:
+<ul type=disc>
+<li>
+<b>Create</b> opens a wave file, creates a sound buffer, and cues the stream for playback.<br><br></li>
+<li>
+<b>Play</b> begins DirectSound playback and launches a timer to service the sound buffer.<br><br></li>
+<li>
+<b>ServiceBuffer</b> determines how much of the sound buffer is free and fills free space with wave data (or with silence data if all wave data has been sent to the buffer). <b>ServiceBuffer</b> also maintains an elapsed time count and stops playback when all of the wave file has been played.</li>
+</ul>
+<h4>Creating the sound buffer</h4>
+<p>
+Before creating a sound buffer, you must open the wave file to determine its format, average data rate, and duration. Here's the corresponding code from the <b>Create</b> method:</p>
+<pre><code>// Create a new WaveFile object
+if (m_pwavefile = new WaveFile)
+{
+  // Open given file
+  if (m_pwavefile-&gt;Open (pszFilename))
+  {
+ &nbsp;&nbsp; // Calculate sound buffer size in bytes
+ &nbsp;&nbsp; m_cbBufSize = (m_pwavefile-&gt;GetAvgDataRate () * m_nBufLength) / 1000;
+ &nbsp;&nbsp; m_cbBufSize =&nbsp;&nbsp; (m_cbBufSize &gt; m_pwavefile-&gt;GetDataSize ())
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ? m_pwavefile-&gt;GetDataSize ()
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : m_cbBufSize;
+
+ &nbsp;&nbsp; // Get duration of sound (in milliseconds)
+ &nbsp;&nbsp; m_nDuration = m_pwavefile-&gt;GetDuration ();
+ &nbsp;&nbsp; 
+ &nbsp;&nbsp; . . .
+  }
+}
+</code></pre>
+<p>
+After opening the file, <b>Create</b> determines the required size of the sound buffer and the duration of the sound. The size of the sound buffer is calculated from the average data rate and the default buffer length in milliseconds (the <b>m_nBufLength</b> data member). The default buffer length is set to a constant in the <b>AudioStream</b> constructor. I chose to use a two-second sound buffer, but it's a good idea to experiment with your particular application. The timer interval for servicing the sound buffer should be no more than half of the buffer length. I used a 500-millisecond service interval, one-fourth the length of the sound buffer. You can adjust the buffer length and buffer service intervals in the STREAMS sample application by changing the <b>DefBufferLength</b> and <b>DefBufferServiceInterval</b> constants in the AUDIOSTREAM.CPP file:</p>
+<pre><code>const UINT DefBufferLength&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = 2000;
+const UINT DefBufferServiceInterval&nbsp; = 250;
+</code></pre>
+<p>
+After successfully opening the wave file and calculating the required buffer size, <b>Create</b> creates a DirectSound sound buffer by initializing a <b>DSBUFFERDESC</b> structure and calling <b>IDirectSound::CreateSoundBuffer</b>:</p>
+<pre><code>// Create sound buffer
+HRESULT hr;
+memset (&amp;m_dsbd, 0, sizeof (DSBUFFERDESC));
+m_dsbd.dwSize = sizeof (DSBUFFERDESC);
+m_dsbd.dwBufferBytes = m_cbBufSize;
+m_dsbd.lpwfxFormat = m_pwavefile-&gt;m_pwfmt;
+hr = (m_pass-&gt;GetPDS ())-&gt;CreateSoundBuffer (&amp;m_dsbd, &amp;m_pdsb, NULL);
+</code></pre>
+<p>
+The <b>lpwfxFormat</b> element of the <b>DSBUFFERDESC</b> structure points to a <b>WAVEFORMATEX</b> structure specifying the format of the wave file. Currently, DirectSound will not play compressed wave formats. The <b>CreateSoundBuffer</b> method will fail for any formats that are not PCM. Note that no flags are specified for <b>DSBUFFERDESC.dwFlags</b>. This causes <b>CreateSoundBuffer</b> to create a looping secondary buffer which is the proper type of buffer for streaming.</p>
+<h4>Filling the sound buffer with wave data</h4>
+<p>
+After successfully creating the sound buffer, <b>Create</b> calls the <b>AudioStream::Cue</b> method to prepare the stream for playback. <b>Cue</b> resets the buffer pointers and the file pointer and then calls <b>AudioStream::</b> <b>WriteWaveData</b> to fill the buffer with data from the wave file. The following is the source for <b>WriteWaveData</b>:</p>
+<pre><code>BOOL AudioStream::WriteWaveData (UINT size)
+{
+  HRESULT hr;
+  LPBYTE lpbuf1 = NULL;
+  LPBYTE lpbuf2 = NULL;
+  DWORD dwsize1 = 0;
+  DWORD dwsize2 = 0;
+  DWORD dwbyteswritten1 = 0;
+  DWORD dwbyteswritten2 = 0;
+  BOOL fRtn = SUCCESS;
+
+  // Lock the sound buffer
+  hr = m_pdsb-&gt;Lock (m_cbBufOffset, size, &amp;lpbuf1, &amp;dwsize1, &amp;lpbuf2, &amp;dwsize2,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0);
+  if (hr == DS_OK)
+  {
+ &nbsp;&nbsp; // Write data to sound buffer. Because the sound buffer is circular,
+ &nbsp;&nbsp; // we may have to do two write operations if locked portion of buffer
+ &nbsp;&nbsp; // wraps around to start of buffer.
+ &nbsp;&nbsp; ASSERT (lpbuf1);
+ &nbsp;&nbsp; if ((dwbyteswritten1 = m_pwavefile-&gt;Read (lpbuf1, dwsize1)) == dwsize1)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; // Second write required?
+ &nbsp;&nbsp;&nbsp;&nbsp; if (lpbuf2)
+ &nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if ((dwbyteswritten2 = m_pwavefile-&gt;Read (lpbuf2, dwsize2)) == dwsize2)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Both write operations successful!
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Error, didn't read wave data completely
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fRtn = FAILURE;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; else
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; // Error, didn't read wave data completely
+ &nbsp;&nbsp;&nbsp;&nbsp; fRtn = FAILURE;
+ &nbsp;&nbsp; }
+
+ &nbsp;&nbsp; // Update our buffer offset and unlock sound buffer
+ &nbsp;&nbsp; m_cbBufOffset = (m_cbBufOffset + dwbyteswritten1 + dwbyteswritten2)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; % m_cbBufSize;
+ &nbsp;&nbsp; m_pdsb-&gt;Unlock (lpbuf1, dwbyteswritten1, lpbuf2, dwbyteswritten2);
+  }
+  else
+  {
+ &nbsp;&nbsp; // Error locking sound buffer
+ &nbsp;&nbsp; fRtn = FAILURE;
+  }
+
+  return (fRtn);
+}
+</code></pre>
+<p>
+<b>WriteWaveData</b> reads a given number of data bytes from the wave file and writes the data to the sound buffer. To write data to a DirectSound sound buffer you must first call the <b>IDirectSoundBuffer::Lock</b> method to get write pointers. No that's not a typo, <b>Lock</b> return <i>two</i> pointers. Usually, the second pointer will be returned as NULL, but if the write operation spans the end of the buffer the second pointer will be a valid address (the beginning of the buffer). That's the nature of circular buffers. No problem though, the resulting code is still pretty simple and straightforward.</p>
+<h4>Beginning playback</h4>
+<p>
+The <b>AudioStream::Play</b> method begins playback by calling the<b> IDirectSoundBuffer::Play</b> method and creating a timer to service the sound buffer:</p>
+<pre><code>// Begin DirectSound playback
+HRESULT hr = m_pdsb-&gt;Play (0, 0, DSBPLAY_LOOPING);
+if (hr == DS_OK)
+{
+  // Save current time (for elapsed time calculation)
+  m_nTimeStarted = timeGetTime ();
+  
+  // Kick off timer to service buffer
+  m_ptimer = new Timer ();
+  if (m_ptimer)
+  {
+ &nbsp;&nbsp; m_ptimer-&gt;Create (m_nBufService, m_nBufService, DWORD (this),
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; TimerCallback);
+  }
+
+  . . . 
+}
+</code></pre>
+<p>
+Note that the call to <b>IDirectSoundBuffer::Play</b> includes the DSBPLAY_LOOPING flag to specify that playback continue until explicitly stopped. <b>Play</b> also sets the <b>m_nTimeStarted</b> data member to the current system time (in milliseconds) to allow calculation of the time that has elapsed since playback was started. </p>
+<h4>Servicing the Sound Buffer</h4>
+<p>
+The <b>Timer</b> object created by <b>AudioStream::Play</b> periodically calls the <b>ServiceBuffer</b> routine to perform the following tasks:
+<ul type=disc>
+<li>
+Maintain an elapsed time count.<br><br></li>
+<li>
+Determine if playback is complete and stop if necessary.<br><br></li>
+<li>
+Fill sound buffer with more wave data or with silence data if all wave data has been sent to buffer.</li>
+</ul>
+<p>
+The following is the complete source for <b>ServiceBuffer</b>:</p>
+<pre><code>LONG lInService = FALSE;&nbsp; // reentrancy semaphore
+
+BOOL AudioStream::ServiceBuffer (void)
+{
+  BOOL fRtn = TRUE;
+
+  // Check for reentrance
+  if (InterlockedExchange (&amp;lInService, TRUE) == FALSE)
+  { // Not reentered, proceed normally
+ &nbsp;&nbsp; // Maintain elapsed time count
+ &nbsp;&nbsp; m_nTimeElapsed = timeGetTime () - m_nTimeStarted;
+
+ &nbsp;&nbsp; // Stop if all of sound has played
+ &nbsp;&nbsp; if (m_nTimeElapsed &lt; m_nDuration)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; // All of sound not played yet, send more data to buffer
+ &nbsp;&nbsp;&nbsp;&nbsp; DWORD dwFreeSpace = GetMaxWriteSize ();
+
+ &nbsp;&nbsp;&nbsp;&nbsp; // Determine free space in sound buffer
+ &nbsp;&nbsp;&nbsp;&nbsp; if (dwFreeSpace)
+ &nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // See how much wave data remains to be sent to buffer
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DWORD dwDataRemaining = m_pwavefile-&gt;GetNumBytesRemaining ();
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (dwDataRemaining == 0)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; { // All wave data has been sent to buffer
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Fill free space with silence
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (WriteSilence (dwFreeSpace) == FAILURE)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; { // Error writing silence data
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fRtn = FALSE;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else if (dwDataRemaining &gt;= dwFreeSpace)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; { // Enough wave data remains to fill free space in buffer
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Fill free space in buffer with wave data
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (WriteWaveData (dwFreeSpace) == FAILURE)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; { // Error writing wave data
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fRtn = FALSE;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; { // Some wave data remains, but not enough to fill free space
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // Write wave data, fill remainder of free space with silence
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (WriteWaveData (dwDataRemaining) == SUCCESS)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (WriteSilence (dwFreeSpace - dwDataRemaining) == FAILURE)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; { // Error writing silence data
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fRtn = FALSE;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; { // Error writing wave data
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fRtn = FALSE;
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp; { // No free space in buffer for some reason
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fRtn = FALSE;
+ &nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; else
+ &nbsp;&nbsp; { // All of sound has played, stop playback
+ &nbsp;&nbsp;&nbsp;&nbsp; Stop ();
+ &nbsp;&nbsp; }
+ &nbsp;&nbsp; // Reset reentrancy semaphore
+ &nbsp;&nbsp; InterlockedExchange (&amp;lInService, FALSE);
+  }
+  else
+  { // Service routine reentered. Do nothing, just return
+ &nbsp;&nbsp; fRtn = FALSE;
+  }
+  return (fRtn);
+}
+</code></pre>
+<p>
+I feel that the code pretty much speaks for itself here (that's why I included all of this rather lengthy routine). There are several things I want to explain, however. The first is the call to <b>InterlockedExchange</b>. This is a nifty Win32 synchronization mechanism that I'm using to detect whether the <b>ServiceBuffer</b> routine is reentered. It's possible that you could still be servicing the buffer when another timer interrupt comes along. If <b>ServiceBuffer</b> is reentered, it simply returns immediately without doing anything.</p>
+<p>
+I also want to explain why you need to write silence data to the sound buffer. DirectSound has no concept of when playback of a wave file is complete—it just happily cycles through the sound buffer playing whatever data is there until it's told to stop. The <b>ServiceBuffer</b> routine keeps track of how much time has elapsed since playback was started and stops playback as soon as enough time has elapsed to play the entire wave file. Since you can't stop playback at the exact millisecond that the last wave data byte is played, you have to follow the wave data with data representing silence. If you don't do this, you will get some random blip of sound at the end of a wave file.</p>
+<h4>Managing the read-and-write cursors</h4>
+<p>
+Two offsets are required to manage data in a circular buffer. Traditionally these offsets are called the head and the tail of the buffer. I can never remember which is the head and which is the tail, so I like to call these two offsets the "read cursor" and the "write cursor." In this case, the read cursor identifies the location in the buffer where DirectSound is reading wave data and the write cursor identifies the location where we need to write the next block of wave data. </p>
+<p>
+If you take a look at the <b>IDirectSoundBuffer::GetCurrentPosition</b> method, you'll see that it returns a read cursor and a write cursor. Looks easy enough. At least that's what I thought, but that's not exactly correct. It took me several days of hair-pulling to figure out that the write cursor returned by <b>GetCurrentPosition</b> was not the write cursor I needed to manage a sound buffer. Don't you hate it when things don't work like you want them to?</p>
+<p>
+To manage a sound buffer with DirectSound, you must maintain your own write cursor. In the <b>AudioStream</b> class I represent the write cursor with the <b>m_cbBufOffset</b> data member. Each time you write wave data to the sound buffer, you must increment <b>m_cbBufOffset</b> and check to see if it has wrapped around to the beginning of the buffer. It's not difficult code to write, but it certainly took me a while to discover that I couldn't use the write cursor provided by DirectSound! The following code is a helper method called by <b>ServiceBuffer</b> to determine how much of the sound buffer has already been played (in other words, how much data can be written to the sound buffer):</p>
+<pre><code>DWORD AudioStream::GetMaxWriteSize (void)
+{
+  DWORD dwWriteCursor, dwPlayCursor, dwMaxSize;
+
+  // Get current play position
+  if (m_pdsb-&gt;GetCurrentPosition (&amp;dwPlayCursor, &amp;dwWriteCursor) == DS_OK)
+  {
+ &nbsp;&nbsp; if (m_cbBufOffset &lt;= dwPlayCursor)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; // Our write position trails play cursor
+ &nbsp;&nbsp;&nbsp;&nbsp; dwMaxSize = dwPlayCursor - m_cbBufOffset;
+ &nbsp;&nbsp; }
+
+ &nbsp;&nbsp; else // (m_cbBufOffset &gt; dwPlayCursor)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; // Play cursor has wrapped
+ &nbsp;&nbsp;&nbsp;&nbsp; dwMaxSize = m_cbBufSize - m_cbBufOffset + dwPlayCursor;
+ &nbsp;&nbsp; }
+  }
+  else
+  {
+ &nbsp;&nbsp; // GetCurrentPosition call failed
+ &nbsp;&nbsp; ASSERT (0);
+ &nbsp;&nbsp; dwMaxSize = 0;
+  }
+  return (dwMaxSize);
+}
+</code></pre>
+<p>
+<b>GetMaxWriteSize</b> provides a good illustration of how to manage the read and write cursors. You may also want to look at the <b>WriteWaveData</b> method presented earlier and see how <b>m_cbBufOffset</b> is used with the <b>IDirectSoundBuffer::Lock </b>method to get an actual write pointer in the sound buffer.</p>
+<p>
+Now, I'll bet you're wondering what the deal is with the write cursor maintained by DirectSound. No, it's not broken—that's the way it was designed to operate! DirectSound's write cursor specifies the position in the buffer where it is safe to write data. During playback, DirectSound won't allow you to write to the section of the sound buffer that begins with its play cursor and ends with its write cursor. Typically, this is about 15 milliseconds worth of data. DirectSound does not change its write cursor when you write data to a sound buffer—the write cursor always tracks the play cursor and leads it by about 15 milliseconds during playback.</p>
+<h2><a name="quickfix"></a>Quick Fix: A Summary of Streaming with DirectSound </h2>
+<p>
+This following list summarizes what you need to know about streaming wave files with DirectSound:
+<ul type=disc>
+<li>
+DirectSound uses a single sound buffer. For streaming, you need to create a looping secondary buffer by calling the <b>IDirectSound::CreateSoundBuffer</b> method without specifying either the DSBCAPS_STATIC or DSBCAPS_PRIMARYBUFFER flags in the <b>DSBUFFERDESC</b> structure.<br><br></li>
+<li>
+The required size of the sound buffer depends on the format of the wave file you are streaming. For example, a 44.1 kHz 16-bit stereo file will require a much larger sound buffer than an 11.025 kHz 8-bit mono file. I recommend using a one- or two-second sound buffer.<br><br></li>
+<li>
+Use the Win32 multimedia timer services to provide a periodic timer interrupt to service the sound buffer. The timer interval depends on the size of the sound buffer and the data rate of the wave file you are streaming. I recommend using a timer interval that is one-fourth the size of your sound buffer. For example, with a two-second sound buffer, use a timer interval of 500 milliseconds.<br><br></li>
+<li>
+There are two pointers used to manage the contents of the sound buffer, a play cursor and a write cursor. DirectSound maintains the play cursor, which you can obtain with the <b>IDirectSoundBuffer::GetCurrentPosition</b> method. You must maintain your own write cursor to determine how much wave data to write into the buffer and where to write the data. <i>Don't use the write cursor maintained by DirectSound for this purpose</i>.<br><br></li>
+<li>
+DirectSound will continue to play the contents of the sound buffer until you tell it to stop. After you've written all of the wave file data into the sound buffer, you must write data representing silence to the buffer until you determine that all of the wave file data has been played. To determine when all of the data has been played, calculate the duration of the wave file and keep track of how much time has elapsed since you began playback.<br><br></li>
+<li>
+DirectSound only plays PCM data formats. Compressed wave formats are not supported. To play compressed wave data, you must first expand the data into PCM format before writing the data to a DirectSound sound buffer.</li>
+</ul>
+</BODY>
+</HTML>

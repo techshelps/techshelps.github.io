@@ -1,0 +1,365 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Using Java Threads with WFC</title>
+<style>@import url(stylesheets/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="stylesheets/msdn_ie3.css"></HEAD>
+<BODY>
+
+<h1><a name="vjconusingjavathreadswithwfc"></a>Using Java Threads with WFC</h1>
+<p>
+Java is a free-threaded environment. This means that any object can call any other object, at any time, from any thread. Special care must be taken when writing objects so that their methods are atomic and thread-safe. </p>
+<p>
+There are several classes that benefit from being free-threaded, and WFC has provided the locking code to make these objects thread-safe. These classes are as follows:
+<ul type=disc>
+<li>
+com.ms.wfc.core.Component<br><br></li>
+<li>
+com.ms.wfc.core.Container<br><br></li>
+<li>
+com.ms.wfc.ComponentManager<br><br></li>
+<li>
+com.wfc.ui.Brush<br><br></li>
+<li>
+com.wfc.ui.Font<br><br></li>
+<li>
+com.wfc.ui.Pen</li>
+</ul>
+<p>
+On the other hand, any object that derives from com.ms.wfc.ui.Control is apartment-threaded because of the Win32 window that is tied to each control. Additionally, most other objects in the com.ms.wfc.ui package are not synchronized, so they should also be considered to be apartment threaded. Likewise, the com.ms.wfc.io, com.ms.wfc.html, and com.ms.wfc.util packages are not thread-safe.</p>
+<h1>Mixing Java and Win32 Threading Models</h1>
+<p>
+WFC accesses native Win32 constructs (such as windows) from Java objects. The Win32 window manager is apartment-threaded, and Windows automatically marshals calls from one thread to another as needed. When a free-threaded object calls into an apartment-threaded object, the call must marshal to the object's apartment. This means that the free thread is blocked for a period of time while the apartment thread handles the request. Any other calls from free-threaded objects to the apartment call will block until the apartment call is free. Consequently, this can lead to deadlock situations.</p>
+<p>
+So how do Java objects, which are inherently free thread work with WFC controls? Rather than hide when thread transitions occur, WFC makes it the programmer's responsibility to request the transition. The programmer can then design an algorithm in such a way as to prevent deadlocks. This can be done by invoking a delegate on the control's thread, which in turn calls the method specified in the delegate.</p>
+<p>
+To execute a given delegate on the thread that created the control's window handle and contains the message loop, use the <object id=alink_1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="_topic_not_found.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="com.ms.wfc.ui.Control_invoke">
+</object><a href=JavaScript:alink_1.Click()>Control.invoke</a> or <object id=alink_2 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="_topic_not_found.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="com.ms.wfc.ui.Control_invokeAsync">
+</object><a href=JavaScript:alink_2.Click()>Control.invokeAsync</a> methods from the desired control. It is important to use the control's own thread in case the control needs to re-create its window handle for any reason. The invoke method causes the thread to call the specified callback method and wait for a return. The invokeAsync method causes the thread to call the callback method without waiting for reply. All exceptions on the invoked thread are passed on to the owning control in both cases. </p>
+<p>
+You can also use the <object id=alink_3 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="_topic_not_found.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="com.ms.wfc.ui.Control_createGraphics">
+</object><a href=JavaScript:alink_3.Click()>Control.createGraphics</a> object to perform background painting and animation techniques on a ui.Graphics object. Whereas the Graphics object is apartment-threaded, the createGraphics call is entirely free-threaded. This allows one thread to create a graphics object for a control in another thread.</p>
+<h1>Creating and Exiting a Thread</h1>
+<p>
+Free-threaded threads can be created using the standard Java method of implementing the java.lang.Runnable interface. </p>
+<p>
+This sample shows a class that implements Runnable and takes two controls (a trackbar and a label) as parameters to its constructor. From the thread's run method, it transitions to the trackbar's thread by calling the trackbar's invokeAsync method. InvokeAsync passes a delegate called tDelegate (an instance of <object id=alink_4 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="_topic_not_found.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="com.ms.wfc.app.MethodInvoker">
+</object><a href=JavaScript:alink_4.Click()>com.ms.app.MethodInvoker</a>) that specifies a callback method called tCallBack. Inside that method, the control's thread can safely manipulate the control's properties, in this case, changing the trackbar's tick style. This causes the trackbar's window handle to be re-created. If the thread was not transitioned as demonstrated here, the trackbar would be re-created on the new thread rather than on the thread containing the message loop; in this case, the control trackbar wouldn't receive any new messages and would fail to respond.</p>
+<pre><code>import com.ms.wfc.app.*;
+import com.ms.wfc.core.*;
+import com.ms.wfc.ui.*;
+
+/**
+ * Runnable is the interface you need to implement to make a new
+ * java thread
+ */
+public class RunnableClass implements Runnable
+{
+ &nbsp; final int SLEEP = 500;
+ &nbsp; Label l; 
+ &nbsp; TrackBar tb;
+ &nbsp; 
+ &nbsp; /**
+ &nbsp;&nbsp; * This is the thread for our class.
+ &nbsp;&nbsp; */
+ &nbsp; Thread thread;
+ &nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp; /**
+ &nbsp;&nbsp; * Makes a special delegate so WFC can call it from the control's
+ &nbsp;&nbsp; * thread.
+ &nbsp;&nbsp; */
+ &nbsp; MethodInvoker tDelegate = new MethodInvoker(tCallback);
+
+ &nbsp; /**
+ &nbsp;&nbsp; * Make a new Java thread; tell it to begin running via the 
+ &nbsp;&nbsp; * start() method.
+ &nbsp;&nbsp; */
+ &nbsp; public RunnableClass (TrackBar tb, Label l)
+ &nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; this.l&nbsp; = l;&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp; this.tb = tb;
+ &nbsp;&nbsp;&nbsp;&nbsp; thread&nbsp; = new Thread(this, "RunnableClass thread");
+ &nbsp;&nbsp;&nbsp;&nbsp; thread.start();
+ &nbsp; }
+ &nbsp; 
+ &nbsp; public void run()
+ &nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; while (true)
+ &nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /**
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; * Call the specified method from the label's thread.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; tb.invokeAsync (tCallback);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; try
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Thread.sleep (SLEEP);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; catch (InterruptedException e)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp; }
+ &nbsp; 
+ &nbsp; int nCount = 0;
+ &nbsp; int nTickStyles[] = {TickStyle.BOTH,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; TickStyle.BOTTOMRIGHT,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; TickStyle.NONE,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; TickStyle.TOPLEFT};
+ &nbsp; /**
+ &nbsp;&nbsp; * This code is executed on the trackbar's thread. 
+ &nbsp;&nbsp; */
+ &nbsp; private void tCallback()
+ &nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; int nIndex = nCount % (nTickStyles.length);
+ &nbsp;&nbsp;&nbsp;&nbsp; l.setText ("hello from tCallBack: " + nCount);&nbsp;&nbsp; 
+ &nbsp;&nbsp;&nbsp;&nbsp; tb.setTickStyle (nTickStyles [nIndex]);
+ &nbsp;&nbsp;&nbsp;&nbsp; nCount++;
+
+ &nbsp;&nbsp;&nbsp;&nbsp; int nValue = tb.getValue();
+ &nbsp;&nbsp;&nbsp;&nbsp; if (nValue &gt;= tb.getMaximum())
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; tb.setValue(0);
+ &nbsp;&nbsp;&nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; tb.setValue (nValue + 1);
+ &nbsp; }
+ &nbsp; 
+ &nbsp; public void stopThread()
+ &nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; thread.stop();&nbsp; 
+ &nbsp; }
+}
+</code></pre>
+<p>
+Exiting a thread in this case is just a matter of running the thread's stop method. In this example, the Form class that creates the RunnableClass object calls that object's stopThread method when it is disposed. The following code fragment demonstrates this.</p>
+<pre><code>...
+import RunnableClass;
+
+public class SimpleRunnable extends Form
+{
+   /**
+ &nbsp;&nbsp; * This is the class that implements the Runnable interface.
+    */
+ &nbsp; RunnableClass runnableClass;
+ &nbsp; 
+ &nbsp; public SimpleRunnable()
+   {
+      // Required for Visual J++ Forms Designer support.
+      initForm();      
+ &nbsp;&nbsp;&nbsp;&nbsp; runnableClass = new RunnableClass (tb, l);&nbsp;&nbsp; 
+   }
+
+   public void dispose()
+   {
+ &nbsp;&nbsp;&nbsp;&nbsp; runnableClass.stopThread();
+ &nbsp;&nbsp;&nbsp;&nbsp; super.dispose();
+ &nbsp;&nbsp;&nbsp;&nbsp; components.dispose();
+   }
+ &nbsp; Container components = new Container();
+ &nbsp; Edit eDescription = new Edit();
+ &nbsp; TrackBar tb = new TrackBar();
+ &nbsp; Label l = new Label();
+
+ &nbsp; private void initForm()
+ &nbsp; {
+ &nbsp;&nbsp;&nbsp; // Code to initialize the controls omitted ...
+ &nbsp; }
+
+   public static void main(String args[])
+   {
+      Application.run(new SimpleRunnable());
+   }
+}
+</code></pre>
+<p>
+Alternately, to create a new application thread without having to implement the Java Runnable interface or extend java.lang.Thread, you can use the <object id=alink_5 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="_topic_not_found.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="com.ms.wfc.app.Application_createThread">
+</object><a href=JavaScript:alink_5.Click()>Application.createThread</a> method. The createThread method takes a delegate as a parameter (MethodInvoker is often used, but any delegate can be used). In this case, all logic can be contained in one class, typically the Form-based class of the application. The following example code fragment shows how this works.</p>
+<pre><code>import com.ms.wfc.app.*;
+import com.ms.wfc.core.*;
+import com.ms.wfc.ui.*;
+
+public class SimpleAppThread extends Form
+{
+ &nbsp; final int SLEEP = 700;
+ &nbsp; Thread thread;
+
+ &nbsp;&nbsp; // Specify the thread context to run a method on.
+ &nbsp; MethodInvoker cbDelegate = new MethodInvoker( cbThrdCallback );
+
+ &nbsp; public SimpleAppThread()
+ &nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; initForm();
+ &nbsp;&nbsp;&nbsp;&nbsp; /**
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *&nbsp; Creates a new thread and runs the methodInvoker method
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *&nbsp; on the new thread.&nbsp; The returned thread object is needed 
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *&nbsp; so we can stop the thread when this form is closed (disposed).
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *&nbsp; Note that thread.start() is called automatically.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; thread = Application.createThread (new MethodInvoker (this.methodInvoker));
+ &nbsp; }
+
+ &nbsp; private void methodInvoker()
+ &nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; while (true)
+ &nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; // cbThrdCallback is called on the check box's thread.
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cb.invoke (cbDelegate);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; try
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Thread.sleep (SLEEP);
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; catch (InterruptedException e)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp; }
+
+ &nbsp; int nCount = 0;
+ &nbsp; /**
+ &nbsp;&nbsp; * Thread callback that sets check box alignment property.
+ &nbsp;&nbsp; * This code is to be executed on the check box's thread.
+ &nbsp;&nbsp; */
+ &nbsp; private void cbThrdCallback()
+ &nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; cb.setText ("threadCallback loop: " + nCount++);
+ &nbsp;&nbsp;&nbsp;&nbsp; if (nCount % 2 == 0)
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cb.setTextAlign (LeftRightAlignment.LEFT);
+ &nbsp;&nbsp;&nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cb.setTextAlign (LeftRightAlignment.RIGHT);
+ &nbsp; }
+
+
+ &nbsp; public void dispose()
+ &nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; thread.stop();
+ &nbsp;&nbsp;&nbsp;&nbsp; super.dispose();
+ &nbsp;&nbsp;&nbsp;&nbsp; components.dispose();
+ &nbsp; }
+
+ &nbsp; private void cbSuspend_click(Object sender, Event e)
+ &nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; if (cbSuspend.getChecked())
+ &nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cbSuspend.setText ("press to resume thread");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; thread.suspend();
+ &nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp;&nbsp;&nbsp;&nbsp; else
+ &nbsp;&nbsp;&nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cbSuspend.setText ("press to suspend thread");
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; thread.resume();
+ &nbsp;&nbsp;&nbsp;&nbsp; }
+ &nbsp; }
+
+ &nbsp; Container components = new Container();
+ &nbsp; CheckBox cbSuspend = new CheckBox();
+ &nbsp; CheckBox cb = new CheckBox();
+
+ &nbsp; private void initForm()
+ &nbsp; {
+ &nbsp;&nbsp;&nbsp; // Code to initialize the controls here ...
+ &nbsp; }
+
+ &nbsp; public static void main(String args[])
+ &nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; Application.run(new SimpleAppThread());
+ &nbsp; }
+}
+</code></pre>
+<p>
+Here the thread is stopped by calling the thread’s stop method from the form's dispose method. The thread is not in a separate class, so its methods can be called directly from the Form-based class.</p>
+<p>
+The Application class also contains the <object id=alink_6 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="_topic_not_found.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="com.ms.wfc.app.Application_exitThread">
+</object><a href=JavaScript:alink_6.Click()>Application.exitThread</a> method, which closes the thread's message loop and shuts down all windows on the thread (note that it does not stop or exit the thread itself). By way of contrast, Application.exit closes message loops on all threads and closes all windows. </p>
+<h1>Using Thread Storage </h1>
+<p>
+The WFC Application class provides support for Thread Local Storage (TLS). Each thread can allocate a slot of memory for storing data that is specific to the thread. Calling <object id=alink_7 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="_topic_not_found.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="com.ms.wfc.app.Application_allocThreadStorage">
+</object><a href=JavaScript:alink_7.Click()>Application.allocThreadStorage</a> returns an index to that slot. To set a value in TLS, call the <object id=alink_8 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="_topic_not_found.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="com.ms.wfc.app.Application_setThreadStorage">
+</object><a href=JavaScript:alink_8.Click()>Application.setThreadStorage</a> with the index and a value you want to set. To retrieve that value, call <object id=alink_9 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="_topic_not_found.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="com.ms.wfc.app.Application_getThreadStorage">
+</object><a href=JavaScript:alink_9.Click()>Application.getThreadStorage</a>. Remember to free any allocated thread storage with a call to Application.freeThreadStorage.</p>
+<h1>Working with Thread Exceptions</h1>
+<p>
+The com.ms.wfc.app class provides a <object id=alink_10 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="_topic_not_found.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="com.ms.wfc.app.ThreadExceptionDialog">
+</object><a href=JavaScript:alink_10.Click()>ThreadExceptionDialog</a> class, which is automatically displayed whenever an unhandled exception occurs in a thread. You can gain control of exceptions by using the <object id=alink_11 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="_topic_not_found.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="com.ms.wfc.app.Application_addOnThreadException">
+</object><a href=JavaScript:alink_11.Click()>Application.addOnThreadException</a> method to specify your own thread exception handler. The addOnThreadException method takes a <object id=alink_12 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="_topic_not_found.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="com.ms.wfc.app.ThreadExceptionEventHandler">
+</object><a href=JavaScript:alink_12.Click()>ThreadExceptionEventHandler</a> delegate, which is constructed with your event handler method and the ThreadExceptionEvent class.</p>
+<p>
+Typically, a thread exception event handler queries the exception field of the <object id=alink_13 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="_topic_not_found.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="com.ms.wfc.app.ThreadExceptionEvent">
+</object><a href=JavaScript:alink_13.Click()>ThreadExceptionEvent</a> object passed to it to determine the next course of action. From this thread exception handler, you can run the ThreadExceptionDialog and retrieve the dialog results in the same way as any other WFC dialog box: use the <object id=alink_14 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="_topic_not_found.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="com.ms.wfc.ui.Form_showDialog">
+</object><a href=JavaScript:alink_14.Click()>Form.showDialog</a> method to launch the dialog box, and compare the returned results with the <object id=alink_15 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11">
+<PARAM name="Command" value="ALink,MENU">
+<PARAM name="DefaultTopic" value="_topic_not_found.htm">
+<PARAM name="Item1" value="">
+<PARAM name="Item2" value="com.ms.wfc.ui.DialogResult">
+</object><a href=JavaScript:alink_15.Click()>com.ms.wfc.ui.DialogResult</a> class fields. </p>
+</BODY>
+</HTML>

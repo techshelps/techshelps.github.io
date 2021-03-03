@@ -1,0 +1,942 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Under The Hood</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  Under The Hood</H1><P>Matt Pietrek</P>
+<P>Matt Pietrek is the author of <I>Windows</I><FONT FACE="Symbol"><I>â</I></FONT><I> 95 System Programming Secrets</I> (IDG Books, 1995). He works at Nu-Mega Technologies Inc., and can be reached at 71774.362@compuserve.com.</P>
+<P>In last month's column, I began describing the Windows NT<FONT FACE="Symbol">Ô</FONT> performance data, and presented some basic C++ classes to acquire the data. However, because the Windows NT performance data is convoluted (to put it mildly), I deferred a description of the performance data format. This month, I'll describe what the performance data looks like and provide the remaining classes that let you access it from within a C++ program.</P>
+<P>Before I jump into the performance data format, a quick review of last month's column is in order. The Windows NT performance information lets you query Windows NT for information such as process and thread lists, memory-paging statistics, and the cache hit rate. All of this information is stored in the HKEY_PERFORMANCE_DATA key of the registry.</P>
+<P>To handle the messy details of querying the registry for performance information, last month's column included the CPerfSnapshot class. I use the term "snapshot" because the performance data is only guaranteed to be valid at the instant you call RegQueryValueEx. Even as you're parsing the data in your code, portions of the data may become invalid. For example, a thread may terminate, so the thread list would be partially wrong. The CPerfSnapshot class is really just a container for holding the raw performance data, and has very little knowledge of what the data means. The classes I'll give this month let you parse the data in a relatively straightforward fashion.</P>
+<P>The other class from last month is the CPerfTitleDatabase class. In the performance data, many names such as "Process" or "File Read Operations/sec" are stored as integer indices rather than as actual strings. For instance, on my system, an index value of 230 corresponds to the string "Process". The CPerfTitleDatabase class takes care of reading the name strings from the registry, and converts indexes to strings and vice versa.</P>
+<P> </P>
+<H2><A NAME="sec0"></A>  The Performance Data From 30,000 Feet</H2><P>As I described last month, whenever you query for performance data successfully, you get back a variable-length mass of data; the only thing you know for sure is that the data starts with a PERF_DATA_BLOCK structure (defined in WINPERF.H). The CPerfSnapshot class encapsulates this data structure. It's all the stuff that comes after the PERF_DATA_BLOCK structure that makes the performance data look convoluted.</P>
+<P>In working with the performance data, I have a mental model of the performance data that helps me keep everything straight. This model is somewhat like a directory/file hierarchy. The classes I'll provide this month mirror this hierarchy.</P>
+<P>Like a file system hierarchy, there are first/next methods for navigating the hierarchy. At the top of the hierarchy is what I call the "object list." Whenever you acquire a performance snapshot, the data contains an object list with zero or more objects in it. When you ask for a particular kind of performance data (such as the thread list), you may get more objects than you requested. In the case of requesting a thread list, you'll also get information about the processes the threads belong to. For this reason, the object-list class has enumeration and lookup functions you must use to access the particular object you're interested in.</P>
+<P>What are these objects? In the sense of Windows NT performance data, objects include "Process", "Thread", "Memory", "Processor", "Physical Disk", "Redirector", and several others. It's important to understand that an object may itself be a list. For example, the process object doesn't mean just one particular process. Rather, the process object means the list of all running processes. Likewise, the processor object is a list, since multiprocessor machines have more than one CPU. On the other hand, the memory object obviously isn't a list.</P>
+<P>Moving down yet another level, object lists contain zero or more object instances. For example, the process object contains as many object instances as there are processes in the system. Thus, the process object itself isn't that interesting. It's the object instances within the process object that contain the useful information. If the difference between objects and object instances is confusing, don't worry. It took me awhile to grok it, too.</P>
+<P>If the Windows NT performance data were simple, you'd think that each type of object instance (like a process object instance) would have a well-defined format from which you could just pluck the information you need. Alas, this isn't the case. The individual bits and pieces of information about an object instance aren't located in fixed locations within the object instance. Instead, each object instance contains one or more "counters" tacked onto the end of its data. A counter is like an attribute of an object instance. For a process object instance, the counters include the process ID, the number of threads, the percentage of time spent in privileged operating system code, and so forth. (Yes, in some cases, the term "counter" is misleading.) For a thread object instance, the counters include the thread's priority and the ID of the process it belongs to.</P>
+<P>Getting at the counters for a particular object instance is tricky because only the raw counter data is stored at the end of each object instance; the information that explains the raw data is located elsewhere. A portion of the data for an object list (<I>not </I>an object instance) is a list of all the counters that apply to the object instances that follow. Returning to the process object example, part of its data is a list of counter descriptions. The counter descriptions can then be used to interpret the raw data in each of the process object instances. Think of the counter description as a structure definition; each object instance has a copy of the structure tacked on to its end.</P>
+<P>Before I describe the C++ classes I used to wrap up this lovely mess, I'll recap the object list description, this time tying it to structure names from WINPERF.H. The performance data starts with a PERF_DATA_BLOCK structure, which tells you how many performance objects are in the object list. Following the PERF_DATA_BLOCK structure is the actual object data. Each object starts with a PERF_OBJECT_TYPE structure. Each object in turn contains zero or more object instances. Each object instance begins with a PERF_INSTANCE_DEFINITION structure. Besides containing a list of object instances, each object also describes one or more counters. The counters describe the data that ends each object instance. Each counter definition is a PERF_COUNTER_DEFINITION structure.</P>
+<P>As a final theoretical note before going to the code, I want to clear up the issue of objects that don't have object instances—like the memory object. These objects still have counters. However, the counters don't describe the raw data at the end of an object instance. Rather, the counter definitions describe the data at the end of the object itself. Part of a counter definition is the offset of the raw counter data from the end of an object instance. In the case of an object without instances, the counter offsets are relative to the end of the counter descriptions.</P>
+<P><B>Figure 1</B> shows a hypothetical performance snapshot. It starts out with a PERF_DATA_BLOCK header. Following the header are three performance objects (a system object, a memory object, and a process object). Each object starts with a PERF_OBJECT_TYPE header. The two objects (system and memory) that don't have object instances end with counter definitions (PERF_COUNTER_DEFINITION) followed by the counter data. The process object also has PERF_COUNTER_DEFINITION's, but they are followed by two process object instances (the PERF_INSTANCE_DEFINITION structures).</P>
+<P><img src="hood1.gif"></P>
+<P><B> Figure 1  Performance Snapshot Data Structure</B></P>
+<P> </P>
+<H2><A NAME="sec1"></A>  The Performance Data Classes</H2><P>The classes I wrote to encapsulate the complexity of all these variable-length structures correspond closely to the structures in WINPERF.H. Each class includes enumeration and lookup methods that return pointers to class instances of the type logically below it in the hierarchy. For example, the performance object class has methods that return pointers to object instance classes. The one exception is that the performance object class doesn't have a lookup method. This is because there could be multiple performance object instances with the same name, and the lookup method wouldn't know which instance to return.</P>
+<P>As you look up or enumerate the lower-level classes, you'll get back pointers to instances of the lower-level classes. It's your responsibility to delete them when when you're done. This model is different from typical find first/next functions where you supply a structure which is filled with information. The model my classes use is more like OLE: when you create an OLE object, you get back an interface pointer, and the interface has a reference count of 1. You need to call IUnknown::Release explicitly to free the object. Deleting the object pointers in my classes is similar to calling IUnknown::Release in OLE.</P>
+<P>Working our way from the top down in the hierarchy, the first class we come to is CPerfObjectList, located in OBJLIST.CPP and OBJLIST.H (see <B>Figure 2</B>). CPerfObjectList provides access to the various performance objects embedded in the performance snapshot. The CPerfObjectList constructor expects a pointer to a CPerfSnapshot class (which I described last month), as well as a pointer to a CPerfTitleDatabase class. The title database is needed to look up a particular performance object (such as "thread") by name. The CPerfObject class is the only class described this month that you create explicitly, and thus is the only class that you need to know the constructor parameters for.</P>
+<P><B> Figure 2  OBJLIST</B></P>
+<P></P>
+<P>OBJLIST.H</P>
+<P><BR></P>
+<PRE> #ifndef __Objlist_h__
+#define __Objlist_h__
+
+#ifndef _WINDOWS_
+#include &lt;windows.h&gt;
+#endif
+#ifndef _WINPERF_
+#include &lt;winperf.h&gt;
+#endif
+#ifndef __Perfsnap_h__
+#include "perfsnap.h"
+#endif
+
+class CPerfObject;
+
+class CPerfObjectList
+{
+    public:
+        
+    CPerfObjectList(CPerfSnapshot * const pPerfSnapshot,
+                    CPerfTitleDatabase * const pPerfTitleDatabase );
+
+    ~CPerfObjectList( void ){ };
+
+    // Functions that return CPerfObject pointers.  Caller is responsible
+    // for deleting the CPerfObject * when done with it.
+
+    CPerfObject * GetFirstPerfObject( void );
+
+    CPerfObject * GetNextPerfObject( void );
+    
+    CPerfObject * GetPerfObject( PTSTR const pszObjListName );
+
+    protected:
+
+    CPerfSnapshot * m_pPerfSnapshot;
+
+    CPerfTitleDatabase * m_pPerfCounterTitles;
+
+    unsigned m_currentObjectListIndex;
+
+    PPERF_OBJECT_TYPE m_pCurrObjectType;    // current first/next object ptr
+};
+
+typedef CPerfObjectList * PCPerfObjectList;
+#endif</PRE>
+<P></P>
+<P>OBJLIST.CPP</P>
+<P><BR></P>
+<PRE> //====================================
+// File: OBJLIST.CPP
+// Author: Matt Pietrek
+// From: Microsoft Systems Journal
+//       "Under the Hood", April 1996
+//====================================
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include &lt;windows.h&gt;
+#include &lt;winperf.h&gt;
+#include &lt;stdlib.h&gt;
+#pragma hdrstop
+#include "ctitledb.h"
+#include "objlist.h"
+#include "perfobj.h"
+#include "makeptr.h"
+
+CPerfObjectList::CPerfObjectList(
+        CPerfSnapshot * const pPerfSnapshot,
+        CPerfTitleDatabase * const pPerfTitleDatabase )
+{
+    m_pPerfSnapshot = pPerfSnapshot;
+    m_pPerfCounterTitles = pPerfTitleDatabase;
+}
+
+CPerfObject *
+CPerfObjectList::GetFirstPerfObject( void )
+{
+    m_currentObjectListIndex = 0;
+    if ( m_currentObjectListIndex &gt;= m_pPerfSnapshot-&gt;GetNumObjectTypes() )
+        return 0;
+
+    m_pCurrObjectType = 
+        (PPERF_OBJECT_TYPE)m_pPerfSnapshot-&gt;GetPostHeaderPointer();
+
+    return new CPerfObject( m_pCurrObjectType, m_pPerfCounterTitles );
+}
+
+CPerfObject *
+CPerfObjectList::GetNextPerfObject( void )
+{
+    // Are we at the last object in the list?  Return NULL if so.
+    if ( ++m_currentObjectListIndex &gt;= m_pPerfSnapshot-&gt;GetNumObjectTypes() )
+        return 0;
+
+    // Advance to the next PERF_OBJECT_TYPE structure
+    m_pCurrObjectType = MakePtr(PPERF_OBJECT_TYPE,
+                                m_pCurrObjectType,
+                                m_pCurrObjectType-&gt;TotalByteLength );
+                                
+    return new CPerfObject( m_pCurrObjectType, m_pPerfCounterTitles );
+}
+    
+CPerfObject *
+CPerfObjectList::GetPerfObject( PTSTR const pszObjListName )
+{
+    DWORD objListIdx
+        = m_pPerfCounterTitles-&gt;GetIndexFromTitleString( pszObjListName );
+    if ( 0 == objListIdx )
+        return 0;
+
+    // Point at first PERF_OBJECT_TYPE, and loop through the list, looking
+    // for one that matches.
+    PPERF_OBJECT_TYPE pCurrObjectType = 
+            (PPERF_OBJECT_TYPE)m_pPerfSnapshot-&gt;GetPostHeaderPointer();
+
+    for ( unsigned i=0; i &lt; m_pPerfSnapshot-&gt;GetNumObjectTypes(); i++ )
+    {
+        // Is this the one that matches?
+        if ( pCurrObjectType-&gt;ObjectNameTitleIndex == objListIdx )
+            return new CPerfObject(pCurrObjectType, m_pPerfCounterTitles);
+
+        // Nope... try the next object type
+        pCurrObjectType = MakePtr(  PPERF_OBJECT_TYPE,
+                                    pCurrObjectType,
+                                    pCurrObjectType-&gt;TotalByteLength );
+    }
+    
+    return 0;
+}</PRE>
+<P></P>
+<P>The GetFirstPerfObject and GetNextPerfObject methods of the CPerfObjectList class allow easy enumeration of all performance objects in a snapshot. They both return a pointer to a CPerfObject. Alternatively, if you know exactly which kind of performance object you're after, you can use CPerfObjectList::GetPerfObject(name), which also returns a CPerfObject pointer. Regardless of which you use, the function locates the appropriate PERF_OBJECT_TYPE (a WINPERF.H structure) within the snapshot data and uses it to create a CPerfObject. </P>
+<P>The CPerfObject (PERFOBJ.H and PERFOBJ.CPP, see <B>Figure 3</B>) has the GetFirstObjectInstance and GetNextObjectInstance methods for enumerating the object instances within a performance object. For each instance, the methods return a pointer to a CPerfObjectInstance. If the object doesn't have instances, the GetFirstObjectInstance method fakes a single instance.</P>
+<P><B> Figure 3  PERFOBJ</B></P>
+<P></P>
+<P>PERFOBJ.H</P>
+<P><BR></P>
+<PRE> #ifndef __Perfobj_h__
+#define __Perfobj_h__
+
+#ifndef _WINDOWS_
+#include &lt;windows.h&gt;
+#endif
+#ifndef _WINPERF_
+#include &lt;winperf.h&gt;
+#endif
+
+class CPerfObjectInstance;
+
+class CPerfObject
+{
+    public:
+        
+    CPerfObject(    PPERF_OBJECT_TYPE const pObjectList,
+                    CPerfTitleDatabase * const pPerfTitleDatabase );
+
+    ~CPerfObject( void ){ }
+    
+    // Functions that return CPerfObjectInstance pointers.  Caller is
+    // responsible for deleting the CPerfObjectInstance * when done with it.
+
+    CPerfObjectInstance * GetFirstObjectInstance( void );
+
+    CPerfObjectInstance * GetNextObjectInstance( void );    
+
+    unsigned GetObjectInstanceCount(void){return m_pObjectList-&gt;NumInstances;}
+
+    BOOL GetObjectTypeName( PTSTR pszObjTypeName, DWORD nSize );
+
+    protected:
+        
+    PPERF_OBJECT_TYPE m_pObjectList;
+
+    unsigned m_currentObjectInstance;
+
+    PPERF_INSTANCE_DEFINITION m_pCurrentObjectInstanceDefinition;
+        
+    CPerfTitleDatabase * m_pPerfCounterTitles;
+};
+
+typedef CPerfObject * PCPerfObject;
+#endif</PRE>
+<P></P>
+<P>PERFOBJ.CPP</P>
+<P><BR></P>
+<PRE> //====================================
+// File: PERFOBJ.CPP
+// Author: Matt Pietrek
+// From: Microsoft Systems Journal
+//       "Under the Hood", APRIL 1996
+//====================================
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include &lt;windows.h&gt;
+#include &lt;winperf.h&gt;
+#include &lt;stdlib.h&gt;
+#pragma hdrstop
+#include "ctitledb.h"
+#include "perfobj.h"
+#include "objinst.h"
+#include "makeptr.h"
+
+CPerfObject::CPerfObject(   PPERF_OBJECT_TYPE const pObjectList,
+                            CPerfTitleDatabase * const pPerfCounterTitles)
+{
+    m_pObjectList = pObjectList;
+    m_pPerfCounterTitles = pPerfCounterTitles;
+}
+
+CPerfObjectInstance *
+CPerfObject::GetFirstObjectInstance( void )
+{
+    m_currentObjectInstance = 0;
+    if ( m_currentObjectInstance &gt;= GetObjectInstanceCount() )
+        return 0;
+
+    // Point at the first PERF_INSTANCE_DEFINITION
+    m_pCurrentObjectInstanceDefinition = 
+        MakePtr( PPERF_INSTANCE_DEFINITION, m_pObjectList,
+                m_pObjectList-&gt;DefinitionLength );
+
+    return new CPerfObjectInstance(
+                m_pCurrentObjectInstanceDefinition,
+                MakePtr(PPERF_COUNTER_DEFINITION,
+                        m_pObjectList, m_pObjectList-&gt;HeaderLength),
+                m_pObjectList-&gt;NumCounters,
+                m_pPerfCounterTitles,
+                m_pObjectList-&gt;NumInstances ==
+                    PERF_NO_INSTANCES ? TRUE : FALSE );
+}
+
+CPerfObjectInstance *
+CPerfObject::GetNextObjectInstance( void )
+{
+    if ( m_pObjectList-&gt;NumInstances == PERF_NO_INSTANCES )
+        return 0;
+
+    if ( ++m_currentObjectInstance &gt;= GetObjectInstanceCount() )
+        return 0;
+
+    // Advance to the next PERF_INSTANCE_DEFINITION in the list.  However,
+    // following the current PERF_INSTANCE_DEFINITION is the counter data,
+    // which is also of variable length.  So, we gotta take that into
+    // account when finding the next PERF_INSTANCE_DEFINITION
+        
+    // First, get a pointer to the counter data size field
+    PDWORD pCounterDataSize
+        = MakePtr(PDWORD, m_pCurrentObjectInstanceDefinition,
+                    m_pCurrentObjectInstanceDefinition-&gt;ByteLength);
+
+    // Now we can point at the next PPERF_INSTANCE_DEFINITION
+    m_pCurrentObjectInstanceDefinition = MakePtr(PPERF_INSTANCE_DEFINITION,
+                m_pCurrentObjectInstanceDefinition,
+                m_pCurrentObjectInstanceDefinition-&gt;ByteLength
+                + *pCounterDataSize);
+            
+    // Create a CPerfObjectInstance based around the PPERF_INSTANCE_DEFINITION
+    return new CPerfObjectInstance(m_pCurrentObjectInstanceDefinition,
+                                   MakePtr(PPERF_COUNTER_DEFINITION,
+                                           m_pObjectList, 
+                                           m_pObjectList-&gt;HeaderLength),
+                                   m_pObjectList-&gt;NumCounters,
+                                   m_pPerfCounterTitles,
+                                   FALSE );
+}
+
+BOOL
+CPerfObject::GetObjectTypeName( PTSTR pszObjTypeName, DWORD nSize )
+{
+    PTSTR pszName = m_pPerfCounterTitles-&gt;GetTitleStringFromIndex(
+                                    m_pObjectList-&gt;ObjectNameTitleIndex );
+        
+    if ( !pszName )
+        return FALSE;
+    
+    lstrcpyn( pszObjTypeName, pszName, nSize );
+    return TRUE;
+}</PRE>
+<P></P>
+<P>As you might guess, CPerfObject::GetObjectInstanceCount returns the number of object instances the object contains (for example, how many threads are in the thread object). If the object doesn't have instances, the method returns -1 (see PERF_NO_INSTANCES in WINPERF.H). The CPerfObject::GetObjectTypeName method returns the name of the object ("Process", "Thread", and so on). This method uses the title database to convert the object's title index into a readable string.</P>
+<P>As the CPerfObject methods enumerate the instances, they return pointers to CPerfObjectInstance objects. (The CPerfObjectInstance code is in OBJINST.H and OBJINST.CPP—see <B>Figure 4</B>). Since each object instance has a name, the class includes the GetObjectInstanceName method for retrieving this data. If you were enumerating the process list, you could use this method to find the name of each process.</P>
+<P><B> Figure 4  OBJINST</B></P>
+<P></P>
+<P>OBJINST.H</P>
+<P><BR></P>
+<PRE> #ifndef __Obinst_h__
+#define __Objinst_h__
+
+#ifndef _WINDOWS_
+#include &lt;windows.h&gt;
+#endif
+#ifndef _WINPERF_
+#include &lt;winperf.h&gt;
+#endif
+
+class CPerfTitleDatabase;
+class CPerfCounter;
+
+class CPerfObjectInstance
+{
+    public:
+        
+    CPerfObjectInstance(
+            PPERF_INSTANCE_DEFINITION const pPerfInstDef,
+            PPERF_COUNTER_DEFINITION const pPerfCntrDef, DWORD nCounters,
+            CPerfTitleDatabase * const pPerfTitleDatabase, BOOL fDummy );
+
+    ~CPerfObjectInstance( void ){ }
+    
+    BOOL GetObjectInstanceName( PTSTR pszObjInstName, DWORD nSize );
+    
+    // Functions that return CPerfCounter pointers.  Caller is
+    // responsible for deleting the CPerfCounter * when done with it.
+
+    CPerfCounter * GetFirstCounter( void );
+
+    CPerfCounter * GetNextCounter( void );
+
+    CPerfCounter * GetCounterByName( PTSTR const pszName );
+
+    protected:
+        
+    PPERF_INSTANCE_DEFINITION m_pPerfInstDef;
+
+    unsigned m_nCounters;
+    
+    unsigned m_currentCounter;
+    
+    PPERF_COUNTER_DEFINITION m_pPerfCntrDef;
+
+    CPerfTitleDatabase * m_pPerfCounterTitles;
+
+    CPerfCounter * MakeCounter( PPERF_COUNTER_DEFINITION const pCounter );
+
+    CPerfCounter * GetCounterByIndex( DWORD index );
+
+    CPerfTitleDatabase *m_pCounterTitleDatabase;
+
+    BOOL m_fDummy;  // FALSE normally, TRUE when an object with no instances
+};
+
+typedef CPerfObjectInstance * PCPerfObjectInstance;
+
+#endif</PRE>
+<P></P>
+<P>OBJINST.CPP</P>
+<P><BR></P>
+<PRE> //====================================
+// File: OBJINST.CPP
+// Author: Matt Pietrek
+// From: Microsoft Systems Journal
+//       "Under the Hood", April 1996
+//====================================
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include &lt;windows.h&gt;
+#include &lt;winperf.h&gt;
+#include &lt;stdlib.h&gt;
+#pragma hdrstop
+#include "ctitledb.h"
+#include "objinst.h"
+#include "perfcntr.h"
+#include "makeptr.h"
+
+CPerfObjectInstance::CPerfObjectInstance(
+        PPERF_INSTANCE_DEFINITION const pPerfInstDef,
+        PPERF_COUNTER_DEFINITION const pPerfCntrDef,
+        DWORD nCounters, CPerfTitleDatabase * const pPerfCounterTitles,
+        BOOL fDummy)
+{
+    m_pPerfInstDef = pPerfInstDef;
+    m_pPerfCntrDef = pPerfCntrDef;
+    m_nCounters = nCounters;
+    m_pPerfCounterTitles = pPerfCounterTitles;
+    
+    m_fDummy = fDummy;
+}
+
+BOOL
+CPerfObjectInstance::GetObjectInstanceName(
+    PTSTR pszObjInstName, DWORD nSize )
+{
+    if ( m_fDummy )
+    {
+        *pszObjInstName = 0;    // Return an empty string
+        return FALSE;
+    }
+    
+    if ( nSize &lt; (m_pPerfInstDef-&gt;NameLength / sizeof(TCHAR)) )
+        return FALSE;
+
+    PWSTR pszName = MakePtr(PWSTR, m_pPerfInstDef, m_pPerfInstDef-&gt;NameOffset);
+    
+    #ifdef UNICODE
+    lstrcpy( pszObjInstName, pszName );
+    #else
+    wcstombs( pszObjInstName, pszName, nSize );
+    #endif
+        
+    return TRUE;
+}
+
+CPerfCounter *
+CPerfObjectInstance::MakeCounter( PPERF_COUNTER_DEFINITION const pCounterDef )
+{
+    // Look up the name of this counter in the title database
+    PTSTR pszName = m_pPerfCounterTitles-&gt;GetTitleStringFromIndex(
+                                pCounterDef-&gt;CounterNameTitleIndex );
+        
+    DWORD nInstanceDefSize = m_fDummy ? 0 : m_pPerfInstDef-&gt;ByteLength;
+
+    // Create a new CPerfCounter.  The caller is responsible for deleting it.
+    return new CPerfCounter(pszName,
+                            pCounterDef-&gt;CounterType,
+                            MakePtr( PBYTE, m_pPerfInstDef,
+                                    nInstanceDefSize +
+                                    pCounterDef-&gt;CounterOffset ),
+                            pCounterDef-&gt;CounterSize );
+}
+
+CPerfCounter *
+CPerfObjectInstance::GetCounterByIndex( DWORD index )
+{
+    PPERF_COUNTER_DEFINITION pCurrentCounter;
+    
+    if ( index &gt;= m_nCounters )
+        return 0;
+    
+    pCurrentCounter = m_pPerfCntrDef;
+
+    // Find the correct PERF_COUNTER_DEFINITION by looping
+    for ( DWORD i = 0; i &lt; index; i++ )
+    {
+        pCurrentCounter = MakePtr( PPERF_COUNTER_DEFINITION,
+                                    pCurrentCounter,
+                                    pCurrentCounter-&gt;ByteLength );
+    }
+
+    if ( pCurrentCounter-&gt;ByteLength == 0 )
+        return 0;
+
+    return MakeCounter( pCurrentCounter );
+}
+
+CPerfCounter *
+CPerfObjectInstance::GetFirstCounter( void )
+{
+    m_currentCounter = 0;
+    return GetCounterByIndex( m_currentCounter );
+}
+
+CPerfCounter *
+CPerfObjectInstance::GetNextCounter( void )
+{
+    m_currentCounter++;
+    return GetCounterByIndex( m_currentCounter );
+}
+
+CPerfCounter *
+CPerfObjectInstance::GetCounterByName( PTSTR const pszName )
+{
+    DWORD cntrIdx = m_pPerfCounterTitles-&gt;GetIndexFromTitleString(pszName);
+    if ( cntrIdx == 0 )
+        return 0;
+    
+    PPERF_COUNTER_DEFINITION pCurrentCounter = m_pPerfCntrDef;
+
+    // Find the correct PERF_COUNTER_DEFINITION by looping and comparing
+    for ( DWORD i = 0; i &lt; m_nCounters; i++ )
+    {
+        if ( pCurrentCounter-&gt;CounterNameTitleIndex == cntrIdx )
+            return MakeCounter( pCurrentCounter );
+        
+        // Nope.  Not this one.  Advance to the next counter
+        pCurrentCounter = MakePtr( PPERF_COUNTER_DEFINITION,
+                                    pCurrentCounter,
+                                    pCurrentCounter-&gt;ByteLength );
+    }
+
+    return 0;
+}</PRE>
+<P></P>
+<P>CPerfObjectInstance::GetFirstCounter and GetNextCounter return pointers to CPerfCounters. If you know the name of the desired counter, use GetCounterByName instead; this method takes a readable name (such as "Working Set") so you don't have to pass the counter's index value (such as "180").</P>
+<P>Finally, we come to the lowest level in the hierarchy: CPerfCounter (PERFCNTR.H and PERFCNTR.CPP—see <B>Figure 5</B>). This class represents one unit of information about one particular performance object instance. GetName returns the counter's name, which originally started out as a string in the title database. GetType returns the DWORD value that describes the size of the counter and how it should be interpreted. WINPERF.H defines all the gory bitfield encodings for this DWORD. (Calling the counter-type bitfields Byzantine is an understatement.) CPerfCounter::GetData retrieves the raw data associated with the counter. It also returns the counter's type DWORD. The final method, CPerfCounter::Format, hides all the counter format variations. Simply pass it a buffer pointer, and Format fills it with a string that represents the value. Format does something reasonable with all the various counter types I encountered, but doesn't support every known type in WINPERF.H. The third argument to Format is a default argument that specifies whether Format should display the number as decimal or hex. The default is decimal.</P>
+<P><B> Figure 5  PERFCNTR</B></P>
+<P></P>
+<P>PERFCNTR.H</P>
+<P><BR></P>
+<PRE> #ifndef __Perfcntr_h__
+#define __Perfcntr_h__
+
+class CPerfCounter
+{
+    public:
+
+    CPerfCounter(   PTSTR const pszName, DWORD type,
+                    PBYTE const pData, DWORD cbData );
+
+    ~CPerfCounter( void );
+
+    PTSTR GetName( void ) { return m_pszName; }
+
+    DWORD GetType( void ) { return m_type; }
+    
+    BOOL GetData( PBYTE pBuffer, DWORD cbBuffer, DWORD *pType );
+    
+    BOOL Format( PTSTR pszBuffer, DWORD nSize, BOOL fHex = FALSE );
+
+    protected:
+        
+    PTSTR m_pszName;
+
+    DWORD m_type;
+
+    PBYTE m_pData;
+    
+    DWORD m_cbData;
+};
+
+typedef CPerfCounter * PCPerfCounter;
+#endif</PRE>
+<P></P>
+<P>PERFCNTR.CPP</P>
+<P><BR></P>
+<PRE> //====================================
+// File: PERFCNTR.CPP
+// Author: Matt Pietrek
+// From: Microsoft Systems Journal
+//       "Under the Hood", APRIL 1996
+//====================================
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include &lt;windows.h&gt;
+#include &lt;winperf.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;malloc.h&gt;
+#include &lt;tchar.h&gt;
+#pragma hdrstop
+#include "perfcntr.h"
+
+CPerfCounter::CPerfCounter( PTSTR const pszName, DWORD type,
+                            PBYTE const pData, DWORD cbData )
+{
+    m_pszName = _tcsdup( pszName );
+    m_type = type;
+    m_cbData = cbData;
+    m_pData = new BYTE[m_cbData];
+    memcpy( m_pData, pData, m_cbData );
+}
+
+CPerfCounter::~CPerfCounter( void )
+{
+    free( m_pszName );
+    delete []m_pData;
+}
+
+BOOL
+CPerfCounter::GetData( PBYTE pBuffer, DWORD cbBuffer, DWORD *pType )
+{
+    if ( cbBuffer &lt; m_cbData )  // Make sure the buffer is big enough
+        return FALSE;
+    
+    memcpy( pBuffer, m_pData, m_cbData );   // copy the data
+
+    if ( pType )            // If the user wants the type, give it to them
+        *pType = m_type;
+    
+    return TRUE;
+}
+    
+BOOL
+CPerfCounter::Format( PTSTR pszBuffer, DWORD nSize, BOOL fHex )
+{
+    // Do better formatting!!!  Check length!!!
+
+    PTSTR pszPrefix = TEXT("");
+    TCHAR szTemp[512];
+    
+    // First, ascertain the basic type (number, counter, text, or zero)
+    switch ( m_type &amp; 0x00000C00 )
+    {
+        case PERF_TYPE_ZERO:
+        {
+            wsprintf( pszBuffer, TEXT("ZERO") ); return TRUE;
+        }
+        case PERF_TYPE_TEXT:
+        {
+            wsprintf( pszBuffer, TEXT("text counter") ); return TRUE;
+        }
+        case PERF_TYPE_COUNTER:
+        {
+            switch( m_type &amp; 0x00070000 )
+            {
+                case PERF_COUNTER_RATE:
+                    pszPrefix = TEXT("counter rate "); break;
+                case PERF_COUNTER_FRACTION:
+                    pszPrefix = TEXT("counter fraction "); break;
+                case PERF_COUNTER_BASE:
+                    pszPrefix = TEXT("counter base "); break;
+                case PERF_COUNTER_ELAPSED:
+                    pszPrefix = TEXT("counter elapsed "); break;
+                case PERF_COUNTER_QUEUELEN:
+                    pszPrefix = TEXT("counter queuelen "); break;
+                case PERF_COUNTER_HISTOGRAM:
+                    pszPrefix = TEXT("counter histogram "); break;
+                default:
+                    pszPrefix = TEXT("counter value "); break;
+            }
+        }
+    }
+    
+    PTSTR pszFmt = fHex ? TEXT("%s%Xh") : TEXT("%s%u");
+    
+    switch ( m_cbData )
+    {
+        case 1: wsprintf(szTemp, pszFmt, pszPrefix, *(PBYTE)m_pData);
+                break;
+        case 2: wsprintf(szTemp, pszFmt, pszPrefix, *(PWORD)m_pData);
+                break;
+        case 4: wsprintf(szTemp, pszFmt, pszPrefix, *(PDWORD)m_pData);
+                break;
+        case 8: // Danger!  Assumes little-endian (X86) byte ordering
+                wsprintf( szTemp, TEXT("%s%X%X"), pszPrefix,
+                        *(PDWORD)(m_pData+4), *(PDWORD)m_pData ); break;
+        default: wsprintf( szTemp, TEXT("&lt;unhandled size %u&gt;"), m_cbData );
+    }
+    
+    switch ( m_type &amp; 0x70000000 )
+    {
+        case PERF_DISPLAY_SECONDS:
+            _tcscat( szTemp, TEXT(" secs") ); break;
+        case PERF_DISPLAY_PERCENT:
+            _tcscat( szTemp, TEXT(" %%") ); break;
+        case PERF_DISPLAY_PER_SEC:
+            _tcscat( szTemp, TEXT(" /sec") ); break;
+    }
+
+    lstrcpyn( pszBuffer, szTemp, nSize );
+        
+    return TRUE;
+}</PRE>
+<P></P>
+<P> </P>
+<H2><A NAME="sec2"></A>  Using the Performance Data Classes</H2><P>So, how do you actually use all this code in your application? I decided that the easiest thing to do is to put all the classes in a library. PERFDATA.MS compiles all the class source files and puts the resulting OBJ files into PERFDATA.LIB (see <B>Figure 6</B>). In applications that use the performance data classes, simply include PERFDATA.LIB in the linker's library list. When you build PERFDATA.MS with NMAKE, it accepts two optional defines, DEBUG=1 and UNICODE=1, to build debug and/or unicode versions. The default is no debug info and ANSI strings.</P>
+<P>I've also provided PERFDATA.H (see <B>Figure 6</B>), which #includes all the header files you need, so you don't have to add six separate #include directives in each of your source files.</P>
+<P>To demonstrate the classes in action, I wrote two example programs, both command-line oriented. The command line for building both programs is included at the top of their respective source files.</P>
+<P><B> Figure 6  PERFDATA</B></P>
+<P></P>
+<P>PERFDATA.H</P>
+<P><BR></P>
+<PRE> #ifndef __Perfdata_h__
+#define __Perfdata_h__
+#include "ctitledb.h"
+#include "perfsnap.h"
+#include "objlist.h"
+#include "perfobj.h"
+#include "objinst.h"
+#include "perfcntr.h"
+#endif</PRE>
+<P></P>
+<P>PERFDATA.MS</P>
+<P><BR></P>
+<PRE> PROJ = PERFDATA
+
+OBJS = ctitledb.obj perfsnap.obj objlist.obj perfobj.obj \
+       objinst.obj perfcntr.obj
+
+!if "$(DEBUG)" == "1"
+DEBUG_FLAGS = /Zi /Od
+!else
+DEBUG_FLAGS = /O2
+!endif
+!if "$(UNICODE)" == "1"
+UNICODE_FLAGS = /DUNICODE /D_UNICODE
+!endif
+
+CFLAGS = /W3 /MT /D_X86_ /DWIN32_LEAN_AND_MEAN /D"_WINDOWS" /D"WIN32" \
+         $(DEBUG_FLAGS) $(UNICODE_FLAGS) /Fd"$(PROJ).PDB" /Fp"$(PROJ).PCH"
+
+$(PROJ).LIB: $(OBJS)
+    LIB -OUT:$(PROJ).LIB $(OBJS)
+
+.cpp.obj:
+    CL $(CFLAGS) /c $&lt;</PRE>
+<P> </P>
+<P>  The first demo program is PERFENUM.EXE, built from PERFENUM.CPP (see <B>Figure 7</B>). After taking its performance snapshot, the program enumerates each performance object  and object instance in the snapshot. For each object instance, PERFENUM displays the title and value for each counter. When invoking PERFENUM, you control the contents of the snapshot. You can pass the strings "Global", "Costly", or something like "Processor Memory" (to display processor and memory info). Whatever you pass on the command line is passed to CPerfSnapshot::TakeSnapshot, so see last month's column for a better idea of exactly what you can pass.</P>
+<P><B> Figure 7  DEMO PROGRAMS</B></P>
+<P></P>
+<P>PERFENUM.CPP</P>
+<P><BR></P>
+<PRE> //==========================================================================
+// File: PERFENUM.CPP
+// Author: Matt Pietrek
+// From: Microsoft Systems Journal
+//       "Under the Hood", April 1996
+// To Build:
+//  CL /MT /DUNICODE /D_UNICODE /DWIN32 PERFENUM.CPP \
+//      PERFDATA.LIB ADVAPI32.LIB USER32.LIB
+//==========================================================================
+#include &lt;windows.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;tchar.h&gt;
+#pragma hdrstop
+#include "perfdata.h"
+#define MY_BUFF_SIZE 256
+
+CPerfTitleDatabase gCounterTitles( PERF_TITLE_COUNTER );
+
+int main( )
+{
+    CPerfSnapshot snapshot( &amp;gCounterTitles );
+    
+    PTSTR pszCmdLineArgs = GetCommandLine();
+    
+    while ( *pszCmdLineArgs &amp;&amp; (*pszCmdLineArgs != ' ') )
+        pszCmdLineArgs++;
+    
+    if ( !snapshot.TakeSnapshot( pszCmdLineArgs ) )
+    {
+        _tprintf( TEXT("TakeSnapshot failed\n") );
+        return 1;
+    }
+    
+    _tprintf( TEXT("Object count: %u\n"), snapshot.GetNumObjectTypes() );
+    
+    TCHAR szSystemName[256];
+    
+    if ( !snapshot.GetSystemName( szSystemName, sizeof(szSystemName) ) )
+    {
+        _tprintf( TEXT("GetSystemName failed\n") );
+        return 1;
+    }
+        
+    _tprintf( TEXT("SystemName: %s\n"), szSystemName );
+
+    CPerfObjectList objList( &amp;snapshot, &amp;gCounterTitles );
+    
+    CPerfObject * pPerfObj;
+    
+    for (   pPerfObj = objList.GetFirstPerfObject();
+            pPerfObj;
+            pPerfObj = objList.GetNextPerfObject() )
+    {
+        CPerfObjectInstance *pObjInst;
+        TCHAR szObjTypeName[MY_BUFF_SIZE];
+        
+        pPerfObj-&gt;GetObjectTypeName( szObjTypeName, MY_BUFF_SIZE );
+        
+        _tprintf( TEXT("----------- %s object --------------\n"),szObjTypeName );
+
+        for (   pObjInst = pPerfObj-&gt;GetFirstObjectInstance();
+                pObjInst;
+                pObjInst = pPerfObj-&gt;GetNextObjectInstance() )
+        {
+            TCHAR szObjName[MY_BUFF_SIZE];
+            
+            pObjInst-&gt;GetObjectInstanceName( szObjName, MY_BUFF_SIZE );
+            _tprintf( TEXT("Instance name: %s\n"), szObjName );
+
+            CPerfCounter * pPerfCntr;
+            
+            for (   pPerfCntr = pObjInst-&gt;GetFirstCounter();
+                    pPerfCntr;
+                    pPerfCntr = pObjInst-&gt;GetNextCounter() )
+            {
+                TCHAR szCounterData[MY_BUFF_SIZE];
+                
+                pPerfCntr-&gt;Format( szCounterData, MY_BUFF_SIZE );
+
+                _tprintf(   TEXT("  %s: %s\n"),
+                            pPerfCntr-&gt;GetName(), szCounterData );
+                    
+                delete pPerfCntr;
+            }
+            
+            delete pObjInst;
+            
+            _tprintf( TEXT("\n") );
+        }
+
+        delete pPerfObj;
+    }
+            
+    return 0;
+}</PRE>
+<P></P>
+<P>WORKSET.CPP</P>
+<P><BR></P>
+<PRE> //==========================================================================
+// File: WORKSET.CPP
+// Author: Matt Pietrek
+// From: Microsoft Systems Journal
+//       "Under the Hood", April 1996
+// To Build:
+//  CL /MT /DUNICODE /D_UNICODE /DWIN32 WORKSET.CPP \
+//      PERFDATA.LIB ADVAPI32.LIB USER32.LIB
+//==========================================================================
+#define WIN32_LEAN_AND_MEAN
+#include &lt;windows.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;winperf.h&gt;
+#include &lt;tchar.h&gt;
+#pragma hdrstop
+#include "perfdata.h"
+
+int main( int argc, char *argv[] )
+{
+    BOOL fFoundProcess = FALSE; // Record if we found the specified process
+    TCHAR szProgram[MAX_PATH];
+
+    if ( argc != 2 ) // Make sure 1 argument was passed
+    {
+        _tprintf(   TEXT("WORKSET - Matt Pietrek 1996\n")
+                    TEXT("Syntax:WORKSET &lt;program name&gt;\n") );
+        return 1;
+    }
+    else // Store argv[1] into szProgram, converting from ANSI if need be
+    {
+        #ifdef UNICODE
+        mbstowcs( szProgram, argv[1], sizeof(szProgram) );
+        #else
+        lstrcpyn( szProgram, argv[1], sizeof(szProgram) );
+        #endif
+    }
+    
+    // Make the title database and take a snapshot
+    CPerfTitleDatabase gCounterTitles( PERF_TITLE_COUNTER );
+    CPerfSnapshot snapshot( &amp;gCounterTitles );
+    
+    if ( !snapshot.TakeSnapshot( TEXT("process") ) )
+    {
+        _tprintf( TEXT("Failed to take snapshot\n") ); return 1;
+    }
+    
+    // Make the CPerfObjectList, and find the process object within it
+    CPerfObjectList objectList( &amp;snapshot, &amp;gCounterTitles );
+    
+    PCPerfObject pPerfObj = objectList.GetPerfObject( TEXT("process") );
+    if ( !pPerfObj )
+    {
+        _tprintf( TEXT("process performance object not found") ); return 1;
+    }
+
+    // Make an object instance pointer, and start iterating through instances
+    // We'll go through all the instances, since there could be multiple
+    // instances of a process running
+    PCPerfObjectInstance pPerfObjInst;
+    
+    for (   pPerfObjInst = pPerfObj-&gt;GetFirstObjectInstance();
+            pPerfObjInst;
+            delete pPerfObjInst, pPerfObjInst =
+                                 pPerfObj-&gt;GetNextObjectInstance() )
+    {
+        TCHAR szInstanceName[260];
+        unsigned nSizeInstanceName = sizeof(szInstanceName) / sizeof(TCHAR);
+        
+        // Get the name of this instance.  Keep going if this fails.
+        if ( !pPerfObjInst-&gt;GetObjectInstanceName(  szInstanceName,
+                                                    nSizeInstanceName) )
+            continue;
+        
+        // Is it the one specified on the command line?
+        if ( lstrcmpi(szInstanceName, szProgram ) )
+            continue;
+
+        // Yes!  We found a matching process instance
+        PCPerfCounter pCounter;
+        pCounter = pPerfObjInst-&gt;GetCounterByName( TEXT("Working Set") );
+                
+        if ( !pCounter )    // Make sure we got the desired counter
+        {
+            _tprintf( TEXT("Working Set counter not found\n") ); return 0;
+        }
+
+        // Have the counter format a copy of its data, then print it out
+        // Override the default 3rd argument to Format() to make the output
+        // use hex, rather than decimal values.
+        TCHAR szCounterDataStr[128];
+        unsigned nSizeCounterDataStr = sizeof(szCounterDataStr)/sizeof(TCHAR);
+        
+        if (pCounter-&gt;Format(szCounterDataStr, nSizeCounterDataStr, TRUE))
+            _tprintf( TEXT("Working set: %s bytes\n"), szCounterDataStr );
+
+        delete pCounter;        // Don't need this counter object any more
+        
+        fFoundProcess = TRUE;   // Record that we found the desired process
+    }
+    
+    delete pPerfObj;
+    
+    if ( FALSE == fFoundProcess )   // Let the user know if we didn't find it
+        _tprintf( TEXT("process %s not found\n"), szProgram );
+    
+    return 0;
+}</PRE>
+<P></P>
+<P>The other demo program is WORKSET.EXE, built from WORKSET.CPP (see <B>Figure 7</B>). The purpose of WORKSET is to show how to quickly burrow down to a specific piece of information. WORKSET looks for the working set for the process whose name is passed on the command line. While some of the WORKSET code is similar to the PERFENUM code, there are key differences. First, with the CPerfObjectList class, I use the GetPerfObject method to find the "Process" object within the snapshot rather than enumerating through all the objects. Second, after I have a pointer to the right CPerfObjectInstance, I use GetCounterByName to get the desired counter. Compare this with the PERFENUM code, which iterates through all the counters. Also, WORKSET's output is best displayed in hex, so I pass TRUE as the third argument to override the default behavior of CPerfCounter::Format.</P>
+<P>Despite all the code, and everything I've written, there are still aspects of the performance data that I haven't touched upon. For example, many of the performance counters really are counter values and are meaningless except when compared to a previous snapshot. Still, the C++ classes make it a lot easier for you to get useful information you might otherwise shy away from because it's such a pain to get.</P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="221pt" VALIGN="TOP"><COL WIDTH="221pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD COLSPAN="2" VALIGN="TOP"><P> Have a question about programming in Windows? You can mail it directly to Under The Hood, Microsoft Systems Journal, 825 Eighth Avenue, 18th Floor, New York, New York 10019, or send it to MSJ (re: Under The Hood) via:</P></TD></TR><TR><TD VALIGN="TOP"><P> <BR>Internet:</P>
+<P><BR>Internet:</P></TD><TD VALIGN="TOP"><P>Matt Pietrek<BR>71774.362@compuserve.com</P>
+<P>Eric Maffei<BR>ericm@microsoft.com</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P><I>This article is reproduced from Microsoft Systems Journal. Copyright © 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</P>
+<P></P></font></body></HTML>

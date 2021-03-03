@@ -1,0 +1,176 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>HandoffSet Parsers</title>
+<link disabled rel=stylesheet href=../../../backsdk3.css>
+<style type="text/css">
+@import url(../../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h3><a name="sms_handoffset_parsers"></a>HandoffSet Parsers</h3>
+<p>
+HandoffSet parsers are more efficient than FollowSet parsers. When a HandoffSet parser returns from its recognize function, it identifies the next protocol for the kernel. </p>
+<p>
+For example, the TCP parser has a Port property that tells it what protocol follows it. Port 20 indicates that the next protocol will be FTP; port 53 indicates that the next protocol will be DNS. Another example: in the SMB parser, if the value in the smb_suwcnt field of a Transact SMB is 0, then the data pointed to by smb_psoff is the data for a Remote API and should be handed to the REMAPI parser.</p>
+<p>
+How a HandoffSet parser determines which protocol follows is implemented in one of two ways: one way handles the TCP/IP kind of HandoffSet, and the other handles the SMB kind of HandoffSet. If you examine the TCPIP.INI file in the parser directory, it looks something like this:</p>
+<pre><code>[IP_HandoffSet]
+   1    = ICMP
+   6    = TCP
+   17   = UDP
+   89   = OSPF
+
+[TCP_HandoffSet]
+   20   = FTP
+   21   = FTP
+   23   = TELNET
+   53   = DNS
+   111  = RPC
+   137  = NBT, 1000
+   138  = NBT, 1002
+   139  = NBT, 1001
+   1024 = NBT, 1001
+
+[UDP_HandoffSet]
+   53   = DNS
+   67   = DHCP
+   68   = DHCP
+   111  = RPC
+   137  = NBT, 1000
+   138  = NBT, 1002
+   139  = NBT, 1001
+   520  = RIP
+   2049 = RPC
+
+[RPC_HandoffSet]
+   2049   = NFS
+ </code></pre>
+<p>
+The TCP/IP parser reads this file at DLL initialization, and makes a table of numbers and handles to parsers. When TCP gets a port, it reads the table to see if the port is for a known protocol. This method allows a new parser (that the TCP parser can hand off to) to be added without shipping a new TCP parser.</p>
+<p>
+For example, if you wanted to write a Finger protocol parser, you would create the parser, modify the PARSER.INI file to load your parser, and then tell TCP to hand off to you by adding the Finger port as shown here:</p>
+<pre><code>[TCP_HandoffSet]
+   20   = FTP
+   21   = FTP
+   23   = TELNET
+   53   = DNS
+   79   = FINGER
+   111  = RPC
+   137  = NBT, 1000
+   138  = NBT, 1002
+   139  = NBT, 1001
+   1024 = NBT, 1001
+</code></pre>
+<p>
+The TCP/IP parser reads its initialization data out of an .INI file stored in its directory. It scans the data, converts the text "79" to the number 79, gets the text string "FINGER," and calls a function to find Finger's protocol handle.</p>
+<pre><code>hFinger = GetProtocolFromName ("FINGER");
+</code></pre>
+<p>
+If the kernel has successfully loaded the Finger protocol, a valid non-NULL handle will be returned that can be returned at recognize time to identify the Finger protocol as being the next in line.</p>
+<h4>Helper Functions</h4>
+<p>
+The Network Monitor kernel provides some parser helper functions to make this easier. For example, the LLC parser <b>Register</b> function creates and loads its LLC.INI file in the following piece of code by using the <b>BuildINIPath</b> helper API to get the path to the .INI file. It also uses the <b>CreateHandoffTable</b> helper API to load a handoff table.</p>
+<pre><code>VOID WINAPI LLCRegister(HPROTOCOL hLLCProtocol)
+{
+    register DWORD i;
+    char     IniFile[INI_PATH_LENGTH];
+
+    //===========================================================
+    //  Create the property database.
+    //===========================================================
+
+    CreatePropertyDatabase(hLLCProtocol, nLLCProperties);
+
+    for(i = 0; i &lt; nLLCProperties; ++i)
+    {
+        AddProperty(hLLCProtocol, &amp;LLCDatabase[i]);
+    }
+
+    if (BuildINIPath(IniFile, "LLC.DLL") == NULL)
+    {
+        #ifdef DEBUG
+        dprintf(" LLC BuldINIPath Failed !");
+        #endif
+    }
+
+    if ((nSapHOSets = CreateHandoffTable(  "SAPS", 
+            IniFile, 
+            &amp;lpSapHOTable, 
+            MAX_SAPS, 
+            16)) == 0)
+    {     
+    #ifdef DEBUG
+    dprintf("BuildHandoffTable failed on SAPS Section");
+    #endif
+    }
+}
+</code></pre>
+<p>
+Now, in the <b>Recognize</b> function for LLC, for SAPS and ETYPES, it looks up who to hand off to by calling the <b>GetProtocolFromTable</b> helper API:</p>
+<pre><code>LPBYTE WINAPI LLCRecognizeFrame(HFRAME          hFrame,                     //... frame handle.
+                                LPBYTE          MacFrame,                   //... Frame pointer.
+                                LPLLC           LLCFrame,                   //... Relative pointer.
+                                DWORD           MacType,                    //... MAC type.
+                                DWORD           BytesLeft,                  //... Bytes left.
+                                HPROTOCOL       hPreviousProtocol,          //... Previous protocol or NULL if none.
+                                DWORD           nPreviousProtocolOffset,    //... Offset of previous protocol.
+                                LPDWORD         ProtocolStatusCode,         //... Pointer to return status code in.
+                                LPHPROTOCOL     hNextProtocol,              //... Next protocol to call (optional).
+                                LPDWORD         InstData)                   //... Next protocol instance data.
+{
+    //===============================================================
+    //  If the mac frame equals the llc frame this isn't LLC.
+    //===============================================================
+
+    if ( MacFrame != (LPBYTE) LLCFrame )
+    {
+        //===========================================================
+        //  If this is ethernet then the LLC frame had better follow the 
+        //  mac header.
+        //===========================================================
+
+        if (  MacType == MAC_TYPE_ETHERNET &amp;&amp; 
+      &amp;MacFrame[ETHERNET_HEADER_LENGTH] != (LPBYTE) LLCFrame )
+        {
+            *ProtocolStatusCode = PROTOCOL_STATUS_NOT_RECOGNIZED;
+
+            return (LPBYTE) LLCFrame;
+        }
+
+        //==========================================================
+        //  Now check for an LLC frame in general.
+        //
+        //  For this we rule out the global sap pair.
+        //==========================================================
+
+        if ( *((ULPWORD) LLCFrame) != 0xFFFF )
+        {
+            register LPBYTE EndOfFrame;
+
+            if ( (EndOfFrame = GetEndOfFrame(LLCFrame)) != NULL )
+            {
+                *hNextProtocol = GetProtocolFromTable(  lpSapHOTable, 
+                LLCFrame-&gt;dsap, 
+                InstData);
+
+                *ProtocolStatusCode = PROTOCOL_STATUS_NEXT_PROTOCOL;
+            }
+            else
+            {
+                *ProtocolStatusCode = PROTOCOL_STATUS_CLAIMED;
+            }
+
+            return EndOfFrame;
+        }
+    }
+
+    *ProtocolStatusCode = PROTOCOL_STATUS_NOT_RECOGNIZED;
+
+    return (LPBYTE) LLCFrame;
+}
+</code></pre>
+<p>&nbsp;</p></body>
+</HTML>

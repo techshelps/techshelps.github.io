@@ -1,0 +1,653 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>C++ Q &amp; A</title>
+<style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000 dir=ltr>
+<Font face="verdana,arial,helvetica" size="2">
+<h1><a name="cqa"></a>C++ Q &amp; A</h1>
+<p class=indent>
+By Paul DiLascia</p>
+<p>
+<b>Q.  </b>I am writing a network app with MFC. Multiple copies of my app on different workstations access the same data file, which is a serialized CArchive. I want the first user that opens the file to get read/write permission, and other users to get the file read-only. How can I do this with the existing MFC CDocument handling code? The MFC implementation of CDocument::OpenDocument opens the file, attaches the CArchive, serializes the contents, and then closes both the file and archive. As a result, the file is not locked. If a second user opens the same file, there is likely to be some confusion if they both save modifications. One user is going to lose out.</p>
+<p>
+My solution was to override the Open/SaveDocument pair such that the file is not closed while editing is taking place. As such, the second user will open a read-only file. While this seems perfectly straightforward, I wonder if there are any hidden side effects? One never can tell with MFC.</p>
+<p class=indent>
+<i>Jerry Evans</i></p>
+<p>
+<b>A.  </b>Well, you are certainly right about that last statement! However, in this case I think your approach is reasonable, though I suspect few readers will find it “perfectly straightforward.” I’ll show how to do it in a moment—but first, a little discussion of file sharing is in order.</p>
+<p>
+File sharing has been a problem ever since two people got on a computer. It’s just not clear what should happen when two people try to grab the same file. Just for fun, I experimented with some of my favorite apps. In Microsoft® Excel, if user A opens a file, and then user B opens the same file, the second user gets the dialog box shown in Figure 1. User B can open the file read-only, can cancel the open, or can wait until the file is ready. (Actually, there is a fourth option under Windows® 95: reboot your computer, and then get the file with write access because Windows is totally confused. This is the kind of thing only programmers and psychopaths would try.) If the user chooses to open the file read-only, he can still edit it, but if he tries to save those changes, Microsoft Excel displays a message reminding him the file is read-only and the Save As dialog appears to ask for a different name. In other words, Microsoft Excel doesn’t attempt to restrict editing to read-only operations the way some editors do.</p>
+<p>
+<img src="cpp1211_fig01.gif" border=0></p>
+<p>
+<b>Figure 1: Microsoft Excel Dialog Box</b></p>
+<p>
+And speaking of editors, my favorite one, Epsilon, takes a different approach. It lets multiple processes and users open the same text file and edit it. But whenever you activate the window containing the file—either by switching to it from within Epsilon or by task-switching from another Windows-based app—Epsilon compares the last-modified date with what it thinks it has. If the file has changed since you opened it, Epsilon displays a message like the one shown in Figure 2. The Visual Studio™ IDE does a similar thing. Anyone who uses a text editor other than the IDE is familiar with the dialog in Figure 3. And if a non-Epsilon app has the file open with share-deny-write access, you get the dialog in Figure 4 when you try to save. Not very friendly, but most people who use Epsilon are programmers, and “foo.txt: write error, error 13” makes perfect sense to them. You must either close the application that has the file open or save the file to a different name.</p>
+<p>
+<img src="cpp1211_fig02.gif" border=0></p>
+<p>
+<b>Figure 2: A Message from Epsilon</b></p>
+<p>
+<img src="cpp1211_fig03.gif" border=0></p>
+<p>
+<b>Figure 3: Visual Studio Warning</b></p>
+<p>
+<img src="cpp1211_fig04.gif" border=0></p>
+<p>
+<b>Figure 4: Epsilon Warning</b></p>
+<p>
+My point is, to deal with the file sharing question you have to decide what you want to do. There’s no single “right” way to do it. Everything depends on how you expect users to employ your program and files and how much code you’re willing to write. You can bet the Notify option in the Microsoft Excel dialog took a few lines.</p>
+<p>
+But since you asked how to lock the file during editing, I’ll show you one way of doing it in MFC. As you discovered, MFC (as with so many things) doesn’t make life easy. By default, MFC doesn’t lock a file while the user is editing it, only while the file is actually being saved or loaded—serialized, in MFC jargon. To load a document, MFC opens the file read-only; to save it, MFC opens the document with read-write and share-exclusive access. If MFC can’t get the access it wants, it beeps you with some clever warning message. So in a nutshell, MFC’s strategy is: get in, serialize, and get out. Between the load and the save, the file is up for grabs—which leads to the contention problem you pointed out.</p>
+<p>
+To show how you can make locking work in MFC, I wrote a simple text editor called ShareEdit that lets you edit ASCII text using CEditView. All the file-sharing changes are in a new class, CSharedDoc. The basic idea is to do as you suggest: keep the file open while it’s being edited. But that requires massaging MFC and performing a few tricks. I’ll go over them one at a time.</p>
+<p>
+When the user opens a file, MFC calls CDocument::OnOpenDocument, which I’ve overridden to call a helper function, OpenFile (see doc.cpp in Figure 5). OpenFile first tries to open the file with write permission; failing that, it opens the file read-only. Either way, OpenFile returns a CFile and sets a flag argument to tell the caller whether it got write access. </p>
+<p>
+Conceptually, OpenFile goes like this:</p>
+<pre><code>// Open file for write or read
+CFile* CSharedDoc::OpenFile(LPCTSTR lpszPathName, 
+                            BOOL&amp; bReadOnly)
+{
+   CFile* pFile = new CFile;
+   if (pFile-&gt;Open(/*write access*/)) {
+      bReadOnly = FALSE;
+   } else if (pFile-&gt;Open(/*read-only*/)) {
+      bReadOnly = TRUE;
+   } else {
+      delete pFile;
+      return NULL;
+   }
+   return pFile;
+}
+</code></pre>
+<p>
+If OpenFile returns with bReadOnly=TRUE, OnOpenDocument displays the message shown in Figure 6. Regardless of the read-only status, it then sets the class member m_pFile to the file opened. m_pFile will point to the open file for the duration of the edit session.</p>
+<p>
+<b>Figure 5: CsharedDoc</b></p>
+<p>
+<b>doc.h</b></p>
+<pre><code>////////////////////////////////////////////////////////////////
+// 1997 Microsoft Systems Journal. 
+// If this code works, it was written by Paul DiLascia.
+// If not, I don't know who wrote it.
+// 
+
+/////////////////
+// CCharedDoc implements shareable documents that are kept open
+// for the duration of the edit session
+//
+class CSharedDoc : public CDocument {
+protected:
+   CFile* m_pFile;      // the file kept open during editing
+   BOOL   m_bReadOnly;  // whether read-only access
+
+   // helpers
+   CFile* OpenFile(LPCTSTR lpszPathName, BOOL&amp; bReadOnly, BOOL bCreate=FALSE);
+   void   CloseFile();
+   DECLARE_DYNCREATE(CSharedDoc)
+   DECLARE_MESSAGE_MAP()
+
+public:
+   CSharedDoc();
+   virtual ~CSharedDoc();
+   virtual void Serialize(CArchive&amp; ar);
+   virtual BOOL OnNewDocument();
+   virtual BOOL OnOpenDocument(LPCTSTR lpszPathName);
+   virtual BOOL OnSaveDocument(LPCTSTR lpszPathName);
+   virtual void OnCloseDocument();
+   virtual void ReleaseFile(CFile* pFile, BOOL bAbort);
+   virtual BOOL DoFileSave();
+   virtual CFile* GetFile(LPCTSTR lpszFileName, UINT nOpenFlags,
+      CFileException* pError);
+};</code></pre>
+<p>
+<b>doc.cpp</b></p>
+<pre><code>////////////////////////////////////////////////////////////////
+// 1997 Microsoft Systems Journal. 
+// If this code works, it was written by Paul DiLascia.
+// If not, I don't know who wrote it.
+//
+// CSharedDoc implements an MFC doc class that does file sharing by
+// locking a file for the duration of an edit session.
+// Compiles with VC++ 5.0 or later
+// 
+#include "stdafx.h"
+#include "doc.h"
+
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#undef THIS_FILE
+static char THIS_FILE[] = __FILE__;
+#endif
+
+IMPLEMENT_DYNCREATE(CSharedDoc, CDocument)
+
+BEGIN_MESSAGE_MAP(CSharedDoc, CDocument)
+END_MESSAGE_MAP()
+
+CSharedDoc::CSharedDoc()
+{
+   m_pFile = NULL;
+}
+
+CSharedDoc::~CSharedDoc()
+{
+}
+
+//////////////////
+// Load/Save doc as normal (use edit view)
+//
+void CSharedDoc::Serialize(CArchive&amp; ar)
+{
+   ((CEditView*)m_viewList.GetHead())-&gt;SerializeRaw(ar);
+}
+
+////////////////////////////////////////////////////////////////
+// Below are overrides for shared stuff
+
+/////////////////
+// Map "Save" to "Save As" if doc is read-only
+//
+BOOL CSharedDoc::DoFileSave()
+{
+   return m_bReadOnly ?
+      DoSave(NULL) :             // do Save As
+      CDocument::DoFileSave();   // save as normal
+}
+
+////////////////
+// Create new doc. Close old one in case this is an SDI app
+//
+BOOL CSharedDoc::OnNewDocument()
+{
+   CloseFile();  // Required for SDI app only, because MFC re-uses doc.
+   BOOL bRet = CDocument::OnNewDocument();
+
+   if (bRet)
+      // do normal stuff
+      ((CEditView*)m_viewList.GetHead())-&gt;SetWindowText(NULL);
+   return bRet;
+}
+
+//////////////////
+// Open New doc. Close old one in case this is an SDI app
+//
+BOOL CSharedDoc::OnOpenDocument(LPCTSTR lpszPathName)
+{
+   CloseFile();  // Required for SDI app only, because MFC re-uses doc
+
+   // Open the file
+   CFile* pFile = OpenFile(lpszPathName, m_bReadOnly);
+   if (!pFile)
+      return FALSE;
+
+   if (m_bReadOnly) {
+      // Doc was opened read-only: tell user
+      CString s;
+      s.Format("File '%s' is in use.\nIt will be opened read-only",
+               lpszPathName);
+      AfxMessageBox(s);
+   }
+   m_pFile = pFile;
+
+   // Now do standard MFC Open, but close file if the open fails
+   BOOL bRet = CDocument::OnOpenDocument(lpszPathName);
+   if (!bRet)
+      CloseFile();
+   return bRet;
+}
+
+/////////////////
+// Save document. Use already-open file, unless saving to a new name.
+// Either way, lock the file and set length to zero before saving it.
+//
+BOOL CSharedDoc::OnSaveDocument(LPCTSTR lpszPathName)
+{
+   BOOL bReadOnly = m_bReadOnly;
+   CFile* pFile   = m_pFile;
+   ASSERT_VALID(pFile);
+
+   // Check for different file name
+   CString sFileName = pFile-&gt;GetFilePath();
+   BOOL bNewFile = (sFileName != lpszPathName);
+   if (bNewFile) {
+      // saving w/different name: open new file
+      pFile = OpenFile(lpszPathName, bReadOnly, TRUE);
+      if (!pFile)
+         return FALSE;
+   }
+   ASSERT_VALID(pFile);
+
+   // If can't get write access, can't save.
+   // Display message and return FALSE.
+   // 
+   if (bReadOnly) {
+      CString s;
+      s.Format("File '%s' is in use.\nSave with a different name.",
+               lpszPathName);
+      AfxMessageBox(s);
+      if (bNewFile)           // if new file was opened:
+         pFile-&gt;Close();      // close it
+      return FALSE;
+   }
+
+   if (bNewFile) {
+      // new file was opened: install it and close the old one
+      ASSERT(m_pFile);        // sanity check
+      m_pFile-&gt;Close();       // close old one
+      m_pFile = pFile;        // and replace w/new one
+      m_bReadOnly = bReadOnly;// read-only flag too
+   }
+
+   // Now do normal Serialize. Lock the file first and set length to zero
+   // This is required because I opened with modeNoTruncate. You might
+   // want to consider "robust" saving here: that is, save to a temp file
+   // before destroying the original file; then if the save succeeds, replace
+   // the original file with the new one.
+   //
+   pFile-&gt;LockRange(0,(DWORD)-1);   // will throw exception if fails
+   pFile-&gt;SetLength(0);             // otherwise will append
+   BOOL bRet = CDocument::OnSaveDocument(lpszPathName); // normal MFC save
+   pFile-&gt;UnlockRange(0,(DWORD)-1); // unlock
+   return bRet;
+}
+
+//////////////////
+// Close document: time to really close the file too. MFC only calls this
+// function in a MDI app, not SDI.
+//
+void CSharedDoc::OnCloseDocument()
+{
+   CloseFile(); // close file
+   CDocument::OnCloseDocument(); // Warning: must call this last
+                                 // because MFC will "delete this"
+}
+
+//////////////////
+// "Release" the file. This means either abort or close.
+// In the case of close, I don't really close it, but leave
+// file open for duration of user session.
+//
+void CSharedDoc::ReleaseFile(CFile* pFile, BOOL bAbort)
+{
+   if (bAbort)
+      CDocument::ReleaseFile(pFile, bAbort);
+   else if (!m_bReadOnly) {
+      pFile-&gt;Flush(); // write changes to disk, but don't close!
+   }
+}
+
+//////////////////
+// Override to use my always-open CFile object instead
+// of creating and opening a new one.
+//
+CFile* CSharedDoc::GetFile(LPCTSTR, UINT, CFileException*)
+{
+   ASSERT_VALID(m_pFile);
+   return m_pFile;
+}
+
+////////////////////////////////////////////////////////////////
+// Helper functions
+
+// CFile::Open mode flags
+const OPENREAD   = CFile::modeRead      | CFile::shareDenyNone;
+const OPENWRITE  = CFile::modeReadWrite | CFile::shareDenyWrite;
+const OPENCREATE = CFile::modeCreate    | CFile::modeReadWrite  |
+   CFile::shareDenyWrite;
+
+//////////////////
+// Open the document file. Try to open with write access, else read-only.
+// bCreate says whether to create the file, used when saving to a new name.
+// Returns the CFile opened, and sets bReadOnly.
+//
+CFile* CSharedDoc::OpenFile(LPCTSTR lpszPathName, BOOL&amp; bReadOnly, BOOL bCreate)
+{
+   CFile* pFile = new CFile;
+   ASSERT(pFile);
+   bReadOnly = TRUE; // assume read only 
+
+   // try opening for write
+   CFileException fe;
+   if (pFile-&gt;Open(lpszPathName, bCreate ? OPENCREATE : OPENWRITE, &amp;fe)) {
+      bReadOnly = FALSE;      // got write access
+
+   } else if (bCreate || !pFile-&gt;Open(lpszPathName, OPENREAD, &amp;fe)) {
+      // can't open for read OR write--yikes! Time to punt
+      delete pFile;
+      pFile = NULL;
+      ReportSaveLoadException(lpszPathName, &amp;fe, FALSE, 
+                              AFX_IDP_FAILED_TO_OPEN_DOC);
+   }
+   if (pFile)
+      pFile-&gt;SeekToBegin();
+
+   return pFile;
+}
+
+/////////////////
+// Close the file if it's open. Called from multiple places for SDI app
+//
+void CSharedDoc::CloseFile()
+{
+   if (m_pFile) {
+      m_pFile-&gt;Close();
+      m_pFile = NULL;
+   }
+}</code></pre>
+<p>
+<img src="cpp1211_fig06.gif" border=0></p>
+<p>
+<b>Figure 6: SharEdit Read-only Message</b></p>
+<p>
+Once the file is open, CSharedDoc::OnOpenDocument calls CDocument::OnOpenDocument to open the document as normal. MFC creates an archive, attaches the file to it, and reads the document by calling your Serialize function. This is where things get tricky. Normally, CDocument::<br>
+OnOpenDocument calls another virtual function, CDocument::GetFile, to open the file. My override goes like this:</p>
+<pre><code>CFile* CSharedDoc::GetFile(LPCTSTR, UINT, CFileException*)
+{
+   ASSERT(m_pFile);
+   return m_pFile;
+}
+</code></pre>
+<p>
+I don’t create a new CFile the way CDocument does; I simply return the m_pFile already open. There is one disadvantage to this: I lose the MFC feature of robust file saving. </p>
+<p>
+MFC normally uses a special CFile class, CMirrorFile, to load and save documents. What’s that, you ask? It’s nothing complicated—but it does gum up the works, like so many other things MFC does for your benefit. CMirrorFile is like CFile, except it creates a temporary file when saving. That way, if the save fails, your old file is still there. It’s a nice feature, but it fails if you have to do anything different like seek to the beginning of the file or lock the file, which I need to do. CMirrorFile is an MFC private class, so the friendly Redmondtonians didn’t bother to override all the CFile functions, only the ones they need for generic doc/view. The upshot is, you either have to punt CMirrorFile altogether or implement your own form of bullet-proof saving (which I encourage you to do). You could copy the original file to a backup version before saving over it, then delete the backup if the save succeeds or restore if the save fails. In the interest of getting the magazine out on time, I chose the punt strategy.</p>
+<p>
+The second trick is to override CDocument::ReleaseFile:</p>
+<pre><code>void 
+CSharedDoc::ReleaseFile(CFile* pFile, BOOL bAbort)
+{
+   if (bAbort)
+      CDocument::ReleaseFile(pFile, bAbort);
+   else if (!m_bReadOnly) {
+      pFile-&gt;Flush();
+   }
+}
+</code></pre>
+<p>
+MFC calls this virtual function when it’s finished serializing. ReleaseFile calls either CFile::Abort or CFile::Close, depending on its flag argument. In the case of an abort, my override really aborts. But in the case of a close, I don’t actually close the file; I only Flush any changes that may have been written. This is how I keep the file open for the entire duration of the edit session. My implementation of ReleaseFile fakes MFC out into thinking it’s closed the file when it really hasn’t. This sort of thing is generally dangerous, but if you ever want to get anything done in MFC <br>
+you need nerves of steel. In any case, a quick grep of the source code reveals that OnOpenDocument and OnSaveDocument are the only places where MFC calls ReleaseFile—at least for now.</p>
+<p>
+OK, the doc is open and loaded and everything is hunky-dory in doc/view-land, except that the file is still open with write permission and share-deny write access. That’s assuming your user was the first one to open the file; if not, the same picture holds, except the file is open read-only. So now the natural question is, when do you close the file?</p>
+<p>
+You would think a function with the name CDocument::OnCloseDocument would be the obvious place. That works fine in a Multiple Document Interface (MDI) app, but in a Single Document Interface (SDI) app, if Jane User opens a document and then opens another one, MFC never calls OnCloseDocument for the first document. Surprise! That’s because MFC reuses the same CDocument object for the new file. It never calls OnCloseDocument; it just opens another document. If the user selects File | New, MFC calls OnNewDocument directly, without ever calling OnCloseDocument. What all this means is that there are three places you must close the file: OnCloseDocument, OnOpenDocument, and OnNewDocument. Sigh. So I wrote a helper function to close m_pFile, and I call it from each of these three places.</p>
+<pre><code>void CSharedDoc::CloseFile()
+{
+   if (m_pFile) {
+      m_pFile-&gt;Close();
+      m_pFile = NULL;
+   }
+}
+</code></pre>
+<p>
+As you can see from the implementation, calling CloseFile multiple times is harmless—but that should never happen because, even though there are three places I call CloseFile, only one should ever be called in any given circumstance (MDI close/SDI open/SDI new). The only reason to call CloseFile from several places is to make CSharedDoc work properly in an SDI app. (Advanced gurus might think of putting the call in DeleteContents—but that won’t work because MFC calls DeleteContents after OnOpenDocument, and you’d close the very file you just opened.) None of this would be necessary if the framework called OnCloseDocument like it should.</p>
+<p>
+So far, so good. I’m making real progress. ShareEdit opens the doc with appropriate write or read-only permission, keeps the file open during the entire edit session, and closes it at the proper time when the user either closes the doc (an MDI app) or opens or creates a new one (an SDI app). Now, what happens when the user saves the document? Uh-oh. Once again, things get rather persnickety. I get tired of saying it, but modifying MFC really is like performing brain surgery; the whole thing is so delicately crafted that if you do even the slightest thing wrong, you’ll kill the patient.</p>
+<p>
+Like Microsoft Excel and Epsilon, ShareEdit does nothing to restrict editing when the user can only get read access. I could easily have changed the edit control to set the ES_READONLY style, but in most apps it’s not so easy to turn editing off, so I didn’t. Instead, I prevent the user from saving the file. There are two places to do it. The first is trivial:</p>
+<pre><code>/////////////////
+// Map "Save" to "Save As" if doc is read-only
+//
+BOOL CSharedDoc::DoFileSave()
+{
+   return m_bReadOnly ?
+      DoSave(NULL) :
+      CDocument::DoFileSave();
+}
+</code></pre>
+<p>
+CDocument::DoFileSave is the virtual helper function MFC uses to do—what else—the File | Save command. DoSave is an even lower helper function that handles both Save and Save As. If you give it a file name, it saves the file; if you give it NULL as the file name, it runs the Save As dialog. So my override maps Save to Save As if the doc is read-only. If Jane invokes File | Save, Control+S, or the Save button for a read-only doc, ShareEdit will invoke the Save As dialog.</p>
+<p>
+But if she saves the file with a different name, I have to first see if I can open the new file with write access. If so, I save it and close the old file; the new file becomes the one-and-only open file stored in m_pFile. The logic is fairly straightforward:</p>
+<pre><code>BOOL 
+CSharedDoc::OnSaveDocument(LPCTSTR lpszName)
+{
+   if (/*new file name*/) {
+      CFile* pFile = // open write access
+      if (!pFile)
+         // report error: file in use
+      m_pFile-&gt;Close(); // close old file
+      m_pFile = pFile;  // set file pointer
+   }
+.
+.
+.
+}
+</code></pre>
+<p>
+I refer you to doc.cpp for the details. The only thing new is another flag, bCreate, for CSharedDoc::OpenFile, which tells the function to create the file if it doesn’t exist. Note that the previous code handles the case properly where Jane tries to get around the read-only restriction by doing a Save As to the original name. Either way, if OnSaveDocument can’t open the file with write access, it fails with a friendly message explaining that the file is in use (see Figure 7).</p>
+<p>
+OK, now I’m really smoking. I’ve got the file open, closed, and saved—well, almost. There’s just one more thing needed to make all of this fly. In the case where the user does have write access, you’ve got to lock the file while it’s being written. You don’t want Joe User (Jane’s cousin) to try reading the file while someone else is in the middle of writing it. Collisions of that sort are unlikely for small text files, but what if you’re writing a giant database, or even just a large bitmap, that takes a few seconds to save? You have to make sure whoever saves the file has exclusive access while they’re saving it. Indeed, MFC always opens files with share-exclusive access before serializing them to disk. Since CSharedDoc opens the file with share-deny-write (so others can read it), something must be done to lock it. </p>
+<p>
+<img src="cpp1211_fig07.gif" border=0></p>
+<p>
+<b>Figure 7: ShareEdit Message</b></p>
+<p>
+Fortunately, there’s a function that does just what you want. Here’s the fragment from OnSaveDocument:</p>
+<pre><code>pFile-&gt;LockRange(0,(DWORD)-1);
+pFile-&gt;SetLength(0);
+CDocument::OnSaveDocument(lpszName);
+pFile-&gt;UnlockRange(0,(DWORD)-1);
+</code></pre>
+<p>
+CFile::LockRange lets you lock a region of a file. In ShareEdit, I lock the entire file. If you want to get fancy with a big file, you can try locking only the portion you’re actually writing to. Note that I also set the length of the file to zero. That’s because I opened the file with CFile::modeWrite, not modeCreate (in the case of an existing file), so if I don’t set the length to zero, the extra stuff won’t get deleted if the new version is shorter than the old. Normally, MFC always opens the file with modeCreate, which sets the length to zero—but I can’t do that because when the user first opens the file, I don’t want to erase it. This also explains why CSharedDoc::OpenFile ends with a SeekToBegin.</p>
+<p>
+That’s it! Figure 8 lists the CSharedDoc functions and what they do. There are still several sharing issues I haven’t addressed that you should be aware of to create a truly user-fuzzy network app. For example, what happens when Jane or Joe creates a new file? Should the app require that the file be available for write access? What if someone else tries to create the same file? Should the app display a warning then—or wait until the user saves? Also, what about informing users when a file has changed on disk? It’d be nice to do the Epsilon/Visual IDE thing where the program tells you, either periodically or whenever you task-switch to it, that the file has been modified. Then, of course, you need a Revert command, and you should also modify File | Open so that if the user opens a file already open, your app reverts to the version on disk. Currently, if you open foo.txt while it’s already open, MFC just activates the foo.txt window. And what happens if your app allows multiple views on the same doc, as when you invoke the New Window command? Should the first window get write access and the others read-only? Or should they all get write access and saving one of them updates all the others? </p>
+<p>
+<b>Figure 8: Overview of CShareDoc Functions</b></p>
+<p>
+<b>CDocument Overrides</b></p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td width=296>BOOL OnNewDocument();</td>
+<td width=296>Override to call CloseFile in case of SDI app.</td>
+</tr>
+<tr valign=top>
+<td width=296>BOOL OnOpenDocument(LPCTSTR lpszPathName);</td>
+<td width=296>Override to call CloseFile in case of SDI app. Open the file (OpenFile) before calling default, CDocument::OnOpenDocument.</td>
+</tr>
+<tr valign=top>
+<td width=296>BOOL OnSaveDocument(LPCTSTR lpszPathName);</td>
+<td width=296>If the name saved to is different from the current name, re-open m_pFile to the new file, requiring write access. Before actually saving the file, lock it (exclusive access) and set length to zero. Unlock after saving.</td>
+</tr>
+<tr valign=top>
+<td width=296>void OnCloseDocument(); </td>
+<td width=296>Override to call CloseFile. </td>
+</tr>
+<tr valign=top>
+<td width=296>void ReleaseFile(CFile* pFile, BOOL bAbort);</td>
+<td width=296>Override to NOT close the file if bAbort==FALSE.</td>
+</tr>
+<tr valign=top>
+<td width=296>BOOL DoFileSave();</td>
+<td width=296>Override to map File Save to File Save As if doc is read-only.</td>
+</tr>
+<tr valign=top>
+<td width=296>CFile* GetFile(LPCTSTR lpszFileName,    UINT nOpenFlags, CFileException* pError);</td>
+<td width=296>Override to return the open file, m_pFile.</td>
+</tr>
+</table><br>
+<p>
+<b>New Helper Functions</b></p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td width=296>void CloseFile();</td>
+<td width=296>Close m_pFile if it is open.</td>
+</tr>
+<tr valign=top>
+<td width=296>CFile* OpenFile(LPCTSTR lpszPathName,</td>
+<td width=296>Open doc with read-write access and share-deny write if possible; otherwise, </td>
+</tr>
+<tr valign=top>
+<td width=296>    BOOL&amp; bReadOnly);</td>
+<td width=296>just mode Read and shareDenyNone. Sets bReadOnly to tell caller which. Seek to beginning of file.</td>
+</tr>
+</table><br>
+<p>
+As you can see, there’s much to consider. I’ve only shown you how to get around MFC to implement the basic file sharing feature. And I’ve only shown you one way of doing it. There are others. For example, you might forgo the CSharedDoc approach entirely and create a lock file on disk. When Jane opens foo.txt, you could create a zero-length file, foo.txt.lock—or maybe the lock is a backup copy of the original file for robust saving. When opening a file, your app would first look for the lock file and, if it’s present, open the file read-only. The major drawback with this approach is that the lock files can easily get left hanging if the system or your program crashes—not infrequent in Windows 95—and then how does anyone edit the file? Someone must manually delete the lock file, which is pretty tacky. Of course, the same thing can happen with LockRange. I’ve often crashed Visual C++® and ended up with a permanently locked .ncb file—the only recourse is to reboot and delete it.</p>
+<p>
+Have you considered knitting instead of programming?</p>
+<p>
+<b>Q.  </b>I’m trying to encapsulate drag and drop functionality into derived CTreeCtrl and CListCtrl classes. My classes use MFC message reflection to handle TVN_BEGINDRAG and LVN_BEGINDRAG. When I tried to handle these same messages in a dialog (so the dialog would know when the user drags data between its controls), the notifications are already intercepted by the controls, so the dialog’s handlers are not called. I was able to solve the problem using user-defined messages, but that seems kludgy. I would like my classes’ users to be able to drop the classes into their project and go, without having to code up custom message handlers. Is there some way I can force messages that are being reflected to the control back into the parent dialog’s message handlers?</p>
+<p class=indent>
+<i>Keith Tingle</i></p>
+<p>
+<b>A.  </b>Finally, an easy question!</p>
+<p>
+I once had the same problem and dumbly tried to solve it by sending the notification message back to the parent, only to have it reflected back at me in an infinite recursion of reflections and counter-reflections—like looking in the mirrors in a barber shop—until several microseconds later my stack space vanished into the ether. So I did a little research and found ON_NOTIFY_REFLECT_EX.</p>
+<p>
+The MFC message-reflection macros are one of the truly great things in MFC. Old timers can remember the days before C++ when you wrote a single, all-encompassing window/dialog proc to handle all the messages in the universe, including WM_COMMAND notifications from child controls. When the user clicks a button or edits some text in an edit control, Windows sends a WM_COMMAND with notification code = BN_CLICKED or EN_CHANGED to the parent Window. Well, that’s nice, but it isn’t very object-oriented. It doesn’t let you write controls that handle their own notifications. For example, if you want to write an edit control that colors itself blue or a tree control that handles its own drag and drop, you can’t do it because the parent, not the control, must handle the notifications. In the old days, no one particularly noticed because we were all so busy trying to figure out how to make our apps run in 640KB. But then extended memory managers and C++ came out, and programmers wanted to write completely self-contained plug-in classes like CBlueEdit and CDragTreeCtrl.</p>
+<p>
+I believe it was in version 4.0 that MFC first came to the rescue with the concept of message reflection. The idea is to “reflect” control notifications back to the control that sent them. So, for example, a button can handle its own BN_CLICKED, or a tree control can handle its own TVN_BEGINDRAG. There are several kinds of notifications MFC reflects (see Figure 9), but the main ones are WM_COMMAND and WM_NOTIFY, which you can implement in your message map using the macros ON_CONTROL_REFLECT and ON_NOTIFY_REFLECT. </p>
+<p>
+<b>Figure 9: MFC Message-Reflection Macros</b></p>
+<table border=1 cellpadding=5 cols=3 frame=below rules=rows>
+<tr valign=top>
+<td class=blue width=272><b>Macro</b></td>
+<td class=blue width=162><b>Message</b></td>
+<td class=blue width=222><b>Used For</b></td>
+</tr>
+<tr valign=top>
+<td width=272>ON_CONTROL_REFLECT</td>
+<td width=162>WM_COMMAND</td>
+<td width=222>control notifications</td>
+</tr>
+<tr valign=top>
+<td width=272>ON_CONTROL_REFLECT_EX</td>
+<td width=162>WM_COMMAND</td>
+<td width=222>control notifications</td>
+</tr>
+<tr valign=top>
+<td width=272>ON_NOTIFY_REFLECT</td>
+<td width=162>WM_NOTIFY</td>
+<td width=222>control notifications</td>
+</tr>
+<tr valign=top>
+<td width=272>ON_NOTIFY_REFLECT_EX</td>
+<td width=162>WM_NOTIFY</td>
+<td width=222>control notifications</td>
+</tr>
+<tr valign=top>
+<td width=272>ON_UPDATE_COMMAND_UI_REFLECT</td>
+<td width=162>MFC UI update</td>
+<td width=222>updating buttons, status bar, and so on</td>
+</tr>
+<tr valign=top>
+<td width=272>ON_WM_CTLCOLOR_REFLECT</td>
+<td width=162>WM_CTLCOLOR</td>
+<td width=222>changing control color</td>
+</tr>
+<tr valign=top>
+<td width=272>ON_WM_DRAWITEM_REFLECT</td>
+<td width=162>WM_DRAWITEM</td>
+<td width=222>owner-draw items</td>
+</tr>
+<tr valign=top>
+<td width=272>ON_WM_MEASUREITEM_REFLECT</td>
+<td width=162>WM_MEASUREITEM</td>
+<td width=222>owner-draw items</td>
+</tr>
+<tr valign=top>
+<td width=272>ON_WM_DELETEITEM_REFLECT</td>
+<td width=162>WM_DELETEITEM</td>
+<td width=222>owner-draw items</td>
+</tr>
+<tr valign=top>
+<td width=272>ON_WM_CHARTOITEM_REFLECT</td>
+<td width=162>WM_CHARTOITEM</td>
+<td width=222>keystroke navigation in list box</td>
+</tr>
+<tr valign=top>
+<td width=272>ON_WM_VKEYTOITEM_REFLECT</td>
+<td width=162>WM_VKEYTOITEM</td>
+<td width=222>keystroke navigation in list box</td>
+</tr>
+<tr valign=top>
+<td width=272>ON_WM_COMPAREITEM_REFLECT</td>
+<td width=162>WM_COMPAREITEM</td>
+<td width=222>owner-draw items</td>
+</tr>
+<tr valign=top>
+<td width=272>ON_WM_HSCROLL_REFLECT</td>
+<td width=162>WM_HSCROLL</td>
+<td width=222>scroll bars</td>
+</tr>
+<tr valign=top>
+<td width=272>ON_WM_VSCROLL_REFLECT</td>
+<td width=162>WM_VSCROLL</td>
+<td width=222>scroll bars</td>
+</tr>
+<tr valign=top>
+<td width=272>ON_WM_PARENTNOTIFY_REFLECT</td>
+<td width=162>WM_PARENTNOTIFY</td>
+<td width=222>to notify parent of child window creation/destruction</td>
+</tr>
+</table><br>
+<p>
+In addition to the normal macros, there are two lesser-known varieties, ON_CONTROL_REFLECT_EX and ON_NOTIFY_REFLECT_EX. The _EX versions (a complete list is shown in Figure 10) work just like the normal versions, except the handler functions return BOOL:</p>
+<pre><code>BEGIN_MESSAGE_MAP(CMyTreeCtrl, CTreeCtrl)
+    ON_NOTIFY_REFLECT_EX(TVN_DRAGBEGIN, OnDragBegin)
+END_MESSAGE_MAP()
+
+BOOL 
+CMyCtrl::OnDragBegin(NMHDR* pNMHDR, 
+                     LRESULT* plResult)
+{
+.
+.
+.
+   return FALSE;
+}
+</code></pre>
+<p>
+If your handler function returns TRUE, MFC interprets this to mean you have handled the message and MFC will not route it to the parent; if you return FALSE, MFC will route the message to the parent window from which the message originated. Got it? If not, the full story is in MFC Technical Note TN062.</p>
+<p>
+<b>Figure 10: MFC_EX Message Handler Macros</b></p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=blue width=236><b>Macro</b></td>
+<td class=blue width=204><b>Message/Use</b></td>
+</tr>
+<tr valign=top>
+<td width=236>ON_COMMAND_EX</td>
+<td width=204>command ID</td>
+</tr>
+<tr valign=top>
+<td width=236>ON_COMMAND_EX_RANGE</td>
+<td width=204>range of command ID’s</td>
+</tr>
+<tr valign=top>
+<td width=236>ON_NOTIFY_EX</td>
+<td width=204>WM_NOTIFY</td>
+</tr>
+<tr valign=top>
+<td width=236>ON_NOTIFY_EX_RANGE</td>
+<td width=204>range of WM_NOTIFY’s</td>
+</tr>
+<tr valign=top>
+<td width=236>ON_CONTROL_REFLECT_EX</td>
+<td width=204>reflected WM_COMMAND</td>
+</tr>
+<tr valign=top>
+<td width=236>ON_NOTIFY_REFLECT_EX</td>
+<td width=204>reflected WM_NOTIFY</td>
+</tr>
+</table><br>
+<p>
+There are other message map macros that come in _EX flavors such as ON_COMMAND_EX, which goes with ON_COMMAND. Here the idea is not parent-child reflection, but letting multiple command targets handle the same command. A command target is any object of a class derived from CCmdTarget. The most common examples are documents, frames, and views. While a command is generally associated with a WM_COMMAND message from a window, MFC extends the notion to other kinds of nonwindow objects, such as CDocument and CWinApp. CCmdTarget is the base class for objects than can receive commands—and the base class for objects that have message maps. MFC implements an elaborate scheme for routing commands to objects (see “Meandering Through the Maze” in the July 1995 issue). Most of the time, you implement a command handler for each command in one, and only one, class. For example, your app object handles ID_FILE_OPEN, while the view handles ID_CHANGE_FONT_COLOR. Each ID_FOO appears in one, and only one, message map. But the _EX macros let more than one kind of object handle the same command. The extended command handler returns FALSE and MFC goes on routing it. </p>
+<p>
+Why is this useful? You might use ON_COMMAND_EX to implement a View | Refresh command. Several kinds of objects might have ON_COMMAND_EX handlers for ID_<br>
+VIEW_REFRESH. Each object would refresh itself differently, but they would all want to do something. If you use ON_COMMAND_EX, be careful: there’s no guarantee in what order the objects will receive commands, so all objects handling the command should return FALSE. If any object returns TRUE, it will block the others from seeing it. (The routing order is well-determined, and described in “Meandering Through the Maze,” but it’s not a good idea to rely on it unless you’re doing something hairy.)</p>
+<p>
+In the case of message reflection, the message reflected is a WM_COMMAND or WM_NOTIFY notification from a control, not a command. There is some confusion here, because historically Windows used WM_COMMAND for both menu commands and control notifications—which is why WM_NOTIFY was introduced. Either way, with message reflection the routing order is clear: the child control always gets first crack. So if you’re implementing a specialized control such as a tree control that handles its own drag/drop notification, but you also want to let the parent see it, just use ON_NOTIFY_REFLECT_EX and return FALSE from your handler. If you do that, I guess you could call it a double-reflection.</p>
+<p>
+To obtain complete source code listings, see the MSJ Web site at <br>
+http://www.microsoft.com/msj.</p>
+<p>
+Have a question about programming in C or C++? Send it to Paul DiLascia at askpd@pobox.com</p>
+</font></BODY>
+</HTML>

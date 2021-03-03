@@ -1,0 +1,420 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Under the Hood</title>
+<style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000 dir=ltr>
+<Font face="verdana,arial,helvetica" size="2">
+<h1><a name="underhood"></a>Under the Hood</h1>
+<p class=indent>
+&nbsp;By Matt Pietrek</p>
+<p>
+When I first started writing the article on   Windows NT® 5.0 that appears in this issue, I  didn’t have much to work with other than the operating system itself. With no SDK docs or white papers, figuring out what’s new came down to comparing the Windows NT 4.0 and 5.0 system DLLs to see what new exported APIs were added (or possibly deleted). </p>
+<p>
+In the past, I would have compared the exports from two similar DLLs like this:
+<ul type=disc>
+<li>
+Run DUMPBIN /EXPORTS on both DLLs, redirecting the output to separate files <br><br></li>
+<li>
+Run the SORT program on both files, redirecting the output <br><br></li>
+<li>
+Run the FC (File Compare) program on the two sorted files</li>
+</ul>
+<p>
+The output from the FC program would consist of the APIs that had changed between the two DLLs. </p>
+<p>
+Although this process isn’t horrible and can be done in under a minute, it obviously isn’t suitable when you have dozens or hundreds of DLLs to examine. While I could have spent considerable time designing an elaborate executable file-comparison program, there’s something to be said for just hacking out something good enough for the job at hand. No GUI, no fancy algorithms—just grab the information and let the CPU burn cycles to give you the results.</p>
+<p>
+The program I came up with is called PEDIFF, and I was pleasantly surprised that I spent only an hour getting the first version to work well enough for my own needs. Alas, there were some restrictions and limitations that made it unsuitable for a column. Therefore, for you, the intrepid reader, I went back in and made it more robust (and, as a by-product, faster). The name PEDIFF is somewhat of a misnomer since it only compares PE file exports, but the code can easily be extended to list other PE file differences.</p>
+<h3>PEDIFF Basics</h3>
+<p>
+The structure of PEDIFF operations can be expressed very simply in pseudocode:
+<ul type=disc>
+<li>
+Get the names of the two files to compare<br><br></li>
+<li>
+Load the exports for both files into two separate lists<br><br></li>
+<li>
+Walk though list 1, flagging all entries that are also in list 2<br><br></li>
+<li>
+Walk though list 1, printing out all entries not previously flagged<br><br></li>
+<li>
+Walk though list 2, printing out all entries not previously flagged</li>
+</ul>
+<p>
+The code that implements this sequence of steps is PEDIFF.CPP (see Figure 1). Function main begins by calling ProcessCommandLine, which parses the command-line arguments to come up with the names of the two files to compare. Assuming the command line is reasonable, function main creates two instances of a class that I called PEExportList. Both PEExportList class instances are passed separately to a helper function called LoadExportInfo, which I’ll describe later.</p>
+<p>
+<b>Figure 1: PEDIFF.CPP</b></p>
+<pre><code>//==========================================
+// Matt Pietrek, Microsoft Systems Journal, November 1997
+// FILE: PEDIFF.CPP
+//==========================================
+#include &lt;windows.h&gt;
+#include &lt;imagehlp.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;malloc.h&gt;
+#include "PEExportList.h"
+//=============================== Global Variables ============================
+char g_szHelpText[] = 
+"Syntax: PEDIFF file1 [file2]\n\n" 
+"If only one file is specified, it is assumed to be a comparison file to a \n"
+"similarly named file in the current directory.\n\n"
+"For example: PEDUMP C:\\WINNT\\SYSTEM32\\KERNEL32.DLL will compare that file\n"
+"to the KERNEL32.DLL in the current directory.\n";
+PSTR pszFile1 = 0;
+PSTR pszFile2 = 0;
+//==================================== Code ===================================
+#define MY_PROCESS_HANDLE 0
+BOOL LoadExportInfo( char * pszFilename, PEExportList * pExportList )
+{
+    LOADED_IMAGE li;
+    if ( !MapAndLoad( pszFilename, "", &amp;li, TRUE, TRUE ) )
+    {
+        printf( "Unable to locate or load %s\n", pszFilename );
+        return FALSE;
+    }
+    PIMAGE_EXPORT_DIRECTORY pExpDir;
+    pExpDir = (PIMAGE_EXPORT_DIRECTORY)(li.FileHeader-&gt;OptionalHeader.
+                DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+    if ( !pExpDir )
+    {
+        printf( "No Exports\n" );
+        return FALSE;
+    }
+    pExpDir = (PIMAGE_EXPORT_DIRECTORY)ImageRvaToVa(
+                    li.FileHeader, li.MappedAddress, (DWORD)pExpDir, 0 );
+    PDWORD * pExpNames = pExpDir-&gt;AddressOfNames;
+    pExpNames = (PDWORD *)ImageRvaToVa(
+                    li.FileHeader, li.MappedAddress, (DWORD)pExpNames, 0 );
+    for ( unsigned i=0; i &lt; pExpDir-&gt;NumberOfNames; i++ )
+    {
+        PSTR p = (PSTR)ImageRvaToVa(
+                    li.FileHeader, li.MappedAddress, (DWORD)*pExpNames, 0 );
+        pExportList-&gt;AddSymbol( p );
+        pExpNames++;
+    }
+    // In case the DLL exports any APIs by ordinal only, we need to
+    // synthesize a name (e.g., "ordinal_102", and add it to the list
+    if ( pExpDir-&gt;NumberOfNames &lt; pExpDir-&gt;NumberOfFunctions )
+    {
+        // First, get a pointer to the AddressOfNameOrdinals array
+        PWORD pNameOrdinals = (PWORD)ImageRvaToVa(
+                        li.FileHeader, li.MappedAddress,
+                        (DWORD)pExpDir-&gt;AddressOfNameOrdinals, 0 );
+        // Next, get a pointer to the AddressOfFunctions array
+        PDWORD pFunctions = (PDWORD)ImageRvaToVa(
+                        li.FileHeader, li.MappedAddress,
+                        (DWORD)pExpDir-&gt;AddressOfFunctions, 0 );
+        DWORD cNamedOrdinals = pExpDir-&gt;NumberOfNames;
+        DWORD cFunctions = pExpDir-&gt;NumberOfFunctions;
+        // Allocate memory for an array of BYTEs, each BYTE indicating if
+        // a function is exported by name.  Initially, all entries are set to
+        // 0, meaning they're exported by ordinal
+        PBYTE pNamedFuncs = (PBYTE)calloc( cFunctions, sizeof(BYTE) );
+        // Iterate through the NamedOrdinals array, and for each ordinal,
+        // set the corresponding entry in the pNamedFunctions array to 1
+        // (meaning "exported by name"
+        PWORD pCurrOrd = pNameOrdinals;
+        for ( unsigned i = 0; i &lt; cNamedOrdinals; i++, pCurrOrd++ )
+            pNamedFuncs[ *pCurrOrd ] = 1;
+        // Finally, iterate through the pNamedFunctions array.  For each
+        // function, check if it's named, or if its address is 0.  If neither
+        // is true, the function is exported by ordinal only, so synthesize
+        // a name and add it to the PEExportList
+        for ( i = 0; i &lt; cFunctions; i++ )
+        {
+            if ( pNamedFuncs[i] )   // If marked, it's a named export
+                continue;
+            if ( 0 == pFunctions[i] )   // If the address is 0, it's not
+                continue;               // a blank (non-exported) function
+            char szMadeUpName[64];
+            wsprintf( szMadeUpName, "ordinal_%u", pExpDir-&gt;Base + i );
+            pExportList-&gt;AddSymbol( szMadeUpName );
+        }
+        free( pNamedFuncs );    // Free our allocated buffer
+    }
+    UnMapAndLoad( &amp;li );  // Close the PE file and debug info mapping
+    return TRUE;
+}
+BOOL ProcessCommandLine( int argc, char *argv[] )
+{
+    if ( (argc &lt; 2) || (argc &gt; 3) )
+        return FALSE;
+    pszFile1 = argv[1];         // First real argument is first filename
+    if ( 3 == argc )            // If 2 real arguments, second arg is the
+    {                           // the second filename
+        pszFile2 = argv[2];
+        return TRUE;        
+    }
+    // If we get here, only one filename was specified.  It should contain
+    // a path.  Therefore, we should be able to point pszFile2 to the
+    // character after the final blackslash, and be done with it.
+    pszFile2 = strrchr( pszFile1, '\\' );
+    if ( !pszFile2 )        // Hmmm... No blackslash.. Something's not right.
+        return FALSE;
+    pszFile2++;             // Increment past the backslash to the filename
+    return TRUE;
+}
+int main( int argc, char * argv[] )
+{   
+    if ( !ProcessCommandLine( argc, argv ) )
+    {
+        printf( g_szHelpText );
+        return 0;
+    }
+    PEExportList file1;
+    if ( !LoadExportInfo( pszFile1, &amp;file1 ) )
+        return 1;
+    PEExportList file2;
+    if ( !LoadExportInfo( pszFile2, &amp;file2 ) )
+        return 1;
+    ExportedSymbolInfo * pCurrent = 0;
+    while ( pCurrent = file1.GetNextSymbol(pCurrent) )
+    {
+        ExportedSymbolInfo * pMatch = file2.LookupSymbol( pCurrent-&gt;m_pszName );
+        if ( pMatch )
+        {
+            pCurrent-&gt;m_flags |= EXPSYMINFO_MATCH;
+            pMatch-&gt;m_flags   |= EXPSYMINFO_MATCH;
+        }       
+    }
+    printf( "File: %s\n", pszFile1 );
+    pCurrent = 0;
+    while ( pCurrent = file1.GetNextSymbol(pCurrent) )
+    {
+        if ( 0 == pCurrent-&gt;m_flags &amp; EXPSYMINFO_MATCH )
+        {
+            printf( "  %s\n", pCurrent-&gt;m_pszName );
+        }       
+    }
+    printf( "File: %s\n", pszFile2 );
+    pCurrent = 0;
+    
+    while ( pCurrent = file2.GetNextSymbol(pCurrent) )
+    {
+        if ( 0 == pCurrent-&gt;m_flags &amp; EXPSYMINFO_MATCH )
+        {
+            printf( "  %s\n", pCurrent-&gt;m_pszName );
+        }       
+    }
+    return 0;
+}</code></pre>
+<p>
+The PEExportList class is defined and implemented in PEExportList.H and PEExportList.CPP (see Figure 2). Internally, the PEExportList class maintains a list (actually, an array) of ExportedSymbolInfo structures. An ExportedSymbolInfo struct is minimalist and really just associates an exported function name with a set of flags:</p>
+<pre><code>struct ExportedSymbolInfo
+{
+    char *      m_pszName;
+    unsigned    m_flags;
+};
+</code></pre>
+<p>
+The three methods of the PEExportList class all work with ExportedSymbolInfo structures. The PEExportList::AddSymbol method adds a new entry to the end of the list. The PEExportList::LookupSymbol method takes the name of an exported function and returns a pointer to the ExportedSymbolInfo previously created for it, or NULL if the symbol isn’t found.</p>
+<p>
+<b>Figure 2: PEExportList</b></p>
+<p>
+<b>PEExportList.H</b></p>
+<pre><code>//==========================================
+// Matt Pietrek, Microsoft Systems Journal, November 1997
+// FILE: PEExportList.H
+//==========================================
+#ifndef __PEEXPORTLIST_H
+#define __PEEXPORTLIST_H
+typedef enum ExportedSymbolInfoFlags
+{
+    EXPSYMINFO_MATCH = 1
+};
+struct ExportedSymbolInfo
+{
+    char *      m_pszName;
+    unsigned    m_flags;
+};
+const int PEExportListGrowSize = 100;
+class PEExportList
+{
+    ExportedSymbolInfo *    m_pSymbols;
+    unsigned                m_symbolCount;
+    public:
+    PEExportList( void );
+    ~PEExportList( void );
+    ExportedSymbolInfo * AddSymbol( char * pszSymbolName );
+    ExportedSymbolInfo * LookupSymbol( char * pszSymbolName );
+    ExportedSymbolInfo * GetNextSymbol( ExportedSymbolInfo * );
+};
+#endif
+</code></pre>
+<p>
+<b>PEExportList.CPP</b></p>
+<pre><code>//==========================================
+// Matt Pietrek, Microsoft Systems Journal, November 1997
+// FILE: ExportList.CPP
+//==========================================
+#include &lt;windows.h&gt;
+#include &lt;string.h&gt;
+#include &lt;malloc.h&gt;
+#include "PEExportList.h"
+PEExportList::PEExportList( void )
+{
+    m_pSymbols = 0;
+    m_symbolCount = 0;
+}
+PEExportList::~PEExportList( void )
+{
+    ExportedSymbolInfo * pCurrent = m_pSymbols;
+    
+    for ( unsigned i = 0; i &lt; m_symbolCount; i++, pCurrent++ )
+    {
+        free( pCurrent-&gt;m_pszName );    
+    }
+}
+ExportedSymbolInfo *
+PEExportList::AddSymbol( char * pszSymbolName )
+{
+    if ( 0 == (m_symbolCount % PEExportListGrowSize) )
+    {
+        m_pSymbols = (ExportedSymbolInfo *)
+            realloc(m_pSymbols,
+                    (m_symbolCount + PEExportListGrowSize)
+                    * sizeof(ExportedSymbolInfo) );
+    }
+    ExportedSymbolInfo * pCurrent = &amp;m_pSymbols[m_symbolCount];
+    pCurrent-&gt;m_pszName = strdup( pszSymbolName );
+    pCurrent-&gt;m_flags = 0;
+    m_symbolCount++;
+    return pCurrent;        
+}
+ExportedSymbolInfo *
+PEExportList::LookupSymbol( char * pszSymbolName )
+{
+    ExportedSymbolInfo * pSymbol = 0;
+    while ( pSymbol = GetNextSymbol( pSymbol ) )
+    {
+        if ( 0 == strcmp(pSymbol-&gt;m_pszName, pszSymbolName) )
+            break;
+    }
+    return pSymbol;
+}
+ExportedSymbolInfo *
+PEExportList::GetNextSymbol( ExportedSymbolInfo * pSymbol )
+{
+    ExportedSymbolInfo * pEndSymbol = &amp;m_pSymbols[m_symbolCount];
+    if ( 0 == pSymbol &amp;&amp; m_symbolCount )
+    {
+        return m_pSymbols;
+    }
+    else
+    {
+        pSymbol++;
+        if ( pSymbol &lt; pEndSymbol )
+            return pSymbol;
+        else
+            return 0;
+    }
+}
+</code></pre>
+<p>
+The PEExportList::GetNextSymbol method allows for list enumeration. To start an enumeration, pass in a NULL pointer. The method returns a pointer to the first ExportedSymbolInfo in the list. To continue the enumeration, pass in the ExportedSymbolInfo pointer returned by the previous call. I won’t go into the class’s implementation details any further, except to say that the list is really an array that’s dynamically reallocated if the number of entries grows beyond the current limits. Perhaps not the most elegant implementation, but it was fast and easy to write.</p>
+<p>
+Now let’s look at the LoadExportInfo code, which fills up a PEExportList instance with API goodies to compare. In keeping with my fast, brute-force mandate, I needed to enumerate the exported functions from a DLL with minimum fuss. My first implementation used the IMAGEHLP MapDebugInformation, SymLoadModule, and SymEnumerateSymbols APIs. The underlying idea is that IMAGEHLP.DLL synthesizes a symbol table from the exports of  an image (in the absence of debug information). The flaw with this approach is that if you have symbol tables lying around, SymLoadModule won’t bother loading the exports. An example of having a symbol table lying around is if you installed the .DBG files that are available for Windows NT system DLLs.</p>
+<p>
+Using IMAGEHLP’s symbol table routines ultimately didn’t work out, but it did get me thinking about other ways that I could use IMAGEHLP to get at the exported API list. The approach I took was to read the export list directly, but to use IMAGEHLP APIs to save me from messy low-level details. I ended up using the MapAndLoad API to map the DLL into memory and get a pointer to its PE header. From the PE header, it’s easy to get the relative virtual address (RVA) of the export table.</p>
+<p>
+While knowing the RVA of the exports section is great, an RVA isn’t a real pointer. Luckily, IMAGEHLP has the ImageRvaToVa API. You pass in information about the previously mapped-in DLL and the RVA you want to translate. What comes out is a usable pointer. Once I had a usable pointer to the exports table, it wasn’t that hard to walk the array of named exports. The exact format of an export table is described in WINNT.H, so I won’t give the details here. However, it’s worth mentioning that many of the fields in an export table are given as RVAs, so I had to make use of the ImageRvaToVa API a few more times. As the code loops through the entries in the export table, it calls the PEExportList::AddSymbol method to add each API to the DLL’s list of APIs. Mission accomplished.</p>
+<p>
+After loading up the two PEExportList class instances, function main flags APIs that are in both DLLs. Using  the PEExportList::GetNextSymbol method, the code iterates through all the APIs in the first DLL. For each API,  the code checks to see if an identically named API is also in  the second DLL’s list. If so, the EXPSYMINFO_MATCH flag is set in the ExportedSymbolInfo struct for that API  in both lists.</p>
+<p>
+The last task for function main is to iterate through both lists again. For each API that doesn’t have the EXPSYMINFO_MATCH flag set, the code prints the name of the API. Once again, simple brute force is used. To make things easier, the code precedes both API enumerations by printing out the name of the DLL for which it is about to start spewing out API names.</p>
+<h3>Using PEDIFF </h3>
+<p>
+The comprehensive online help for PEDIFF can be obtained by running PEDIFF from the command line with no arguments. The normal use of PEDIFF is to specify the names of both files to compare on the command line. For example, on my system the beta copy of Windows NT 5.0  is on my E: drive, while Windows NT 4.0 is on my C: drive. Running</p>
+<pre><code>PEDIFF C:\WINNT\SYSTEM32\USER32.DLL E:\WINNT\SYSTEM32\USER32.DLL
+</code></pre>
+<p>
+writes the output shown in Figure 3 to stdout. The figure shows that there is one USER32 API that was cut in Windows NT 5.0, and many new APIs added.</p>
+<p>
+<b>Figure 3: Windows NT 4.0 and 5.0 API References</b></p>
+<pre><code>File: c:\WINNT\system32\user32.dll
+FullScreenControl
+
+File: e:\winnt\system32\user32.dll
+AlignRects
+AnimateWindow
+BlockInput
+CreateDesktopExA
+CreateDesktopExW
+CreateTerminal
+EnumDisplayMonitors
+EnumDisplaySettingsExA
+EnumDisplaySettingsExW
+GetAltTabInfoA
+GetAltTabInfoW
+GetAncestor
+GetClipboardSequenceNumber
+GetComboBoxInfo
+GetCursorFrameInfo
+GetGUIThreadInfo
+GetGuiResources
+GetListBoxInfo
+GetMenuBarInfo
+GetMenuInfo
+GetMonitorInfoA
+GetMonitorInfoW
+GetMouseMovePoints
+GetScrollBarInfo
+GetTitleBarInfo
+GetWindowInfo
+GetWindowModuleFileNameA
+GetWindowModuleFileNameW
+IMPGetIMEA
+IMPGetIMEW
+IMPQueryIMEA
+IMPQueryIMEW
+IMPSetIMEA
+IMPSetIMEW
+InSendMessageEx
+InitializeWin32EntryTable
+InstallDeviceWorker
+MonitorFromPoint
+MonitorFromRect
+MonitorFromWindow
+NotifyWinEvent
+OpenInputDesktopEx
+PrivateSetDbgTag
+PrivateSetRipFlags
+RealChildWindowFromPoint
+RegisterDeviceNotificationA
+RegisterDeviceNotificationW
+ResolveDesktopForWOW
+SendIMEMessageExA
+SendIMEMessageExW
+SendInput
+SetMenuInfo
+SetWinEventHook
+UnhookWinEvent
+UnregisterDeviceNotification
+User32InitializeImmEntryTable
+WINNLSEnableIME
+WINNLSGetEnableStatus
+WINNLSGetIMEHotkey
+</code></pre>
+<p>
+To make PEDIFF easier, I stole an idea from the way cool WINDIFF program that’s part of the Win32® SDK. It turns out that when you’re comparing PE files, the odds are high that the DLLs you’re comparing will have the same base file name (for instance, USER32.DLL). There’s also a good chance that your current working directory contains one of the DLLs that you’d like to compare. With this in mind, if you specify only one file name, and if that file name contains a path, PEDIFF will compare that file to the equivalently named file in the current directory. For instance,</p>
+<pre><code>PEDFIFF C:\WINNT\SYSTEM32\USER32.DLL
+</code></pre>
+<p>
+causes the exports of that file to be compared to USER32.DLL in the current directory.</p>
+<p>
+While this shortcut syntax is great for comparing the exports of two versions of a particular DLL, it would be terribly tedious to compare the exports of hundreds of DLLs (as I need to do for my Windows NT 5.0 article research). This is where a little knowledge of the command processor comes in handy. There’s a built-in command called FOR that causes a command you specify to be executed for each file matching a given filespec:</p>
+<pre><code>FOR %a in (*.DLL) DO PEDIFF c:\winnt\system32\%a &gt;&gt; my_diffs.txt
+</code></pre>
+<p>
+For each file that meets the filespec in the parentheses, the command processor fills in the variable %a with the name of the file, and then executes whatever follows the DO keyword. Note also that I used &gt;&gt; rather than &gt; to concatenate all PEDIFF output to a file rather than have the output file be overwritten by each execution of PEDIFF.</p>
+<p>
+The finished program is under 4KB in size. I achieved a significant size reduction by using the LIBCTINY replacement runtime library from my October 1996 column. Using the standard Visual C++® runtime library, the EXE would be about three times the size. PEDIFF is a perfect candidate for using LIBCTINY—the Visual C++ runtime library isn’t used extensively, and the speed of the replacement functions like malloc and printf isn’t an issue. I’ve included LIBCTINY.LIB in the program sources this month in case you want to build or modify PEDIFF yourself.</p>
+<p>
+To obtain complete source code listings, see the MSJ Web site at  http://www.microsoft.com/msj.</p>
+<p>
+Have a question about programming in Windows? Send it to Matt at mpietrek@tiac.com or http://www.tiac.com/users/mpietrek</p>
+</font></BODY>
+</HTML>

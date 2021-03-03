@@ -1,0 +1,114 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Introducing CMultiThread</TITLE><META HTTP-EQUIV="CONTENT-TYPE" CONTENT="text/html; charset= iso-8859-1">
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H2>Introducing CMultiThread</H2><P>CMultiThread, shown in Figure 8, is a base class that addresses many of the design issues discussed here. It provides for the safe creation and destruction of a secondary thread. It provides control mechanisms by which other objects can start, stop, and modify the behavior of the embedded thread. Classes derived from CMultiThread must override the DoWork method to accomplish their real work. (DoWork is not pure virtual because this conflicts with the use of IMPLEMENT_DYNCREATE.)</P>
+<P>Figure 8  CMultiThread Class</P>
+<P><BR></P>
+<PRE>// Multithrd.h : header file
+//
+
+////////////////////////////////////////////////////////////////////
+
+class CMultiThread : public CWinThread
+{
+DECLARE_DYNCREATE(CMultiThread)
+public:
+        CMultiThread() {}
+        virtual ~CMultiThread();
+
+        //CreateThread masks CWinThread::CreateThread
+        BOOL CreateThread(DWORD dwCreateFlags = 0,
+                          UINT nStackSize = 0,
+                          LPSECURITY_ATTRIBUTES
+                          lpSecurityAttrs = NULL,
+                          UINT nMilliSecs = INFINITE); 
+// upper time limit to wait
+
+        BOOL InitInstance() {return TRUE;}
+        int Run();
+
+protected:
+        CEvent*    m_pWorkEvent;       // do work event
+        CEvent*    m_pExitEvent;       // used to synchronize 
+                                       // destruction
+        int       m_nCycleTime;        // do work cycle time
+        BOOL      m_bEndThread;        // end the thread ?
+
+        virtual void DoWork() {}       // over-ride to do work
+        CEvent* GetEvent() const {return m_pWorkEvent;}  // cycle control event
+        int GetCycleTime() const {return m_nCycleTime;}
+        void SetCycleTime(int nMilliSecs) {m_nCycleTime = nMilliSecs;}
+};
+
+// Multithrd.cpp : implementation file
+//
+
+#include "stdafx.h"
+#include "Multithrd.h"
+
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#undef THIS_FILE
+static char THIS_FILE[] = __FILE__;
+#endif
+
+IMPLEMENT_DYNCREATE(CMultiThread, CWinThread)
+
+/////////////////////////////////////////////////////////////////////////////
+// MultiThread
+
+BOOL CMultiThread::CreateThread(DWORD dwCreateFlags,  UINT nStackSize,
+                                LPSECURITY_ATTRIBUTES lpSecurityAttrs, 
+                                UINT nMilliSecs)
+{
+        m_nCycleTime = nMilliSecs;
+        m_bEndThread = FALSE;
+
+        // Create a non-signaled, manual-reset event to synchronize destruction
+        m_pExitEvent = new CEvent(FALSE, TRUE);
+        ASSERT(m_pExitEvent);
+
+        // Create a non-signaled, auto-reset event to wait on for work cycle
+        m_pWorkEvent = new CEvent();
+        ASSERT(m_pWorkEvent);
+
+        // Start second thread
+        return CWinThread::CreateThread(dwCreateFlags, nStackSize,
+                                        lpSecurityAttrs);
+}
+
+CMultiThread::~CMultiThread()
+{
+        // Start up the other thread so it can complete.
+        // When it does, it will set the exit event and the object can be 
+        // destructed.
+        m_bEndThread = TRUE;
+        m_pWorkEvent-&gt;SetEvent();
+        CSingleLock csl(m_pExitEvent);
+        csl.Lock();                     // wait for 2nd thread to finish
+        csl.Unlock();                                                
+        delete m_pWorkEvent;
+        delete m_pExitEvent;
+}
+
+int CMultiThread::Run()
+{
+        CSingleLock csl(m_pWorkEvent);      // synch on the work event
+        while (!m_bEndThread)               // loop until we're done
+        {
+                csl.Lock(m_nCycleTime);     // wait for event or timeout
+                csl.Unlock();                        
+                DoWork();                   // and then do some work
+        }
+
+        m_pExitEvent-&gt;SetEvent();           // not waiting signal
+        return CWinThread::Run();
+}</PRE>
+<P>CMultiThread uses a synchronization class I haven't yet discussed in detail: CEvent. A CEvent object has an internal state which can be "set" (also known as "signaled" or "available") or "not set" (also known as "not signaled," "unavailable," or "reset"). The SetEvent, ResetEvent, and PulseEvent methods manipulate this state. When you construct a CEvent, you can specify whether you wish it to be auto-reset or manual-reset. An auto-reset CEvent has its state automatically set to unavailable whenever an object obtains a lock on it, whereas a manual-reset event requires an explicit call to ResetEvent or PulseEvent to change state. When a CSingleLock or CMultiLock object attempts to get a lock on a CEvent, the lock will succeed if the event is available and fail otherwise.</P>
+<P>CMultiThread is derived from CWinThread. When an application wishes to start up a thread using CMultiThread, it calls the CreateThread method with almost the same parameters as would be used in a direct call to CWinThread::CreateThread. There is one additional parameter: nMilliSecs is the minimum number of milliseconds to <BR>wait between successive executions of DoWork (or a time-out interval).</P>
+<P>The CMultiThread's member m_pWorkEvent is a pointer to an internal CEvent created by CMultiThread's constructor. Because this CEvent's constructor is called without any parameters, it is initially unavailable and auto-reset. To understand how it is used, look at the Run method. The first statement associates the CSingleLock object csl with m_pWorkEvent, and then the method enters the while loop (assuming that m_bEndThread is FALSE, which it is until CMultiThread's destructor is called). It then tries to obtain a lock on csl. Because  m_pWorkEvent initially points to a nonsignaled CEvent, the lock attempt will time out after nMilliSecs milliseconds (assuming that m_nCycleTime is not infinite). At that point, the lock is released, the event is reset, and the overridden DoWork is executed. Then the cycle will be repeated until CMultiThread's destructor is called. The effect is to initiate a cycle of executions of DoWork at intervals of nMilliSecs. As you've seen, the first call to DoWork will not occur immediately, but will wait until the initial interval has passed.</P>
+<P>To let DoWork execute immediately, call GetEvent()-&gt;SetEvent immediately after CreateThread. This will make m_pWorkEvent available and enable the lock attempt to succeed without waiting for the timeout. Because m_pWorkEvent is auto-reset, subsequent executions of DoWork will still occur at the specified interval unless the calling thread demands them sooner with additional calls to GetEvent()-&gt;SetEvent.</P>
+<P>For clean destruction of CMultiThread, you must ensure that csl is not waiting for a lock when CMultiThread is destroyed. Therefore, the CMultiThread destructor sets the m_bEndThread member to TRUE and sets m_pWorkEvent, ensuring that csl.Lock succeeds at once and DoWork is executed one last time. Then the destructor waits for m_pExitEvent to be set so it will know when DoWork has completed. Once DoWork is finished, the Run method drops out of the while loop and sets m_pExitEvent, enabling the destructor to continue.</P>
+<P>There is one final and subtle twist to note about CMultiThread. The final statement of the Run method calls the Run method of the base class, CWinThread, which doesn't do much except watch for messages. When the destructor process is finished, the object is destroyed and the routine is exited cleanly. If instead Run were to simply return without calling the base class, MFC would attempt to initiate destruction again, causing problems and usually a GP fault. </P></font></body></HTML>

@@ -1,0 +1,263 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Using Multithreading and C++ to Generate Live Objects</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_frogfly1"></a></sup>Using Multithreading and C++ to Generate Live Objects</h1>
+<p>
+Ruediger Asche<br>
+Microsoft Developer Network Technology Group</p>
+<p>
+Created: August 22, 1993</p>
+<p>
+<OBJECT id=sample1 type="application/x-oleobject"
+	classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+	width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Technical Articles Sample">
+<PARAM name="Item2" value="1808">
+</OBJECT><a href="javascript:sample1.Click()">Click to open or copy the files in the FrogFly application for this technical article.</a></p>
+<h2>Abstract</h2>
+<p>
+The language C++ provides a powerful framework for generating objects that encapsulate data and help the programmer implement well-defined access mechanisms, regardless of their representation. This modularity makes the language very well suited to simulating applications that model object-centered aspects of reality. However, it does not provide an intuitive mechanism to model <i>live objects</i>, that is, objects that perform computations on their own instead of simply residing in memory and waiting to be activated from the outside. This article describes how multithreading can be used to extend the power of C++ objects to model live objects.</p>
+<h2>Introduction</h2>
+<p>
+The accompanying sample application, FrogFly, is a Microsoft® Windows NT™–based application that implements a simulation of a very small ecosystem. After the user opens the application and chooses Start Simulation from the Simulation menu, an image representing a frog moves over the application's client area. The frog is associated with a calorie count that will constantly decrease over time. As soon as the calorie count goes to 0, the frog dies. With the arrow keys, the user can change the direction of the frog on its way across the screen.</p>
+<p>
+The Add Fly command from the Simulation menu adds an image to the screen that represents a fly that moves randomly across the client area. The user can generate as many flies as desired. As soon as the frog hits a fly, the fly dies and the frog's calorie count increases. Thus, by constantly eating flies, the frog will stay alive. The flies follow the same life cycle as the frog: Unless they get food, they will starve and die. By clicking the left mouse button (leaving on the screen the image of a food spill that flies can "eat" while moving over it), the user can provide food for the flies to prolong their lives. As soon as a fly has eaten a lot (that is, its calorie count exceeds a predefined threshold), it will multiply automatically (that is, spawn another fly).</p>
+<p>
+The user interface (UI) has been kept rather simple in order to focus on the important elements of the application. The UI could be significantly enhanced, for example, by adding functionalities that allow the frog to multiply or by adding splines to animate the frog on its way across the screen. (For information on how to do the latter, see the article <a href="msdn_sprites.htm">"Animation in Windows"</a> on this CD.)</p>
+<p>
+The major design goal of FrogFly was to simulate a virtual universe in which as little global control as necessary exists. The universe is made up of independent objects that both keep an internal state (as C++ objects do) and also constantly update their internal states by themselves (by means of threads). Through communication with each other, the objects terminate each other or themselves and decide when to spawn additional objects.</p>
+<p>
+The C++ source file that contains the necessary logic to implement the "universe" has about 300 lines of code, including a generous number of comments. In spite of its simplicity, the application shows some of the elements that make live objects a very powerful tool to simplify simulation applications. This article explains how adding multithreading can make C++ objects to come to life and also elaborates on the pitfalls of using multiple threads in Windows-based applications.</p>
+<p>
+You should be familiar with C++ in order to make best use of the article. Also, it is highly recommended that you understand the basics of multithreading—please refer to the bibliography at the end for some suggestions on where to start if you have not worked with multiple threads before.</p>
+<p>
+Please note that there is not a single line of Microsoft Foundation Class Library code in this application. There are two reasons for this: First of all, the Foundation classes and multithreading do not work together very well. (Refer to Technical Note 37 in the "Microsoft Foundation Classes Technical Notes" that are shipped with Visual C++ for Windows NT.) Second, the foremost goal of the Foundation library is to aid application interface development. The interface of FrogFly is not very elaborate because I wanted to put the emphasis on the functionality of the application, not its appearance or user-friendliness.</p>
+<p>
+The application is currently designed to allow only one frog in the pond at any time. This is because the user can steer the frog over the screen using the arrow keys, and this degree of control is hard to maintain in a system that has more than one frog. However, because both the user interaction with the frog and the collision detection work are encapsulated within one object, as will be described later, an extension to several frogs would include changes to one class definition only and is left as an exercise to the reader.</p>
+<p>
+Finally, FrogFly also serves as a real-life demonstration of how to detect and solve possible synchronization problems among several threads—which, after all, is the toughest part in the design of a multithreaded application. Due to the complexity of these issues, a separate article, <a href="msdn_onthefly.htm">"Synchronization on the Fly,"</a> will use FrogFly to demonstrate a solid approach to identifying and resolving data access conflicts in multithreaded applications.</p>
+<h2>Fortifying C++ Objects with Multiple Threads</h2>
+<p>
+An application like FrogFly is difficult to implement in a nonmultithreaded environment because some global logic needs to keep track of the status of the objects—in this case, the frog and the flies—and to communicate information from one object to another. The global logic also needs to constantly update the screen to reflect the new position of the objects, as well as update the internal state of the objects themselves to simulate the "life" of the objects.</p>
+<p>
+Any attempt to realize objects with lives of their own in a nonmultithreaded environment can easily end up being a major nightmare. First of all, a mechanism to periodically update the internal state of the objects must be devised. Under 16-bit Windows, a timer would be the obvious choice, but the low priority of the timer and the nonpreemptive multitasking scheme would seriously affect the responsiveness and stability of such a system. Although a multimedia timer could solve this immediate problem, any timer-based solution would need to implement a mechanism to "context switch" between the objects upon each timer tick, and the amount of work needed to implement this would be significant. Doing so, in fact, would create a homegrown variation of a multithreading operating system.</p>
+<p>
+A second reason "live" objects are hard to realize in a nonmultithreaded environment is that the application would need to keep a list of all the objects and traverse it in some kind of predefined order. In a FrogFly type of application under 16-bit Windows, the user would see that the objects move in a specific order, in particular if there are many flies on the screen. This is not only undesirable, but may also lead to wrong results—for example, in a simulation of a Boltzman-machine type of neural network, the individual objects are required to update their internal states asynchronously; otherwise, the network does not behave as expected.</p>
+<p>
+In a multithreaded operating environment, these timing/updating features basically come for free because the task of updating the internal state of the object can be dispatched to a thread that is associated with the object; also, the thread can constantly redraw the object itself. This way, no global logic needs to be added to loop through the active objects and, in turn, update all of the objects; ideally, the global logic does not need to know anything about the existence of the objects at all.</p>
+<h3>Classes in FrogFly</h3>
+<p>
+FrogFly defines a total of four classes. One base class, <b>animated_object</b>, has two derived classes, <b>frog</b> and <b>fly</b>, and there is one object type, <b>pond</b>. Objects of type <b>frog</b> and <b>fly</b> are live objects–that is, objects that have threads associated with them.</p>
+<p>
+The <b>animated_object</b> class is fairly generic. Objects created from this or a derived class are essentially capable of moving across the screen. They do this through the use of threads, one of which is associated with each object of that or a derived class.</p>
+<p>
+The <b>pond</b> class—of which only one instance, the global object <b>the_pond</b>, is ever created—is more of an arbitrator class. As opposed to <b>animated_object</b> and its derived classes, <b>pond</b> objects are not associated with threads and serve more as an interface between the objects, the user and the "universe." The <b>pond</b> class exports functions to retrieve the calorie count of the frog, to create and remove animated objects, and to query the state of the pond (that is, the number of living frogs and flies at any given time). Also, the pond is being used by the objects themselves to communicate information to other objects.</p>
+<p>
+Note that the <b>pond</b> class imposes something like a "global control" on the universe because it knows about the living objects and their coordinates and, therefore, monitors and resolves collisions. This implementation somewhat defies the main goal of the application stated earlier, which is to create a virtual world in which no global arbitrator is present and objects are self-governed.</p>
+<p>
+However, it turns out that interaction among objects without some form of global resolution is very hard to implement. We will discuss these issues in detail later on. Note, however, that some of the tasks of the pond are purely informational—for example, a service that queries the number of live flies is there only to display information to the user—while others are essential to the correct functioning of the application. By encapsulating the "global control" into one C++ class, all it takes to change the global control mechanism or to redesign the collision detection algorithm is to rewrite that class.</p>
+<h3>The Fundamentals of Life: Animated Objects</h3>
+<p>
+Let's look at the way multithreading is implemented in the constructor of <b>animated_object</b>:</p>
+<pre><code>animated_object::animated_object(LPSTR lpImageName, short sType)
+{
+  &lt; Initialize some member variables here. &gt;
+ &nbsp; 
+  hThread = CreateThread(NULL,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (LPTHREAD_START_ROUTINE)ObjectThreadRoutine,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; this,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0,
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (LPDWORD)&amp;this-&gt;dwIDThread);
+  iStatus = (hThread != (HANDLE)NULL);
+};
+</code></pre>
+<p>
+After initializing a few variables, the constructor calls <b>CreateThread</b> to associate the C++ object with a unique thread. If this succeeds, the public member variable <b>iStatus</b> is set to TRUE; otherwise, it is set to FALSE so that the caller of the constructor—the <b>pond</b> member <b>CreateObject</b>—can delete the object. This technique is employed to work around the problem that C++ constructors cannot fail if some part of the initialization of an object fails.</p>
+<p>
+Note that we could alternatively make <b>hThread</b> a public member of <b>animated_object</b> and have the caller check for a nonzero value of <b>hThread</b> instead of <b>iStatus</b>. However, I wanted the thread handle to be hidden from everybody but the class member functions, and in a full-fledged application, more initialization could be done that could fail, so <b>iStatus</b> serves as a general failure/success indicator for all kinds of private initializations that might fail in the constructor.</p>
+<p>
+As a side effect of the object creation, <b>pond::CreateObject</b> generates an object handle that is communicated to the object via the public <b>iHandle</b> member. This object handle—an integer that internally serves as an index into an array of objects that is private to the pond—is being used by the object later on to identify itself to the pond in subsequent operations.</p>
+<p>
+Now let us look at the thread routine that is passed to <b>CreateThread</b>. We would like the routine to be able to see all the member variables of the object that it is associated with, but there is a problem: As Dale Rogerson's technical article <a href="msdn_callb.htm">"Calling All Members: Member Functions as Callbacks"</a> explains, this routine, because it is being passed to a Windows API as a function pointer, can, unfortunately, not be a nonstatic member function of the class. Thus, a global function is being used as the thread function:</p>
+<pre><code>long WINAPI ObjectThreadRoutine(animated_object *fpObj)
+{ 
+ return (fpObj-&gt;MoveAndDraw());
+} 
+</code></pre>
+<p>
+This function is merely a stub function, but a tricky one. As the parameter to the thread function, we pass the <b>this</b> pointer of the object itself, and the stub then uses that object pointer to locate a private member function of the <b>animated_object</b> class to call it. This way, we are doing about as well as having passed the member function to the thread itself: What will eventually execute in the thread <i>is</i> a member function and, therefore, has access to all member variables.</p>
+<p>
+Unfortunately, this technique is not universally applicable to callback functions. The only reason we can get away with it is that the thread function parameter passed to <b>CreateThread</b> is not looked at by <b>CreateThread</b> itself, but merely passed on to the thread function. Thus, we can sneak the <b>this</b> pointer in. Callback functions generally expect predefined parameters though.</p>
+<p>
+To ensure that the stub function can execute a private member function in the <b>animated_object</b> class, it is declared as a friend function. The thread function <b>MoveAndDraw</b> basically consists of a <b>while</b> loop that repeatedly checks to see whether the object is still alive—if yes, it computes its new position on the screen and redraws it; if not, it returns, thereby terminating the thread.</p>
+<h3>Cleaning Up After Yourself</h3>
+<p>
+The control flow after the death of an object is somewhat confusing; therefore, I will elaborate on it a little bit. Returning from the thread function will terminate the thread, but the application still needs to call <b>CloseHandle</b> on the thread. This is because a thread is an object that is maintained by the Windows NT executive, which will not reclaim the storage associated with the object before the last handle to it has been closed.</p>
+<p>
+As <a href="msdn_threads.htm">"Multithreading for Rookies"</a> explains, it is all right to close a thread's handle while the thread is running. Although this would work in FrogFly because the thread handle is never accessed again after the thread has been created, in general it is likely that the handle will still be used, so I show a technique here that works in all cases.</p>
+<p>
+We must first return from the routine and then close the handle from the outside, that is, from another thread in the application. But how can we know when it's safe to close the handle? Returning from the thread function and then immediately calling <b>CloseHandle</b> is dangerous because both threads execute concurrently, and there is no fixed time after the return from the thread function in which the thread is guaranteed to be deallocated.</p>
+<p>
+The resolution here is a <b>WaitForSingleObject</b> call. Like all native Windows NT objects, threads can attain a signaled state. Once the thread has terminated, it will be set to the signaled state, which basically means that <b>WaitForSingleObject</b> with the handle as its parameter will return. (For details, please refer to the article <a href="msdn_threads.htm">"Multithreading for Rookies."</a>) Thus, after returning from <b>WaitForSingleObject</b>, we can safely close the handle.</p>
+<p>
+In the <b>animated_object</b> class, this takes place in the destructor:</p>
+<pre><code>animated_object::~animated_object(void)
+{
+  if (iStatus)
+  {
+ &nbsp; WaitForSingleObject(hThread,INFINITE);
+ &nbsp; CloseHandle(hThread);
+  };
+  DeleteObject(hImage);
+  MessageBeep(-1);
+}; 
+</code></pre>
+<p>
+Once the object is destroyed, it waits for the associated thread to terminate, and then closes the handle. Note that the destructor might have been called due to a failed initialization, so the code sequence is only executed if <b>iStatus</b> indicates that the object and all its components have been initialized correctly.</p>
+<p>
+The remaining problem now is this: The thread cannot call the destructor itself because if it did so, it would implicitly wait for itself before returning from the destructor, and we would deadlock. The solution is to post a message to the application window, which calls the destructor later on. We can do this because <b>PostMessage</b> can be viewed as a mechanism of "loose coupling" between threads: Posting a message from thread A to B implies that A returns right away but B will execute some specific code later on. Using <b>SendMessage</b> instead would deadlock the application. In a console application, this technique will apparently not work and needs to be worked around, for example, by having one thread poll a shared variable that is set by the other one.</p>
+<p>
+This implementation has one interesting side effect that nicely serves the goal of independence that we stated earlier: In a nonmultithreaded application, all objects that exist at any given time must be globally known so that somebody can access them, keep track of their states, and eventually destroy them. In the multithreaded version, all objects determine their lifetimes themselves, so there is no need to keep the object pointer anywhere. (We do it anyway in the <b>pond</b> object, but not in order to be able to delete the object explicitly, but because some member functions of objects need to be called by the pond.) When posting the message, the object passes its own <b>this</b> pointer to the application window, which will call <b>delete</b> on the <b>this</b> parameter. The destructor will then wait for the thread to finish and close the handle as discussed. Figure 1 illustrates this process:</p>
+<p>
+<img src="frogfly1_1.gif" border=0></p>
+<p class=label>
+<b>Figure 1. Creating and terminating threads</b></p>
+<h2>Communication Between Objects</h2>
+<p>
+Associating threads with C++ objects has come a long way towards accomplishing the original goal, which was to model a universe of self-contained objects that ideally underlie no global control and make individual decisions based only on their interactions with each other and their environment. This second part, however, is tough—how exactly <i>do</i> objects of class <b>animated_object</b> communicate with each other? How does the frog know that it is in within reach of a fly to be able to eat it? How does the fly know in return that it has been eaten? </p>
+<p>
+In the real world, these questions do not come up because, first, frogs and flies have senses that inform them of the state of their environment, and second, as opposed to the frog and fly objects, whose identity can best be described as a bit pattern somewhere in memory, real flies and frogs also have actual physical existences that allow them to interact with other objects physically.</p>
+<p>
+In order to simulate frog and fly behavior on a computer, some global control is needed; that is, there must be an instance that knows what live objects exist, where they are, and whether two or more objects happen to collide. In FrogFly, this arbitrator is the pond object. It is informed every time a frog or fly object has moved via the member function <b>pond::NewCoordinates</b>, which is called from every thread function upon each iteration, decides whether the move has resulted in a collision between the frog and a fly and, if it has, kills the fly and rewards the frog.</p>
+<p>
+The pond is also responsible for processing user input (that is, for forwarding movement keystrokes to the frog object) and is the only instance that knows the animated objects (that is, knows how many flies and frogs there are at any given moment and knows how to reference the objects by pointer). Thus, any request to access an object must go through the pond. This not only encapsulates all interaction between the objects and the outside world in a single object, but also greatly simplifies the concurrency analysis, as we will see in the technical article <a href="msdn_onthefly.htm">"Synchronization on the Fly."</a></p>
+<p>
+So then, how do we detect a collision? The algorithm implemented in the current version of FrogFly is admittedly not very sophisticated; but given the application's restrictions, it works fairly well. Because only one frog is allowed to exist at any time, all the pond does is wait for a fly to tell the pond its new coordinates and match those against the frog's current coordinates. If they match, it kills the fly and rewards the frog. (Note that due to this implementation strategy, allowing more than one frog in the pond would require major modifications of the pond implementation.)</p>
+<p>
+The way the pond kills a fly is by returning FALSE from its member function <b>pond::NewCoordinates</b> to the fly. This will cause the fly to fall out of its <b>while</b> loop and return from the <b>thread</b> function, thereby initiating the shutdown sequence that we discussed earlier. When called from the frog, <b>pond::NewCoordinates</b> always returns TRUE.</p>
+<p>
+One more implementation detail is worth mentioning here. Most of the computational work that the frog and the flies do in their respective dedicated threads is the same: Both need to repeatedly recalculate their movements and redraw themselves. But the fly needs to do some additional work—namely, determine if there is food right below it, and if so, eat it (which means that it gets awarded the nutritional value of food spills). Likewise, the frog also has some additional work to do—that is, let the user steer it around the screen.</p>
+<p>
+Given that the additional work the fly and frog objects each do only makes up for a very small percentage of the work that the thread does, it would be wasteful to write two almost identical thread functions for the frog and the fly. Instead, the common thread function does all of its work and then calls into a virtual function that is specific to the derived class. (Check for the line labeled LOOK HERE in the following code snippet.)</p>
+<pre><code>long animated_object::MoveAndDraw(void)
+{ int iTempX, iTempY;
+  HDC hDC;
+  while(!bFinished)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp;&nbsp; iTempX = iX+iXVelocity;
+ &nbsp;&nbsp;&nbsp;&nbsp; iTempY = iY+iYVelocity;
+
+/* The next four IF statements check whether a wall has been hit after a move.
+ &nbsp; If yes, the position is reset to the wall, the direction reversed,
+ &nbsp; and a random value added. */
+
+&lt; Wall-collison detection code follows here... */&nbsp; 
+
+ &nbsp;&nbsp;&nbsp;&nbsp; EnterCriticalSection(&amp;csSerializeDraw);
+ &nbsp;&nbsp;&nbsp;&nbsp; hDC=GetDC(the_pond-&gt;hWndApplication);
+
+&lt; Erase the old image from the screen: &gt;
+
+ &nbsp;&nbsp;&nbsp;&nbsp; BitBlt(hDC,iX,iY,iImageWidth,iImageHeight,NULL,0,0,WHITENESS);
+ &nbsp;&nbsp;&nbsp;&nbsp; iX = iTempX;
+ &nbsp;&nbsp;&nbsp;&nbsp; iY = iTempY;
+ &nbsp;&nbsp;&nbsp;&nbsp; iCalories-=MOVE_DEDUCTION;
+
+/* Do three things here to determine whether one has died:&nbsp; */
+/* (a) Do additional per-move work, depending on the object type. */
+/* (b) Determine whether we have enough fuel left to survive. */
+/* (c) Ask the pond whether a collision has occurred. */
+
+ &nbsp;&nbsp;&nbsp;&nbsp; if (!ObjectSpecificThreadRoutine(hDC) ||&nbsp;&nbsp;&nbsp; // LOOK HERE!
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iCalories &lt; 0 ||
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; !the_pond-&gt;NewCoordinates(iHandle,iX,iY))
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; bFinished=TRUE;
+ &nbsp;&nbsp;&nbsp;&nbsp; else
+/* Redraw the object. */
+
+&lt; Redraw code is in here.&gt;
+
+ &nbsp;&nbsp;&nbsp;&nbsp; ReleaseDC(the_pond-&gt;hWndApplication,hDC);
+ &nbsp;&nbsp;&nbsp;&nbsp; LeaveCriticalSection(&amp;csSerializeDraw);
+/* Delay the object before moving on. */
+ &nbsp;&nbsp;&nbsp;&nbsp; Sleep(DELAY);
+ &nbsp;&nbsp; };&nbsp;&nbsp; // end of while loop. Going past here means we are dead...
+/* Inform the window that the thread has terminated, so it can clean up the object. */
+
+  PostMessage(the_pond-&gt;hWndApplication,WM_OBJECT_DIED,(WPARAM)iHandle,NULL);
+  return(TRUE);
+};
+</code></pre>
+<p>
+The function <b>ObjectSpecificRoutine</b> is declared as a virtual function in the base class and implemented as follows for the frog object:</p>
+<pre><code>BOOL frog::ObjectSpecificThreadRoutine(HDC hDC)
+{ iXVelocity += iTempXVel;
+  iYVelocity += iTempYVel;
+  iTempXVel = iTempYVel = 0;
+  return (iKilling == STATUS_ALIVE);
+};
+</code></pre>
+<p>
+and looks like this in the fly object:</p>
+<pre><code>BOOL fly::ObjectSpecificThreadRoutine(HDC hDC)
+{
+  if (GetPixel(hDC,iX,iY) == KETCHUP_COLOR)
+ &nbsp;&nbsp; iCalories+=KETCHUP_NUTRITION_VALUE;
+  if (iCalories &gt; FLY_MULTIPLY_CALORIES)
+ &nbsp;&nbsp; {
+ &nbsp;&nbsp;&nbsp; PostMessage(the_pond-&gt;hWndApplication,WM_COMMAND,IDM_ADDFLY,NULL);
+ &nbsp;&nbsp;&nbsp; iCalories-=(FLY_MULTIPLY_CALORIES/2);
+ &nbsp;&nbsp; };
+ &nbsp;&nbsp; return (TRUE);
+};
+</code></pre>
+<p>
+As described earlier, these routines implement the object-type-specific work that the thread needs to do. Note that in a multilevel object hierarchy, this technique can even be taken further. Assume that there are blue flies and green flies that eat different kinds of foods and have different nutritional values. In this case, the blue and green flies would probably be instances of new classes derived from the fly class. The fly object-specific thread routine could then call into other virtual functions that refine the fly's object-specific thread routine behavior for green and blue flies.</p>
+<p>
+Using this technique, we have all objects move concurrently with only one basic function that repeatedly computes the new move and executes it. However, there is one problem: What if the frog moves in between the time the pond decides that a collision occurred and decides to kill the fly?</p>
+<p>
+Welcome to the wonderful world of mutual exclusion. As powerful as multithreading is, it inevitably leads into the kinds of questions that you ran into all the time when you were sweating it out in Operating Systems classes in college: How does one prevent concurrent threads from updating shared data in the wrong order? And following from that, how do we prevent deadlocking and lockouts? Yikes! It finally caught up with you—after years of MS-DOS®–based and 16-bit Windows–based programming where there was no such thing as concurrency.</p>
+<p>
+As innocent as FrogFly looks, the synchronization issues that are involved in it are, to say the least, fairly complex—complex enough to make them into an article of their own. Stay tuned for an article called <a href="msdn_onthefly.htm">"Synchronization on the Fly,"</a> which will make a lot of implementation details in FrogFly clearer.</p>
+<h2>Graphics Issues</h2>
+<p>
+There is not really any magic to what FrogFly does in terms of graphics, although something may strike you as funny right away. Microsoft keeps advising that you wait for WM_PAINT before you do any output to your application's client area. However, each thread in FrogFly does a <b>GetDC</b> call to obtain the device context and write to it outside of WM_PAINT! Mayhem! Revolution! Every nuthead can see that this doesn't work—resize the window or drag another window over it, and the food spills will be gone because WM_PAINT doesn't know anything about it! And why should the frog eat food spills although he prefers flies? Maybe because the frog bluntly overwrites whatever is below him?</p>
+<p>
+Calm down. I know that this solution has a good portion of sleaze to it. By switching to the standard Windows graphics model, the application would implicitly go back to serializing the threads. The coordinates of any object would need to be frozen from the time they are computed until the time the object has been displayed on the screen, and due to the low priority of WM_PAINT messages, a lot of responsiveness would be sacrificed by adhering to the standard Windows output model. Plus, a lot of intricate synchronization issues would need to be addressed in a WM_PAINT-based implementation.</p>
+<p>
+The interaction between multiple threads and the Win32® subsystem—on both the USER and GDI levels—is an extremely wide and complex field that will be addressed in future articles in this series. For the time being, I am sticking to the "asynchronous output" approach, after having made a note in my "things to do" folder that an in-depth scrutiny of "synchronizing asynchronous output" would make a great article for future CDs.</p>
+<p>
+I like to argue that FrogFly is somewhat output-bound. In a real-life simulation application, it is more important that the internal states of the objects are updated concurrently, and the visible output is generally less important. For example, a neural network simulation does not need to display the activity levels of all neurons as they change; it is more important that the neurons themselves work in the background and that the output of the network is accessible at all times. In an application that is not output-bound, the screen display could be refreshed periodically, querying the states of the objects in turn and collecting them for output (just as a nonmultithreaded application would do, except that the real work happens behind the scenes in the objects' respective threads).</p>
+<p>
+One more thing before we sign off (and go play a few video games): You probably know already that concurrent access to device contexts (DCs) is not serialized by the Win32 subsystem. In other words, as long as one thread has a device context to the same device open, no other thread should touch the DC. That's why there is a global critical section <b>csSerializeDraw</b> that is claimed by anyone who wants to get the application window's device context and release it after the thread is done. We will see in <a href="msdn_onthefly.htm">"Synchronization on the Fly"</a> that this critical section does much more than that.</p>
+<h2>Conclusion</h2>
+<p>
+In this article, we have discussed questions that arise while extending C++ objects to live objects under Windows NT. Together with the data encapsulation mechanisms and the object model of C++, multithreading is a powerful tool to simplify the implementation of simulation applications.</p>
+<p>
+Although FrogFly has a rather playful character for an application, it is a fairly comprehensive demonstration of the capabilities of live objects. The application may serve as the core of a complex simulation application that needs to model real-life components with as little global control as possible, such as neural network simulations or industry simulations.</p>
+<h2>Bibliography</h2>
+<p>
+Asche, Ruediger. <a href="msdn_threads.htm">"Multithreading for Rookies,"</a> MSDN CD.</p>
+<p>
+Ben-Ari, M. <i>Principles of Concurrent Programming</i>. Englewood Cliffs, N.J.: Prentice Hall, 1982.</p>
+<p>
+Richter, Jeffrey. "Creating, Managing, and Destroying Processes and Threads under Windows NT." <i>Microsoft Systems Journal</i> (July 1993): 55-76. (MSDN Library, Periodicals)</p>
+<p>
+Richter, Jeffrey. "Synchronizing Win32 Threads Using Critical Sections, Semaphores, and Mutexes." <i>Microsoft Systems Journal</i> (August 1993): 27-44. (MSDN Library, Periodicals)</p>
+<p>
+Rodent, Herman. <a href="msdn_sprites.htm">"Animation in Windows."</a> (MSDN Library)</p>
+<p>
+Rogerson, Dale. <a href="msdn_callb.htm">"Calling All Members: Member Functions as Callbacks,"</a> MSDN CD.</p>
+<p>
+"Technical Note 37: Multithreaded MFC 2.1 Applications." Microsoft Foundation Class Technical Notes. (MSDN Library)</p>
+</BODY>
+</HTML>

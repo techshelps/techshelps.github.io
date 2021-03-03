@@ -1,0 +1,294 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Two-Phase Commit Example</title>
+<link disabled rel=stylesheet href=../../../../backsdk3.css>
+<style type="text/css">
+@import url(../../../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h2><a name="_two.2d.phase_commit_example"></a>Two-Phase Commit Example</h2>
+<p>
+The following example program illustrates the two-phase commit service. Periodically, the code is interrupted by comments to orient you and to document how recovery occurs for different types of errors. The corresponding example file, TWOPHASE.C, is found in \SQL\DBLIB\SAMPLES.</p>
+<p>
+To compile and link the example, follow the instructions for compiling and linking programs for your operating system. (See <a href="pdc03_58ab.htm">Building Applications</a>.) </p>
+<p>
+This example assumes that you have two servers running, <i>sql_svr1</i> and <i>sql_svr2</i>, and a third server, <i>sql_svr3</i>, to coordinate transactions. If you don't have a second and third server available, contact your system administrator. If your servers are named differently, replace <i>sql_svr1</i>, <i>sql_svr2</i>, and <i>sql_svr3</i> in the source code with the actual names of your servers.</p>
+<pre>//    Demo of Two-Phase Commit Service
+//
+//    This example uses the two-phase commit service
+//    to perform a simultaneous update on two servers.
+//    In this example, one of the servers participating 
+//    in the distributed transaction also functions as
+//    the commit service.
+//
+//    In this particular example, the same update is
+//    performed on both servers. You can, however, use
+//    the commit server to perform completely different
+//    updates on each server.
+
+#define DBNTWIN32
+#include &lt;windows.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;sqlfront.h&gt;
+#include &lt;sqldb.h&gt;
+
+char    cmdbuf[256];
+char    xact_string[128];
+// Forward declarations of the error handler and message handler. 
+int    err_handler();
+int    msg_handler();
+main(argc,argv)
+int argc;
+char *argv[];
+{
+    DBPROCESS    *dbproc_server1;
+    DBPROCESS    *dbproc_server2;
+    DBPROCESS    *dbproc_commit;
+    LOGINREC    *login;
+    DBINT        commid;
+
+    RETCODE    ret_server1;
+    RETCODE    ret_server2;
+
+    dberrhandle(err_handler);
+    dbmsghandle(msg_handler);
+
+    // Initialize private DB-Library structures. 
+    dbinit();
+
+    printf("Demo of Two Phase Commit\n");
+
+    // Open connections with the servers and the commit service. 
+    login = dblogin();
+    DBSETLUSER(login, "user");
+    DBSETLPWD(login, "my_passwd");
+    DBSETLAPP(login, "example");
+    dbproc_server1 = dbopen (login, "sql_svr1");
+    dbproc_server2 = dbopen (login, "sql_svr2");
+    dbproc_commit = open_commit (login, "sql_svr3");
+
+    if (dbproc_server1 == NULL ||
+        dbproc_server2 == NULL ||
+        dbproc_commit    == NULL)
+    {
+        printf(" Connections failed!\n");
+        return (ERREXIT);
+    }
+
+    // Use the "pubs" database. 
+    dbuse(dbproc_server1, "pubs");
+    dbuse(dbproc_server2, "pubs");
+
+    // Start the distributed transaction on the commit service. 
+    commid = start_xact(dbproc_commit, "demo", "test", 2);
+</pre>
+<p>
+The application is now in the <i>begin</i> phase of the two-phase commit transaction.</p>
+<pre>// Build the transaction name. 
+build_xact_string ("test", "sql_svr3", commid, xact_string);
+
+// Build the first command buffer. 
+sprintf(cmdbuf, "BEGIN TRANSACTION %s", xact_string);
+
+// Begin the transactions on the different servers. 
+dbcmd(dbproc_server1, cmdbuf);
+dbsqlexec(dbproc_server1);
+dbcmd(dbproc_server2, cmdbuf);
+dbsqlexec(dbproc_server2);
+
+dbcancel (dbproc_server1);
+dbcancel (dbproc_server2);
+
+// Do various updates. 
+sprintf(cmdbuf, " update titles set price = $1.50 where");
+strcat(cmdbuf, " title_id = 'BU1032'");
+dbcmd(dbproc_server1, cmdbuf);
+ret_server1 = dbsqlexec(dbproc_server1);
+dbcmd(dbproc_server2, cmdbuf);
+ret_server2 =dbsqlexec(dbproc_server2);
+</pre>
+<p>
+If any type of failure occurs at this point, the application should roll back the transactions, using <b>abort_xact</b>.</p>
+<pre>if (ret_server1 == FAIL || ret_server2 == FAIL)
+{
+    // Some part of the transaction failed. 
+    printf(" Transaction aborted -- dbsqlexec failed\n");
+    abortall(dbproc_server1, dbproc_server2, dbproc_commit, commid);
+}
+
+dbcancel (dbproc_server1);
+dbcancel (dbproc_server2);
+
+// Find out if all servers can commit the transaction. 
+sprintf(cmdbuf, "PREPARE TRANSACTION");
+dbcmd(dbproc_server1, cmdbuf);
+dbcmd(dbproc_server2, cmdbuf);
+ret_server1 = dbsqlexec(dbproc_server1);
+</pre>
+<p>
+The application has entered the <i>prepare</i> stage of the two-phase commit transaction, but the commit server thinks the application is still in the <i>begin</i> phase.</p>
+<pre>ret_server2 = dbsqlexec(dbproc_server2);
+</pre>
+<p>
+If any type of failure occurs at this point, the application should roll back the transactions, using <b>abort_xact</b>.</p>
+<pre>if (ret_server1 == FAIL || ret_server2 == FAIL)
+{
+    // One or both of the servers failed to prepare. 
+    printf(" Transaction aborted -- PREPARE failed\n");
+    abortall(dbproc_server1, dbproc_server2, dbproc_commit, commid);
+}
+
+dbcancel (dbproc_server1);
+dbcancel (dbproc_server2);
+</pre>
+<p>
+At this point, the following failures and related consequences can occur:
+<ul>
+<li>
+Either the application's link to the commit server, or the commit server itself shuts down.<p>
+The following call to <b>commit_xact</b> fails, and the application must roll back the transactions with <b>abort_xact</b>.
+</li>
+<li>
+The application's link to a participating server shuts down.<p>
+The following call to <b>commit_xact</b> succeeds, but the application's COMMIT TRANSACTION command to the participating server fails. However, aware that its connection with the application has been broken, the server uses <i>probe</i> to communicate with the commit server to determine whether to commit the transaction locally.
+</li>
+<li>
+A participating server shuts down.<p>
+The following call to <b>commit_xact</b> succeeds, but the application's COMMIT TRANSACTION command to the participating server fails. When the participating server starts back up, it uses <i>probe</i> to determine whether to commit the transaction locally.
+</li>
+<li>
+Both the application's link to the commit server and its link to the participating server shut down.<p>
+The following call to <b>commit_xact</b> fails. The application must then roll back the transactions with <b>abort_xact</b>, but it cannot communicate with the participating server. The participating server, communicating with the commit server through <i>probe</i>, learns that the transaction was not committed in the commit service. It then rolls back the transaction locally.
+</li>
+<li>
+Both the application's link to the participating server and the participating server's link to the commit server shut down.<p>
+The following call to <b>commit_xact</b> succeeds, but the application cannot inform the participating server. When its connection to the application is broken, the participating server tries (unsuccessfully) to communicate with the commit server through <i>probe</i> to determine whether or not to commit the transaction locally.
+<p>
+If a connection cannot be established within 1 minute, the database is marked as "not recovered" and an attempt is made to recover the next database. When the commit service server is available again, shutting down the server with the unrecovered database and bringing the server back up again enables the recovery of the transaction in doubt.
+<pre>// Commit the transaction. 
+if (commit_xact(dbproc_commit, commid) == FAIL)
+{
+    // The commit server failed to record the commit. 
+    printf( " Transaction aborted -- commit_xact failed\n");
+    abortall(dbproc_server1, dbproc_server2, dbproc_commit, commid);
+}</pre>
+</li>
+</ul>
+<p>
+The application has entered the committed phase of the two-phase commit transaction. Now, any <i>probe</i> process querying the commit server is told to commit the transaction locally. From here on, the application does not need to be concerned about canceling the transaction.</p>
+<pre>// The transaction has successfully committed.
+// Inform the servers. 
+sprintf(cmdbuf, "COMMIT TRANSACTION");
+dbcmd(dbproc_server1, cmdbuf);
+if (dbsqlexec(dbproc_server1) != FAIL)
+    remove_xact(dbproc_commit, commid, 1);
+</pre>
+<ul>
+<li>
+If the <b>dbsqlexec</b> call to <i>server1</i> in the previous lines of code returns FAIL because the application's link to the server has been broken, <i>server1</i> uses <i>probe</i> to communicate with the commit server. The <i>probe</i> process finds that the transaction is committed in the commit server and tells <i>server1</i> to commit it locally.<p>
+If possible, the system administrator should always wait until communication with the commit server has been re-established before canceling the infected process.
+</li>
+<li>
+If the <b>dbsqlexec</b> call to <i>server1</i> returns FAIL because <i>server1</i> has shut down, the local transaction remains in limbo until <i>server1</i> is restored. As part of the recovery process, <i>server1</i> uses <i>probe</i> to communicate with the commit server. When <i>probe</i> finds that the transaction is committed in the commit server, it tells <i>server1</i> to commit the transaction locally.<p>
+If <i>probe</i> can't communicate with the commit server, <i>server1</i> marks the database as "not recovered." After communication with the commit server is re-established, the suspect database should be recovered.)
+<pre>dbcmd(dbproc_server2, cmdbuf);
+if (dbsqlexec(dbproc_server2) != FAIL)
+remove_xact(dbproc_commit, commid, 1);</pre>
+</li>
+<li>
+If the <b>dbsqlexec</b> to <i>server2</i> in the preceding lines returns FAIL because the application's link to the server has been interrupted, <i>server 2</i> uses <i>probe</i> to communicate with the commit server. When <i>probe</i> finds that the transaction is committed in the commit server, it tells <i>server2</i> to commit the transaction locally.<p>
+If possible, the system administrator should always wait until communication with the commit server has been re-established before canceling the infected process.
+</li>
+<li>
+If the <b>dbsqlexec</b> call to <i>server2</i> returns FAIL because <i>server2</i> has shut down, the local transaction remains in limbo until <i>server2</i> is restored. As part of the recovery process, <i>server2</i> uses <i>probe</i> to communicate with the commit server. When <i>probe</i> finds that the transaction is committed in the commit server, it tells <i>server2</i> to commit the transaction locally.<p>
+If <i>probe</i> can't communicate with the commit server, <i>server2</i> marks the database as "not recovered." After communication with the commit server is re-established, the suspect database should be recovered again.
+<pre>// Close the connection to the commit server. 
+close_commit(dbproc_commit);</pre>
+</li>
+</ul>
+<p>
+The <b>close_commit</b> function marks the transaction as complete in the <i>spt_committab</i> table on the commit server. If <b>close_commit</b> fails, no harm is done. The transaction is simply not marked as complete. In this case, the system administrator can manually update <i>spt_committab</i>.</p>
+<pre>    printf( "We made it!\n");
+    dbexit();
+    return(STDEXIT);
+}
+
+// Function to terminate the distributed transaction. 
+
+abortall( dbproc_server1, dbproc_server2, dbproc_commit, commid )
+DBPROCESS    *dbproc_server1;
+DBPROCESS    *dbproc_server2;
+DBPROCESS    *dbproc_commit;
+DBINT        commid;
+{
+    // Some part of the transaction failed. 
+
+    // Inform the commit server of the failure. 
+    abort_xact(dbproc_commit, commid);
+
+    // Roll back the transactions on the different servers. 
+    sprintf(cmdbuf, "ROLLBACK TRANSACTION");
+    dbcmd(dbproc_server1, cmdbuf);
+    if (dbsqlexec(dbproc_server1) != FAIL)
+        remove_xact(dbproc_commit, commid, 1);
+    dbcmd(dbproc_server2, cmdbuf);
+    if (dbsqlexec(dbproc_server2) != FAIL)
+        remove_xact(dbproc_commit, commid, 1);
+
+    dbexit();
+    return(ERREXIT);
+}
+// Message and error-handling functions. 
+int msg_handler(dbproc,msgno,msgstate, severity, msgtext)
+DBPROCESS    *dbproc;
+DBINT    msgno;
+int    msgstate;
+int    severity;
+char    *msgtext;
+{
+    // Msg 5701 is just a USE DATABASE message, so skip it. 
+    if (msgno == 5701)
+        return (0);
+    // Print any severity 0 message as is, without extra stuff. 
+    if (severity == 0)
+    {
+        printf("%s\n",msgtext);
+        return (0);
+    }
+
+    printf("SQL Server message %ld, severity %d:\n\t%s\n",
+    msgno, severity, msgtext);
+
+    if (severity &gt;= 16)
+    {
+        printf("Program Terminated! Fatal SQL Server error.\n");
+        exit(ERREXIT);
+    }
+    return (0);
+}
+
+int err_handler(dbproc, severity, dberr, oserr, dberrstr, oserrstr)
+DBPROCESS    *dbproc;
+int    severity;
+int    dberr;
+int    oserr;
+char    *dberrstr;
+char    *oserrstr;
+
+    if ((dbproc == NULL) || (DBDEAD(dbproc)))
+        return (INT_CANCEL);
+    else
+    {    printf("DB-Library error: \n\t%s\n", dberrstr);
+    if (oserr != DBNOERR)
+            printf ("Operating system error:\n\t%s\n", oserrstr);
+    }
+    return (INT_CANCEL);
+} 
+
+</pre>
+<p>&nbsp;</p></body>
+</HTML>

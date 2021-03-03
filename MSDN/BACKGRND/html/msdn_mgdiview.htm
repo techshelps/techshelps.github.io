@@ -1,0 +1,455 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Microsoft Windows CE Display Drivers and Hardware</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><a name="msdn_mgdiview"></a>Microsoft Windows CE Display Drivers and Hardware</h1>
+<p>
+Jason Black and Jon Christiansen</p>
+<p>
+September 1997</p>
+<h2>Introduction</h2>
+<p>
+The graphics display architecture in the Microsoft® Windows® CE operating system has been radically transformed in version 2.0. In version 1.0, the Graphics Device Interface (GDI) interfaced directly with the display hardware. In version 2.0, the GDI interfaces with one or more display drivers, which in turn interface with the display hardware. This display architecture gives Windows CE the capability of using a wide variety of display devices without the need to have a hard-coded interface routine for each device. The new Windows CE GDI thus combines versatility with a small footprint.</p>
+<p>
+First, we will consider the elements that make a good Windows CE display driver. We'll discuss the device driver interface functions that display drivers should implement, as well as the graphics primitive engine classes that can be used to simplify the task of writing display drivers. GDI support for device drivers is also discussed.</p>
+<p>
+Then, we will list detailed display buffer formats for each of the pixel depths supported by Windows CE, and discuss display hardware. Since the display drivers are the conduits between GDI and the display devices, the hardware needed to support the display drivers is, in effect, the hardware needed to support GDI.</p>
+<h2>Windows CE Display Drivers</h2>
+<p>
+Like much of Windows CE, the Display Driver Interface (DDI) is a subset of the Microsoft Windows NT® DDI. If you are not familiar with the Windows NT DDI, you may wish to read the display driver sections of the Windows NT Device Driver Kit (DDK) before writing your Windows CE display driver.</p>
+<p>
+Windows CE uses only the basic graphics engine functions and driver functions from the Windows NT DDI. These differences between Windows CE and Windows NT have the following ramifications for Windows CE display drivers:
+<ul type=disc>
+<li>
+Windows CE display drivers always present the same set of functionality; GDI does not query the driver for information about its capabilities.<br><br></li>
+<li>
+A Windows CE display driver cannot reject an operation as too complex and then call back to GDI to have the operation broken into simpler steps. Because all Windows CE display drivers support the same set of functionality, GDI can break up complex operations before calling the display driver in the first place.<br><br></li>
+<li>
+Windows CE display drivers are compiled as dynamic-link libraries (.dll files) rather than as libraries (.lib files).</li>
+</ul>
+<p>
+All Windows CE display drivers must implement a set of DDI functions that will be called by the GDI to initialize the display driver and draw to the display. In addition to the DDI functions, there is a set of Microsoft Visual C++® classes called the Graphics Primitive Engine (GPE) classes that display drivers can use to facilitate hardware acceleration. The sample display driver's implementation of the GPE Classes and their methods perform acceleration for S3Trio64-based display hardware. If your display hardware uses a different video chip set, you can change the implementation of the GPE methods to suit your hardware's capabilities.</p>
+<p>
+Note that using the GPE classes is optional. You could write your display driver without them, at the expense of making your implementations of the DDI functions more complex. Note that the GPE classes as provided by Microsoft require that your display hardware have a flat frame buffer. If your display hardware does not (for example, if it uses a fixed-size moveable window to access the whole of display memory), it may not be possible to use the GPE classes. For more information, see the <a href="#mgdiview_windhr">"Windows CE Display Hardware Recommendations"</a> section of this article, especially the <a href="#mgdiview_drd">"Dirty Rect Drivers"</a> subsection.</p>
+<p>
+Windows CE display drivers differ from normal device drivers in a number of ways. The major difference is that they do not expose the stream input/output (I/O) interface, therefore, they are not managed by the device manager, so <b>RegisterDevice</b> is never called for them. As a result, there are no special device files or other file system entries that correspond to active display drivers. Display drivers are loaded when an application that needs to use the display driver calls <b>CreateDC</b> with the name of the display driver's .dll file. This causes Windows CE to load the display driver, and initialize it so that a device context can be returned to the calling application. The default display driver, of course, is loaded automatically.</p>
+<h3>DDI Functions</h3>
+<p>
+The following table lists the DDI functions for both display and printer drivers. Display drivers should implement all of the display DDI functions listed here; printer drivers should implement all of the listed print DDI functions. However, only <b>DrvEnableDriver</b> must be exported from the display driver DLL. Therefore, only <b>DrvEnableDriver</b> must bear that name; the other functions can be called whatever you want because they are exposed to GDI through function pointers returned by <b>DrvEnableDriver</b>. No matter what they are called, follow the prototypes defined in the WinDDI.H file.</p>
+<p class=label>
+<b>Table1. DDI functions</b></p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=33%><b>Function</b></td>
+<td class=label width=67%><b>Purpose</b></td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvAnyBlt</b></td>
+<td width=67%>Bit block transfer, with stretching or transparency</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvBitBlt</b></td>
+<td width=67%>General bit block transfer, with clipping and masking</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvContrastControl</b></td>
+<td width=67%>Allows software adjustment of the display hardware's contrast</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvCopyBits</b></td>
+<td width=67%>Sends GDI-created print band to printer driver</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvCreateDeviceBitmap</b></td>
+<td width=67%>Creates and manages bitmaps</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvDeleteDeviceBitmap</b></td>
+<td width=67%>Deletes a device bitmap</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvDisableDriver</b></td>
+<td width=67%>Notifies the driver that GDI no longer needs it and is ready to unload it</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvDisablePDEV</b></td>
+<td width=67%>Notifies the driver that GDI no longer needs a particular print or display device</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvDisableSurface</b></td>
+<td width=67%>Notifies the driver that GDI no longer needs a particular drawing surface</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvEnableDriver</b></td>
+<td width=67%>The initial entry point exposed by the driver that returns pointers to the other DDI functions to GDI</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvEnablePDEV</b></td>
+<td width=67%>Returns a PDEV, a logical representation of a physical display device, to GDI</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvEnableSurface</b></td>
+<td width=67%>Creates a drawing surface and associates it with a PDEV</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvEndDoc</b></td>
+<td width=67%>Sends any control information needed to finish printing a document</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvFillPath</b></td>
+<td width=67%>Fills a path with a brush</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvGetMasks</b></td>
+<td width=67%>Gets the color masks for the display device's current mode</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvGetModes</b></td>
+<td width=67%>Lists the display modes supported by the display device</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvMovePointer</b></td>
+<td width=67%>Moves the pointer with a guarantee of noninterference by GDI</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvPaint</b></td>
+<td width=67%>Paints a specified region with a brush</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvPowerHandler</b></td>
+<td width=67%>Called to handle power-up and power-down notifications</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvQueryFont</b></td>
+<td width=67%>Gets font metric information</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvRealizeBrush</b></td>
+<td width=67%>Creates a brush with parameters specified by GDI</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvRealizeColor</b></td>
+<td width=67%>Maps an RGB color onto the closest available color supported by the device</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvSetPalette</b></td>
+<td width=67%>Sets the display device's palette</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvSetPointerShape</b></td>
+<td width=67%>Sets the pointer to a new shape and updates the display</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvStartDoc</b></td>
+<td width=67%>Sends any control information needed to start printing a document</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvStartPage</b></td>
+<td width=67%>Sends any control information needed to start printing a new page</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvStrokePath</b></td>
+<td width=67%>Strokes a path</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvTransparentBlt</b></td>
+<td width=67%>Bit block transfer, with transparency</td>
+</tr>
+<tr valign=top>
+<td width=33%><b>DrvUnrealizeColor</b></td>
+<td width=67%>Maps a color in the display device's format onto an RGB value</td>
+</tr>
+</table><br>
+<h3><a name="mgdiview_usegpe"></a>Using GPE Classes</h3>
+<p>
+The sample display driver uses the GPE classes. While the GPE classes are optional, using them greatly facilitates the process of writing display drivers. If you use the GPE classes, you only need to provide the new code necessary to make your display hardware function correctly and to perform acceleration.</p>
+<p>
+The GPE classes require that your display hardware uses a flat frame buffer. That is, the display's memory must lie in a contiguous memory range. Modifying the GPE classes to use a discontinuous frame buffer would require significant effort.</p>
+<p>
+To create a display driver based on the GPE classes, use the following approach:
+<ol>
+<li>
+Create a directory for your project.<br><br></li>
+<li>
+Copy the files from one of the sample driver directories, for example the S3Trio64 directory, to your project directory.<br><br></li>
+<li>
+Globally replace the device-specific name in those files, such as "S3Trio64," with your device's name.<br><br></li>
+<li>
+Change Config.CPP so that it puts your display device in a linear frame-buffer mode.<br><br></li>
+<li>
+Disable all hardware-specific acceleration.<br><br></li>
+<li>
+Build and test this nonaccelerated driver. GPE will use software emulation to generate output.<br><br></li>
+<li>
+Add your own hardware acceleration code.</li>
+</ol>
+<h2>GDI Support Services for Display Drivers</h2>
+<p>
+The Windows CE GDI provides some services to support display drivers, in the form of predefined structures with functions that act on them, and a few standalone C functions. Predefined structures provide support for brushes, clipping regions, palettes, stroke and fill paths, and translations. Standalone C functions provide support for device bitmaps and surfaces.</p>
+<p class=label>
+<b>Table 2. GDI structures and functions</b></p>
+<table border=1 cellpadding=5 cols=2 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=36%><b>Structure or Function</b></td>
+<td class=label width=64%><b>Purpose</b></td>
+</tr>
+<tr valign=top>
+<td width=36%><b>BRUSHOBJ</b></td>
+<td width=64%>Structure that represents a brush used for solid or patterned stroke and fill operations</td>
+</tr>
+<tr valign=top>
+<td width=36%><b>BRUSHOBJ_pvAllocRbrush</b></td>
+<td width=64%>Function that allocates memory for a brush</td>
+</tr>
+<tr valign=top>
+<td width=36%><b>BRUSHOBJ_pvGetRbrush</b></td>
+<td width=64%>Function that retrieves a pointer to the specified brush</td>
+</tr>
+<tr valign=top>
+<td width=36%><b>CLIPOBJ</b></td>
+<td width=64%>Structure that represents a clipping region</td>
+</tr>
+<tr valign=top>
+<td width=36%><b>CLIPOBJ_bEnum</b></td>
+<td width=64%>Function that enumerates clipping rectangles from a clipping region</td>
+</tr>
+<tr valign=top>
+<td width=36%><b>CLIPOBJ_cEnumStart</b></td>
+<td width=64%>Function that sets parameters for enumerating the rectangles in a clipping region</td>
+</tr>
+<tr valign=top>
+<td width=36%><b>EngCreateDeviceBitmap</b></td>
+<td width=64%>Function that causes GDI to create a handle for a device bitmap</td>
+</tr>
+<tr valign=top>
+<td width=36%><b>EngCreateDeviceSurface</b></td>
+<td width=64%>Function that causes GDI to create a device surface that the display driver will manage</td>
+</tr>
+<tr valign=top>
+<td width=36%><b>EngDeleteSurface</b></td>
+<td width=64%>Function that informs GDI that a device surface is no longer needed by the display driver</td>
+</tr>
+<tr valign=top>
+<td width=36%><b>PALOBJ_cGetColors</b></td>
+<td width=64%>Function that copies colors into a palette</td>
+</tr>
+<tr valign=top>
+<td width=36%><b>PATHDATA</b></td>
+<td width=64%>Structure that stores portions of a drawing path</td>
+</tr>
+<tr valign=top>
+<td width=36%><b>PATHOBJ_bEnum</b></td>
+<td width=64%>Function that enumerates PATHDATA records from a drawing path</td>
+</tr>
+<tr valign=top>
+<td width=36%><b>PATHOBJ_vEnumStart</b></td>
+<td width=64%>Function that readies a drawing path to have its component line segments enumerated</td>
+</tr>
+<tr valign=top>
+<td width=36%><b>PATHOBJ_vGetBounds</b></td>
+<td width=64%>Function that returns the bounding rectangle for a drawing path</td>
+</tr>
+<tr valign=top>
+<td width=36%><b>XLATEOBJ</b></td>
+<td width=64%>Structure used in translating colors from one palette to another</td>
+</tr>
+<tr valign=top>
+<td width=36%><b>XLATEOBJ_cGetPalette</b></td>
+<td width=64%>Function that retrieves colors from an indexed palette</td>
+</tr>
+</table><br>
+<h3><a name="mgdiview_dbf"></a>Display Buffer Formats</h3>
+<p>
+The Windows CE GDI supports displays with a wide variety of color depths and color models, from one-bit color to palletized color to true 32-bit RGB. Each format also supports several pixel-orderings, depending on whether access to the display memory is by bytes, two-byte words, or 4-byte DWORDs.</p>
+<p>
+All display buffer formats assume that the order of pixels on the display is from left to right, and top to bottom. That is, pixel (0,0) is at the upper-left corner of the display, and pixel (<i>width</i>-1<i>, height</i>-1) is at the lower-right corner.</p>
+<h4>One-Bit-Per-Pixel Format</h4>
+<p>
+One-bit-per-pixel format is for simple black-and-white displays. <i>Zero</i> represents black, <i>one</i> represents white. Pixels are packed into bytes such that pixel (0,0) is packed into the highest-order bit of the first byte of display memory. Memory for this format can be arranged like this:</p>
+<p>
+<img src="mgdiview01.gif" border=0></p>
+<h4>Two-bits-per-pixel format</h4>
+<p>
+Two-bits-per-pixel format is typically used for four-level grayscale displays, although any 4-entry palette will work. Gray levels are represented according to the following table:</p>
+<table border=1 cellpadding=5 cols=3 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=28%><b>Bit 1</b></td>
+<td class=label width=25%><b>Bit 0</b></td>
+<td class=label width=47%><b>Gray Level</b></td>
+</tr>
+<tr valign=top>
+<td width=28%>0</td>
+<td width=25%>0</td>
+<td width=47%>Black</td>
+</tr>
+<tr valign=top>
+<td width=28%>0</td>
+<td width=25%>1</td>
+<td width=47%>Dark Gray</td>
+</tr>
+<tr valign=top>
+<td width=28%>1</td>
+<td width=25%>0</td>
+<td width=47%>Light Gray</td>
+</tr>
+<tr valign=top>
+<td width=28%>1</td>
+<td width=25%>1</td>
+<td width=47%>White</td>
+</tr>
+</table><br>
+<p>
+Memory for this format can be arranged like this:</p>
+<p>
+<img src="mgdiview02.gif" border=0></p>
+<h4>Four-bits-per-pixel format</h4>
+<p>
+Four-bits-per-pixel format is generally a palletized format. The frame buffer itself can be implemented either as two pixels packed into each byte, or as one pixel-per-byte. Memory for this format can be arranged like this:</p>
+<p>
+<img src="mgdiview03.gif" border=0></p>
+<p>
+If you choose to implement just one pixel per byte, the driver should represent the display mode as eight bits per pixel with a 16-color palette. The relevant bits in each byte should be the low-order nibble, while the high-order nibble should always be zero.</p>
+<h4>Eight-bits-per-pixel format</h4>
+<p>
+Eight-bits-per-pixel format should ideally use a software-changeable palette that maps eight-bit values onto 24-bit colors. Microsoft recommends using a palette that contains the default Windows CE palette for reasons of performance, compatibility, and image quality. Memory for this format can be arranged like this:</p>
+<p>
+<img src="mgdiview04.gif" border=0></p>
+<h4>Fifteen- or sixteen-bits-per-pixel format</h4>
+<p>
+Fifteen- or sixteen-bits-per-pixel format is a masked format, and is not palletized. For either fifteen or sixteen bits per pixel, pixels are stored one per two-byte word; fifteen-bits-per-pixel format wastes the high-order bit of each word. Microsoft recommends using the following masks to extract red, green, and blue values:</p>
+<table border=1 cellpadding=5 cols=3 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=17%><b>Color</b></td>
+<td class=label width=41%><b>Fifteen-Bit (5-5-5 RGB) </b></td>
+<td class=label width=42%><b>Sixteen-Bit (5-6-5 RGB)</b></td>
+</tr>
+<tr valign=top>
+<td width=17%>Red</td>
+<td width=41%>0x7C00</td>
+<td width=42%>0xF800</td>
+</tr>
+<tr valign=top>
+<td width=17%>Green</td>
+<td width=41%>0x3E00</td>
+<td width=42%>0x07E0</td>
+</tr>
+<tr valign=top>
+<td width=17%>Blue</td>
+<td width=41%>0x001F</td>
+<td width=42%>0x001F</td>
+</tr>
+</table><br>
+<p>
+As those masks show for fifteen bits per pixel, the low-order fifteen bits of each word contain the pixel's data. The unused bit should contain zero. Memory for this format can be arranged like this:</p>
+<p>
+<img src="mgdiview05.gif" border=0></p>
+<h4>Twenty-four-bits-per-pixel format</h4>
+<p>
+Twenty-four-bits-per-pixel format is a true-color format, in which each pixel stores eight bits for red, green, and blue. There are advantages and drawbacks to this format. The advantages are that image quality is very good, and because each pixel occupies exactly 3 bytes, they can be packed together without wasting memory. The drawback is that since half the pixels in this scheme cross DWORD boundaries, there is a performance penalty in accessing and decoding pixels. Memory for this format can be arranged like this:</p>
+<p>
+<img src="mgdiview06.gif" border=0></p>
+<h4>Thirty-two-bits-per-pixel format</h4>
+<p>
+Thirty-two-bits-per-pixel format is another true color format. This format does not cause pixels to cross DWORD boundaries, but is less efficient in memory use. There are two ways to arrange the color channels in this format. One puts blue in the least significant byte of each pixel, and the other puts red in the least significant byte. These options correspond to the PAL_BGR and PAL_RGB modes. You can use the following masks to extract red, green, blue, and alpha channels from each pixel:</p>
+<table border=1 cellpadding=5 cols=3 frame=below rules=rows>
+<tr valign=top>
+<td class=label width=23%><b>Color</b></td>
+<td class=label width=38%><b>PAL_RGB Mask</b></td>
+<td class=label width=39%><b>PAL_BGR Mask</b></td>
+</tr>
+<tr valign=top>
+<td width=23%>Red</td>
+<td width=38%>0x000000FF</td>
+<td width=39%>0x00FF0000</td>
+</tr>
+<tr valign=top>
+<td width=23%>Green</td>
+<td width=38%>0x0000FF00</td>
+<td width=39%>0x0000FF00</td>
+</tr>
+<tr valign=top>
+<td width=23%>Blue</td>
+<td width=38%>0x00FF0000</td>
+<td width=39%>0x000000FF</td>
+</tr>
+</table><br>
+<p>
+Memory for this format can be arranged like this:</p>
+<p>
+<img src="mgdiview07.gif" border=0></p>
+<h2><a name="mgdiview_windhr"></a>Windows CE Display Hardware Recommendations</h2>
+<p>
+Microsoft has several recommendations for display hardware used with the Windows CE operating system. These recommendations are both to improve performance and to facilitate your display driver development effort. You can still write a fully functional display driver, even if your hardware does not conform to these recommendations, or if it is too late in the design cycle for your product to alter the hardware design, at the expense of additional effort in implementing the driver and/or decreased performance.</p>
+<h3>Memory Layout</h3>
+<p>
+Microsoft strongly recommends that your display hardware use a linear frame buffer; you should be able to both read and write to the buffer. All of your display's memory should be contiguous, and preferably, there should be one linear access window that covers the entire frame buffer. Hardware that does not meet this recommendation will require that you make substantial modifications to the GPE classes if you choose to use them. See the <a href="#mgdiview_usegpe">"Using GPE Classes"</a> section of this article for more information.</p>
+<p>
+Your display hardware should also use a supported combination of pixel format, packing, and pixel ordering. For more information, read the <a href="#mgdiview_dbf">"Display Buffer Formats"</a> section of this article. The display hardware's frame buffer should have the following properties:
+<ul type=disc>
+<li>
+Top-down format, with pixel (0,0) at the upper left, and pixel (<i>width</i>-1, <i>height</i>-1) at the lower right.<br><br></li>
+<li>
+The frame buffer's stride, the number of bytes in memory that it takes to represent one scan line on the display, should be a multiple of four bytes, even if that means padding the end of each scan line with unused bytes.<br><br></li>
+<li>
+The entire frame buffer must be accessible by the CPU without the CPU having to perform bank selection.<br><br></li>
+<li>
+Frame buffers should not use bit-planes, in which separate frame buffers are used for each color channel or intensity component.</li>
+</ul>
+<h3><a name="mgdiview_drd"></a>Dirty Rect Drivers</h3>
+<p>
+If you wish to use the GPE classes to implement a display driver but your display hardware is not designed to support GPE classes (for instance, if the frame buffer is not linear) then you may want to consider writing a "dirty rect driver".</p>
+<p>
+In this model, the GPE classes maintain an in-memory device-independent bitmap (DIB) that represents the frame buffer. GPE notifies the dirty rect driver whenever the in-memory DIB is modified. The dirty rect driver is responsible for copying the altered or "dirty" portion of the DIB to the display device, performing whatever conversions are necessary.</p>
+<p>
+Dirty rect drivers come with significant costs in memory usage and execution speed. They should only be used as a last resort to support hardware that absolutely cannot be made compatible with GPE requirements.</p>
+<h3>Acceleration</h3>
+<p>
+Microsoft recommends that you use display hardware that can accelerate the following operations, in order of decreasing importance:
+<ul type=disc>
+<li>
+Solid color fills. Specifically, <b>Blt</b> operations whose pbo-&gt;iSolidColor member is not 0xFFFFFFFF.<br><br></li>
+<li>
+SRCCOPY <b>Blt</b> operations.<br><br></li>
+<li>
+Cursor display, if your platform uses a cursor.<br><br></li>
+<li>
+Solid line drawing with subpixel precision.<br><br></li>
+<li>
+Masked SRCCOPY <b>Blt</b> operations.<br><br></li>
+<li>
+Other graphical operations performed frequently by your Windows CE device.</li>
+</ul>
+<h2>Summary</h2>
+<p>
+In version 2.0 of Windows CE, the display drivers play a critical role in the visual display architecture. Display drivers and display hardware that are created in accordance with the design strategies outlined in this paper will allow Windows CE–based devices to take full advantage of the enhanced graphical display capabilities of the new GDI.</p>
+<h2>For More Information</h2>
+<p>
+For the Microsoft Windows CE Embedded Toolkit for Visual C++ 5.0, see the Microsoft Windows CE Web site (<a href="http://www.microsoft.com/windowsce/developer/prodinfo/vcceembed.htm">http://www.microsoft.com/windowsce/developer/prodinfo/vcceembed.htm</a>). The toolkit will also be available to Universal Subscribers of the MSDN Library.</p>
+<p>
+Also, be sure to take a look at the following articles, all available in the MSDN Library:</p>
+<p>
+<a href="msdn_embeddev.htm">"Embedded Development with Microsoft Windows CE 2.0,"</a> by Franklin Fite Jr. and Randy Kath.</p>
+<p>
+<a href="msdn_vcceembo.htm">"Introducing the Windows CE Embedded Toolkit for Visual C++ 5.0,"</a> by David Pellerin.</p>
+<p>
+<a href="msdn_mgdidft1.htm">"Microsoft Windows CE Graphics Features,"</a> by Jon Christiansen.</p>
+<p>
+<a href="msdn_memdrft2.htm">"Microsoft Windows CE Memory Use,"</a> by John Murray.</p>
+<p>
+<a href="msdn_comm_mod.htm">"The Microsoft Windows CE Communications Model,"</a> by Guy Smith.</p>
+<p>
+<a href="msdn_rtdraft6.htm">"Real-Time Systems with Microsoft Windows CE,"</a> by John Murray.</p>
+<p>
+<a href="msdn_w32model.htm">"The Win32 Programming Model: A Primer for Embedded Software Developers,"</a> by David Pellerin.</p>
+<p>
+<i>The information contained in this document represents the current view of Microsoft Corporation on the issues discussed as of the date of publication. Because Microsoft must respond to changing market conditions, it should not be interpreted to be a commitment on the part of Microsoft, and Microsoft cannot guarantee the accuracy of any information presented after the date of publication. This document is for informational purposes only.</i></p>
+<p>
+<i>This White Paper is for informational purposes only. MICROSOFT MAKES NO WARRANTIES, EXPRESS OR IMPLIED, IN THIS DOCUMENT.</i></p>
+</BODY>
+</HTML>

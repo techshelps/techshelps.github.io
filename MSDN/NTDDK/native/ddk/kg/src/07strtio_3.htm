@@ -1,0 +1,137 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML>
+<HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>7.2.1  StartIo Routines in NT Device Drivers</TITLE>
+<style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD>
+<BODY BGPROPERTIES="FIXED" TEXT="#000000" BGCOLOR="#FFFFFF">
+
+<FONT FACE="ARIAL,HELVETICA" SIZE="2">
+<H3><A NAME="DDK_StartIo_Routines_in_NT_Device_Drivers_KG"></A>7.2.1  StartIo Routines in NT Device Drivers</H3>
+<P>
+As its name suggests, a StartIo routine in an NT device driver is responsible
+for starting an I/O operation on the physical device. 
+<P>
+When an NT device driver’s StartIo routine is called, it can assume that the
+target device represented by the input device object is not busy. Either one
+of that device driver’s Dispatch routines has just called <B>IoStartPacket</B>
+and the IRP was not inserted into the device queue associated with the target
+device object, or the driver’s DpcForIsr routine is completing another request
+and has just called <B>IoStartNextPacket</B>. 
+<P>
+Before the StartIo routine in a highest-level NT device driver is called, that
+driver’s Dispatch routine must have probed and locked down the user buffer, if
+necessary, to set up valid mapped buffer addresses in the IRP queued to its
+StartIo routine. Such a highest-level device driver that sets up its device
+objects for direct I/O (or for neither buffered nor direct I/O) <I>cannot</I>
+defer locking down a user buffer to the driver’s StartIo routine because every
+StartIo routine is called in an arbitrary thread context at IRQL
+DISPATCH_LEVEL. 
+<H5><IMG SRC="../../../wedge.gif" BORDER=0>&nbsp; &nbsp; In other words, NT driver designers should keep in mind the following fact: </H5>
+<P>
+Any buffer memory to be accessed by an NT driver’s StartIo routine <I>must</I>
+be locked down or allocated from resident, system-space memory and <I>must</I>
+be accessible in an arbitrary thread context. 
+<P>
+NT drivers that set up their device objects for buffered I/O can rely on the
+I/O Manager to pass valid buffers in all IRPs sent to such a driver.
+Lower-level NT drivers that set up device objects for direct I/O can rely on
+the highest-level NT driver in their chain to pass valid buffers in all IRPs
+sent through any intermediate drivers to the underlying device driver. 
+<P>
+In general, any NT device driver’s StartIo routine is responsible for calling <B>IoGetCurrentIrpStackLocation</B>
+with the input IRP and then doing whatever request-specific processing is
+necessary to start the I/O operation on its device, which can include the
+following:
+<UL>
+<LI>
+Setting up or updating any state information about the current request that
+the driver maintains in the device extension of the target device object or
+elsewhere in nonpaged pool allocated by the driver 
+<P>
+For example, if a device driver maintains an InterruptExpected Boolean about
+the current transfer operation, its StartIo routine might set this variable to
+TRUE. If the driver maintains a time-out counter for the current operation,
+its StartIo routine might set up this value, or the StartIo routine might
+queue the driver’s CustomTimerDpc routine. 
+<P>
+Note that if this state information or any other resource is shared with other
+driver routines, the state area or resource must be protected by a spin lock.
+If the StartIo routine shares state or resources with other nonISR routines,
+it must acquire the spin lock that protects the state or resource before
+accessing it. If the StartIo routine shares state with the driver’s ISR,
+StartIo must call <B>KeSynchronizeExecution</B>&nbsp;with a driver-supplied
+SynchCritSection routine that sets up the state. 
+<P>
+For more information about CustomTimerDpc routines, see Chapter 14. For more
+information about the ISR and SynchCritSection routines, see Chapters 8 and
+10, respectively. For more information about using spin locks, see Chapter 16.
+<P>
+<LI>
+Assigning a sequence number to the IRP in case the driver must log a device
+I/O error while processing the IRP
+<P>
+For more information about logging I/O errors, see Chapter 16.
+<P>
+<LI>
+If necessary, translating the parameters in the driver’s I/O stack location
+into device-specific values
+<P>
+For example, a disk driver might need to calculate the starting sector and/or
+byte offset to the physical disk address for a transfer operation, and whether
+the requested length of the transfer will cross a particular sector boundary
+or exceed the transfer capacity of its physical device. 
+<P>
+<LI>
+If the driver controls a removable-media device, checking for media changes
+before programming the device for I/O and notifying its overlying file system
+if the media has changed
+<P>
+For more information about handling removable media, see Chapter 16. 
+<P>
+<LI>
+If the device uses DMA, checking whether the requested <B>Length</B>&nbsp;(number
+of bytes to be transferred, found in the driver’s I/O stack location of the
+IRP) should be split into partial-transfer operations, as explained in Chapter
+3, assuming a closely coupled higher-level driver does not pre-split large
+transfers for the device driver
+<P>
+The StartIo routine of such a device driver also can be responsible for
+calling <B>KeFlushIoBuffers</B>&nbsp;and, if the driver uses packet-based DMA, for
+calling <B>IoAllocateAdapterChannel</B>&nbsp;with the driver’s AdapterControl
+routine.
+<P>
+For more information about AdapterControl routines, see Chapter 11. For more
+information about maintaining cache coherency during DMA operations, see also
+Chapter 16.
+<P>
+<LI>
+If the device uses PIO, mapping the base virtual address of the buffer,
+described in the IRP at <B>Irp-&gt;MdlAddress</B>, to a system-space address
+with <B>MmGetSystemAddressForMdl</B>, as explained in Chapter 3
+<P>
+For read requests, the device driver’s StartIo routine can be responsible for
+calling <B>KeFlushIoBuffers</B>&nbsp;before PIO operations begin. For more
+information about maintaining cache coherency during PIO, see also Chapter 16.
+<P>
+<LI>
+If the driver uses a controller object, calling <B>IoAllocateController</B>
+with its ControllerControl routine 
+<P>
+For more information about ControllerControl routines, see Chapter 11. 
+<P>
+<LI>
+If the driver handles cancelable IRPs, checking whether the input IRP has
+already been cancelled
+<P>
+<LI>
+If an input IRP can be cancelled before it is processed to completion, the
+StartIo routine must call <B>IoSetCancelRoutine</B>&nbsp;with the IRP and the entry
+point of the driver’s Cancel routine. The StartIo routine must acquire the
+cancel spin lock for its call to <B>IoSetCancelRoutine</B>.
+<P>
+For more information about Cancel routines, see Chapter 12. 
+</UL>
+<P></FONT>
+</BODY>
+</HTML>

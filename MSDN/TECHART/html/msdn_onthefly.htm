@@ -1,0 +1,445 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Synchronization on the Fly</title>
+                <style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY>
+
+<h1><sup><a name="msdn_onthefly"></a></sup>Synchronization on the Fly</h1>
+<p>
+Ruediger Asche<br>
+Microsoft Development Technology Group</p>
+<p>
+Created: September 15, 1993</p>
+<h2>Abstract</h2>
+<p>
+Following upon <a href="msdn_frogfly1.htm">"Using Multithreading and C++ to Generate Live Objects,"</a> this article gives a live demonstration of what a thorough concurrency analysis of a multithreaded application can look like. Employing a semiformal approach, it discusses how to establish shared data protection and demonstrates that the data encapsulation mechanisms in C++ greatly aid in providing this analysis.</p>
+<h2>Introduction</h2>
+<p>
+The bulk of work in designing and implementing a multithreaded application lies in designing it such that concurrent, asynchronous access of multiple threads to shared data does not affect the desired functionality of the application. As we will see later, a big chunk of that task is theoretical work—namely, analyzing the behavior of the application without actually running it. We will take FrogFly, a multithreaded application, as an example of how this can be achieved. (As a side benefit, you will learn that there is no limit to what one can write about an application that has only about 300 lines of relevant code!)</p>
+<p>
+Let us define a few terms before we start. The overall goal we want to achieve is called <i>correctness analysis</i>. This consists of two components: (1) Determining whether data can be corrupted by concurrent access from more than one thread, and if so, designing mechanisms to prevent it from happening (<i>safety analysis</i>); and (2) determining whether the application will be alive (<i>liveness analysis</i>).</p>
+<p>
+What does it mean for an application to be "alive"? Well, almost all mechanisms that can be established to prevent data corruption from happening work through a suspend-and-wait mechanism—that is, one thread that is about to work on some shared resource is suspended until another thread has finished using the resource in some manner. (Sheesh, aren't we abstract today! Hold on, though, it will become clearer.) This scheme can lead to some undesired effects, though. It may happen that the two threads end up waiting for each other until doomsday (a so-called <i>deadlock</i>) or that two threads keep waking each other up in such a way that a third thread will never run (a so-called <i>lockout</i>). A multithreaded application is alive if no deadlocks or lockouts occur, but it needs to be proven that neither happens.</p>
+<p>
+Actually, the definition for liveness that I like best comes from M. Ben-Ari: "In concurrent systems, liveness means that if something is supposed to happen then eventually it will happen. . . . The word 'eventually' . . . means exactly that: within an unspecified but finite length of time." (<i>Principles of Concurrent Programming</i>, 21-22.)</p>
+<p>
+Although I originally planned to include both the safety and liveness discussions in this article, it turned out that the liveness analysis requires a lot of theoretical discussion that is long enough to justify <i>even more</i> articles on FrogFly! Thus, here we will focus on safety and postpone the liveness discussion until later.</p>
+<p>
+When reading through this article, you will (believe me—YOU WILL!) at times think that the discussion goes too deep and that some issues might as well be resolved intuitively or can safely be ignored. After all, so far software design in your company has been done on the computer and not on paper, right?</p>
+<p>
+Well, yes. But in the case of FrogFly, it turned out that without a thorough theoretical analysis of the entire application, some potential causes of malicious behavior might have escaped me and might only have shown up somewhere in a "real-life configuration." Also, some code that looked good in the early development cycle started to look really ugly when I applied the analysis techniques to it, and upon second thought, I found there really <i>was</i> a better way to implement things. Thus, the theoretical analysis turned out to be both a technique to make the code more stable and a feedback mechanism for me to detect and refine not-so-good coding practices. The article contains a lot of statements such as "If we had done A instead of B, this and that problem would have popped up." Originally, I had implemented it as A and then switched to B when I realized that A had caused this and that problem.</p>
+<h2>Mutual Exclusion and Synchronization</h2>
+<p>
+As soon as there is more than one thread running in the system, a whole new category of problems may pop up that were not present in a single-threaded environment. The question that it all comes down to is, "Is there data that is visible to more than one thread?"</p>
+<p>
+If the answer to this question is "No," things do not become too much more complicated than in the single-threaded version. All one needs to do in this case is to dispatch the threads, wait until they return, and (if applicable) gather the results.</p>
+<p>
+If the answer to the above question is "Yes," however, more work needs to be done. We first need to determine what the critical data is and how to put the access to it into an order that does not affect the correct execution of the program. After that, we need to ensure that the protection mechanisms do not affect the liveness of the application.</p>
+<p>
+Let us be a little more clear about what "confuse one thread" means. A typical example for this scenario is the following: Two threads have access to the same variable x and both execute this code sequence at some point:</p>
+<pre><code>x = x+10
+</code></pre>
+<p>
+On most processors, this addition is not an atomic instruction, that is, the compiler would generate more than one instruction of machine code for that source statement. For example, it might do something like this: </p>
+<pre><code>mov ax,[x]
+add ax,10
+mov [x],ax 
+</code></pre>
+<p>
+We would expect that when both threads execute this sequence, the value of x after both threads are done is 20 higher than it was before the first thread executed it. However, if one thread gets preempted by the operating system after having executed the first <b>mov</b> instruction, the other thread will pick up the same value of x as the first thread, both will add 10 onto that value, and when the threads store the result of the addition back into x, one will overwrite the updated x variable with the same value. Thus, after both threads have executed the sequence, x will be only 10 higher than it was before! We need to establish some mechanism to shield x from being accessed concurrently from the two threads.</p>
+<p>
+Shared data conflicts may manifest themselves in a lot of ways, not only the one mentioned in the previous paragraph. For example, one thread might pick up the value of a shared variable and work on it, assuming that it does not change, but another thread might change the variable while the first thread works on it.</p>
+<p>
+Microsoft® Windows NT™ offers a fairly rich tool set to address mutual exclusion problems. Jeffrey Richter introduces the NT toolbox in his article "Synchronizing Win32 Threads Using Critical Sections, Semaphores, and Mutexes" in the August 1993 issue of <i>Microsoft Systems Journal </i>(Developer Network CD, Books and Periodicals). In this article we will focus on how to apply these techniques in a real-life multithreaded application—FrogFly.</p>
+<p>
+It is crucial that the question posed at the beginning of this section be answered completely and correctly. Other than in single-threaded applications, access conflicts in multithreaded applications may not show up immediately, and in worst-case scenarios, pass all tests fine and start to behave strangely only at a customer's site. Thus, the analysis of possible access conflicts must accompany the development cycle; plus, this analysis is generally a theoretical task. You need to sit down with a piece of paper, extract all of the relevant information from your source code, decide whether data can be corrupted through unserialized access, and then provide means to coordinate the access, if necessary.</p>
+<p>
+In order to provide a clean serialization analysis, we will assume that every variable in the system is a potential candidate for access conflicts, then eliminate all for which we can prove that no conflict can occur, and look at the remaining ones one at a time to determine if they can cause problems and apply serialization mechanisms, if necessary.</p>
+<p>
+In practice, this strategy might not be useful and will frequently be complemented by intuition and preexclusions of data elements that you know right away you don't care about possibly misreading or misassigning.</p>
+<p>
+Unfortunately, there is no algorithm that can do all of the work for you. Although I describe a fairly mechanistic process that takes care of a lot of exclusions for you—a process that can, in part, be automated—there are always decisions that cannot be made without a thorough knowledge of the application's run-time behavior.</p>
+<p>
+So let's roll up our sleeves and begin by doing what all computer people do when they are not really sure how to proceed: Draw a matrix.</p>
+<h3>A Semiformal Approach to Mutual Exclusion Analysis</h3>
+<p>
+Because we need to identify all the variables that more than one thread can look at, I put together a matrix where I labeled the rows with the variables and the columns with the threads. In FrogFly, I have separated the C++ class declarations from the code and also declared all global variables in the C++ header file so that all the data we need to look at is neatly listed in that one file, CLASSES.HPP. In this section, I describe how to derive the matrix from the header declaration file; the resulting matrix can be found in Appendix A.</p>
+<p>
+All variables broadly fall into two categories: data elements that are located on the stack (that is, function parameters and automatic variables) and those that reside in a process's data address space (global variables, static local function variables, and member variables of C++ objects). We need to distinguish between those two categories of variables because each thread runs on its own separate stack; thus, variables allocated on a stack are no candidates for shared data access conflicts—unless you dare to pass the address of such a variable to another thread or something along those lines. (Although such an operation is questionable enough even in single-threaded applications, it should at all costs be avoided in multithreaded applications because it may very well introduce problems of the extremely pathological kind into an application.) However, it may happen that a stack variable is assigned a value from a shared variable, and if some code makes the assumption that the stack variable always has the same value as the shared variable, it may run into problems. Thus, we need to discuss stack variables separately from data variables—the former ones will be discussed in a later section.</p>
+<p>
+The rows in our matrix are basically the lines in the C++ header file CLASSES.HPP with two minor modifications: First, I took out member functions because no code will ever write to them, and there are no access conflicts between multiple threads that only execute the same code (think of the code as execute-only data). Second, since a class declaration contains the members of a prototype instance of that class, and there can be more than one object of a class in the running application, we need a few more rows. Let us assume that there is one frog and one fly alive. In that case, there is one object of class frog and one of type fly; thus, there are two instances of each member variable that need to be considered. We realize this by copying and pasting the base class declaration and tagging one as frog and the other one as fly, adding derived class members as necessary.</p>
+<p>
+Note that it is sufficient to consider only one frog and one fly each because we do not allow more than one frog anyway, and in the current implementation, flies don't interfere with each other at all. (We can verify this intuitive statement later on when we present the call graph.)</p>
+<p>
+In the example with one frog and one fly, the three threads that are running—the main thread in which <b>WinMain</b> executes, the thread that is associated with the frog, and the one that is associated with the fly—provide the labels for the columns of our matrix.</p>
+<p>
+Employing a recursive scan-and-mark algorithm over the source code, I determined which thread accesses which variable and whether the access is read or write. The details of the algorithm are outlined in the following section. The implementation I used required yellow, pink, and green fluorescent markers, a printed copy of the entire source code, a few tons of recycled paper, and a few brain cells. Instead, I could have used the source code browser that comes with Visual C++™ to ease the source code scan (which would definitely be the preferred choice for larger applications).</p>
+<h3>Walking the Graph</h3>
+<p>
+Remember, the whole idea behind this matrix is to determine which thread can reach which variable. Because a variable can only be accessed from code that in C++ must reside inside a function, the first step is to list the functions there are in the entire application and which threads will call which functions. Because each thread starts its life span when its thread function is invoked, we can use that thread function as an <i>anchor function</i> (that is, a function to start scanning the code from) for each thread.</p>
+<p>
+The anchor on which the primary application thread rests is the <b>WinMain</b> function, and the frog and fly threads start to run when <b>CreateThread</b> is called in the constructor for <b>animated_object</b>; whereas the thread start routine (that is, the anchor) for the frog and fly threads is <b>ObjectThreadRoutine</b>, which immediately dispatches to <b>animated_object::MoveAndDraw</b>. Thus, for each thread we would need to browse the source code, beginning at the anchor function; determine which other functions can be called from there in turn; and recursively apply the same mechanism to the functions found this way until we reach functions that do not call anything else—in other words, we need to build a "function call graph."</p>
+<p>
+Note that I somehow cheated in stating that the anchor of the application's main thread is the <b>WinMain</b> function. In reality, the anchor is the code to which the Windows NT loader transfers control after it has completed the loading process, which is a location determined by the C run-time startup code that the linker provides when linking the application. However, no secondary thread runs unless the application starts one—which, by definition, must be after <b>WinMain</b> has picked up execution—and safety analysis is not an issue until two threads start competing for shared data; thus, we can just pretend that <b>WinMain</b> is the anchor. To further complicate the issue, there are cases in which there is a potential for safety problems even before <b>WinMain</b> is called, such as when two applications attach implicitly to the same DLL, and there is shared data in the DLL that is accessed when the DLL processes PROCESS_ATTACH in its DLL entry point. In that case, some more work needs to be done. In most cases, this work involves a named mutex object that shields the shared data. We will not elaborate on this here; if you are interested in how that works, you might want to have a look at the READWRIT code sample that is being shipped with the Windows NT SDK (see also the MSDN Library).</p>
+<p>
+The task of determining which functions are ever being called by a given thread is not trivial and requires more than just browsing the source code. For example, the main thread may call a Windows NT application programming interface (API) that accepts as one parameter the address of a callback function. In order to determine if that callback function can be reached (and if so, from where), we need to know something about the semantics of that API function. For example, since I know that until the point where the first animated object is created, only one thread runs, and no animated object can be created before the main application window has been created, I do not bother to include <b>WinMain</b>, <b>InitApplication</b>, and <b>InitInstance</b> in the call graph.</p>
+<p>
+A computer that was to do this task would have to know that the window procedure <b>WndProc</b> will be called from the main thread, although there is no explicit call to it ever—I just happen to know that if <b>RegisterClass</b> is called on a class whose <b>lpfnWndProc</b> structure member is <b>WndProc</b>, <b>WndProc</b> will eventually be called from the same thread that called <b>CreateWindow</b> on that class. This kind of knowledge is fairly hard to feed into a computer.</p>
+<p>
+Thus, my anchor for the main thread is not <b>WinMain</b>, but <b>WndProc</b>. Beginning with the anchors, we can draw the function call graph. I decided to let Visual C++ do the work for me: I created a source code browse tree, copied the result into this document, and replaced the plus signs that Visual C++ uses with arrows. Unfortunately, Visual C++ does not include calls to destructors in the browse tree, so I added these by hand; I also had to manually feed the calls to <b>ObjectSpecificThreadRoutine</b> into the graph because Visual C++ cannot know which instances of virtual functions get called when the virtual function is called for a derived object.</p>
+<pre><code><b>WndProc </b>(anchor for the main thread)
+|--&gt;pond::CreateObject&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+|&nbsp;&nbsp;&nbsp; |---&gt;pond::Initialize
+|&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |-----------------------&gt;frog::frog
+|&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+|&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |---&gt;<u>animated_object::animated_object</u>
+|&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; 
+|&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |-----------------------&gt;fly::fly
+|--&gt;pond::pond
+|
+|--&gt;pond::RetrieveFrogCalories
+|&nbsp;&nbsp;&nbsp; |----------------------------------&gt;<u>animated_object::RetrieveCalories</u>
+|--&gt;<u>pond::ReturnObjectCount</u>
+|--&gt;pond::Remove
+|&nbsp;&nbsp;&nbsp; |----------------------------------&gt;<u>animated_object::~animated_object</u>
+|--&gt;pond::SetFrogVelocity
+|&nbsp;&nbsp;&nbsp; |----------------------------------&gt;<u>animated_object::SetVelocity</u>
+|--&gt;<u>pond::KillFrog</u>
+|--&gt;<u>pond::~pond</u>
+
+<b>animated_object::MoveAndDraw</b> (anchor for the frog and fly thread)
+|---------------------------------------&gt;<u>frog::ObjectSpecificThreadRoutine</u>
+|---------------------------------------&gt;<u>fly::ObjectSpecificThreadRoutine</u>
+|--&gt;pond::NewCoordinates
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |------------------------------&gt;<u>animated_object::AddCalories</u>
+</code></pre>
+<p>
+The indented entries on the left-hand side of the call graph above are the member functions of the <b>pond</b> object class, and those on the right-hand side are the member functions of the <b>animated_object</b> class and its derived classes. The two bold nodes are the anchor functions, and all the underlined nodes are leaf nodes–that is, functions that do not call anything down the road. Actually, this is not quite true. They may very well call Win32® API functions (which the Visual C++ browse output dutifully reflects), but as in the discussion of callback functions, I use my knowledge about the semantics of Win32 API functions to exclude those calls from the discussion. For example, the last parameter to <b>CreateThread</b> is a pointer to a variable of type <b>long</b>, which will be written to while the function executes. This is reflected in the matrix just because I know about it.</p>
+<p>
+So all that is left to do is determine for each function which variables it reads and writes (this can again be done by scanning the function bodies) and match the data with the function call graph. The way to do that would be to take a leaf node function, determine which variables it reads from and which ones it writes to, and propagate that data up to all of its callers (that is, against the arrow direction of the call edges). Repeat this for all leaf nodes, and then traverse the middle nodes (that is, the nodes that you propagated the variables from the leaf nodes to), adding to the propagated data the variables that the middle nodes themselves access. Keep repeating the process until you are at the root (that is, the anchor) nodes, keeping in mind that there may be recursive calls (which show as loops in the graph). If you think about putting this process into an algorithm to execute on a computer, make sure to mark each node once you have processed it to prevent infinite loops. </p>
+<p>
+Once you are at the anchor nodes, add some finely ground thyme leaves, the onions, and. . . oops, wrong recipe. Once you are at the anchor nodes, you have all of the variables that the threads that are associated with the anchor nodes access—which, after all, is the information we are looking for.</p>
+<p>
+Note that in that graph I collapsed the frog and fly threads into one, so for the matching process, we need to consider the two threads separately.</p>
+<p>
+To apply the above algorithm, I found it very helpful to work in C++. Although plain C code can basically be processed the same way, C++ code employs data encapsulation mechanisms that make it easier to locate the variables that are referenced within a function. This is because most data is encapsulated within a class declaration, so finding a data item is basically a task of scanning the class declaration that contains the function you currently process; if a variable resides in an object of another class, C++ requires that you provide an explicit object pointer that tells you right away where the data item is.</p>
+<p>
+Of course, one can always loosen up the C++ requirements and go back to global variable programming in the worst case. At times this may make sense, but one of the benefits of C++ is that it offers you alternatives and makes you think about what would be the best choice. For example, in an earlier version of FrogFly, the frog's coordinates were global variables because every thread had to see them, and in intermediate versions I relocated them as private member variables of the frog (and added a "query coordinate function" to access them), private member variables of the pond, or both. There were advantages and disadvantages to each approach, but to have a choice helped in determining which solution would be best. By making the frog's coordinates public members of the <b>animated_object</b> class, they are still part of the base class and can, therefore, cut down on the distinctions that must be made between the derived classes; on the other hand, the pond can still reference them, but must do so via an object pointer (which makes it easier to identify where they reside when scanning the source code).</p>
+<h3>Rules to Reduce the Matrix</h3>
+<p>
+What does the matrix in Appendix A tell us? (From now on, I call it an "access matrix" because it sounds cool.) Let me first explain what the entries mean: A capital <i>R</i> in position x,y means that variable <i>x</i> is read from when thread <i>y</i> runs; likewise, a capital <i>W</i> means that <i>x</i> is written to when thread <i>y</i> runs. The small letters are there just to avoid confusion; a small <i>w</i> means that a member variable is written to before the thread is created. For example, in the constructor for <b>animated_object</b>, the member variables <b>hImage</b>, <b>iImageWidth</b>, and <b>iImageHeight</b> are assigned from the main application's thread, but that happens before <b>CreateThread</b> is called to associate the object with a thread. Thus, the thread, once it runs, will never see the main thread's write to those variables.</p>
+<p>
+Now what the chart tells us is which threads will ever access which variables, and this information is useful for excluding some variables as candidates for access conflicts right away. Three intuitive rules can help us here:
+<ol>
+<li>
+Any variable that is only read from and never written to is safe.<br><br></li>
+<li>
+Any variable that is only written to and never read from is safe.<br><br></li>
+<li>
+Any variable that is accessed from one thread only is safe because the thread in itself runs sequentially and, presumably, knows how to make good use of its data.</li>
+</ol>
+<p>
+The reasoning for rules 1 and 2 is rather trivial: If a variable is never changed, no thread that ever reads it will pick up a "wrong" value, and likewise, a variable that is never read can never return a wrong value. Although you might think that these cases will never show up, you'll be surprised that rules 1 and 2 will, in fact, eliminate a whole bunch of rows from our matrix.</p>
+<p>
+Using those rules on the matrix, we can greatly reduce the candidates for access conflicts by striking out all rows in which all columns are either only <i>R</i>s or <i>W</i>s (rules 1 or 2), or in which only one column has entries in it (rule 3). Because of the meaning of small letters, we ignore all small <i>r</i>s and <i>w</i>s. This process leaves us with the following matrix:</p>
+<pre><code>VARIABLE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; main&nbsp;&nbsp; frog&nbsp;&nbsp; fly
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; thread thread thread&nbsp;&nbsp;&nbsp;&nbsp; 
+
+/**********************************************************************/
+/*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Global variables&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+/**********************************************************************/
+
+CRITICAL_SECTION csSerializeDraw;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; 
+pond *the_pond;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp; W&nbsp;&nbsp; |&nbsp; W&nbsp;&nbsp;&nbsp; 
+
+/**********************************************************************/
+/*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Class declarations&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+/**********************************************************************/
+
+class pond
+{ private:
+ &nbsp;&nbsp; int iFrogIndex;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp; R&nbsp;&nbsp; |&nbsp; R
+ &nbsp;&nbsp; A_OBJECTS obArray[MAX_OBJECTS];&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp; R&nbsp;&nbsp; |&nbsp; R
+  public:&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; int iPondWidth;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; W&nbsp;&nbsp; |&nbsp; R&nbsp;&nbsp; |&nbsp; R&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; int iPondHeight;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; W&nbsp;&nbsp; |&nbsp; R&nbsp;&nbsp; |&nbsp; R&nbsp; 
+};
+
+/**********************************************************************/
+/*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Variables of the frog object&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+/**********************************************************************/
+
+class animated_object
+{ private: 
+ &nbsp;&nbsp; signed int iXVelocity, iYVelocity;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; W&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; int iCalories;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; Rw&nbsp; |&nbsp; RW&nbsp; |&nbsp; W
+ &nbsp;&nbsp; int iHandle;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp; R&nbsp;&nbsp; |&nbsp;&nbsp; 
+ &nbsp;&nbsp; int iX, iY;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; w&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp; R&nbsp;&nbsp;&nbsp; 
+};
+
+class frog: public animated_object
+{ private:
+  public :
+ &nbsp;&nbsp; int iKilling;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; W&nbsp;&nbsp; |&nbsp; R&nbsp;&nbsp; |
+};
+
+/**********************************************************************/
+/*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Variables of the fly object&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+/**********************************************************************/
+
+
+class animated_object
+{ 
+ &nbsp; int iHandle;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; R 
+};
+</code></pre>
+<p>
+Note that the differences between the entries for the frog object and the fly object reflect the asymmetry of the application: We could eliminate all entries but <b>iHandle</b> on the fly's side, and we will need to further investigate <b>iCalories</b>, <b>iX</b>, <b>iY</b>, <b>iKilling</b>, <b>iXVelocity</b>, and <b>iYVelocity</b> for the frog object. This is because <b>iCalories</b>, <b>iX</b>, and <b>iY</b> are also needed by a fly (which queries the frog's position implicitly while calling into <b>pond::NewCoordinates</b>), whereas <b>iKilling</b>, <b>iXVelocity</b>, and <b>iYVelocity</b> are manipulated by the user when selecting <b>Simulation::Stop Simulation</b> to kill the frog or using the arrow keys to steer it.</p>
+<h3>Here's Where the Detail Work Starts</h3>
+<p>
+We can't preclude any more variables here. For each of the remaining data, we must analyze when, where, and how it gets accessed and whether that can cause us trouble or not. </p>
+<p>
+The Surgeon General warns: This section is fairly dry. I mean, <i>really</i> dry. You are in danger of dehydrating while reading it! Make sure to have a glass of water within reach while reading it. I mean, a <i>really</i> big glass of water.</p>
+<p>
+Let us proceed from the end to the beginning of the list–that is, let's start with <b>frog::iKilling</b>. That member is used by <b>frog::ObjectSpecificThreadRoutine</b> to determine whether the user has killed the frog by checking the <b>Stop Simulation</b> menu item, which will merely set <b>iKilling</b> to STATUS_DEAD (via the <b>pond::KillFrog</b> member function). This works like a posted note: We leave STATUS_DEAD in the variable so that the frog will react accordingly the next time it moves by. There are two remarkable characteristics about that variable: (a) It is a Boolean variable, that is, it only takes either of two values; and (b) there is no required relationship between the time it is set and the time it is read. If the frog happens not to read an updated value during one iteration, it will do so during the next iteration, and that is not going to harm the application. There is no need to synchronize access to <b>iKilling</b> due to this implementation. (Note that if we had decided instead to set the frog's calories to 0 once the user wants to stop the simulation, we would have to worry about the possibility that the frog eats a fly after the calorie count has been reset to 0 and before the <b>MoveAndDraw</b> function queries the calories.)</p>
+<p>
+Now for the frog's <b>iX</b> and <b>iY</b> coordinates. They are retrieved and computed while the frog executes <b>animated_object::MoveAndDraw</b>, but each fly also reads them implicitly while calling <b>pond::NewCoordinates</b>. What happens if the frog changes his coordinates while they are queried by a fly?</p>
+<p>
+The solution to this problem comes for free as a side effect of the critical section that the <b>MoveAndDraw</b> routine is in when it redraws the object. The newly computed coordinates are not stored into the "real" locations <b>iX</b> and <b>iY</b> right away, but instead are put into the temporary automatic variables <b>iTempX</b> and <b>iTempY</b>. After the routine has claimed the critical section and erased the old image from the screen, <b>iX</b> and <b>iY</b> are copied from the temporary locations and the object is drawn there. This implementation was done so that the <b>MoveAndDraw</b> routine spends only as little time as necessary in the critical section, but as a side effect, it also ensures that no object's <b>iX</b> and <b>iY</b> values change while the critical section is claimed by someone else. Since the call to <b>pond::NewCoordinates</b> is also part of the sequence that is executed while in the critical section, the frog's coordinates do not change while a fly queries them. If that were not the case, the frog and a fly could "miss" each other by assuming that they did not collide, though in reality they did.</p>
+<p>
+By the same argument, the frog's calorie-carrying variable <b>iCalories</b> is safe. All <b>animated_objects</b> subtract MOVE_DEDUCTION from their respective calorie counts in each move. A fly—while executing <b>pond::NewCoordinates</b>—can increase the frog's calorie count via the call chain <b>animated_object::MoveAndDraw</b>/ <b>pond::NewCoordinates</b>/ <b>frog::AddCalories</b>. This means that the frog's <b>iCalories</b> variable could be accessed by more than one thread, assuming an incorrect value if the two operations occur interleaved similar to the scenario presented early in this section. However, both operations take place while the <b>MoveAndDraw</b> function executes in the critical section, so this problem is already taken care of as well.</p>
+<p>
+How about the <b>iHandle</b> member of both the frog and the fly, then? That member is assigned in the constructor of <b>animated_object</b> before the thread is created, and from then on passed to <b>pond::NewCoordinates</b> repeatedly, which uses the handle to locate the object and then call into it. If it were only for this use, the variable would deserve a small <i>w</i> and would therefore have been eliminated before. However, there is one more use: When the thread function is about to terminate, it posts the handle as a parameter of a message to the main application window, which then calls <b>pond::Remove</b> on that handle, which, in turn, calls the destructor, which then closes the handle. (Remember that discussion?) The thing we need to make sure here is that after the object has been deleted, the pond never references it via the handle anymore. This is ensured because the only time the pond references the object by handle is via the <b>NewCoordinates</b> member, and that one is only being called from the object's thread function <i>before</i> it posts a WM_OBJECT_DIED message to the main window. In other words, once the object has posted this message to the main window, it will never call <b>NewCoordinates</b> anymore, and therefore can never ask the pond to reference an invalid object.</p>
+<p>
+What about the frog, though? The frog is referenced via a designated handle called <b>iFrogIndex</b>, which <b>NewCoordinates</b> uses to identify the frog, get hold of its coordinates, and, if necessary, award it additional calories. Is there a chance that the frog has died while a fly tries to address it via <b>NewCoordinates</b>? The answer is "yes, but. . ."—Yes, this can happen, but it does not affect the way the application works. <b>NewCoordinates</b> will return without querying the frog if <b>iFrogIndex</b> is –1 (indicating that the frog is not alive), but <b>iFrogIndex</b> will be set to –1 even before the frog object is deleted, namely, as the first statement in <b>pond::Remove</b>. However, imagine that a fly enters <b>pond::NewCoordinates</b>, checks <b>iFrogIndex</b>, and finds it to be not equal to –1. It then loses its time slice, and the main thread kills the frog through the <b>pond::Remove</b> call. It might now set <b>iFrogIndex</b> to –1 and delete the frog object before the fly gets a new time slice and calls into the frog, assuming that <b>iFrogIndex</b> is not –1 (as it determined before it lost the time slice). In this scenario, different things could happen, depending on how the compiler optimizes the function <b>pond::NewCoordinates</b>: If <b>iFrogIndex</b> is retrieved again, it will now be –1, and <b>pond::NewCoordinates</b> will try to reference the minus first index of <b>obArray</b>, which may cause assorted forms of weird behavior to happen. Or the compiler might store the frog index in a temporary variable, in which case it references a valid index in the array, but tries to reference a deleted object.</p>
+<p>
+Undesirable behavior in either case. In order to prevent this from happening, I wrap the code in <b>pond::Remove</b> into a call to the global critical section <b>csSerializeDraw</b>, which I know is claimed—among other times—whenever any thread can possibly call <b>pond::NewCoordinates</b>.</p>
+<p>
+Now for the frog's velocities. They are read and written by the frog's thread when <b>animated_object::MoveAndDraw</b> is executed, but the main thread also writes to them via the call chain <b>WndProc</b> (with WM_KEYDOWN as the message)/ <b>pond::SetFrogVelocity</b>/ <b>frog::SetVelocity</b>. In an earlier release of FrogFly, I had only <b>iXVelocity</b> and <b>iYVelocity</b> and had both the main thread and the frog thread work on those variables. However, under that approach it could have happened that the routine that computes the new velocities (in <b>animated_object::MoveAndDraw</b>) could have executed interleaved with the main thread so that the changes in the velocities from either thread would have been ignored. Although the user is not very likely to perceive this as a problem (generally an arrow key is held down long enough to generate more than one WM_KEYDOWN message, and so a change in the velocity would eventually be picked up, albeit possibly a few iterations later than the key was in reality pressed), I decided that I could do better than that—I added the variables <b>iTempXVel</b> and <b>iTempYVel</b>. As the user hits a key, it is only the temporary variables that are updated, and not before the frog makes its round through the object-specific thread routine will the actual velocity be updated from the temporary variables. Thus, all the write accesses to <b>iXVelocity</b> and <b>iYVelocity</b> are centralized in one thread (the frog's thread).</p>
+<p>
+Now we are almost done &lt;phew&gt;. The only variables left to consider are <b>pond::obArray</b>, <b>pond::iPondWidth</b>, and <b>iPondHeight</b>. The variable <b>obArray</b> is written to from the main thread when objects are created or deleted, or the pond executes code in the frog object, and it is also read from <b>pond::NewCoordinates</b> when a fly queries the frog's position. Since only <b>obArray[iFrogIndex]</b> is accessed, all we need to make sure is that <b>iFrogIndex</b> is valid and <b>obArray[iFrogIndex]</b> contains the frog object so that calls into it are valid. Following the discussion about <b>iFrogIndex</b>, this is ensured.</p>
+<p>
+As the comments for the <b>CreateObject</b> routine in the class declaration file imply, the current implementation of the object array is somewhat inefficient; slots of objects that have died are not recycled for new objects. If that was the case, there would be more accesses to <b>obArray</b> that we would need to take into account.</p>
+<p>
+The last two variables we need to look at are <b>pond::iPondWidth</b> and <b>pond::iPondHeight</b>. The only time those values are written to while there are objects alive is when the main application window processes WM_SIZE. If an animated object queries the width or height in order to determine if a wall collision has occurred, and right after that the pond changes its size, it might pick up a wrong value and either bounce off where there is no wall anymore or go past a wall that has popped up in the meantime.</p>
+<p>
+This problem is actually fairly hard to tackle. The Win32 API does not provide a foolproof way to determine when a window is about to be resized; it only notifies you <i>after</i> the window has been resized. Thus, we cannot tell the animated objects to stop moving while the user resizes the window. I sort of cop out of this issue by ignoring it: If an object moves out of the visible area of the window, all that happens is that the graphics device interface (GDI) will clip its attempt to draw itself, and in the next iteration, the object will place itself again within the visible area. If the user widens the window, however, the object might bounce off a wall that does not exist anymore, but since the time in between the frog's querying the velocity and resetting is rather short, chances are small that this happens. Regardless of the statistical issue, the stability of the system is not affected by this implementation (the system cannot crash due to any unfortunate interleaving thread sequence), nor is the functionality (because the objects will eventually pick up the right extensions of the new client area and adjust their positions accordingly, they will be off at most for one iteration).</p>
+<p>
+Yes, I know, I know; I'm a weenie, and one shouldn't go about it this sloppily. So let's just change the implementation from a "safe but ugly" to an "instructional" approach: After having demonstrated conflict avoidance through critical sections, deferred variable assignments, and thread uncoupling, we here demonstrate yet another technique: how to avoid a conflict by not avoiding it. But seriously, I gave this issue a lot of thought, and I don't seem to be able to find a good solution for it. If anybody out there finds a good one, let me know (please look at the "How to Send Us Feedback" topic under Welcome on the Developer Network CD), and I'll ask Dr. GUI to prescribe a cool T-shirt for you.</p>
+<h3>Stack Variables</h3>
+<p>
+Remember that earlier I promised you a discussion of stack variables? My editors would never forgive me if I left a dangling reference in any article, so here comes the missing link.</p>
+<p>
+Automatic variables and function parameters reside on the stack, which is different for each thread in an application. Thus, they only pose a problem if they have been initialized from shared variables and are assumed to keep those values. In order to determine whether one of these variables must be protected as a shared variable would, we need to analyze the relationship between stack variables and shareable ones. Once we have found that a stack data item may indeed work on a copy of a variable that may change during the lifetime of the stack variable, we need to determine whether that can cause a problem (that is, whether the code in the function body relies on the assumption that the stack variable always contains the same value as the corresponding shareable variable). You will notice that in the upcoming discussion, we will not encounter such a stack data item and thus never come to answer the second question.</p>
+<p>
+For automatic variables, this process is easy; all we need to do is look into each function, determine whether it has automatic variables, and if so, determine where those variables are assigned from. Let us begin with <b>WndProc</b>: <b>WndProc</b> has two static local variables (<b>hPenKetchup</b> and <b>hInst</b>).</p>
+<p>
+Note that the keyword <b>static</b> locates those variables outside of the current thread, which makes them behave differently from stack variables. The reason I have not discussed static variables before is that, although their location in data space instead of in stack space makes them theoretically susceptible to concurrent access problems, they are only visible within the scope of the block they are declared in; thus, it is unlikely that other threads will ever get to see them. Because of that, we have not included them in the access matrix and will discuss them now on a case-by-case basis.</p>
+<p>
+Both variables are written to before any secondary thread is created (at WM_CREATE time) and when the application shuts down, so their respective values will not change when more than one thread is active. <b>WndProc</b> also has a few automatic variables in nested blocks: <b>hPenDefault</b> and <b>hDC</b> in the WM_LBUTTONDOWN branch, <b>iNewXVel</b> and <b>iNewYVel</b> in the WM_KEYDOWN branch, and <b>szBuf </b>in the WM_TIMER branch.</p>
+<p>
+All but the last one get assigned values that do not change in between threads: <b>hDC</b> is assigned the device context (DC) of the application client area and <b>hPenDefault</b>, the DC's default pen, neither of which can be accessed by other threads. (Note that any concurrent access to the same device context is prohibited; threads wishing to draw something to the screen must first wait to obtain a critical section.) <b>iNewXVel</b> and <b>iNewYVel</b> are determined by the key code of the user's keystroke and do not change until they are passed to <b>pond::SetFrogVelocity</b>.</p>
+<p>
+The only potential problem here is <b>szBuf</b> in the timer message code. Using <b>SetWindowText</b>, <b>szBuf</b> contains a string that is assembled from various data, including data that will change dynamically (namely, the frog's calorie count and the number of flies alive). Thus, when the window title changes, the values displayed in it will not reflect the actual current data. However, since an application timer in Windows is never accurate, and the application's title is only updated for informative purposes for the user, I will not bother to add synchronization mechanisms here—or, to put it another way, if I had wanted to inform the user about changes in the system in real time, I would not have used application timers in the first place.</p>
+<p>
+As for the object member functions, there are automatic variables in only four of them: <b>Status</b> in <b>pond::NewCoordinates</b>, <b>ptObject</b> in <b>pond::CreateObject</b>, <b>bmpImage</b> in <b>animated_object::animated_object</b>, and <b>iTempX</b>, <b>iTempY</b>, <b>hDefaultBitmap</b>, and <b>hDCMem</b> in <b>animated_object::MoveAndDraw</b>. <b>Status</b> is assigned a Boolean expression that involves the frog's iX and iY coordinates and the parameters passed to <b>pond::NewCoordinates</b>. Because the function is only called from a thread that owns the critical section, and the frog's coordinates do change only when the frog has the critical section, a condition that would change the value of <b>Status</b> while it is being used does not apply. By the same argument, the automatic variables in <b>animated_object::MoveAndDraw</b> are safe; all but <b>iTempX</b> and <b>iTempY</b> are used exclusively while in the critical section. <b>iTempX</b> and <b>iTempY</b> are assigned values before the critical section is entered, but the data members from which <b>iTempX</b> and <b>iTempY</b> are assigned values (iX and iY) will not change until later from the same thread.</p>
+<p>
+So this leaves us only with <b>ptObject</b> (which is not initialized from a shared variable) and <b>bmpImage</b> (which is initialized by a call to <b>GetObject</b> on a bitmap object that is a member of the <b>animated_object</b> class and never gets changed once it is initialized). Thus, in terms of local variables, we are safe.</p>
+<p>
+How about function parameters, then? The potential problem that can occur here is that a value passed to a function represents a data item that is shared by more than one thread and is changed by another thread while the function it is passed to works on the copy. (Note that in C, the default-parameter-passing convention is "call by value," which means that a copy of the parameter, instead of a reference to the parameter, is pushed on the stack before the function is called.) Thus, the place to look to determine whether those problems may or may not occur is not in the bodies of the functions to be called, but in the function calls—if a function is called with a parameter that is subject to change, we might be in trouble.</p>
+<p>
+Also note that if a function parameter is ever written to in the function body, we need to analyze the parameter both in terms of what its value is taken from before the function call and what happens in the function body (just as if it were an automatic variable). FrogFly was designed so that a function parameter is never (mis)used as a temporary variable. We know this because all parameters to member functions are labeled as <b>const</b>, which would make the compiler generate an error message if the application ever tried to write to them in the function body. Thus, the scenario in which a function parameter is written to does not occur.</p>
+<p>
+So let us look at the function invocations, taking the function call tree from the last section as a reference. Fortunately, we do not need to consider any function with a void parameter list, so the list function we need to look at shrinks a little; and by the same argument that we used for the anchor discussion, we do not look at any function in the main thread before <b>WndProc</b> is called. Note that in some function invocations, only constant parameters are passed, so those we can also exclude. <b>pond::ReturnObjectCount</b> is called only with FROG_TYPE or FLY_TYPE, and the same holds for <b>pond::CreateObject</b>; whereas <b>animated_object::AddCalories</b> is invoked only with the constant parameter FLY_NUTRITION_VALUE.</p>
+<p>
+With the information from the access matrix in Appendix A and the call graph, the analysis for function parameters can be completed fairly quickly. For each function listed, I will enumerate its invocations and argue for the safety of its stack variables.</p>
+<pre><code>LRESULT CALLBACK WndProc(HWND hWnd,UINT message, WPARAM uParam,LPARAM lParam);
+</code></pre>
+<p class=indent>
+In almost all cases, the parameters supplied to <b>WndProc</b> come from the system and are, therefore, nothing that the application has an influence on. The only exceptions to this rule are user-defined messages, such as WM_OBJECT_DIED, in which case parts of the parameter list are supplied by the application. For WM_OBJECT_DIED, the <i>uParam</i> is the handle of the object, and <i>lParam</i> is constant 0. What we need to watch out for is whether the handle passed in <i>uParam</i> might become invalid while the thread uses it. Fortunately, this is not the case because our access matrix tells us that the handle is being written to only by the main thread, which also executes <b>WndProc</b>. </p>
+<pre><code>pond::pond(HWND, HINSTANCE)
+</code></pre>
+<p class=indent>
+invoked from <b>WndProc</b>:</p>
+<pre><code>   the_pond = new pond(hWnd, hInst);
+</code></pre>
+<p class=indent>
+hInst has been identified as a variable that is only changed before any secondary thread is created, and hWnd does by definition not change while the window function processes any message.</p>
+<pre><code>void pond::Remove(int iHandle);
+</code></pre>
+<p class=indent>
+invoked from <b>WndProc</b>:</p>
+<pre><code>   the_pond-&gt;Remove((int)uParam);
+</code></pre>
+<p class=indent>
+The value of the <i>uParam</i> comes from the call to <b>PostMessage</b> that an object submits once it falls out of its <b>while</b> loop in <b>animated_object::MoveAndDraw</b>. Since the <b>iHandle</b> parameter is never written to but from the main thread (see the access matrix) and <b>WndProc</b> executes only in the main thread, the handle cannot be changed while the function executes.</p>
+<pre><code>BOOL pond::NewCoordinates(int, int, int);
+</code></pre>
+<p class=indent>
+invoked from animated_object::MoveAndDraw:</p>
+<pre><code>   if (!ObjectSpecificThreadRoutine(hDC) || iCalories &lt; 0 || !the_pond-
+   &gt;NewCoordinates(iHandle,iX,iY))
+</code></pre>
+<p class=indent>
+<b>iHandle</b> is not written to after the thread has been created, and <b>iX</b> and <b>iY</b> will not be written to by any other thread than the one that executes the function.</p>
+<pre><code>void pond::SetFrogVelocity(int, int);
+</code></pre>
+<p class=indent>
+invoked from <b>WndProc</b>:</p>
+<pre><code>   the_pond-&gt;SetFrogVelocity(iNewXVel,iNewYVel);
+</code></pre>
+<p class=indent>
+Following the discussion for <b>iNewXVel</b> and <b>iNewYVel</b> in the section on automatic local variables, those two (which are the parameters to <b>SetFrogVelocity</b>) do not change while the message is being processed. </p>
+<pre><code>void animated_object::SetVelocity(int, int);
+</code></pre>
+<p class=indent>
+invoked from pond::SetFrogVelocity:</p>
+<pre><code>   obArray[iFrogIndex].ptObject-&gt;SetVelocity(iX,iY);
+</code></pre>
+<p class=indent>
+See discussion of <b>SetFrogVelocity</b> above.</p>
+<pre><code>animated_object::animated_object(LPSTR,short, int);
+</code></pre>
+<p class=indent>
+The first parameter is a constant string, the second one a constant integer, and the third parameter is the object handle, which is never written to after it has been assigned by the pond thread. (See above discussion on <b>pond::Remove</b>).</p>
+<pre><code>frog::frog(int) and fly::fly(int)
+</code></pre>
+<p class=indent>
+See discussion of <b>animated_object::animated_object</b>—the parameter is the handle passed on to that constructor.</p>
+<pre><code>frog::ObjectSpecificThreadRoutine(HDC) and fly::ObjectSpecificThreadRoutine(HDC);
+</code></pre>
+<p class=indent>
+The parameter is copied from an object's local <b>hDC</b> variable, which does not change while the function is executing. (See also discussion for <b>pond::NewCoordinates</b>).</p>
+<h3>Postlude</h3>
+<p>
+When I had the peers in our writing staff review this article, some of the reviewers appeared to be somewhat puzzled. One asked, "So where is the solution? What do you want to say here?", while someone else mentioned, "I'd rather see you devise a method that spares me this analysis altogether." After reading some of those comments, I began asking myself, "Gee, this article really demonstrates that I gave FrogFly a lot of thought, but how is it going to help the developers out there write more solid multithreaded applications?"</p>
+<p>
+Well, the primary purpose of this article, of course, is to demonstrate that FrogFly is safe in the sense of multithreaded correctness analysis—that is, no scenario could interleave the execution of multiple threads such that no individual data element can ever take up a value it is not supposed to have or that the program specification would not expect it to have.</p>
+<p>
+The more important aspect of the article, though, is <i>how</i> this was done. The techniques I demonstrated—building an access matrix, reducing it in size via exclusion rules, and scrutinizing the remaining entries individually—are applicable to all applications, and the major tool used—the source code browser supplied with Visual C++—is widely available to aid this process.</p>
+<p>
+I mentioned a few times that it is possible to automate part of the process, for example, by building a "smart" source code browser that automatically builds and reduces the access matrix, but unfortunately, there are always pieces that need to be done manually.</p>
+<p>
+Although FrogFly demonstrates many of the elements of a multithreaded application that need to be considered for a correctness analysis, in a real-life scenario there is much more to consider. For example, what if an application links to a DLL, possibly passing pointers to its variables to the DLL, which then parties on the variables? Or conversely, what if a DLL can attach to more than one process, exporting shared data to the attaching processes? An access matrix for such a system would have to take all of these possibilities into consideration.</p>
+<p>
+Also, what if a C++ object is passed to a function? In this case, the copy constructor gets called, generating a copy of the original object, such that the function all of a sudden works on something other than the original—such an object goes both into the access matrix and the stack variable discussion. Another issue that may cause you major grief is calls by reference; if a variable is passed to a function by reference, it loses its status as a stack variable in that, for the sake of the analysis, both the function and the caller of the function now access the same object.</p>
+<p>
+Finally, I sort of brushed one issue under the carpet—the problem of compound data structures. While I argued that the <b>iHandle</b> parameter passed to the constructor for the <b>animated_object</b> class and the <b>pond::Remove</b> function is safe because it is never written to aside from the main thread, I did not mention that we really need the parameter only as an index into an A_OBJECTS array, and who can guarantee that nobody else will overwrite the same array entry via a different variable while the main thread accesses it via <b>iHandle</b>? In FrogFly, this does not happen (see the discussion for the <b>obArray</b> variable), but once there are more complex data structures (possibly nested structures or linked lists), each member of the compound data structure must be analyzed separately.</p>
+<h2>Conclusion</h2>
+<p>
+I have devised a mechanism to analyze a multithreaded application for safety and applied the mechanism to the FrogFly application. This mechanism smells a lot like CS444, "Using a Lot of Greek Letters and Theorems to Make You Fall Asleep in Class," but I cut down on the formalism quite a bit to find an appropriate compromise between practicability and "foolproofness," knowing that everyday computer reality generally does not allow for a lot of theoretical analysis. Although I did not formally devise an algorithm that takes all possible scenarios into account, the mechanism can be applied to a fairly wide range of multithreaded applications and will in particular benefit from modular application design such as is provided by C++.</p>
+<p>
+It turned out that in FrogFly, almost all data sharing problems that could arise due to multithreading were eliminated by relocating changes to shared data into a section of code that was wrapped into a global critical section. There are pros and cons to that technique. I do not want to imply that critical sections are a miraculous remedy to all mutual exclusion problems; it just turned out that in the case of FrogFly, this approach fit pretty well into the overall design scheme. In your real-life case, there are many considerations that may very well require different synchronization schemes:
+<ul type=disc>
+<li>
+Maybe you have data that needs to be accessed from multiple threads in different processes. In that case, a critical section will not do, of course, because it is a data structure that cannot be shared. In that case, you will need to look into NT's native synchronization objects—that is, events, mutexes, or semaphores. (As a side note, critical sections are internally implemented via a kernel mutant object, which is very similar to a mutex object.)<br><br></li>
+<li>
+Maybe you need to shield a resource so that only a limited number of threads can claim it, in which case a semaphore is the way to go.<br><br></li>
+<li>
+Maybe a single synchronization primitive is not sufficient to achieve what you need. For example, if you need to implement asymmetric mutual exclusion, you will probably need a combination of an event object and interlocked variable access. <i>Asymmetric mutual exclusion</i> is a mechanism in which different threads have different rights to a resource—for example, there are cases in which an arbitrary number of threads can access a resource to read it, but one dedicated thread will only write to it and can do so only while none of the other threads read from it.</li>
+</ul>
+<p>
+Aside from these typical cases, there are many different scenarios that require even more synchronization techniques. In any case, you are well advised to adopt some kind of formal mechanism to determine and eliminate resource access conflicts, such as the one presented in this article. And if you found this article interesting, stay tuned for "FrogFly 3: The Final Encounter," in which I will complete the correctness analysis of FrogFly by proving its liveness (and, hopefully, make it into <i>The Guinness Book of Records</i> for the highest number of words written per lines of code for the FrogFly application).</p>
+<h2>Bibliography</h2>
+<p>
+Ben-Ari, M. <i>Principles of Concurrent Programming.</i> Englewood Cliffs, N.J.: Prentice Hall, 1982.</p>
+<p>
+Petzold, Charles. "Installing Traffic Lights Under Windows NT." <i>PC Magazine</i> (September 28, 1993): 339-344. </p>
+<p>
+Richter, Jeffrey. "Synchronizing Win32 Threads Using Critical Sections, Semaphores, and Mutexes." <i>Microsoft Systems Journal</i> (August 1993): 27-44. (Developer Network CD, Books and Periodicals.)</p>
+<h2>Appendix A: Tagged Class Declaration File</h2>
+<pre><code>VARIABLE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; main&nbsp;&nbsp; frog&nbsp;&nbsp; fly
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; thread thread thread&nbsp;&nbsp;&nbsp;&nbsp; 
+/**********************************************************************/
+/*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Global variables&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+/**********************************************************************/
+
+CRITICAL_SECTION csSerializeDraw;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; 
+pond *the_pond;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp; W&nbsp;&nbsp; |&nbsp; W&nbsp;&nbsp;&nbsp; 
+char szAppName[] = "frogfly";&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+char szTitle[]&nbsp;&nbsp; = "No simulation in progress";&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+
+
+/**********************************************************************/
+/*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Class declarations&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+/**********************************************************************/
+
+class pond
+{ private:
+ &nbsp;&nbsp; int iFrogIndex;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp; R&nbsp;&nbsp; |&nbsp; R
+ &nbsp;&nbsp; A_OBJECTS obArray[MAX_OBJECTS];&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp; R&nbsp;&nbsp; |&nbsp; R
+ &nbsp;&nbsp; short iCurrentPointer;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp; r&nbsp;&nbsp; |&nbsp; r
+ &nbsp;&nbsp; int iObjectCount[2];&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+  public:&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; int iPondWidth;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; W&nbsp;&nbsp; |&nbsp; R&nbsp;&nbsp; |&nbsp; R&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; int iPondHeight;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; W&nbsp;&nbsp; |&nbsp; R&nbsp;&nbsp; |&nbsp; R&nbsp; 
+ &nbsp;&nbsp; HWND hWndApplication;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; w&nbsp;&nbsp; |&nbsp; R&nbsp;&nbsp; |&nbsp; R
+ &nbsp;&nbsp; HINSTANCE hInst;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; w&nbsp;&nbsp; |&nbsp; R&nbsp;&nbsp; |&nbsp; R
+
+};
+
+/**********************************************************************/
+/*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Variables of the frog object&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+/**********************************************************************/
+
+
+class animated_object
+{ private: 
+ &nbsp;&nbsp; int iImageWidth,iImageHeight;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; w&nbsp;&nbsp; |&nbsp; R&nbsp;&nbsp; |
+ &nbsp;&nbsp; HBITMAP hImage;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; w&nbsp;&nbsp; |&nbsp; R&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; HANDLE hThread;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+ &nbsp;&nbsp; int dwIDThread;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; W&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+ &nbsp;&nbsp; BOOL bFinished;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; w&nbsp;&nbsp; |&nbsp; RW&nbsp; |
+ &nbsp;&nbsp; signed int iXVelocity, iYVelocity;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; W&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+
+  protected:
+
+ &nbsp;&nbsp; int iCalories;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; Rw&nbsp; |&nbsp; RW&nbsp; |&nbsp; W
+
+  public:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; int iHandle;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp; R&nbsp;&nbsp; |&nbsp;&nbsp; 
+ &nbsp;&nbsp; int iX, iY;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; w&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp; R&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; BOOL iStatus;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+};
+
+class frog: public animated_object
+{ private:
+  public :
+ &nbsp;&nbsp; int iKilling;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; W&nbsp;&nbsp; |&nbsp; R&nbsp;&nbsp; |
+};
+
+/**********************************************************************/
+/*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Variables of the fly object&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */
+/**********************************************************************/
+
+
+class animated_object
+{ private: 
+ &nbsp;&nbsp; int iImageWidth,iImageHeight;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; w&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; R
+ &nbsp;&nbsp; HBITMAP hImage;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; w&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; R&nbsp; 
+ &nbsp;&nbsp; HANDLE hThread;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+ &nbsp;&nbsp; int dwIDThread;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; W&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+ &nbsp;&nbsp; BOOL bFinished;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; w&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; WR
+ &nbsp;&nbsp; signed int iXVelocity, iYVelocity;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; w&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; WR&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+
+  protected:
+
+ &nbsp;&nbsp; int iCalories;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; w&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; WR
+
+  public:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+ &nbsp;&nbsp; int iHandle;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; R 
+ &nbsp;&nbsp; int iX, iY;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; w&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; RW&nbsp;&nbsp; 
+ &nbsp;&nbsp; BOOL iStatus;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; RW&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+};
+
+class fly: public animated_object
+{ private:
+  public :
+};
+</code></pre>
+</BODY>
+</HTML>

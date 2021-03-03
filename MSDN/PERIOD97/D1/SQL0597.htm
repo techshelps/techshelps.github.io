@@ -1,0 +1,178 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Super Administrator: Asynchronous Transactions </title>
+
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000>
+
+<font face="verdana,arial,helvetica" size="2"><h1>Super Administrator</h1>
+<h1>Asynchronous Transactions</h1>
+<p>
+Andrew Zanevsky</p>
+<p>
+<i>This month Andrew shares his approach to problem solving and demonstrates how asynchronizing </i>parts<i> of a business transaction can optimize system performance.</i></p>
+<p>
+A client once asked me to implement an audit table to keep all deleted rows from a production table. Two additional columns on the audit table were supposed to keep the date and time of deletion and the name of the user who had deleted the row. I’ve simplified the actual table definitions for this article:</p>
+<pre><font face="Courier New" size="3">create table PRODUCTION (
+&#09;ID int,
+&#09;DESCRIPTION varchar(255)
+)
+go
+create table AUDIT (
+&#09;ID int,
+&#09;DESCRIPTION varchar(255),
+&#09;DELETE_TIME datetime,
+&#09;DELETE_USER varchar(30)
+)
+go</font></pre>
+<p>
+What could be easier? I created a trigger on the PRODUCTION table that would instantly insert all deleted rows into the AUDIT table:</p>
+<pre><font face="Courier New" size="3">create trigger PRODUCTION_DEL
+on PRODUCTION
+for delete 
+as
+declare @t datetime, @u varchar(30)
+select @t = getdate(), @u = suser_name()
+insert AUDIT ( 
+&#09;ID, 
+&#09;DESCRIPTION, 
+&#09;DELETE_TIME, 
+&#09;DELETE_USER 
+)
+select ID,
+       DESCRIPTION,
+       @t,
+       @u
+from&#09;deleted
+go</font></pre>
+<p>
+This didn’t take long to implement, but then I considered performance implications and possible user activity on these tables. It turned out that rows in the PRODUCTION table could be deleted by user transactions at any time of day or night. Users expected sub-second response time for these online transactions, but the trigger wouldn’t increase the duration of delete transactions. However, another group of users-those involved in what is typically referred to as decision support-could periodically access the AUDIT table for data analysis. They would typically execute aggregate queries scanning the table. Such transactions would place a shared lock on the whole AUDIT table for several minutes, which would block any new inserts attempted by the PRODUCTION_DEL trigger. As a result, any delete on the PRODUCTION table could be put on hold for several minutes-a situation that was totally unacceptable.</p>
+<h1>Staging changes</h1>
+<p>
+Then I developed another solution. I delayed data movement from PRODUCTION to AUDIT. A new table called STAGING would hold all deleted rows from the PRODUCTION table until an asynchronous process would finally move them into the AUDIT table:</p>
+<pre><font face="Courier New" size="3">create table STAGING (
+&#09;ID int,
+&#09;DESCRIPTION varchar(255),
+&#09;DELETE_TIME datetime,
+&#09;DELETE_USER varchar(30)
+)
+go</font></pre>
+<p>
+The trigger on PRODUCTION had to change to save deleted rows in the STAGING table:</p>
+<pre><font face="Courier New" size="3">create trigger PRODUCTION_DEL
+on PRODUCTION
+for delete 
+as
+declare @t datetime, @u varchar(30)
+select @t = getdate(), @u = suser_name()
+insert STAGING ( 
+&#09;ID, 
+&#09;DESCRIPTION, 
+&#09;DELETE_TIME, 
+&#09;DELETE_USER 
+)
+select ID,
+       DESCRIPTION,
+       @t,
+       @u
+from&#09;deleted
+go</font></pre>
+<p>
+A special stored procedure would move data from STAGING to AUDIT. I scheduled it to run every 30 minutes.</p>
+<pre><font face="Courier New" size="3">create procedure STAGING_TO_AUDIT
+as
+&#09;declare @t datetime
+&#09;select @t = getdate()
+&#09;begin transaction
+&#09;insert AUDIT 
+&#09;select * 
+&#09;from STAGING 
+&#09;where DELETE_TIME &lt; @t
+&#09;if @@error = 0 begin
+&#09;&#09;delete STAGING 
+&#09;&#09;where DELETE_TIME &lt; @t
+&#09;&#09;if @@error = 0 commit transaction
+&#09;&#09;else rollback transaction
+&#09;end
+&#09;else rollback transaction
+go</font></pre>
+<p>
+What happens when a user submits a long query on the AUDIT table? Under the revised scheme, the query would hold locks on the AUDIT table for several minutes. Deletes from the PRODUCTION table shouldn’t be affected, because they trigger inserts into STAGING-not AUDIT. If the STAGING_TO_AUDIT procedure were to be executed at the same time, it would be blocked on the AUDIT table and have to wait. However, that would be acceptable because users aren’t affected by a delay of this unattended process. (This solution is based on the assumption that users of the AUDIT table don’t require an up-to-the-minute set of deleted rows.)</p>
+<h1>“Mommy, why am I making circles?” </h1>
+<p>
+“Be quiet or I’ll tie your other foot, too!” One more factor that should be considered is the amount of time it takes the STAGING_TO_AUDIT stored procedure to execute an insert with a subsequent delete. If the number of rows accumulated in the STAGING table since the last execution is large, then it may take several seconds to move them. This transaction places an exclusive lock on the STAGING table and blocks the PRODUCTION_DEL trigger from being executed. Thus, it indirectly blocks deletes from the PRODUCTION table for several seconds. If users deleting rows from it expect very quick response, then we still have a performance problem.</p>
+<p>
+Here’s one final twist that minimizes direct and indirect impact on the PRODUCTION table. The stored procedure that moves rows from STAGING to AUDIT should be modified to move one row at a time in a loop. This will further slow the process down, but there are no performance restrictions on this procedure as long as it can keep up with the volume of deletes from PRODUCTION. When we move just one row from STAGING, it may still indirectly block deletes from PRODUCTION, but only for a fraction of a second. Locks on the STAGING table become very atomic and can’t significantly increase the duration of deletes from PRODUCTION:</p>
+<pre><font face="Courier New" size="3">create procedure STAGING_TO_AUDIT
+as
+declare&#09;@ID int,
+&#09;@DESCRIPTION varchar(255),
+&#09;@DELETE_TIME datetime,
+&#09;@DELETE_USER varchar(30)
+set rowcount 1
+while 0=0 begin
+&#09;select @ID = ID,
+         @DESCRIPTION = DESCRIPTION,
+         @DELETE_TIME = DELETE_TIME,
+         @DELETE_USER = DELETE_USER
+&#09;from&#09;STAGING
+&#09;if @@rowcount = 0 break
+&#09;begin transaction
+&#09;insert AUDIT (
+&#09;&#09;ID, 
+&#09;&#09;DESCRIPTION, 
+&#09;&#09;DELETE_TIME, 
+&#09;&#09;DELETE_USER 
+&#09;)
+&#09;values (
+&#09;&#09;@ID, 
+&#09;&#09;@DESCRIPTION, 
+&#09;&#09;@DELETE_TIME, 
+&#09;&#09;@DELETE_USER 
+&#09;)
+&#09;delete STAGING where ID = @ID
+&#09;commit transaction
+end
+set rowcount 0
+go
+</font></pre>
+<p>
+One more advantage of this version of the STAGING_TO_AUDIT procedure is that it locks only the first page of the STAGING table. It has no indexes and the process always moves the first row on the first page. When there are a large number of “staged” rows, new additions to the STAGING table are appended to the last page. Therefore, the STAGING_TO_AUDIT procedure doesn’t interfere with the PRODUCTION_DEL trigger. The staged rows lock different pages of the STAGING table until there’s only one page left.</p>
+<h1>Your e-mail</h1>
+<p>
+Writing this column exposes me to requests for help from my readers. I always welcome your questions and will try to reply to every e-mail message, even if I don’t have an answer to your problem. Some letters are even funny. One reader threatened to switch to Oracle if I didn’t help him. I wonder if he now writes similar messages to authors of <i>Oracle Developer</i>, a sister newsletter published by Pinnacle. </p>
+<p>
+When your messages give me ideas for future articles, I’ll gladly acknowledge your contribution!s </p>
+<p>
+<b>&#09;&#09;&#09;  ZANEVSKY.SQL at www.pinpub.com/sqlpro</b></p>
+<p>
+<i>Andrew Zanevsky, an independent consultant, has worked as a DBA, database and data warehouse designer, and developer for several Fortune 500 companies using Microsoft SQL Server and Sybase. He can be reached at his consulting firm, AZ Databases Inc. 708-609-8783, fax 847-419-0190, or zanevsky@compuserve.com.</i></p>
+<P align="center"><a
+href="http://www.pinpub.com/sqlpro/"><img src="Pinnacle.gif"
+border="0" width="216" height="72"></a></p>
+
+<P align="center"><strong>To find out more about SQL
+Server Professional and Pinnacle Publishing, <br>
+visit their website at</strong> <a
+href="http://www.pinpub.com/sqlpro/"><strong>http://www.pinpub.com/sqlpro/</strong></a><strong>
+</strong></p>
+
+<P align="center"><font size="1">Note: This is not a
+Microsoft Corporation website. <br>
+Microsoft is not responsible for its content.</font></p>
+
+<P>This article is reproduced from the May 1997
+issue of SQL Server Professional. Copyright 1997, by Pinnacle
+Publishing, Inc., unless otherwise noted. All rights are
+reserved. SQL Server Professional is an independently produced
+publication of Pinnacle Publishing, Inc. No part of this article
+may be used or reproduced in any fashion (except in brief
+quotations used in critical articles and reviews) without prior
+consent of Pinnacle Publishing, Inc. To contact Pinnacle
+Publishing, Inc., please call (800)788-1900 or (206)251-1900.</p>
+</font></BODY>
+</HTML>

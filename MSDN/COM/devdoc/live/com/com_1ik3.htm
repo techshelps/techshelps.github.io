@@ -1,0 +1,47 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML dir=ltr>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>In-process server Threading Issues</title>
+<link disabled rel=stylesheet href=../../backsdk3.css>
+<style type="text/css">
+@import url(../../backsdk4.css);
+</style>
+</HEAD>
+<BODY BGCOLOR = #FFFFFF TEXT = #000000>
+
+<h2><a name="_com_in_process_server_threading_issues"></a>In-process server Threading Issues</h2>
+<p>
+An in-process server does <u>not</u> call <b>CoInitialize</b>, <b>CoInitializeEx</b>, or <b>OleInitialize</b> to mark its threading model. For thread-aware DLL-based or in-process objects, you need to set the threading model in the registry. The default model when you do not specify a threading model is single-thread-per-process. To specify a model, you add the <b>ThreadingModel</b> named-value to the <a href="reg_5n8y.htm"><b>InprocServer32</b></a> key in the registry.</p>
+<p>
+DLLs that support instantiation of a class object must implement and export the functions <a href="api2_48fo.htm"><b>DllGetClassObject</b></a> and <a href="api2_531z.htm"><b>DllCanUnloadNow</b></a>. When a client wants an instance of the class the DLL supports, a call to <a href="api1_6yb8.htm"><b>CoGetClassObject</b></a> (either directly or through a call to <a href="api1_1nad.htm"><b>CoCreateInstance</b></a>) calls <b>DllGetClassObject</b> to get a pointer to its class object when the object is implemented in a DLL. <b>DllGetClassObject</b> should therefore be able to give away multiple class objects or a single thread-safe object (essentially just using <b>InterlockedIncrement</b>/<b>InterlockedDecrement</b> on their internal reference count). </p>
+<p>
+As its name implies, <b>DllCanUnloadNow</b> is called to determine whether the DLL that implements it is in use, so the caller can safely unload it if it is not. Calls to <a href="api1_3p2r.htm"><b>CoFreeUnusedLibraries</b></a> from any thread always route through the main apartment's thread to call <b>DllCanUnloadNow</b>.</p>
+<p>
+Like other servers, in-process servers can be single-threaded, apartment-threaded, free-threaded, or both. Each of these servers can be used by any OLE client, regardless of the threading model used by that client. There are certain considerations peculiar to client/inprocess-server interoperation.</p>
+<p>
+All combinations of threading model interoperability are allowed between clients and in-process objects. Interaction between a client and an in-process object that use different threading models is exactly like the interaction between clients and out-of-process servers. For an in-process server, when the threading model of the client and inprocess server differ, COM must interpose itself between the client and the object. </p>
+<p>
+When an in-process object that supports the single threading model is be called simultaneously by multiple threads of a client, COM cannot allow the client threads to directly access the object's interface because the object was not designed for such access. Instead COM must ensure that calls are synchronized and are made only by the client thread that created the object. Therefore, COM creates the object in the client's main apartment and requires all the other client apartments to access the object using proxies. </p>
+<p>
+When a free-threaded apartment (multi-threaded apartment) in a client creates an apartment-threaded in-process server, COM spins up a single-threaded apartment model 'host' thread in the client. This host thread will create the object and the interface pointer will be marshaled back to the client's free-threaded apartment. Similarly, when a single-threaded apartment in an apartment-model client creates a free threading in-process server, COM spins up a free-threading host thread (multi-threaded apartment on which the object will be created and marshaled back to the client single-threaded apartment. </p>
+<p>
+In general, if you design a custom interface on an in-process server, you should also provide the marshaling code for it so COM can marshal the interface between client apartments.</p>
+<p>
+COM protects access to objects provided by a single-threaded DLL by requiring access from the same client apartment in which they were created. In addition, all of the DLL's entry points (like <b>DllGetClassObject </b>and <b>DllCanUnloadNow</b>) and global data should always be accessed by the same apartment. COM creates such objects in the main apartment of the client, giving the main apartment direct access to the object's pointers. Calls from the other apartments use inter-thread marshaling to go from the proxy to the stub in the main apartment (using inter-thread marshaling) and then to the object. This allows COM to synchronize calls to the object. Inter-thread calls are slow, so it is recommended that these servers be rewritten to support multiple apartments.</p>
+<p>
+Like a single-threaded in-process server, an object provided by an apartment-model DLL must be accessed by the same client apartment from which it was created. Objects provided by this server, however, can be created in multiple apartments of the client, so the server must implement its entry points (like <b>DllGetClassObject</b> and <b>DllCanUnloadNow</b>) for multi-threaded use. For example, if two apartments of a client try to create two instances of the in-process object simultaneously, <b>DllGetClassObject</b> can be called simultaneously by both apartments. <b>DllCanUnloadNow</b> must be written so the DLL is protected from being unloaded while code is still executing in the DLL. </p>
+<p>
+If the DLL provides only one instance of the class factory to create all the objects, the class factory implementation must also be designed for multi-threaded use because it will be accessed by multiple client apartments. If the DLL creates a new instance of the class factory each time <b>DllGetClassObject</b> is called, the class factory need not be thread-safe. </p>
+<p>
+Objects created by the class factory need not be thread-safe. Once created by a thread, the object is always accessed through that thread and all calls to the object are synchronized by COM. The apartment-model apartment of a client that creates this object will get a direct pointer to the object. Client apartments which are different from the apartment in which the object was created must access the object through proxies. These proxies are created when the client marshals the interface between its apartments.</p>
+<p>
+When an in-process DLL's <b>ThreadingModel</b> named-value is set to <b>Both</b>, an object provided by this DLL can be created and used directly (without a proxy) in single- or multi-threaded client apartments. However, it can only be used directly within the apartment in which it was created. To give the object to any other apartment, the object must be marshaled. The DLL's object must implement its own synchronization and can be accessed by multiple client apartments at the same time.</p>
+<p>
+To speed performance for free-threaded access to in-process DLL objects, COM provides the <a href="api1_7jg2.htm"><b>CoCreateFreeThreadedMarshaler</b></a> function. This function creates a free-threaded marshaling object that can be aggregated with an in-process server object. When a client apartment in the same process needs access to an object in another apartment, aggregating the free threaded marshaler provides the client with a direct pointer to the server object, rather than to a proxy, when the client marshals the object's interface to a different apartment. The client does not need to do any synchronization. This works only within the same process — standard marshaling is used for a reference to the object that is sent to another process.</p>
+<p>
+An object provided by in-process DLL that supports only free threading is a free-threaded object. It implements its own synchronization and can be accessed by multiple client threads at the same time. This server does not marshal interfaces between threads so this server can be created and used directly (without a proxy) only by multi-threaded apartments in a client. Single-threaded apartments that create it will access it through a proxy.</p>
+<p>
+</p>
+<p>&nbsp;</p></body>
+</HTML>

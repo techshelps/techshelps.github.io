@@ -1,0 +1,71 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Making Calls Across Processes</title>
+<style>@import url(msdn_ie4.css);</style>
+	<link disabled rel="stylesheet" href="msdn_ie3.css">
+</HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000 dir=ltr>
+<h1><a name="makingcallsacrossprocesses"></a>Making Calls Across Processes</h1>
+<p>
+Let's now take a closer look at how the DCOM magic works. When a client creates an object instance supported by a local <b><code>.EXE</code></b> server, this is what happens:</p>
+<p>
+<img src="03750901.gif" border=0></p>
+<OL><li>The client calls <b><code>CoCreateInstance()</code></b> on a CLSID supported by a local server.<br><br></li>
+<li>The DCOM runtime working together with the SCM (Service Control Manager), determines if the requested local server is already running and can be connected to. The SCM is a part of the OS on Windows NT.</li><br><br>
+<li>If the local server is already running and can be connected to, the client is provided with a pointer to an interface proxy (more on this later).</li><br><br>
+<li>If no connectable instance of the class requested exists, a new instance of the object is created by launching the local server if necessary.</li><br><br>
+<li>An interface proxy representing the requested interface from the newly created object is returned to the client.</li></OL>
+<p>
+The SCM is a process whose sole purpose in life is to locate implementations or specific instances of requested COM classes. Because of this, it's a close friend of the system registry where all the CLSIDs to implementation mappings are kept persistently. This SCM is typically named <b><code>Rpcss.exe</code></b> on Windows 95 and Windows NT systems.</p>
+<p>
+Once a client is connected to an instance of a COM class, it holds an interface pointer to an interface proxy. With this interface proxy, the client may obtain other interface pointers (using <b><code>QueryInterface()—</code></b>recall that all interfaces must implement <b><code>IUnknown::QueryInterface()</code></b>) or call methods of the interface directly). When such methods are invoked, the COM runtime must send all the arguments for the method from the client process to the local server process. This requires the use of a type of interprocess communications supported by the underlying operating system. In the case of COM, the mechanism used is Distributed Computing Environment Remote Procedure Calls (DCE RPC). DCE RPC has several nice features:</p>
+<ul type=disc>
+<li>
+It works in the same way across processes on the same machine or across machines on a network.<br><br></li>
+<li>
+It handles procedure calls and parameter passing across two machines with dissimilar hardware architectures and operating systems.<br><br></li>
+<li>
+It provides security support that allows the identity of the client process to be passed over to the server.<br><br></li>
+<li>
+It's basically network transport protocol independent, being currently able to work over TCP, UDP, IPX/SPX or Named Pipes.<br><br></li>
+<li>
+It's a time-tested mechanism widely deployed in both Windows NT system design and UNIX based network programming.</li>
+</ul>
+<p>
+COM and DCOM leverage heavily on these capabilities.</p>
+<p>
+Note: COM actually will attempt to use lightweight RPC (LRPC) whenever possible when the two communicating objects/components are residing on the same machine and OS. LRPC is a Microsoft proprietary variant of RPC which has the exact same calling syntax as the DCE RPC runtime (thus the seamless interchangeability) but is optimized to reduce data copying and eliminate access to the networking code altogether.</p>
+<p>
+When we put the RPC layer into the picture during a method invocation, the situation becomes a bit more complex. Namely, the call is now 'cross-process' or 'cross-machine'. The actual call is delivered to an object within the current process called an Interface Proxy. The following diagram shows the activities that will occur:</p>
+<p>
+<img src="03750902.gif" border=0></p>
+<OL>
+<li>
+The client invokes the interface through the interface proxy.<br><br></li>
+<li>
+The interface proxy marshals the parameters into a buffer provided by a <b>channel</b>. The channel is supplied by the RPC runtime system and is an abstraction above the different transports. The channel can be operating on shared memory spanning two processes on the same machine, or could be operating over a network protocol stack across two machines. It can be viewed as a virtual tunnel connecting the two communicating processes (regardless of their location). Data going into the tunnel (marshaled) on Process A will come out the same way (unmarshaled) from the other end of the tunnel on Process B. Loosely speaking, marshaling means packing the data into the channel's buffer in a well-defined format (for DCE RPC, this well defined format is called the Network Data Representation or NDR). NDR is an agreed format to transmit different data types between dissimilar machines so that the same data can be reconstructed exactly at the destination machine).<br><br></li>
+<li>
+The channel forwards the data to the server.<br><br></li>
+<li>
+An interface stub on the server receives the buffer from the channel and unmarshals the data from the buffer .<br><br></li>
+<li>
+The interface stub calls the associated interface on the server object.<br><br></li>
+<li>
+The interface stub sends return values back to the interface proxy.<br><br></li>
+<li>
+The interface proxy returns the values to the client.</li>
+</ol>
+<p>
+Note that there are many more subtleties associated with the marshaling action than the simple description implies. For example, if a pointer to a data item is marshaled across two processes, just sending the value of the pointer itself is useless since the receiver lives in a totally separate process/addressing space. Instead, the actual data item itself must be sent across the wire and a pointer to it reconstructed within the receiver process in order for the marshaling to work.</p>
+<p>
+Now is a good time to find out what the interface proxies and stubs are. Under the COM model, they are actually small COM objects. The code for these objects was created automatically when we ran our original IDL (interface description language) through the MIDL compiler. Based on the data type of the method arguments and return values, the MIDL compiler creates these marshalling proxy/stub pairs for communicating between processes. One pair of proxy/stub classes is created for each interface. If you look back in Chapter 7 where we created a local server called <b><code>ATLFinder.EXE</code></b>, you'll find a file called <b><code>ATLFINDERPS.MK.</code></b> You can actually perform:</p>
+<p>
+<b><code>NMAKE –F ATLFINDERPS.MK</code></b></p>
+<p>
+in a DOS box to create and register the proxy/stub for marshalling of the interfaces supported by the <b><code>ATLFinder.EXE</code></b> local server. To satisfy your curiosity, look in your Chapter 7 working directory for the <b><code>ATLFinder.EXE</code></b> project and find the <b><code>ATLFinder_p.c</code></b> file to see what MIDL generated proxy/stub code physically looks like.</p>
+<p>
+So far we've focused on the conceptual view of providing proxy and stub code for interface method invocation across processes, and indeed it was the way that it was done for a period of time. With DCOM, though, Microsoft has introduced automatic type-library based marshaling. Automatic type-library marshaling actually builds these proxy and stub objects <i>on the fly</i> from type library information obtained on an interface. What we see here is actually a reuse of the marshaling technology Microsoft had been using for OLE Automation. As long as the data type that needs to be marshaled is compatible with OLE Automation (which essentially means all the data types that a <b><code>VARIANT</code></b> can hold), you don't even need the MIDL generated proxy/stub code.</p>
+</BODY>
+</HTML>

@@ -1,0 +1,96 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Reading and Writing Blobs</title>
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000>
+
+<font face="verdana,arial,helvetica" size="2"><h1><a name="readingwritingblobs"></a>Reading and Writing Blobs</h1>
+<BR>
+One of the more tedious tasks in programming is reading arbitrary binary data from files. If you’re lucky, the data is logically arranged as records and you can simply read it into UDTs. But sometimes you have to read the data blob from hell. For example, the ExeType function (EXETYPE.BAS) reads in a given <BR>executable file and determines what kind of program it is—MS-DOS, 16-bit <BR>Windows, OS/2, or Win32—by reading random binary data from magic locations. We’re not going to look at this atrocity, but we will examine the blob-processing procedures that make it work.</p>
+<BR>
+When old-timers gather to tell tall tales around the campfire, some claim that there were once versions of Visual Basic that used only 16 bits. I know it sounds ridiculous. But they claim that in those versions you had to read and write binary data as strings—although we all know that Unicode characters would make such techniques unreliable. Nonetheless, it is rumored that these ancient dialects provided a complete set of string functions that neither knew nor cared whether the data fed to them was a string of characters or a sequence of binary bytes. Of course today we know that Byte arrays are the only way to store binary data in a stable format that won’t be modified by Unicode conversion. You might want to review “Unicode Versus Basic” in Chapter 2, if you don’t remember the problem.</p>
+<BR>
+Basic provides two versions of each string function. I’ll refer to the Byte versions —MidB, InStrB, LeftB, and so on—as the B versions. The recommended way to handle binary data goes something like this:</p>
+<pre><code>sBinFile = Dir(“*.*”)<BR>nBinFile = FreeFile<BR>Open sBinFile For Binary Access Read Write Lock Write As #nBinFile<BR>ReDim abBin(LOF(nBinFile))<BR>Get #nBinFile, 1, abBin<BR>sBin = abBin<BR>‘ Process file with MidB$, InStrB$, LeftB$, and friends<BR>abBin = sBin<BR>Put #nBinFile, 1, abBin<BR>Close #nBinFile</code></pre>
+<BR>
+Notice that you copy the array of bytes into a string and work on that rather than on the original array. The B functions work on byte arrays, but they do so through type conversion—meaning that a temporary string is created for each string parameter that receives a byte array argument. It’s much more efficient to create a single temporary string yourself than to let Basic create one for every call to a B function.</p>
+<BR>
+Although the technique shown above works, it’s not very efficient or intuitive. We’d be a lot better off using procedures designed to work directly on byte arrays. No need to convert to and from strings. The rest of this section proposes a set of procedures that extract numbers or strings from various locations in a blob (byte array). It’s not as easy as you might expect. You keep running smack into the nemesis of Basic data conversion: unsigned integers where Basic <BR>expects signed integers. Here’s my first shot at a function to read a Word from a byte string:</p>
+<pre><code>Function WordFromStrB(sBuf As String, iOffset As Long) As Integer<BR>    BugAssert (iOffset + 2) &lt;= LenB(sBuf) - 1<BR>    Dim dw As Long<BR>    dw = AscB(MidB$(sBuf, iOffset + 2, 1)) * 256&amp;<BR>    dw = dw + AscB(MidB$(sBuf, iOffset + 1, 1))<BR>    If dw And &amp;H8000&amp; Then<BR>        WordFromStrB = dw Or &amp;HFFFF000<BR>    Else<BR>        WordFromStrB = dw And &amp;HFFFF&amp;<BR>    End If<BR>End Function</code></pre>
+<BR>
+First you must adjust the offset from a zero-based buffer offset to a one-based string offset. You also need to do significant work with AscB and MidB$ to extract the byte. Finally, you have to do data conversion tricks to turn the unsigned character into a signed Basic integer. If you think this looks ugly, try doing the same for a DWord.</p>
+<BR>
+The BYTES.BAS module uses a different strategy to convert bytes to numeric or string data. BytesToWord and BytesToDWord read numeric data from blobs. BytesFromWord and BytesFromDWord write numeric data. You could add similar functions to read and write Double, Single, and other types.</p>
+<BR>
+Let’s start with BytesToWord, since it is equivalent to the WordFromStrB function shown earlier:</p>
+<pre><code>Function BytesToWord(abBuf() As Byte, iOffset As Long) As Integer<BR>    BugAssert iOffset &lt;= UBound(abBuf) - 1<BR>    Dim w As Integer<BR>    CopyMemory w, abBuf(iOffset), 2<BR>    BytesToWord = w<BR>End Function</code></pre>
+<BR>
+That’s one way to avoid data conversion problems—just blast the data directly into memory. BytesFromWord looks the same except that the first two arguments to CopyMemory are reversed. You can guess the implementation of BytesTo&shy;DWord and BytesFromDWord.</p>
+<BR>
+Converting byte arrays to strings (and vice versa) is a different matter. The strings you extract from byte arrays must look like strings to the outside, which means that you must do Unicode conversion. Here’s a function that converts a byte <BR>array to a string:</p>
+<pre><code>Function BytesToStr(ab() As Byte) As String<BR>    If UnicodeTypeLib Then<BR>        BytesToStr = ab<BR>    Else<BR>        BytesToStr = StrConv(ab(), vbUnicode)<BR>    End If<BR>End Function</code></pre>
+<BR>
+This is just a wrapper function, and you can use StrConv directly if you’re concerned about performance.</p>
+<BR>
+Generally, you won’t be looking at a blob as one big string, but BytesToStr is useful for converting arrays of bytes in UDTs. Normally, you’ll use fixed-length strings rather than byte arrays in UDTs, but BytesToStr comes in handy if <BR>you need to pass a UDT variable to a Unicode API function (such as an OLE function). “Unicode Versus Basic” and “Other Pointers in UDTs,” in Chapter 2, discuss this issue. BytesToStr is also a handy way to watch a byte array that rep&shy;re&shy;sents an ANSI string; simply type the expression <i>? BytesToStr(ab)</i> in the Immediate window.</p>
+<BR>
+StrToBytes goes the other way, but its implementation is very different. First, a function can’t return an array of bytes directly, so you must modify the array by reference. Second, if the array already has a size, you might need to truncate or null-pad the string. Here’s the code:</p>
+<pre><code>Sub StrToBytes(ab() As Byte, s As String)<BR>    If MUtility.IsArrayEmpty(ab) Then<BR>        ‘ Assign to empty array<BR>        ab = StrConv(s, vbFromUnicode)<BR>    Else<BR>        Dim cab As Long<BR>        ‘ Copy to existing array, padding or truncating if necessary<BR>        cab = UBound(ab) - LBound(ab) + 1<BR>        If Len(s) &lt; cab Then s = s &amp; String$(cab - Len(s), 0)<BR>        CopyMemoryStr ab(LBound(ab)), s, cab<BR>    End If<BR>End Sub</code></pre>
+<BR>
+The first part of the conditional handles unsized arrays like this one:</p>
+<pre><code>Dim ab() As Byte</code></pre>
+<BR>
+Unfortunately, Basic provides no way to distinguish an empty array from a sized array, so I had to write the IsArrayEmpty function. The error trapping in this function is too obscene to show in this family-oriented book, but you can look it up in UTILITY.BAS.</p>
+<BR>
+<b>Evil Type Conversion</b></p>
+<BR>
+Without fanfare, the Basic language made a major turn in Visual Basic version 4. In one sense, the change was subtle; if you never wrote code that contained a certain type of bug, you might never have noticed. But in another sense, it was a startling break with Basic tradition that provoked much lively debate among Basic language lawyers. In fact, the new feature came to be known on Visual Basic 4 beta forums, and subsequently, in online forums and magazine articles, as “Evil Type Conversion.” </p>
+<BR>
+Imagine writing the following code:</p>
+<pre><code>Dim i As Integer, s As String<BR>s = 3<BR>i = “12345”<BR>i = Mid$(i, s)</code></pre>
+<BR>
+You know what this code will do—generate type errors. You can’t assign an integer to a string, assign a string to an integer, pass an integer argument to a string parameter, pass a string argument to an integer parameter, or assign the result of a string function to an integer variable.</p>
+<BR>
+Oh, yes, you can. This code assigns the value 12345 to <i>i</i> without complaint. When you look at the variables in the Locals window, you’ll notice that the integer 3 is converted to the string <i>3</i> and the string <i>12345</i> is converted to the integer 12345. Then they are converted back when passed as arguments, and the string result is converted to an integer. These types of conversions used to work with variants, but they never worked with strings and integers. </p>
+<BR>
+Let’s take a more realistic example:</p>
+<BR>
+The second part of the conditional handles sized arrays. First, you calculate the target size and null-pad the source string if necessary, and then you blast the string into the array. The string that comes into this function is Unicode, but notice that there’s no explicit Unicode conversion. It’s not necessary because Basic does implicit Unicode conversion whenever you pass a string to an API function (such as CopyMemory).</p>
+<BR>
+I know I just said that you can’t return a byte array from a function, but con&shy;sistency isn’t my strong point. Following is the code to do it indirectly through a variant:</p>
+<pre><code>Function StrToBytesV(s As String) As Variant<BR>    ‘ Copy to array<BR>    StrToBytesV = StrConv(s, vbFromUnicode)<BR>End Function
+</code></pre>
+<BR>
+<b>i = 3<BR>s = “12345”<BR>s = Mid$(i, s)</b></p>
+<BR>
+I’ve assigned values to i and s, but imagine that these are actually calculated values—s, for example, is the first token in a file I’m parsing, and it happens to be numeric. I accidentally coded the Mid$ function with the arguments reversed. In previous versions of Basic, I’d get an error, immediately see what was wrong, and fix it. In the current version, I get garbage. There’s nothing at position 12345 of the string 3, so the result is an empty string. If I parse a file that has a non&shy;numeric string as its first token, I’ll instantly get an invalid function call, but I might spend hours debugging before I figure this out.</p>
+<BR>
+Basic used to be a strongly typed language with an optional typeless mode through the Variant type. You could choose the better performance and better error facilities of strong type checking, or you could choose the greater flexi&shy;bility of typelessness. (That’s not to say Basic no longer has type checking. It still won’t assign the value 60000 to an integer variable, no matter how much you might want it to.)</p>
+<BR>
+So why the change? Believe it or not, for compatibility. The Text property of TextBox controls used to be type Variant. You could assign an Integer to this property, which was both convenient and important. The developers of Visual Basic version 4 didn’t want to break this feature, but they needed the better performance of a String variable. So they added type conversion of Integers to Strings. If you go that far, why not convert Strings to Integers?</p>
+<BR>
+I respect the motivation, but loss of type safety seems like a significant price to pay. I must admit, however, that I haven’t been hitting as many debugging problems related to the change as I expected.</p>
+<BR>
+This version isn’t as efficient because it has the overhead of converting the byte array to a variant. The caller then has to convert the variant back to a byte array. Also StrToBytesV works only with dynamic arrays. The following lines show equivalent calls with StrToBytesV and StrToBytes:</p>
+<pre><code>StrToBytes ab, “1234567890”<BR>ab = StrToBytesV(“1234567890”)</code></pre>
+<BR>
+StrToBytes and BytesToStr have a very specific use for converting complete arrays of bytes, but when working with blobs, you’ll more often need to extract or insert fixed-length strings at an arbitrary location in memory. What you want is a Mid function and a Mid statement that both work directly on arrays of <BR>bytes. The techniques shown in BytesToStr can be enhanced slightly to create a Mid&shy;Bytes function that works directly on byte arrays. For example, here’s how you extract a string from a 5-byte field:</p>
+<pre><code>sTest = MidBytes(abTest, 7, 5)</code></pre>
+<BR>
+Unfortunately, you can’t implement a similar MidBytes statement in Basic because the Mid$ statement isn’t a procedure. Look closely at this code:</p>
+<pre><code>Mid$(sTest, 1, 5) = “NOWAY”</code></pre>
+<BR>
+How would you write a function that takes an assignment on the right side of an expression? You can’t. Basic cheats to do this. The Basic parser translates this code into a hidden internal call that probably looks like this:</p>
+<pre><code>Ins$ “NOWAY”, sTest, 1, 5</code></pre>
+<BR>
+You can do the same with an InsBytes function that inserts a string at an arbitrary location in a byte array:</p>
+<pre><code>InsBytes “WAYOUT”, abTest, 0, 6</code></pre>
+<BR>
+Note that both MidBytes and InsBytes take zero-based offsets rather than one-based offsets. I’ll let you look up the implementation of MidBytes and InsBytes in BYTES.BAS. They’re essentially BytesToStr and StrToBytes with optional <BR>arguments. You’ll also find LeftBytes, RightBytes, and FillBytes. These compare roughly to Left$, Right$, and String$, but, like MidBytes and InsBytes, they have syntactical differences to accommodate the normal use of byte arrays.</p>
+<BR>
+For an example of blob processing in action, check out the ExeType function in EXETYPE.BAS.</p>
+</font></BODY>
+</HTML>

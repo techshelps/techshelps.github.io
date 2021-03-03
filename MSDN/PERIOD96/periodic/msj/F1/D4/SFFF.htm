@@ -1,0 +1,862 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Win32 Q &amp; A</TITLE>
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY bgcolor="#FFFFFF"><FORM NAME="x"><OBJECT CLASSID="clsid:9c2ac687-ceef-11cf-96d9-00a0c903b016" NAME="iv"></OBJECT></FORM>
+<font face="verdana,arial,helvetica" size="2">
+<H1>  Win32 Q &amp; A</H1><P>Jeffrey Richter</P>
+<P>Jeffrey Richter wrote <I>Advanced Windows</I> (Microsoft Press, 1995) and <I>Windows 95: A Developer</I><I>'</I><I>s Guide</I> (M&amp;T Books, 1995). Jeff is a consultant and teaches Win32-based programming seminars. He can be reached at v-jeffrr@microsoft.com.</P>
+<P><OBJECT id=sample1 type="application/x-oleobject"
+classid="clsid:adb880a6-d8ff-11cf-9377-00aa003b7a11"
+width=0 height=0 hspace=0>
+<PARAM name="Command" value="Sample">
+<PARAM name="Item1" value="Backgrounders Samples">
+<PARAM name="Item2" value="4598">
+</OBJECT><a href="javascript:sample1.Click()">
+
+Click to open or copy the KTTEST project files.</A></P><P><font size="6" face="verdana,arial,helvetica">Q</font>I am working on an application that contains a user-interface thread and a worker thread. At some point the user-interface thread can be notified by the user that the work being done by the worker thread should be terminated. It seems to me that the easiest way to do this would be to call the TerminateThread function. But after reading the Win32® SDK documentation, I am concerned about the problems that this could cause. The documentation states "TerminateThread is a dangerous function that should only be used in the most extreme cases." When is it appropriate to use TerminateThread? Is it okay to use it just before terminating an application? What problems am I likely to run into?</P>
+<P> Sam Malin</P>
+<P><font size="6" face="verdana,arial,helvetica">A</font>As a general rule, avoid calling TerminateThread.The documentationiscorrectwhenitpointsoutseveralpotential problems; it's worthwhile to delve into them more deeply. </P>
+<P>The first problem is that the system does not free a thread's stack when the thread is terminated by<B> </B>TerminateThread. Other threads may be accessing values on the thread's stack and if the stack were freed, these other threads would raise access violations. (The first printing of my book,<I> Advanced Windows</I>, Microsoft Press, 1995, indicates on page 65 that Windows® 95 does free a thread's stack when that thread is terminated. This was true for early betas of Windows 95 but not for the final released version.) Of course, the terminated thread's stack will be freed when the process terminates, so your process will leak memory only while it is running.</P>
+<P>The second problem with TerminateThread is that any DLLs mapped into the process's address space will not get notified. In general, you will have no way of knowing the specific consequences, but let's consider a few possibilities.</P>
+<P>When a new thread is created, all DLLs currently mapped into the process get notified by a call to their DllEntryPoint (or DllMain) function with DLL_THREAD_ATTACH passed in the fdwReason parameter. A DLL should perform its thread-specific initialization when it receives this notification. When a thread terminates, all DLLs again get notified with DLL_THREAD_DETACH passed for the fdwReason parameter. This offers each DLL the opportunity to perform its thread-specific cleanup. However, when a thread is terminated with TerminateThread, the mapped DLLs do not get the DLL_THREAD_DETACH notification; therefore, these DLLs are not given an opportunity to perform the proper cleanup. </P>
+<P>Some DLLs, such as the Microsoft® C run-time DLL (MSVCRT40.DLL), expect to receive the DLL_THREAD_DETACH notification. Microsoft's C run-time DLL uses this notification to free a block of memory. When it does not receive this notification because the thread is terminated with TerminateThread, this block of memory does not get freed until the process terminates. Another example would be a DLL that flushes data to a disk file when it receives the DLL_THREAD_DETACH notification. In this case, using TerminateThread will cause data loss.</P>
+<P>The third problem with TerminateThread is that it allows critical sections and mutexes to be abandoned. If you don't immediately realize why this is very bad, one example should convince you. The multithreaded C run-time DLL uses critical sections to protect its internal data structures; for example, malloc and free use critical sections to gain access to heap structures. To prevent the heap from being corrupted by simultaneous access from multiple threads, the C run-time DLL uses critical sections.</P>
+<P>Imagine that a thread calls malloc, which in turn calls EnterCriticalSection. When EnterCriticalSection returns, the thread owns the critical section. Now, all of a sudden, the thread is terminated by TerminateThread. At this point, the critical section is abandoned. When other threads in the process call malloc, the system will force these threads to wait until the critical section is released. But this will never happen—the threads that are waiting to execute malloc are suspended forever! This is a really good reason to avoid TerminateThread.</P>
+<P>This problem is not limited to heap functions like malloc and free. Many functions in the C run-time DLL are not fully reentrant and therefore need to be protected with critical sections. So if you are using the C run-time DLL at all, it's difficult to avoid this problem.</P>
+<P>Because of all this, I avoid TerminateThread like decaf cola. If you want to pull the rug out from under a thread (terminate it), the absolute best thing to do is to have the thread kill itself by calling ExitThread. The next question deals with this.</P>
+<P>I would consider using TerminateThread only if I needed to terminate a thread that was doing something very destructive (for example, a thread purging records from a database or formatting a hard disk), and there was no other way for me to stop the thread.</P>
+<P>One last note: many developers improperly use TerminateThread as part of a process's shutdown procedure. To terminate a process, any thread within the process can (and should) call ExitProcess.</P>
+<P></P>
+<P><font size="6" face="verdana,arial,helvetica">Q</font>I have a graphics rendering application. It contains a user-interface thread that remains running for the duration of the process. When the user requests certain time-consuming graphics operations from the menu, a second thread is created to actually perform the operation. This keeps the user interface responsive. I also want to let the user cancel the requested operation. This means my user-interface thread must somehow terminate the worker thread. The source code for the worker thread is not under my control and making changes to it is difficult. Is there a good way to terminate my worker thread?</P>
+<P></P>
+<P CLASS="boxt"> The information contained herein is published without the endorsement of Microsoft. Microsoft makes no warranty as to the accuracy or the completeness of the information. Readers are advised that they use this information at their own risk.</P>
+<P></P>
+<P><font size="6" face="verdana,arial,helvetica">A</font>I get this question a lot. Win32 does not offer a way to signal a worker thread to terminate unless the thread you want to terminate is running a message loop. If it is, you may be able to terminate the worker by executing the following line:</P>
+<P> </P>
+<P><BR></P>
+<PRE> PostThreadMessage(<BR>   dwThreadIdWorker, WM_QUIT, (WPARAM) nExitCode, 0);</PRE>
+<P> </P>
+<P>Normally this will cause a message loop to exit, which in turn should cause the thread to exit. If you want the message sent with a higher priority and you have a handle to a window created by the worker thread, you can execute the following line:</P>
+<P> </P>
+<P><BR></P>
+<PRE> SendNotifyMessage(<BR>   hwnd, WM_QUIT, (WPARAM) nExitCode, 0);</PRE>
+<P> </P>
+<P>The problem with using PostThreadMessage or SendNotifyMessage is that worker threads typically don't have message loops, so these functions are no help. The simplest thing to do in this case is to use a flag that is set by the user-interface thread and checked by the worker thread. For example you could create a global flag:</P>
+<P> </P>
+<P><BR></P>
+<PRE> volatile BOOL g_fStopWorkerThread = FALSE;</PRE>
+<P> </P>
+<P>And have the worker thread check the flag from time to time :</P>
+<P> </P>
+<P><BR></P>
+<PRE> if (g_fStopWorkerThread)<BR>   ExitThread(dwExitCode);</PRE>
+<P> </P>
+<P>Then from the user-interface thread you can set the flag:</P>
+<P> </P>
+<P><BR></P>
+<PRE> g_fStopWorkerThread = TRUE;</PRE>
+<P> </P>
+<P>This approach is simple and it gives the worker thread control over when it exits. This is important because it prevents the thread from being terminated in the middle of an operation that should not be interrupted, such as a file update or a call to malloc. The major drawback is that you must sprinkle the worker thread's code with exit flag checks, unless there is a main processing loop where a single check can go. In your case, since it is difficult for you to modify the worker thread's code, you are unable to use this method.</P>
+<P>The reader who asked the question also included the following additional details. Before the user-interface thread spawns the worker thread, the UI thread allocates two buffers—one for input, the other for output. Now, what about the buffers? What if the UI thread freed the buffers that it allocated while<I> </I>the worker thread was still running? Eventually the worker thread would attempt to reference its input or output buffer, at which point an access violation exception would be raised causing the thread to terminate. In effect, any time the worker thread referenced the buffers, it would also be checking for a request to terminate.</P>
+<P>To use memory as a flag in this way, you must allocate and free the buffers using VirtualAlloc and VirtualFree to insure the memory is decommitted when freed—you cannot use malloc and free. Since you don't want the system to display a message box when the worker thread gets the accessviolation,youneed to guard the accesses to the buffers inside a structured exception handling __try block. If youcannotmodify the worker thread's code, you must create a wrapper function that calls the worker thread's function:</P>
+<P> </P>
+<P><BR></P>
+<PRE> DWORD WINAPI WorkerThreadWrapper (PVOID pvParam) {<BR>   DWORD dwExitCode = 0;<BR>   __try {<BR>      dwExitCode = WorkerThread(pvParam);<BR>   }<BR>   __except ((GetExceptionCode() ==
+      EXCEPTION_ACCESS_VIOLATION) ?<BR>                           EXCEPTION_EXECUTE_HANDLER :       
+                           EXCEPTION_CONTINUE_SEARCH) {<BR>   }<BR>   return (dwExitCode);<BR>}</PRE>
+<P> </P>
+<P>This wrapper function allows the access violation to be caught without any changes to the worker function itself. As an added bonus, when the exception filter returns EXCEPTION_EXECUTE_HANDLER, the normal C++ exception-handling mechanism executes properly, causing the destructors to be called for all stack-based C++ objects created by the Worker Thread function. Because of this you need to be sure none of the destructors reference the freed buffers, or you will generate an exception from within a C++ destructor. This will result in a call to the C run-time DLL's terminate function which, by default, terminates the process (not just the thread).</P>
+<P>After formulating this solution I thought about how I might make it more general. Freeing memory that a worker thread is using will eventually cause an exception to be raised in the worker thread. If I could find some mechanism to raise an exception in another thread, I would be able to terminate any worker thread without needing a buffer to free. Ideally I was looking for a Win32 API, perhaps called RaiseThreadException, that worked like RaiseException but added a thread handle parameter to specify the thread to raise the exception in. Since the system does not supply anything like this, I devised a way to implement it. I used this solution to create my own library of functions that allow a controlling thread to "cleanly" terminate a worker thread at any time (well, almost any time). This library is called KillThrd (see <B>Figures 1</B> and <B>2</B>). This approach will only work under Windows NTª. It does  not work on Windows 95 for reasons that are too complex to delve into in this  column.</P>
+<P><B> Figure 1  KillThrd Library Functions</B></P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="131pt" VALIGN="TOP"><COL WIDTH="311pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD VALIGN="TOP"><P> KillThrd_CreateThread</P></TD><TD VALIGN="TOP"><P>Creates a worker thread that can be killed at any time</P></TD></TR><TR><TD VALIGN="TOP"><P> KillThrd_Kill</P></TD><TD VALIGN="TOP"><P>Kills the worker thread</P></TD></TR><TR><TD VALIGN="TOP"><P> KillThrd_Close</P></TD><TD VALIGN="TOP"><P>Frees the resources allocated by KillThrd_CreateThread</P></TD></TR><TR><TD VALIGN="TOP"><P> KillThrd_DelayDeath</P></TD><TD VALIGN="TOP"><P>Delays the death of the worker thread until a known "safe" time</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P></P>
+<P><B> Figure 2  KILLTHRD</B></P>
+<P></P>
+<P>KILLTHRD.H</P>
+<P><BR></P>
+<PRE> /******************************************************************************
+Module name: KillThrd.H
+Notices: By Jeffrey Richter
+******************************************************************************/
+
+
+///////////////////////////////////////////////////////////////////////////////
+// The kill thread software exception code
+
+
+// Useful macro for creating our own software exception codes
+#define MAKESOFTWAREEXCEPTION(Severity, Facility, Exception) \
+   ((DWORD) ( \
+   /* Severity code */     (Severity  &lt;&lt;  0) |     \
+   /* MS(0) or Cust(1) */  (1         &lt;&lt; 29) |     \
+   /* Reserved(0) */       (0         &lt;&lt; 28) |     \
+   /* Facility code */     (Facility  &lt;&lt; 16) |     \
+   /* Exception code */    (Exception &lt;&lt;  0)))
+
+
+// Our very own software exception. This exception is raised
+// when a thread is being killed.
+#define SE_KILLTHREAD   \
+   MAKESOFTWAREEXCEPTION(ERROR_SEVERITY_ERROR, FACILITY_NULL, 1)
+
+
+///////////////////////////////////////////////////////////////////////////////
+// Functions called by the control thread
+
+
+// Data structure returned to the control thread.
+// The control thread should only ever manipulate the
+// m_hThread member directly.  Never touch the other members.
+typedef struct {
+   HANDLE   m_hThread;     // Handle of worker thread
+   HANDLE   m_hmtxControl; // Used to coordinate access the other objects
+   HANDLE   m_hmtxDelay;   // Queue killing when owned
+   HANDLE   m_heventEnd;   // The killing was queued
+} KILLTHRD, *PKILLTHRD;
+
+
+// Creates a worker thread that can be killed at any time
+PKILLTHRD WINAPI KillThrd_CreateThread (
+                    LPSECURITY_ATTRIBUTES lpThreadAttributes, DWORD dwStackSize, 
+                    LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpParameter, 
+                    DWORD dwCreationFlags, LPDWORD lpThreadId);
+
+// Kills the worker thread
+void WINAPI KillThrd_Kill (PKILLTHRD pkt);
+
+// Frees the resources allocated by KillThrd_CreateThread
+VOID WINAPI KillThrd_Close (PKILLTHRD pkt);
+
+
+///////////////////////////////////////////////////////////////////////////////
+// Functions called by the worker thread
+
+
+// Delays the death of the worker until a known "safe" time
+void WINAPI KillThrd_DelayDeath (BOOL fBlock);
+
+
+///////////////////////////////// End of File /////////////////////////////////</PRE>
+<P></P>
+<P>KILLTHRD.CPP</P>
+<P><BR></P>
+<PRE> /******************************************************************************
+Module name: KillThrd.CPP
+Notices:     By Jeffrey Richter
+Purpose:     Functions to kill a worker thread cleanly.
+******************************************************************************/
+
+
+#define STRICT
+#include &lt;windows.h&gt;
+#include "Process.h"    // For _beginthreadex
+#include "KillThrd.h"
+
+
+///////////////////////////////////////////////////////////////////////////////
+
+
+// Used to store a pointer to the worker thread's internal data structure
+// Allocated in KillThrd_CreateThread
+static int gs_nTlsIndex = TLS_OUT_OF_INDEXES;
+
+
+// Internal data structure used by the worker thread. 
+typedef struct {
+   HANDLE                 m_hmtxControl;     // Used to coordinate access to
+                                             // the other objects
+   HANDLE                 m_hmtxDelay;       // Delay death when owned
+   DWORD                  m_dwDelayCount;    // # of times to delay death
+   HANDLE                 m_heventEnd;       // The killing was queued
+   LPTHREAD_START_ROUTINE m_lpStartAddress;  // Worker thread function
+   LPVOID                 m_lpParameter;     // Worker thread parameter
+} KILLTHRD_WORKERINFO, *PKILLTHRD_WORKERINFO;
+
+
+///////////////////////////////////////////////////////////////////////////////
+
+
+// Wraper function for the worker thread. The new thread starts here because
+// we need to wrap the call to the actual worker thread function in an SEH
+// __try block and to perform cleanup just before the thread dies.  The 
+// address of the KILLTHRD_WORKERINFO structure is saved in 
+// thread local storage.
+static UINT WINAPI KillThrd_ThreadFunc (PVOID pvParam) {
+
+   PKILLTHRD_WORKERINFO pktwi = (PKILLTHRD_WORKERINFO) pvParam;
+   DWORD dwExitCode = 0;
+
+   __try {
+      __try {
+         // The index is allocated in KillThrd_CreateThread
+         TlsSetValue(gs_nTlsIndex, pktwi);
+         dwExitCode = pktwi-&gt;m_lpStartAddress(pktwi-&gt;m_lpParameter);
+      }
+
+      // If the exception occurs because our thread is forcibly being
+      // killed, execute our handler (the system does a global unwind first).
+      __except ((GetExceptionCode() == SE_KILLTHREAD) ? 
+        EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+
+         // Nothing to do in here
+      }
+   }
+   __finally {
+      // This executes even if the thread is dying.
+      CloseHandle(pktwi-&gt;m_hmtxDelay);
+      CloseHandle(pktwi-&gt;m_heventEnd);
+      CloseHandle(pktwi-&gt;m_hmtxControl);
+      free(pktwi);
+   }
+   return(dwExitCode);
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+
+
+// Use this function instead of CreateThread to start a killable thread.
+// The parameters to this function match CreateThread.  The caller is 
+// responsible for calling KillThrd_Close to free the allocated resources.
+PKILLTHRD WINAPI KillThrd_CreateThread (
+                  LPSECURITY_ATTRIBUTES lpThreadAttributes, DWORD dwStackSize, 
+                  LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpParameter, 
+                  DWORD dwCreationFlags, LPDWORD lpThreadId) {
+
+   PKILLTHRD pkt = NULL;
+   PKILLTHRD_WORKERINFO pktwi = NULL;
+
+   // If this is the first time this function is called, allocate
+   // a thread local storage slot.
+   if (gs_nTlsIndex == TLS_OUT_OF_INDEXES)
+      gs_nTlsIndex = TlsAlloc();
+
+   // Use calloc instead of malloc because it zeros the memory block
+   // Note: Error check should be done here!
+   pkt = (PKILLTHRD) calloc(1, sizeof(KILLTHRD));
+   pktwi = (PKILLTHRD_WORKERINFO) calloc(1, sizeof(KILLTHRD_WORKERINFO));
+
+   pktwi-&gt;m_lpStartAddress = lpStartAddress;
+   pktwi-&gt;m_lpParameter = lpParameter;
+   pktwi-&gt;m_dwDelayCount = 0;
+
+   pktwi-&gt;m_hmtxControl = CreateMutex(NULL, FALSE, NULL);
+   pktwi-&gt;m_hmtxDelay = CreateMutex(NULL, FALSE, NULL);
+   pktwi-&gt;m_heventEnd = CreateEvent(NULL, TRUE, FALSE, NULL);
+
+
+   // Duplicate the handles so the control thread and the worker
+   // thread each have their own set of process-relative handles which
+   // they are responsible for closing.  The actual kernel objects will
+   // not be destroyed until both handles are closed.
+   DuplicateHandle(GetCurrentProcess(), pktwi-&gt;m_hmtxControl,
+                   GetCurrentProcess(), &amp;pkt-&gt;m_hmtxControl, 0, FALSE, 
+                   DUPLICATE_SAME_ACCESS);
+
+   DuplicateHandle(GetCurrentProcess(), pktwi-&gt;m_hmtxDelay,
+                   GetCurrentProcess(), &amp;pkt-&gt;m_hmtxDelay, 0, FALSE,
+                   DUPLICATE_SAME_ACCESS);
+
+   DuplicateHandle(GetCurrentProcess(), pktwi-&gt;m_heventEnd,
+                   GetCurrentProcess(), &amp;pkt-&gt;m_heventEnd, 0, FALSE,
+                   DUPLICATE_SAME_ACCESS);
+
+   // Start the thread at our wrapper function, KillThrd_ThreadFunc,
+   // which then calls lpStartAddress
+   pkt-&gt;m_hThread = (HANDLE) _beginthreadex(lpThreadAttributes,
+                     dwStackSize, KillThrd_ThreadFunc, pktwi, dwCreationFlags,
+                     (PUINT) lpThreadId);
+
+   // The control thread uses pkt to kill the worker thread using
+   // KillThrd_Kill and must free this resouce by calling KillThrd_Close.
+   return(pkt);
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+
+
+// When the control thread is done with pkt, it must call this function to
+// close the handles and free the memory.
+VOID WINAPI KillThrd_Close (PKILLTHRD pkt) {
+
+   if (pkt != NULL) {
+      if (pkt-&gt;m_hThread     != NULL) CloseHandle(pkt-&gt;m_hThread);
+      if (pkt-&gt;m_hmtxDelay   != NULL) CloseHandle(pkt-&gt;m_hmtxDelay);
+      if (pkt-&gt;m_heventEnd   != NULL) CloseHandle(pkt-&gt;m_heventEnd);
+      if (pkt-&gt;m_hmtxControl != NULL) CloseHandle(pkt-&gt;m_hmtxControl);
+      free(pkt);
+   }
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+
+
+// Terminate the worker thread by getting it to execute this function 
+static void WINAPI KillThrd_ForceDeath (void) {
+
+
+   // Get the address of the worker thread's internal data block. This was
+   // set by KillThrd_ThreadFunc
+   PKILLTHRD_WORKERINFO pktwi =
+      (PKILLTHRD_WORKERINFO) TlsGetValue(gs_nTlsIndex);
+
+   RaiseException(SE_KILLTHREAD, EXCEPTION_NONCONTINUABLE, 0, NULL);
+   // RaiseException never returns
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+// Macros used to abstract the instruction pointer register for the various
+// CPU platforms.
+
+
+#if defined(_X86_)
+#define PROGCTR(Context)  (Context.Eip)
+#endif
+
+#if defined(_MIPS_)
+#define PROGCTR(Context)  (Context.Fir)
+#endif
+
+#if defined(_ALPHA_)
+#define PROGCTR(Context)  (Context.Fir)
+#endif
+
+#if defined(_PPC_)
+#define PROGCTR(Context)  (Context.Iar)
+#endif
+
+#if !defined(PROGCTR)
+#error Module contains CPU-specific code; modify and recompile.
+#endif
+
+
+///////////////////////////////////////////////////////////////////////////////
+
+
+// The control thread calls this function to kill a worker thread.  If the
+// worker thread is not currently protected by KillThrd_DelayDeath, we attempt
+// to kill the thread now by suspending it, changing it's instruction pointer
+// to KillThrd_ForceDeath, and resuming the thread.  Effectively we are raising
+// an exception in the worker thread.  If the worker thread is protected by
+// KillThrd_DelayDeath, we simply set an event and let the thread kill itself
+// when it calls KillThrd_DelayDeath(FALSE) and ends its protection.
+void WINAPI KillThrd_Kill (PKILLTHRD pkt) {
+
+   WaitForSingleObject(pkt-&gt;m_hmtxControl, INFINITE);
+
+   if (WaitForSingleObject(pkt-&gt;m_hmtxDelay, 0) == WAIT_TIMEOUT) {
+
+      // The worker is delaying its death, set a flag that the worker
+      // will check later.
+      SetEvent(pkt-&gt;m_heventEnd);
+   } else {
+
+      // The worker can be terminated now!
+      CONTEXT context;
+
+      // Stop the worker thread
+      SuspendThread(pkt-&gt;m_hThread);
+
+      if (WaitForSingleObject(pkt-&gt;m_hThread, 0) == WAIT_TIMEOUT) {
+         // The worker has not yet terminated
+
+         // Get the worker thread's current CPU registers
+         context.ContextFlags = CONTEXT_CONTROL;
+         GetThreadContext(pkt-&gt;m_hThread, &amp;context);
+
+         // Change the instruction pointer to our function
+         PROGCTR(context) = (DWORD) KillThrd_ForceDeath;
+         SetThreadContext(pkt-&gt;m_hThread, &amp;context);
+
+         // Resuming the thread forces our function to be called which
+         // rasies an SE_KILLTHREAD exception in the worker thread.
+         ResumeThread(pkt-&gt;m_hThread);
+      }
+      ReleaseMutex(pkt-&gt;m_hmtxDelay);
+   }
+   ReleaseMutex(pkt-&gt;m_hmtxControl);
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+
+
+// This function is used to allow the worker thread to protect sections of code
+// from termination by the control thread.  Call KillThrd_DelayDeath(TRUE) to
+// start protection from KillThrd_Kill and KillThrd_DelayDeath(FALSE) to end
+// protection.  Multiple KillThrd_DelayDeath(TRUE) calls are allowed.  A delay
+// count is maintained and the thread remains protected until the count is 0.
+void WINAPI KillThrd_DelayDeath (BOOL fBlock) {
+
+   // Get the address of the worker thread's internal data block. This was
+   // set by KillThrd_ThreadFunc
+   PKILLTHRD_WORKERINFO pktwi = 
+      (PKILLTHRD_WORKERINFO) TlsGetValue(gs_nTlsIndex);
+
+   WaitForSingleObject(pktwi-&gt;m_hmtxControl, INFINITE);
+
+   if (fBlock) {
+
+      // The worker wants to delay its death
+      // We get and keep the m_hmtxDelay mutex while protected
+      // from termination by KillThrd_Kill.
+      WaitForSingleObject(pktwi-&gt;m_hmtxDelay, INFINITE);
+
+      // Increment the delay death count
+      pktwi-&gt;m_dwDelayCount++;
+   } else {
+
+      // The worker wants to allow its death
+      // Decrement the delay death count
+      pktwi-&gt;m_dwDelayCount--;
+      ReleaseMutex(pktwi-&gt;m_hmtxDelay);
+
+      // If the delay death count is zero and
+      if ((pktwi-&gt;m_dwDelayCount == 0) &amp;&amp;
+         (WaitForSingleObject(pktwi-&gt;m_heventEnd, 0) == WAIT_OBJECT_0)) {
+
+         // The delay death count is zero AND KillThrd_Kill has been called.
+         // Force us (the worker thread) to terminate now.
+         KillThrd_ForceDeath();
+      }
+   }
+   ReleaseMutex(pktwi-&gt;m_hmtxControl);
+}
+
+
+///////////////////////////////// End of File /////////////////////////////////</PRE>
+<P></P>
+<P>To test the KillThrd library, I created a sample application called KTTest (see <B>Figure 3</B>). When you invoke the KTTest application, a dialog box appears (see <B>Figure 4</B>). Clicking the "Start worker thread" button causes the application to (you guessed it) create a worker thread using KillThrd_CreateThread that can be killed at any time. This function is used instead of CreateThread (or _beginthreadex). It takes care of setting up an SEH frame for the worker thread. KillThrd_CreateThread allocates and initializes a data block that is used by other KillThrd library functions. A pointer to this block, of type PKILLTHREAD, is returned by KillThrd_CreateThread. The caller may use this structure's m_hThread member, but not any of the other members. When there is no longer a need to control the worker thread, KillThrd_Close (described shortly) must be called to free the resources and the data block.</P>
+<P><B> Figure 3  KTTEST</B></P>
+<P></P>
+<P>KTTEST.CPP</P>
+<P><BR></P>
+<PRE> /*****************************************************************************
+Module:  KTTest.CPP
+Notices: By Jeffrey Richter
+Purpose: Demonstrates how to kill a thread cleanly.
+*****************************************************************************/
+
+
+#define STRICT
+#include &lt;windows.h&gt;
+#include &lt;windowsx.h&gt;
+#pragma warning(disable: 4001)    /* Single line comment */
+
+#include &lt;tchar.h&gt;
+
+#include "resource.h"
+#include "KillThrd.h"             // Kill Thread functions
+
+
+//////////////////////////////////////////////////////////////////////////////
+
+
+// This simple C++ class exists in order to test C++ EH.
+class CTestClass {
+   HWND   m_hwnd;       // Handle of window
+   HANDLE m_hThread;    // Handle to worker thread's kernel object
+
+public:
+   CTestClass (HWND hwnd);
+   ~CTestClass ();
+
+   // This cast operator simply returns the thread handle
+   operator HANDLE() const { return(m_hThread); }
+};
+
+
+CTestClass::CTestClass (HWND hwnd) {
+   m_hwnd = hwnd;
+
+   // Create a "real" handle to the thread kernel object
+   DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
+              GetCurrentProcess(), &amp;m_hThread, 0, FALSE, DUPLICATE_SAME_ACCESS);
+
+   ListBox_SetCurSel(m_hwnd,
+      ListBox_AddString(m_hwnd, _T("C++ object created")));
+}
+
+
+CTestClass::~CTestClass () {
+   // Close the thread handle
+   CloseHandle(m_hThread);
+   ListBox_SetCurSel(m_hwnd,
+      ListBox_AddString(m_hwnd, _T("C++ object destroyed")));
+}
+
+
+///////////////////////////// HANDLE_DLGMSG Macro ////////////////////////////
+
+
+// The normal HANDLE_MSG macro in WINDOWSX.H does not work properly for dialog
+// boxes because DlgProc's return a BOOL instead of an LRESULT (like
+// WndProcs). This HANDLE_DLGMSG macro corrects the problem:
+#define HANDLE_DLGMSG(hwnd, message, fn)                    \
+   case (message): return (SetDlgMsgResult(hwnd, uMsg,      \
+                            HANDLE_##message((hwnd), (wParam), (lParam), (fn))))
+
+
+//////////////////////////////////////////////////////////////////////////////
+
+
+BOOL KTTest_OnInitDialog (HWND hwnd, HWND hwndFocus, LPARAM lParam) {
+
+   // Disable the "End" button since the worker thread hasn't started yet
+   EnableWindow(GetDlgItem(hwnd, IDC_END), FALSE);
+
+   return(TRUE);                  // Accept default focus window.
+}
+
+
+//////////////////////////////////////////////////////////////////////////////
+
+
+// This is the interesting test code. This function even creates a stack-based
+// C++ object so that you can see that the object's destructor is called when
+// the thread is forcibly terminated.
+
+// Turn off optimizations so that the compiler generates the loop code
+// See comment inside function
+#pragma optimize("g", off)
+
+
+DWORD WINAPI WorkerThreadWithoutSEH (LPVOID pvParam) {
+   HWND hwnd = (HWND) pvParam;
+
+   // Windows 95 has a bug which causes an exception to be raised when a
+   // thread is waiting in a call WaitForSingleObject/WaitForMultipleObjects
+   // and the thread's instruction pointer is changed. Using the fIsWin95
+   // flag ensures that the is bug does not expose itself.
+   OSVERSIONINFO osvi;
+   osvi.dwOSVersionInfoSize = sizeof(osvi);
+   GetVersionEx(&amp;osvi);
+   BOOL fIsWin95 = (osvi.dwPlatformId == VER_PLATFORM_WIN32_WINDOWS);
+
+   ListBox_SetCurSel(hwnd, 
+      ListBox_AddString(hwnd, _T("Starting Worker thread")));
+
+   // Create a C++ object to test C++ EH. The C++ object creates a handle to
+   // this thread's kernel object.
+   CTestClass TestClass(hwnd);
+
+
+   ListBox_SetCurSel(hwnd, ListBox_AddString(hwnd, _T("Sleep (3 seconds)")));
+   Sleep(3000);
+
+
+   ListBox_SetCurSel(hwnd,
+      ListBox_AddString(hwnd, _T("WaitForSingleObject (3 seconds)")));
+   // Wait on this thread's kernel object - it will never be signalled.
+   WaitForSingleObject((HANDLE) TestClass, 3000);
+
+
+   ListBox_SetCurSel(hwnd,
+      ListBox_AddString(hwnd, _T("WaitForMultipleObjects (3 seconds)")));
+   HANDLE h = (HANDLE) TestClass;
+   // Wait on this thread's kernel object - it will never be signalled.
+   WaitForMultipleObjects(1, &amp;h, TRUE, 3000);
+
+
+   // Don't allow the UI thread to terminate us until our loop terminates
+   KillThrd_DelayDeath(TRUE);
+   ListBox_SetCurSel(hwnd,
+                 ListBox_AddString(hwnd, _T("Looping a lot, can't be broken")));
+   for (int n = 0 ; n &lt; 200000; n++) {
+
+      // We can delay the thread's death multiple times.
+      KillThrd_DelayDeath(TRUE);
+
+      // We would usually want to delay our death when using functions
+      // that wait on CriticalSections or other thread synchronization
+      // objects so that we don't get them and then die leaving other
+      // threads suspended forever.
+      free(malloc(10));
+      KillThrd_DelayDeath(FALSE);
+   }
+   KillThrd_DelayDeath(FALSE);
+
+
+   // The UI thread can terminate this loop at any time.
+   ListBox_SetCurSel(hwnd, 
+      ListBox_AddString(hwnd, _T("Looping a lot, can be broken")));
+
+   // We have to turn off optimizations so that the compiler
+   // produces code for the loop below.
+   for (n = 0 ; n &lt; 50000000; n++) {
+      // Do nothing
+   }
+
+   // We made it to the end of the function
+   ListBox_SetCurSel(hwnd, 
+      ListBox_AddString(hwnd, _T("Finished looping")));
+
+   return(0);
+}
+
+// Turn optimizations back on
+#pragma optimize("g", on)
+
+
+//////////////////////////////////////////////////////////////////////////////
+
+
+DWORD WINAPI WorkerThreadExcFilter (DWORD dwExceptionCode, HWND hwnd) {
+
+   // Exception filter used for testing. It adds an entry to the listbox
+   // when the worker thread is termiante with KillThrd_Kill.
+   if (dwExceptionCode == SE_KILLTHREAD) {
+      ListBox_SetCurSel(hwnd, 
+         ListBox_AddString(hwnd, _T("SE_KILLTHREAD detected")));
+   }
+
+   return(EXCEPTION_CONTINUE_SEARCH);
+}
+
+
+//////////////////////////////////////////////////////////////////////////////
+
+
+// This is the worker thread.
+DWORD WINAPI WorkerThread (LPVOID pvParam) {
+
+   HWND hwnd = (HWND) pvParam;
+   DWORD dwExitCode = 0;
+
+   __try {
+      __try {
+         // Because we can't mix SEH and C++ EH in the same function, call
+         // another function so that C++ objects are destructed properly.
+         dwExitCode = WorkerThreadWithoutSEH(pvParam);
+      }
+      __except (WorkerThreadExcFilter(GetExceptionCode(), hwnd)) {
+         // We never get in here because WorkerThreadExcFilter always
+         // returns EXCEPTION_CONTINUE_SEARCH.
+      }
+   }
+   __finally {
+      // This executes even if the thread is dying.
+      ListBox_SetCurSel(hwnd,
+         ListBox_AddString(hwnd, _T("Inside __finally block")));
+   }
+
+   // This executes only if the thread dies naturally. It does execute
+   // if KillThrd_Kill is used to kill this thread.
+   ListBox_SetCurSel(hwnd,
+      ListBox_AddString(hwnd, _T("Worker thread is dying on its own")));
+
+   return(dwExitCode);
+}
+
+
+//////////////////////////////////////////////////////////////////////////////
+
+
+// Special watchdog thread used for testing.  This thread just waits for
+// the worker thread to terminate and then adds an entry to the listbox.
+DWORD WINAPI WorkerMonitorThread (LPVOID pvParam) {
+
+   HANDLE hThread = (HANDLE) pvParam;
+   HWND hwnd = GetForegroundWindow();
+
+   WaitForSingleObject(hThread, INFINITE);
+
+   // When the worker thread dies, add an entry to the listbox.
+   HWND hwndLB = GetDlgItem(hwnd, IDC_PROGRESS);
+   ListBox_SetCurSel(hwndLB,
+      ListBox_AddString(hwndLB, _T("--&gt; Worker thread is definitely dead")));
+
+   // Re-enable the "Start" button and disable the "End" button
+   EnableWindow(GetDlgItem(hwnd, IDC_START), TRUE);
+   EnableWindow(GetDlgItem(hwnd, IDC_END), FALSE);
+
+   // Give focus to the "Start" button. NOTE: Because the "Start" button
+   // was created with another thread, we have to attach our input queues
+   // together first before calling SetFocus.
+   AttachThreadInput(GetCurrentThreadId(),
+                     GetWindowThreadProcessId(hwnd, NULL), TRUE);
+   SetFocus(GetDlgItem(hwnd, IDC_START));
+   return(0);
+}
+
+
+//////////////////////////////////////////////////////////////////////////////
+
+
+void KTTest_OnCommand (HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
+   static PKILLTHRD s_pkt = NULL;
+   HWND hwndLB = GetDlgItem(hwnd, IDC_PROGRESS);
+   DWORD dwThreadId;
+
+   switch (id) {
+      case IDC_START:
+         ListBox_ResetContent(hwndLB);
+
+         // Create the worker thread using KillThrd_CreateThread so that
+         // the thread can be killed cleanly at any time. This function
+         // allocates a block of memory and returns the pointer. This
+         // pointer is saved in a static so that we can use it when
+         // the user presses the "End" button.
+         s_pkt = KillThrd_CreateThread(NULL, 0, WorkerThread,
+            hwndLB, 0, &amp;dwThreadId);
+
+         // For testing purposes, create a watchdog thread that sleeps
+         // until the worker thread dies. This thread adds a message to
+         // the listbox when the worker thread is truely dead.
+         CloseHandle(CreateThread(NULL, 0, WorkerMonitorThread,
+            (PVOID) s_pkt-&gt;m_hThread, 0, &amp;dwThreadId));
+
+         // Disable the "Start" button and enable the "End" button.
+         EnableWindow(hwndCtl, FALSE);
+         EnableWindow(GetDlgItem(hwnd, IDC_END), TRUE);
+         SetFocus(GetDlgItem(hwnd, IDC_END));
+         break;
+
+      case IDC_END:
+         // The worker thread should die now!  Disable the "End" button.
+         EnableWindow(hwndCtl, FALSE);
+
+         // Kill the worker thread passing the address of the block
+         // returned from KillThrd_CreateThread.
+         KillThrd_Kill(s_pkt);
+
+         // Cleanup the resources.  If you'd like, you can use the thread
+         // handle in this structure BEFORE calling KillThrd_Close
+         KillThrd_Close(s_pkt);
+         break;
+
+      case IDCANCEL:              // Allows dialog box to close
+         EndDialog(hwnd, id);
+         break;
+   }
+}
+
+
+//////////////////////////////////////////////////////////////////////////////
+
+
+BOOL WINAPI KTTest_DlgProc (HWND hwnd, UINT uMsg,
+   WPARAM wParam, LPARAM lParam) {
+
+   switch (uMsg) {
+
+      // Standard Window's messages
+      HANDLE_DLGMSG(hwnd, WM_INITDIALOG, KTTest_OnInitDialog);
+      HANDLE_DLGMSG(hwnd, WM_COMMAND,    KTTest_OnCommand);
+   }
+   return(FALSE);                 // We didn't process the message.
+}
+
+
+//////////////////////////////////////////////////////////////////////////////
+
+
+int WINAPI WinMain (HINSTANCE hinstExe, HINSTANCE hinstPrev,
+                    LPSTR lpszCmdLine, int nCmdShow) {
+
+   DialogBox(hinstExe, MAKEINTRESOURCE(IDD_KILLTHRDTEST), NULL,
+             KTTest_DlgProc);
+
+   return(0);
+}
+
+
+//////////////////////////////// End of File /////////////////////////////////</PRE>
+<P></P>
+<P>RESOURCE.H</P>
+<P><BR></P>
+<PRE> //{{NO_DEPENDENCIES}}
+// Microsoft Developer Studio generated include file.
+// Used by KTTest.rc
+//
+#define IDD_KILLTHRDTEST                101
+#define IDC_START                       1008
+#define IDC_END                         1009
+#define IDC_PROGRESS                    1015
+
+// Next default values for new objects
+// 
+#ifdef APSTUDIO_INVOKED
+#ifndef APSTUDIO_READONLY_SYMBOLS
+#define _APS_NEXT_RESOURCE_VALUE        104
+#define _APS_NEXT_COMMAND_VALUE         40001
+#define _APS_NEXT_CONTROL_VALUE         1016
+#define _APS_NEXT_SYMED_VALUE           101
+#endif
+#endif</PRE>
+<P></P>
+<P><img src="WIN32QA4.gif"></P>
+<P><B> Figure 4</B></P>
+<P>The KTTest application's worker thread executes in several phases (described later); it adds an entry to the dialog box's list box as it enters each phase so you can observe the worker thread's progress. While the worker thread is running, you can click the "End worker thread" button which causes the application to call KillThrd_Kill to terminate the worker thread. You can see the various effects of calling KillThrd_Kill by clicking the "End worker thread" button during the worker thread's different phases.</P>
+<P>KillThrd_Kill is asynchronous; it may return before the worker thread is actually terminated. If your application requires the controlling thread to wait until the worker thread has terminated, you can follow the call to KillThrd_Kill with this one line:</P>
+<P> </P>
+<P><BR></P>
+<PRE> WaitForSingleObject(pkt-&gt;m_hThread, INFINITE);</PRE>
+<P> </P>
+<P>After the call to KillThrd_Kill, the UI thread calls KillThrd_Close to cleanup. The user of the KillThrd library is responsible for ensuring that all calls to KillThrd_CreateThread have a matching call to KillThrd_Close.</P>
+<P>The code that implements the worker thread is a little unusual. It starts with the WorkerThread function, which implements an SEH __try block around a call to WorkerThreadWithoutSEH. When an exception is raised, the WorkerThreadExcFilter filter function is called. This exception filter watches for the SE_KILLTHREAD exception, which is raised by the KillThrd library functions. This exception is discussed in more detail below. For testing purposes, the WorkerThreadExcFilter function adds an entry to the list box when it detects the SE_KILLTHREAD exception but always returns EXCEPTION_CONTINUE_SEARCH. This behavior is unusual for filter functions, which usually return either EXCEPTION_CONTINUE_EXECUTION or EXCEPTION_EXECUTE_HANDLER when they recognize a specific exception.</P>
+<P>WorkerThread's __try/__except block is nested inside a __try/__finally block. SEH allows arbitrary nesting. The __finally block is used to add another entry to the list box. This serves both as a notification that the thread is terminating, and as an indication that SEH is functioning properly with the KillThrd library functions.</P>
+<P>WorkerThreadWithoutSEH is called by WorkerThread to do the real work. It creates a C++ object on the stack. The object's constructor and destructor each add entries to the list box. The destructor's list box entry serves both as a notification that the function is exiting, and as an indication that C++ exception handling is functioning properly. The rest of WorkerThreadWithoutSEH steps through each phase, adding an entry to the list box as each phase begins.</P>
+<P>The first phase is "Sleep (3 seconds)." After adding the entry to the list box it executes:</P>
+<P> </P>
+<P><BR></P>
+<PRE> Sleep(3000);</PRE>
+<P> </P>
+<P>This tests the termination of a sleeping thread. While the worker thread is sleeping, it cannot be killed. As soon as the thread awakes, it terminates immediately.</P>
+<P>The second phase is "WaitForSingleObject (3 seconds)." After the list box is updated, the worker thread calls:</P>
+<P> </P>
+<P><BR></P>
+<PRE> WaitForSingleObject((HANDLE) TestClass, 3000);</PRE>
+<P> </P>
+<P>Like Sleep, this phase tests the ability of the UI thread to cleanly kill the worker thread while it is waiting. The thread will not die until the wait completes.</P>
+<P>The third phase, "WaitForMultipleObjects (3 seconds)," is a variation of the previous phase but using WaitForMultipleObjects.</P>
+<P> </P>
+<P><BR></P>
+<PRE> WaitForMultipleObjects(1, &amp;h, TRUE, 3000);</PRE>
+<P> </P>
+<P>Again, the worker will not die until the wait completes. The fourth phase is "Looping a lot, can't be broken." It executes the following:</P>
+<P> </P>
+<P><BR></P>
+<PRE> KillThrd_DelayDeath(TRUE);<BR>ListBox_SetCurSel(hwnd,<BR>   ListBox_AddString(hwnd, 
+                    "Looping a lot, can't be broken"));<BR>for (int n = 0 ; n &lt; 200000; n++) {<BR>   KillThrd_DelayDeath(TRUE);<BR>   free(malloc(10));<BR>   KillThrd_DelayDeath(FALSE);<BR>}<BR>KillThrd_DelayDeath(FALSE);</PRE>
+<P> </P>
+<P>The first call to KillThrd_DelayDeath postpones the worker thread from being killed by KillThrd_Kill. An application would usually call KillThrd_DelayDeath to prevent being killed while performing an operation that shouldn't be interrupted such as a disk update. KillThrd_DelayDeath is the only KillThrd function called by the worker thread instead of the controlling thread. This function takes a BOOL parameter: TRUE to start protection, FALSE to end.</P>
+<P>A DelayDeath count is maintained so multiple calls to KillThrd_DelayDeath(TRUE) are cumulative, and protection does not end until an equal number of calls to KillThrd_DelayDeath(FALSE) are made. This is important because it allows protected code to be written without concern for the current state of protection. When FALSE is passed in and the count reaches zero, a terminate flag (implemented as an event kernel object) is checked and, if a terminate request is pending, the worker thread terminates and the call to KillThrd_DelayDeath never returns.</P>
+<P>The additional calls to KillThrd_DelayDeath inside the loop verify that the cumulative effects of calling KillThrd_DelayDeath are working properly. Passing TRUE causes the protection count to go up to 2. The calls to malloc and free are used because these are exactly the kinds of functions that you'd want to protect. Then KillThrd_DelayDeath(FALSE) brings the protection count down to 1. At no time while in the loop does the count reach 0—this loop cannot be interrupted by KillThread_Kill. Clicking "End worker thread" while in this phase will not result in the immediate termination of the worker thread; instead the request will remain pending until the loop terminates. When the loop terminates, KillThrd_DelayDeath(FALSE) is called one more time to match the call that preceded the loop. The protection count drops to zero, allowing the thread to be terminated if KillThrd_Kill was called.</P>
+<P>The fifth and final phase is "Looping a lot, can be broken." After it updates the list box the worker thread enters a loop that should take a few seconds to complete. Unlike phase four, no calls to KillThread_DelayDeath are made to protect the loop from termination. This tests the immediate termination of a running thread. While in this phase, clicking "End worker thread" will terminate the thread without delay.</P>
+<P>The WorkerMonitorThread function (in KTTEST.CPP) implements an additional thread to monitor the worker thread. Its parameter is a handle to the worker thread's kernel object, and it gets a handle to the dialog box by calling GetForegroundWindow. WaitForSingleObject is called to wait for the worker thread to terminate. (Thread objects become signaled when the thread terminates.) Some time after the thread terminates, the call to WaitForSingleObject returns with WAIT_OBJECT_0 and the monitor thread continues execution. Just before the monitor thread exits, it adds an entry to the list box, and fixes the states of the buttons.</P>
+<P>Now let's turn to the KillThrd library itself, starting with the KillThrd_CreateThread function. The first call to KillThrd_CreateThread will reserve a thread local storage slot by calling TlsAlloc. This TLS slot will be used by the worker thread to store a pointer to its KILLTHRD_WORKERINFO. Then two structures are allocated: KILLTHRD_WORKERINFO for the worker thread and KILLTHRD for the controlling thread (a pointer to this block is KillThrd_CreateThread's return value). The KILLTHRD_WORKERINFO structure is initialized and three kernel objects are created (two mutexes and one event). I'll discuss these when I get to the code that uses them. Next the KILLTHRD structure is initialized. DuplicateHandle is used to create a new process-relative handle for each of the three kernel objects created, causing each object's usage count to be 2. The worker thread and the UI thread each get their own set of handles, thus avoiding the overhead required to coordinate the closing of a single set of handles shared by two threads.</P>
+<P>Finally KillThrd_CreateThread uses _beginthreadex to start the worker thread. A wrapper function, KillThrd_ThreadFunc, is the starting address of the new thread; the worker function is not called directly.</P>
+<P>The wrapper function sets up the exception handlers for the worker thread. The outer __try/_finally block ensures cleanup is performed when an exception other than SE_KILLTHREAD is raised in the worker thread. The inner __try/__except block handles the SE_KILLTHREAD exception. It's needed to prevent the system from popping up a message box to the user.</P>
+<P>Inside the exception blocks the passed-in KILLTHRD_WORKERINFO structure pointer is stored in the reserved TLS slot for later use by KillThrd_DelayDeath. Finally the worker function (given as a parameter to KillThrd_CreateThread) is called and the worker starts working.</P>
+<P>Now let's look at the KillThrd_Kill function, which implements the key technique of the KillThrd library. First it gets the m_hmtxControl mutex to prevent the worker thread from entering the KillThrd_DelayDeath function at the same time the controlling thread is executing KillThrd_Kill. If the worker cannot be killed immediately because it is delaying its death, the m_heventEnd event is set and it is assumed the thread will terminate itself when it calls KillThrd_DelayDeath(FALSE).</P>
+<P>If the thread can be killed now, SuspendThread stops the worker thread. Then if the thread has not already terminated, GetThreadContext gets the worker thread's context. ContextFlags is set to CONTEXT_CONTROL to get a copy of the control registers, which includes the instruction pointer. The CONTEXT structure varies between CPU platforms. The PROGCTR macro, defined in KILLTHRD.CPP, accesses the instruction pointer member of CONTEXT. The instruction pointer is changed to point to KillThrd_ForceDeath; then the thread is resumed using ResumeThread. This is how you get the worker thread to jump to the KillThrd_ForceDeath function. If the worker thread is sleeping, waiting, or suspended, it will not continue execution until the system restarts the thread.</P>
+<P>The KillThrd_ForceDeath function raises an SE_KILLTHREAD exception. The SEH mechanism will start calling exception filters looking for a handler; it should find the one set up by the KillThrd_ThreadFunc wrapper function:</P>
+<P> </P>
+<P><BR></P>
+<PRE> __except ((GetExceptionCode() == SE_KILLTHREAD) ? 
+                            EXCEPTION_EXECUTE_HANDLER : 
+                           EXCEPTION_CONTINUE_SEARCH) {</PRE>
+<P> </P>
+<P><BR></P>
+<PRE>                     .
+                    .
+                    .
+}</PRE>
+<P> </P>
+<P>This is what you want to happen, but there is a problem under Windows 95. When you interrupt a worker thread that is servicing a system call on Windows 95, that thread may be in a state that causes only system exception handlers to be called while user exception handlers are skipped. When this is the case, the exception raised by KillThrd_ForceDeath is not offered to any of the user exception filters and none of the user __finally blocks are executed. When the system exception handler gets the SE_KILLTHREAD exception, it presents the user with the "This program has performed an illegal operation and will be shut down" message box and the application is terminated. </P>
+<P>When KillThrd_ThreadFunc's exception filter returns EXCEPTION_EXECUTE_HANDLER, the SEH system will unwind the stack, calling any active __finally blocks and adjusting the thread's stack pointer. C++ exception handling will also proceed normally because it's implemented using SEH. Exception handling does expose one potential problem. It's possible to hang every application's user-interface on Windows 95 when a terminating thread that has been yanked from processing a system call proceeds to hang during exception handling.</P>
+<P>The KillThrd library offers the following benefits over TerminateThread: proper exception handling in the terminating thread, DLL notification of thread termination, and freeing of the terminated thread's stack. It does not solve the problem of abandonment of critical sections by the C run-time DLL. It's too bad there is not a version of the C run-time that protects its critical sections with __try/__finally blocks. If you have the C run-time source, you could, of course, create such a version. But I don't recommend it because you'd have to redo it with each new version of the  C run-time. Instead I suggest writing wrapper functions that use KillThrd_DelayDeath to protect C run-time calls.</P>
+<P>If you are planning to use the KillThrd library, or the technique it presents, you should understand that it is impossible to evaluate the safety of terminating another thread unless you have specific knowledge of what that thread is doing. Let me say this as clearly as I can: misuse of these functions is dangerous, and can result in data loss or cause system instability. But KillThrd can be very useful when you need to terminate a worker thread.</P>
+<P>A special thanks to Jim Harkins for his assistance with ideas and organization.</P>
+
+<TABLE COLS="2" BORDER="0"><COLGROUP><COL WIDTH="221pt" VALIGN="TOP"><COL WIDTH="221pt" VALIGN="TOP"></COLGROUP><TBODY><TR><TD COLSPAN="2" VALIGN="TOP"><P> Have a question about programming in Win32? You can mail it directly to Win32 Q&amp;A, Microsoft Systems Journal, 825 Eighth Avenue, 18th Floor, New York, New York 10019, or send it to MSJ (re: Win32 Q&amp;A) via:</P></TD></TR><TR><TD VALIGN="TOP"><P> <BR>Internet:</P>
+<P><BR>Internet:</P></TD><TD VALIGN="TOP"><P>Jeffrey Richter<BR>v-jeffrr@microsoft.com</P>
+<P>Eric Maffei<BR>ericm@microsoft.com</P></TD></TR></TBODY></TABLE>
+<P><BR></P><P><I>This article is reproduced from Microsoft Systems Journal. Copyright © 1995 by Miller Freeman, Inc. All rights are reserved. No part of this article may be reproduced in any fashion (except in brief quotations used in critical articles and reviews) without the prior consent of Miller Freeman.</I></P>
+<P>To contact Miller Freeman regarding subscription information, call (800) 666-1084 in the U.S., or (303) 447-9330 in all other countries. For other inquiries, call (415) 358-9500.</P>
+<P></P></font></body></HTML>

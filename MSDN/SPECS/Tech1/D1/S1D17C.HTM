@@ -1,0 +1,81 @@
+<HTML><HEAD><META HTTP-EQUIV="Content-Type" Content="text/html; charset=Windows-1252"><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Managing the Object</TITLE><style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD><BODY BGCOLOR="#FFFFFF">
+
+</OBJECT></FORM>
+<H2>Managing the Object</H2>  </P>
+Once an object is initialized, it is entirely up to the client to determine what it intends to do with that object. It is often the case that the initializing interface is not the "working" interface through which the client will primarily use the object. The creation sequence only nets the client a single interface pointer that has a limited scope of functionality. If the client wishes to perform an operation outside that scope, it must call the known interface's QueryInterface function to ask for another interface on the same object.</P>
+For example, say a client has created and initialized an object but now wishes to obtain a graphical presentation, say a bitmap, from that object by calling IDataObject::GetData (see Chapter 10 for details on this function). The client must call QueryInterface to obtain an IDataObject pointer before calling the function.</P>
+It is important to note that <I>all operations on that object will occur through calls to the member functions of the object's various interfaces</I>. Any additional API functions that the client might call to affect the object itself are usually wrapper functions of common sequences of interface function calls. There simply is no other way to affect the object other than through its interfaces.</P>
+Because a client must ask for an interface before it can possibly ask the object to perform the actions defined in the interface, the client cannot ask the object to perform an action the object does not support. This is a primary strength of the QueryInterface function as described in the early chapters of this document. Calling QueryInterface for access to an object's functionality is not problematic nor inconvenient because the client usually makes the call specifically at the point where the client wants to perform some action on the object. That is, clients generally do not call QueryInterface for all possible interfaces after the object is created so as to have all the pointers on hand—instead, the client calls QueryInterface before attempting to perform some action with the object.</P>
+In practice this means that the client must be prepared for the failure of a call to QueryInterface. Instead of being a complete pain to implementation, such preparation defines a mechanism through which the client can make dynamic choices based on the functionality of the object itself on an object-by-object basis.</P>
+For example, consider a client application that has created a number of objects and it now wants to save the application's state, which includes saving the state of each object. Let's say the client is using structured storage for its native file representation, so its first choice will be to assign an individual storage element in that file for each object. Each object can then store structured information itself and it indicates its ability to do by implementing the IPersistStorage interface. However, some object may not know how to write to a storage but know how to write to a stream and indicate the capability by implementing IPersistStream. Yet others may only know how to write information to a file themselves and thus implement IPersistFile. Finally, some objects may not know how to serialize themselves at all, but can provide a binary memory copy of the their native data through IDataObject.</P>
+In this case the client's strategy will be as follows: if an object supports IPersistStorage, then give it an IStorage instance and ask it to save its data into it by calling IPersistStorage::Save. If that object does not provide such support, check if it supports IPersistStream, and if so, create a client-controlled stream for it (in perhaps a separate client-controlled storage element) and pass that IStream pointer to the object through IPersistStream::Save. If the object does not support streams, then check for IPersistFile. If the object supports serialization to a file, then have the object write its data into a temporary file by calling IPersistFile::Save, then make a binary copy of that file in a client-controlled stream element within a client-controlled storage element. If all else fails, attempt to retrieve the object's binary data from IDataObject::GetData using the first format the object supports, and write that binary data into a client-controlled stream in a client-controlled storage.</P>
+Code for such a strategy would be structured something like the following pseudo-code for a "save object" function in the client:</P>
+  </P>
+<BR></P>
+<pre><code>BOOL SaveObject(IUnknown * pUnkObj)
+.....{
+.....pUnkObj-&gt;QueryInterface(IID_IPersistStorage)
+
+.....if (success)
+..........{
+..........create a storage element for the object
+..........call IPersistStorage::Save
+..........call IPersistStorage::Release
+..........return TRUE
+..........}
+
+.....//All other cases use a client-controlled stream
+.....create a stream element for the object in some storage
+
+.....//IPersistStorage not supported, try IPersistStream
+.....pUnkObj-&gt;QueryInterface(IID_IPersistStream)
+.....
+.....if (success)
+..........{
+..........call IPersistStream::Save
+..........call IPersistStream::Release
+..........return TRUE
+..........}
+
+.....//IPersistStream not supported, try IPersistFile
+.....pUnkObj-&gt;QueryInterface(IID_IPersistFile)
+.....
+.....if (success)
+..........{
+..........//Save to a temp file
+..........call IPersistFile::Save("objdata.tmp");
+..........call IPersistFile::Release
+..........read data from temp file
+..........write data to the stream
+..........return TRUE
+..........}
+
+.....//All else failed, try IDataObject
+.....pUnkObj-&gt;QueryInterface(IID_IDataObject)
+
+.....if (success)
+..........{
+..........call IDataObject::EnumFormatEtc
+..........call IEnumFORMATETC to get the first format (assume it's native)
+..........call IEnumFORMATETC::Release
+
+..........call IDataObject::GetData for the format, asking for global memory
+..........call IDataObject::Release
+
+..........Lock global memory and write to stream
+..........Free global memory
+..........return TRUE
+..........}
+
+.....//Everything failed, so give up
+.....destroy stream we created:  not using it.
+.....return FALSE
+.....}</code></pre>
+  </P>
+In this example the client is prepared for many different types of objects and how they might provide persistent information (and using IDataObject::GetData here is stretching the concept somewhat, but shows that the client has many choices). Based on the results of QueryInterface the client decides at run-time how to save each individual object.</P>
+Reloading these objects would be a similar procedure, but the client would know, from the structure of its storage and other information it saved about the objects itself, which method to use to reload the object from the storage. The client wants to insure that it uses the same method to load the object that it did for saving it originally, that is, use the same interface instead of querying for the best one. The reason is that while the data was passively stored on disk, the object that wrote that data might have been updated such that where it once only supported IPersistStream, for example, it now supports IPersistStorage. In that case the client should ask it to load the data using IPersistStream::Load.</P>
+However, when the client goes to save the object again, it will now successfully find that the object supports IPersistStorage and can now have the object save into a storage element instead. (The container would also insure that the old client-controlled stream was deleted as it is no longer in use for that object.) This demonstrates how an object can be updated and new interfaces supported without <I>any</I> recompilation on the part of existing clients while at the same time <I>suddenly working with clients on a higher level of integration than before</I>. In order to remain compatible the object must insure that it supports the older interfaces (such as IPersistStream) but is free to add new contracts—new interfaces such as IPersistStorage—as it wants to provide new functionality.</P>
+The point of this example, which is also true for clients that use any other interfaces an object might support in other scenarios, is that the client is empowered to make dynamic decisions on a per-object basis through the QueryInterface function. Containers programmed to be dynamic as such allow object to improve independently while insuring that the container will work as good—and generally better—as it always has with any given object. All of this is due to the powerful and important QueryInterface mechanism that for all intents and purposes is the single most important aspect of true system component software.</P>
+</P>
+ </P></BODY></HTML>

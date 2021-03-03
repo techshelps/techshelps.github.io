@@ -1,0 +1,542 @@
+<HTML><HEAD><script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Source Code for scanscsi.c</TITLE><META HTTP-EQUIV="CONTENT-TYPE" CONTENT="text/html; charset= iso-8859-1"><style>@import url(/msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="/msdn_ie3.css"></HEAD><BODY BGCOLOR="#FFFFFF">
+<FONT FACE="verdana,arial,helvetica" SIZE="2">
+<H3>Source Code for scanscsi.c </H3><P><BR></P>
+<PRE>// **************************************************************************
+//
+//         Adaptec, Inc.
+//
+//         ASPI Developer's  Kit
+//          Copyright 1992-1994
+//
+// **************************************************************************
+// 
+//  This software contains the valuable trade secrets of Adaptec.
+//  The software is protected under copyright laws as an 
+//  unpublished work of Adaptec.  Notice is for informational
+//  purposes only and does not imply publication.  The user of this
+//  software may make copies of the software for use with parts 
+//  manufactures by Adaptec or under license from Adaptec and for
+//  no other use.
+//
+// **************************************************************************
+//
+//  Program Names:  SCAN16.EXE    SCAN32.EXE
+//
+//  Version:    v2.0      v2.0
+//
+//  Source Code:   SCANSCSI.C    SCANSCSI.C
+//        SCANSCSI.RC    SCANSCSI.RC
+//        RESOURCE.H    RESOURCE.H
+//        SCAN16.DEF    SCAN32.DEF
+//        SCAN16.MAK    SCAN32.MAK
+//        SCSIDEFS.H    SCSIDEFS.H
+//        WINASPI.H     WNASPI32.H
+//
+//  Description:   The ASPI test utility programs included here
+//        will run on Windows 3.0 or later.  The utility
+//        SCAN32.EXE was written for Windows 95 using the
+//        ASPI for WIN32 specifications.  Both programs
+//        open a window and loop continuously while
+//        displaying all of the SCSI devices found on the
+//        SCSI bus.  The user can exit at any time by
+//        pressing ALT F4 or by selecting EXIT from the
+//        applications menu.  The user can enable and 
+//        disable, on a per target basis, which SCSI targets
+//        should get scanned.  
+//        You should have a basic understanding of writing
+//        Windows applications before looking at this 
+//        source code.
+//        Note that this sample code does minimal error 
+//        checking and no timeout handling.  Your application
+//        should be more robust.  This code also demonstrates
+//        the polling and posting techniques of determining
+//        the completion of the SCSI command.  REFER TO THE 
+//        "ASPI FOR WINDOWS" SPECIFICATION FOR MORE
+//        INFORMATION.
+//
+//
+// ************************************************************************** 
+#pragma pack(1)
+#include &lt;windows.h&gt;
+#include &lt;string.h&gt;
+#include "resource.h"
+#include "scsidefs.h"
+
+#ifdef WIN32
+ #include "wnaspi32.h"
+#else
+ #include "winaspi.h"  
+#endif
+
+#ifdef WIN32
+ LRESULT CALLBACK WndProc(HWND,UINT,WPARAM,LPARAM);
+#else
+ long FAR PASCAL WndProc(HWND,UINT,UINT,LONG);
+#endif
+
+void ScanNextTarget(HWND);
+
+#ifdef WIN32
+ void ASPIPostProc(PSRB_ExecSCSICmd); 
+ void DisplaySCSIID (HWND,void *);
+#else
+ void _loadds __far __pascal ASPIPostProc(LPSRB);
+ void DisplaySCSIID (HWND,SRB_ExecSCSICmd6 far *);
+#endif
+
+HWND  PostHWND;
+WORD   NumAdapters;
+RECT   rect;
+int    UsePosting;
+char   szAppName[] = "SCANSCSI" ;
+int    cxChar,cyChar;
+
+#ifndef WIN32
+ FARPROC   lpfnASPIPostProc;
+#endif
+
+// **************************************************************************
+//
+//            WINMAIN
+//
+// **************************************************************************
+int PASCAL WinMain(HANDLE hInstance, HANDLE hPrevInstance,
+                    LPSTR lpszCmdParam, int nCmdShow)
+{
+ 
+ HWND        hwnd;
+ MSG         msg ;
+ WNDCLASS    wndclass ; 
+
+ #ifdef WIN32
+  DWORD  ASPIStatus;
+ #else
+  WORD ASPIStatus;
+ #endif
+ 
+ if (!hPrevInstance)
+ {
+  wndclass.style    = CS_HREDRAW | CS_VREDRAW ;
+  wndclass.lpfnWndProc  = WndProc ;
+  wndclass.cbClsExtra   = 0 ;
+  wndclass.cbWndExtra   = 0 ;
+  wndclass.hInstance   = hInstance ;
+  wndclass.hIcon    = LoadIcon (hInstance,MAKEINTRESOURCE(SCANSCSI)) ;
+  wndclass.hCursor    = LoadCursor (NULL, IDC_ARROW) ;
+  wndclass.hbrBackground  = GetStockObject (WHITE_BRUSH);
+  wndclass.lpszMenuName  = MAKEINTRESOURCE(Menu1);
+  wndclass.lpszClassName  = szAppName ;
+
+  RegisterClass (&amp;wndclass) ;
+ }
+ hwnd = CreateWindow (
+    szAppName,      // window class name
+    "SCANSCSI",     // window caption
+    WS_OVERLAPPEDWINDOW,  // window style
+    CW_USEDEFAULT,     // initial x position
+    CW_USEDEFAULT,    // initial y position
+    CW_USEDEFAULT,    // initial x size
+    CW_USEDEFAULT,    // initial y size
+    NULL,       // parent window handle
+    NULL,       // window menu handle
+    hInstance,     // program instance handle
+    NULL) ;      // creation parameters
+  
+ ShowWindow (hwnd, nCmdShow) ;
+// **************************************************************************
+// *
+// *  Here we check to make sure that ASPI for Windows is resident.
+// *  If ASPI for Windows or ASPI for WIN32 is not resident it is
+// *  suggested that you provide more user feedback/help than what is
+// *  shown in this sample code.
+// *
+// **************************************************************************
+
+#ifdef WIN32
+  ASPIStatus = GetASPI32SupportInfo();
+  switch (HIBYTE(LOWORD(ASPIStatus)))
+#else
+  ASPIStatus = GetASPISupportInfo();
+  switch (HIBYTE(ASPIStatus))
+#endif
+  {
+  case SS_COMP:      // ASPI for Windows is resident.
+   #ifdef WIN32
+    NumAdapters = (LOWORD(LOBYTE(ASPIStatus)));
+   #else
+    NumAdapters = LOBYTE(ASPIStatus);
+   #endif
+   MessageBox(hwnd,"ASPI for Windows is resident!",
+       szAppName,MB_ICONINFORMATION);
+   break; 
+  default:
+   MessageBox(hwnd,"ASPI for Windows not available!",
+       szAppName,MB_ICONSTOP);  
+   return 0;
+  }
+
+// **************************************************************************
+// *
+// *  This code demonstrates the posting abilities of ASPI for Windows 
+// *   as well as the polling technique.  Ask the user which method they 
+// *  would like to use to indicate completion of the SCSI request.
+// *
+// **************************************************************************
+ UsePosting = MessageBox(hwnd,"Use ASPI for Windows Posting?",
+        szAppName,
+        MB_YESNO | MB_ICONQUESTION);
+
+#ifndef WIN32       // NOTE: No need to lock buffers in WIN32.
+ LockData(0);
+
+ lpfnASPIPostProc = MakeProcInstance ((FARPROC)ASPIPostProc, hInstance);
+#endif
+ PostHWND = hwnd;
+ if (UsePosting == IDYES)
+ {
+  ScanNextTarget(hwnd);
+  while (GetMessage (&amp;msg, NULL, 0, 0))
+  {
+   TranslateMessage (&amp;msg) ;
+   DispatchMessage (&amp;msg) ;
+  }
+ }
+ else
+ {
+  while (TRUE)
+  {
+   if (PeekMessage (&amp;msg,NULL,0,0,PM_REMOVE))
+   {
+    if (msg.message == WM_QUIT)
+     break;
+    
+    TranslateMessage(&amp;msg);
+    DispatchMessage(&amp;msg);
+   }
+   else        // While the processor is free, check
+    ScanNextTarget(hwnd);  // the SCSI bus status.
+  }
+ }
+
+ ScanNextTarget(0);      // Finish any pending ASPI requests
+ return msg.wParam ;
+}
+// **************************************************************************
+// *
+// *  Procedure: WndProc()
+// *
+// **************************************************************************
+#ifdef WIN32
+ LRESULT CALLBACK WndProc(HWND hwnd,UINT message,WPARAM wParam,
+ LPARAM lParam)
+#else
+ long __far __pascal _export WndProc(HWND hwnd,UINT message,WPARAM
+ wParam,LPARAM lParam)
+#endif
+{
+ HDC           hdc;
+ PAINTSTRUCT   ps;
+ TEXTMETRIC  tm;
+ HMENU    hMenu;
+ static short  cxClient, cyClient;
+ int     i=0;
+ WORD    status;
+
+ #ifdef WIN32
+  SRB_ExecSCSICmd *SRBPtr;
+ #else
+  SRB_ExecSCSICmd6 far *SRBPtr;
+ #endif
+
+ switch (message)
+ {
+  case WM_CREATE:
+       hdc = GetDC(hwnd);
+       SelectObject(hdc,GetStockObject(SYSTEM_FIXED_FONT));
+       GetTextMetrics(hdc,&amp;tm);
+       cxChar = tm.tmAveCharWidth;
+       cyChar = tm.tmHeight;
+       ReleaseDC(hwnd,hdc); 
+       rect.top = 0;
+       return 0;
+ 
+  case WM_PAINT:
+   InvalidateRect(hwnd,NULL,TRUE);
+   hdc = BeginPaint(hwnd,&amp;ps) ;
+   EndPaint (hwnd,&amp;ps) ;
+   return 0 ;
+
+  case WM_SIZE:
+   cxClient = LOWORD(lParam);
+   cyClient = HIWORD(lParam);
+   rect.right  = LOWORD(lParam);
+   rect.bottom = HIWORD(lParam);
+   UpdateWindow(hwnd);
+   return 0;
+
+  case WM_COMMAND:
+   hMenu = GetMenu(hwnd);
+   switch (wParam)
+   {
+    case ID_FILE_EXIT:
+     SendMessage(hwnd,WM_CLOSE,0,0L);
+     return 0;
+
+    default:
+     // 10 = target #0
+     // 11 = target #1
+     // 12 = target #2
+     // 13 = target #3
+     // 14 = target #4
+     // 15 = target #5
+     // 16 = target #6
+     // 17 = target #7
+
+     // Toggle the SCSI target scan status (ENABLED/DISABELD)
+     if ((wParam &gt;= 10 &amp;&amp; wParam &lt;= 17) ||
+      (wParam &gt;= 20 &amp;&amp; wParam &lt;= 27))
+     {
+      status = GetMenuState(hMenu,wParam,MF_BYCOMMAND) &amp; 
+           MF_CHECKED;
+      CheckMenuItem(hMenu,wParam,MF_BYCOMMAND | ((status) ? 
+      MF_UNCHECKED:MF_CHECKED));
+     }
+     return 0;
+   }
+
+  case WM_ASPIPOST:
+   #ifdef WIN32
+    SRBPtr = (PSRB_ExecSCSICmd)lParam;   
+   #else
+    SRBPtr = (SRB_ExecSCSICmd6 far *)lParam;
+   #endif
+   DisplaySCSIID(hwnd,SRBPtr);
+   ScanNextTarget(hwnd);
+   return 0;
+
+  case WM_DESTROY:
+   PostQuitMessage(0) ;
+   return 0 ;
+ }
+ return DefWindowProc (hwnd, message, wParam, lParam) ;
+}
+// **************************************************************************
+//
+//  Function:  ScanNextTarget
+//
+// Description:  If polling is enabled, this function is called
+//      whenever Windows is idle.  If a SCSI Inquiry command
+//      is still in progress,  this routine will return
+//      control back to the caller to free up the CPU. If
+//      POSTING is enabled,  this function is called when the
+//      SCSI Inquiry command has completed.
+//
+//  hwnd -   This parameter contains the Window handle where the 
+//      device names should be listed.  If hwnd equals zero,
+//      this indicates that we're exiting this program and this
+//      routine should return only after all outstanding ASPI
+//      requests have completed.
+//
+// Returns -   Nothing
+//
+// **************************************************************************
+void ScanNextTarget(HWND hwnd)
+{          
+ HMENU    hMenu;
+ static WORD  SRBIsPending=FALSE;
+ static BYTE  target_id=7,adapter_id=0;
+ static char  InquiryBuffer[100];
+ WORD    status, j;
+ #ifdef WIN32
+  static  SRB_ExecSCSICmd ExecSRB;
+ #else
+  static  SRB_ExecSCSICmd6 ExecSRB;
+ #endif
+         // If the user is exiting the program, wait
+         // until all pending ASPI requests are
+ if (hwnd==0)     //  finished.
+ {
+  if (SRBIsPending==TRUE)  
+  {
+   while (ExecSRB.SRB_Status == SS_PENDING);
+  }
+  return;
+ }
+// ***************************************************************************
+// -
+// -  If we are still waiting for the previous SCSI Inquiry to finish,
+// - simply return back to the caller to free up the CPU.
+// - 
+// ***************************************************************************
+ if (UsePosting==IDNO &amp;&amp; SRBIsPending==TRUE &amp;&amp; 
+  ExecSRB.SRB_Status==SS_PENDING)
+ {
+  return;
+ }
+  
+ if (SRBIsPending==FALSE || UsePosting==IDYES)
+ {
+  hMenu = GetMenu(hwnd);
+  target_id = (target_id + 1)%8; // Move to next SCSI ID#
+
+  if (target_id == 0)
+  {
+   adapter_id++;
+   if (adapter_id &gt;= (BYTE)NumAdapters)
+    adapter_id = 0; 
+  }
+
+            // Here is where we check 
+  for (j=0;j&lt;8;j++)     // the menu status.
+  {
+   status = GetMenuState(hMenu,target_id+10,MF_BYCOMMAND) &amp;
+        MF_CHECKED;
+
+   if (status == 0)
+   {
+    target_id = (target_id + 1) % 8;  // Move to next SCSI ID#
+    if (target_id == 0)
+    {
+     adapter_id++;
+     if (adapter_id = (BYTE)NumAdapters)
+     {
+      adapter_id = 0;
+     }
+    }
+   }
+   else
+    break;
+  }
+ 
+// Now we construct the SCSI Inquiry SRB and send it to ASPI!
+ 
+  if (j == 8)      // Return if user disabled scanning of all
+  {         //  SCSI targets.
+   return;
+  }
+  ExecSRB.SRB_Cmd     = SC_EXEC_SCSI_CMD;
+  ExecSRB.SRB_HaId     = adapter_id;
+  ExecSRB.SRB_Flags    = SRB_DIR_IN | SRB_DIR_SCSI;
+  ExecSRB.SRB_Target    = target_id;
+  ExecSRB.SRB_BufPointer   = InquiryBuffer;
+  ExecSRB.SRB_BufLen    = 32;
+  ExecSRB.SRB_SenseLen   = SENSE_LEN;
+  ExecSRB.SRB_CDBLen    = 6;
+  ExecSRB.CDBByte[0]    = SCSI_INQUIRY; 
+  ExecSRB.CDBByte[1]    = 0;
+  ExecSRB.CDBByte[2]    = 0;
+  ExecSRB.CDBByte[3]    = 0;
+  ExecSRB.CDBByte[4]    = 32;
+  ExecSRB.CDBByte[5]    = 0;
+
+  if (UsePosting == IDYES)
+  {
+   ExecSRB.SRB_Flags  |= SRB_POSTING;
+   #ifdef WIN32
+    ExecSRB.SRB_PostProc = (void *)ASPIPostProc;
+   #else
+    ExecSRB.SRB_PostProc = lpfnASPIPostProc;
+   #endif
+  }
+  #ifdef WIN32
+   SendASPI32Command(&amp;ExecSRB);
+  #else
+   SendASPICommand((LPSRB)&amp;ExecSRB);
+  #endif
+  SRBIsPending = TRUE;     // ASPI command in process
+  return;
+ } 
+ if (UsePosting == IDNO)
+ {
+  SRBIsPending=FALSE;      // Inquiry command has completed
+  DisplaySCSIID(hwnd,&amp;ExecSRB);
+ }
+ return;
+}
+
+// **************************************************************************
+// Function:  DisplaySCSIID
+//
+// Description: This function will scroll the window down and display
+//     the device name of the target we just sent a SCSI Inquiry 
+//     command.
+//
+// hwnd     - This parameter contains the window handle where the device
+//     name should be displayed.
+//
+// ExecSRB  -  This parameter points to the ASPI SCSI Request Block (SRB)   
+//     which has completed.
+//
+// Returns:  Nothing
+// **************************************************************************
+#ifdef WIN32
+void DisplaySCSIID ( HWND hwnd, SRB_ExecSCSICmd *ExecSRB)
+#else
+void DisplaySCSIID(HWND hwnd,SRB_ExecSCSICmd6 far *ExecSRB)
+#endif
+{
+ HDC   hdc;
+ char  string_buf[80];
+ int   string_len;
+ hdc = GetDC (hwnd);
+ ScrollDC (hdc, 0, -cyChar, &amp;rect, &amp;rect, NULL, NULL);
+ SelectObject (hdc, GetStockObject (SYSTEM_FIXED_FONT));
+ 
+ if (ExecSRB-&gt;SRB_Status==SS_COMP)
+ {
+  wsprintf ( string_buf,
+      "Host Adapter #%d - SCSI ID #%d:  ",
+      (BYTE) ExecSRB-&gt;SRB_HaId,
+      (BYTE) ExecSRB-&gt;SRB_Target );
+  #ifdef WIN32
+   strncat(string_buf,&amp;ExecSRB-&gt;SRB_BufPointer[8],28);
+  #else
+   lstrcat(string_buf,&amp;ExecSRB-&gt;SRB_BufPointer[8] );
+  #endif
+  string_len = lstrlen(string_buf);
+ }
+ else
+ {
+  string_len = wsprintf (string_buf,
+         "Host Adapter #%d - SCSI ID #%d:  %-32s",
+         (BYTE)ExecSRB-&gt;SRB_HaId,
+         (BYTE)ExecSRB-&gt;SRB_Target,
+         (LPSTR)"No Device");
+ }
+ TextOut(hdc,cxChar,rect.bottom-cyChar,string_buf,string_len);
+
+ ReleaseDC(hwnd,hdc);
+ ValidateRect(hwnd,NULL);
+ return;
+}
+// ***************************************************************************
+//
+// Function:   ASPIPostProc
+//
+// Description:  If POSTING is enabled,  this function is called by ASPI
+//      for Windows when the SCSI request has completed.  This
+//      sample function simply posts a message to our Window
+//      handle to indicate that the SCSI request has completed.
+//
+// DoneSRB   This parameter points to the ASPI SCSI Request Block (SRB)
+//      which has completed.
+//
+// Returns     Nothing
+//****************************************************************************
+#ifdef WIN32
+ void ASPIPostProc(PSRB_ExecSCSICmd DoneSRB)
+ {
+  PostMessage(PostHWND,WM_ASPIPOST,0,(LPARAM)DoneSRB);
+  return;
+ }
+#else
+ void _loadds __far __pascal ASPIPostProc(LPSRB DoneSRB)
+ {
+  PostMessage (PostHWND,WM_ASPIPOST,
+      (WORD)((SRB_ExecSCSICmd6 far *)DoneSRB)-&gt;SRB_Status,
+      (DWORD)DoneSRB);
+  return;
+ }
+#endif
+</PRE></FONT></BODY></HTML>

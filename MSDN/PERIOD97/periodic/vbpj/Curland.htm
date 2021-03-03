@@ -1,0 +1,114 @@
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=windows-1252">
+<META NAME="Generator" CONTENT="Microsoft Word 97">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>Give Your Classes GetObject Support</TITLE>
+
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY bgcolor="white">
+
+<font face="verdana,arial,helvetica" size="2">
+<DIR>
+
+<h1>Give Your Classes GetObject Support</h1>
+
+<P>When you want to retrieve a reference to a running instance of a class instead of creating a new one, you use the multipurpose GetObject function. GetObject should be familiar to VB programmers who have programmed external object models. The usage GetObject("", "MyProj.MyClass") starts a new instance of the specified class, for which free support is available when you create an ActiveX server in VB. But the alternate syntax GetObject(, "MyProj.MyClass") makes Windows retrieve a reference to a running instance of your object, if one is available. Now I'll show you how to add this functionality to your ActiveX EXE project using the smallest possible amount of code.</P>
+
+<P>GetObject with the first parameter omitted checks the system's running object table (ROT) to see if an instance of the class requested is available. This form of GetObject is simply a wrapper on the GetActiveObject API. GetActiveObject takes a pointer to a CLSID-CLSID is just a fancy name for a GUID-and returns either a pointer to an object that has previously been registered in the ROT, or an error if the requested object is currently unavailable. </P>
+
+<P>To fully understand GetObject, you first need to know how GetObject turns the string "MyProj.MyClass" into a CLSID. Identifiers of the form project.class are referred to as Program Identifiers or ProgIDs. When you register an ActiveX server, you put a key in the registry of the form HKEY_CLASSES_ROOT\ProgID\CLSID={xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}. The value of the ProgID\CLSID key is a string representation of a GUID. The GUID data in the registry is easily converted to the numeric form required by the ROT API calls with the CLSIDFromProgID API call. Servers written in C/C++ have direct access to their CLSIDs, which is not the case in VB. However, the helper objects I've created leverage the fact that all VB-created servers correctly register a ProgID. You simply provide the string identifier you're familiar with and let the helpers do the work.</P>
+<P>It is crucial to the correct behavior of GetObject that you place the correct CLSID in the ROT. It is a common error to use the interface identifier (the GUID used with the Set statement) instead of the CLSID (the GUID used with the New, CreateObject, and GetObject statements).</P>
+<h2><P>PLACE OBJECT IN THE ROT</h2>
+
+<P>To place an object in the ROT, you create the object, get its CLSID, and call RegisterActiveObject, which makes an entry in the table and gives back a cookie. You must then store this cookie so you can pass it to RevokeActiveObject when it's time to remove the object from the table.</P>
+<P>The RegisterActiveObject and RevokeActiveObject APIs are easy enough to use at first glance, but there are some serious issues. The first issue is that, unlike other system pieces, the ROT never cleans up after itself. If you shut down without calling RevokeActiveObject, the entry you made will remain in the ROT until you reboot. The second issue is that if you apply RegisterActiveObject directly to a reference to your VB class, Class_Terminate will never fire because RegisterActiveObject actually changes the reference count on your object. To correctly shut down your object, you would need to call RevokeActiveObject explicitly by calling a method on your object.</P>
+<P>Because you want your objects to terminate when the last non-system reference is set to Nothing, this situation is not acceptable. You can use my ROTHook objects to register yourself as shown in the code snippet. Note that your project must be an ActiveX EXE, your class must be creatable, and the project must be correctly registered (proper registration is free from VB). This is the only required code:</P>
+<pre><FONT FACE="Courier New" SIZE="2">
+<B><P>Private</B> m_ROTHook <B>As</B> IROTHook</P>
+<B><P>Private</B> <B>Sub</B> Class_Initialize()</P>
+<P>&#9;<B>Set</B> m_ROTHook = New IROTHook</P>
+<P>&#9;m_ROTHook.ExposeObject Me, _<BR>
+&#9;&#9;"MyProj.TestObject" </P>
+<B><P>End</B> <B>Sub</P>
+<P>Private</B> <B>Sub</B> Class_Terminate()</P>
+<P>&#9;<B>If</B> <B>Not</B> m_ROTHook <B>Is</B> <B>Nothing</B> <B>Then</B> _<BR>
+&#9;&#9;m_ROTHook.HideObject</P>
+<B><P>End</B> <B>Sub</P></B>
+</font></pre>
+<P>I intentionally omitted the steps for getting access to the IROTHook interface and NewROTHook function because there are two ways to include this functionality in your project. The first step is the same for both ways: add a reference to <I>ROT Support Type Definitions</I> (ROTTypes.tlb) to your project (<I>do not</I> redistribute ROTTypes.tlb with a setup program). For the second step, either add a reference to <I>ROT Support Objects</I> (ROTHook.dll), or add the files ROTHook.cls and ROTHook.bas to your project. If you choose the first option, then you'll have to include ROTHook.dll with your distribution.</P>
+<P>Which option should you choose? I'd recommend including the files in your project. Of course, this isn't the first time programmers have asked this question. You must always de-cide whether components, which you must maintain and distribute (and some other program can potentially mess up), are more suitable than including code in your own project. In some cases, placing code that has specific termination requirements (that is, when you can't push the Stop button or call End), in a compiled component can be beneficial because the termination sequence is always completed. </P>
+<P>Because of the nature of the ROT, you can't use the Stop button anyway, even while using the dll. So, you don't gain any debugging ease by using the compiled component. In fact, until you're nearly finished with your project and set the NOROTDEBUG conditional compilation argument to a True value, including the files instead of referencing the server makes debugging easier. If you need to terminate abnormally, just run ClearROT in the Debug window and press the Stop button (no guarantees for all situations, but you won't leave droppings in the ROT: always obey the scoop law). For your debugging amusement, I've also included two other functions, GuidString and VBRefCount, under the Not CBool(NOROTDEBUG) switch.</P>
+<P>The ROT and GetObject support is a perfect match for the new VB5 GlobalMultiUse instancing value. If you register your global objects in the ROT and add a reference to your server from a project that consumes your server, you don't have to call New, CreateObject, or GetObject anywhere in your code. If the project name for your server is <I>Really</I> and you have a GlobalMultiUse object with a Cool method, then running Really.Cool will get a running instance of your object (if available) or start a new instance for you. Using this coding technique, you save yourself from the error-trapping code required to determine whether an instance is currently running.</P>
+<h2><P>ENSURE CORRECT TERMINATION</h2>
+<P>After solving the reference-counting issues, the next hardest design issue for the ROTHook object is the problem of preventing the VB server from terminating prematurely. A VB server terminates when its last form or ActiveX designer is unloaded. As a result, user interaction is impossible, and no external process holds a reference to an object created by the server. </P>
+<P>How does VB know the difference between an internal and an external object reference? When a cross-process object is created, OLE requests an IExternalConnection interface from the created object. This interface has two methods, AddConnection and ReleaseConnection, which essentially keeps a separate external reference count for the object. When the last of these external references is released, VB knows that all remaining connections are internal to the process.</P>
+<P>To support correct termination, the ROTHook object is designed to remove all information from the ROT when the last external connection is released. This is necessary to ensure correct termination of the server for objects initially created by another process. In the sample code I discussed previously, if the object is created initially by a client process, then GetObject will work indefinitely as long as there is at least one object still running. However, if the object is created internally, as in the Load event of a form, and assigned to an internal variable, then the first GetObject will work. However, this code snippet will fail when run from an external project:</P>
+<pre><FONT FACE="Courier New" SIZE="2">
+<P>Dim Obj As Object</P>
+<P>Set Obj = GetObject(, _<BR>
+&#9;"MyProj.TestObject")</P>
+<P>Set Obj = Nothing</P>
+<I><P>'The second GetObject fails</P>
+</I><P>Set Obj = GetObject(, _<BR>
+&#9;"MyProj.TestObject")</P>
+</font></pre>
+<P>This code fails because the reference held by Obj when it is set to Nothing is the last external reference on the object. When the last external reference is gone, the ROTHook object removes itself from the ROT (the RevokeActiveObject call is required for correct server termination), so the second GetObject fails.</P>
+<P>You can take one of two approaches to maintaining the ROT entry. The first is to notify the controlling object when the last external reference is released and repeat the call to RegisterActiveObject. However, reregistering an object is an expensive task, so it is best to avoid it altogether by actually adding an extra external reference. OLE provides the handy API call CoLockObjectExternal, which fits the bill nicely. The net effect of calling CoLockObjectExternal is that the system maintains an extra external reference, so releasing the last external reference held by another process no longer causes ROTHook to revoke the registration.</P>
+<P>The Locked property of the ROTHook object locks the entry in the ROT. You will generally set Locked to True if you have a visible UI element that corresponds to the registered object. If you set the Locked property to True, you are responsible for setting it to False when the UI element is not visible. If you fail to do so, your server will keep running indefinitely and you will most likely crash VB5 if you're running in the environment.</P>
+<h2><P>THE CLOCK OBJECT TICKS</h2>
+<P>Let's look at a small sample of using the ROTHook objects (download this sample from The Development Exchange Web site. In the Registered Level, the ROTHook objects are in the DLL; in the Premier Level, they're implemented in included VB files. See the Code Online box for details). The ROTClock ActiveX EXE project (Clock.vbp) exposes a GlobalMultiUse object with a ProgID of TimeServer.Clock. The Clock object has one event-Tick-which fires every second, passing the current time, and a TimerID property for demonstration purposes. When ROTClock is started in standalone mode, it shows a form with a clock ticking driven by a Clock object (see Figure 1). </P>
+<P><IMG SRC="Image1.gif" WIDTH=608 HEIGHT=454><IMG SRC="Image1.gif" WIDTH=608 HEIGHT=454></P>
+<P>To support locking, the Clock class adds a Friend Property Let to allow an external object to control the ROTHook. The Locked property should always be set to True as a result of a request external to the class:</P>
+<P>&nbsp;</P>
+<pre><FONT FACE="Courier New" SIZE="2">
+<P>'Additional code from Clock.cls</P>
+<B><P>Friend</B> <B>Property</B> <B>Let</B> Locked(<B>ByVal</B> RHS _<BR>
+&#9;<B>As</B> <B>Boolean</B>)</P>
+<P>&#9;m_ROTHook.Locked = RHS</P>
+<B><P>End</B> <B>Property<BR>
+</B>'Code from frmClock.frm</P>
+<B><P>Private</B> <B>WithEvents</B> m_Clock <B>As</B> <B>Clock</P>
+<P>Private</B> <B>Sub</B> Form_Load()</P>
+<P>&#9;<B>Set</B> m_Clock = <B>New</B> Clock</P>
+<P>&#9;m_Clock.Locked = <B>True</P>
+</B><P>&#9;Caption = Caption &amp; ", ID " &amp; _<BR>
+&#9;&#9;m_Clock.TimerID</P>
+<B><P>End</B> <B>Sub</P>
+<P>Private</B> <B>Sub</B> Form_Unload(Cancel <B>As</B> _<BR>
+&#9;<B>Integer</B>)</P>
+<P>&#9;m_Clock.Locked = <B>False</P>
+</B><P>&#9;'Set m_Clock = Nothing required for</P>
+<P>&#9;'proper termination with WithEvents <BR>
+&#9;'variable</P>
+<P>&#9;<B>Set</B> m_Clock = <B>Nothing</P>
+<P>End</B> <B>Sub</P>
+<P>Private</B> <B>Sub</B> m_Clock_Tick(<B>ByVal</B> Current _<BR>
+&#9;<B>As</B> <B>Date</B>)</P>
+<P>&#9;Label1 = Format$(Current, _<BR>
+&#9;&#9;"Long Time")</P>
+<B><P>End</B> <B>Sub</P>
+</B>
+</font></pre>
+<P>The UseClock project (UseClock.vbp) has one form and a reference to the &quot;TimeServer GetObject support sample&quot; library (ROTClock.Exe). Note that the code leverages the GlobalMultiUse attribute of the TimeServer object to either get a running instance of Clock, or launch the server if necessary. You can launch multiple instances of ROTClock and UseClock to see the same timer driving a clock in multiple instances:</P>
+<pre><FONT FACE="Courier New" SIZE="2">
+<P>'UseClock.frm</P>
+<B><P>Private</B> <B>WithEvents</B> m_Clock <B>As</B> <B>Clock</P>
+<P>Private</B> Sub Form_Load()</P>
+<P>&#9;<B>Set</B> m_Clock = TimeServer.Clock</P>
+<P>&#9;Caption = "Use Clock, ID " &amp; _<BR>
+&#9;&#9;m_Clock.TimerID</P>
+<B><P>End</B> <B>Sub</P>
+<P>Private</B> <B>Sub</B> m_Clock_Tick(<B>ByVal</B> Current _<BR>
+&#9;<B>As</B> <B>Date</B>)</P>
+<P>&#9;Label1 = Format$(Current, _<BR>
+&#9;&#9;"Long Time")</P>
+<B><P>End</B> <B>Sub</P></b>
+</font></pre>
+<h2>BUILD FROM SCRATCH</h2>
+<P>I built the ROTHook object from scratch using an AddressOf manufactured vtable and copious amounts of VarPtr, ObjPtr, and CopyMemory calls. I also needed direct access to the methods of the IUnknown interface, so I defined an IUnknownUnrestricted interface in the ROTTypes typelib. The library could also have been written in C++ (the code is equally scary in both languages), but being able to compile the functionality into a single executable makes it desirable to do this in straight VB.</P>
+<P>The goal of the design is simple: the ROTHook object needs to receive all reference-counting hits from the RegisterActiveObject and CoLockObjectExternal calls, track the AddConnection and ReleaseConnection calls on the IExternalConnection interface, and not modify the reference count of the parent object. ROTHook forwards one request for IExternalConnection through to the parent object so VB knows to keep the server alive, but a Release call immediately balances the reference-count hit so the parent object can terminate. Once the ROTHook object is registered in the ROT with the CLSID of the parent, ROTHook forwards all calls to QueryInterface (all Set statements) directly to the parent. The result is that the ROT thinks the ROTHook is actually the parent object, but all other processes deal with the parent directly.</P>
+<P>If you use the ROTHook object in a way consistent with the design of the object-meaning that you always call HideObject correctly and unlock all locked objects at the appropriate time-you won't have any problems. Have fun, but be careful; there's a reason this functionality wasn't put in the VB box. </P></DIR>
+</FONT></BODY>
+</HTML>

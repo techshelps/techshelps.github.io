@@ -1,0 +1,650 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" Content="text-html; charset=Windows-1252">
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-83731338-2"></script><script>  window.dataLayer = window.dataLayer || [];  function gtag(){dataLayer.push(arguments);}  gtag('js', new Date());  gtag('config', 'UA-83731338-2');</script><title>ActiveX/COM Q &amp; A</title>
+
+<meta name=href content="msdn_ie4.css">                
+<style>@import url(msdn_ie4.css);</style>
+<link disabled rel="stylesheet" href="msdn_ie3.css"></HEAD>
+<BODY BGCOLOR=#FFFFFF TEXT=#000000>
+
+<font face="verdana,arial,helvetica" size="2"><h1>
+ActiveX/COM Q &amp; A</h1>
+<p>
+Don Box</p>
+<p>
+Don Box is cofounder of DevelopMentor, a training firm for COM and Windows NT-based development. He also wrote the upcoming book Creating Components Using DCOM and C++ for Addison-Wesley. Don can be reached at http://www.develop.com/dbox.</p>
+<p>
+<b>Q. </b>I think I understand why I would want to mark my in-process CLSID as ThreadingModel=Apartment or ThreadingModel=Both, but I cannot imagine a scenario where I would want to mark my CLSID as Threading&shy;Model=Free. Why does this option exist? </p>
+<p>
+<i>Melissa Sells </i></p>
+<p>
+<i>Cairo, IL</i></p>
+<p>
+<b>A. </b>Object implementors decide the concurrency requirements of their objects by selecting which apartment types their objects can correctly execute in. Out-of-process servers explicitly decide their apartment type by calling CoInitializeEx with the appropriate parameter. This doesn’t work for in-process servers, as the client will have already called CoInitializeEx by the time the new object is created. To allow in-process servers to control their apartment type, COM allows each CLSID to have its own distinct threading model that is advertised in the local registry using the ThreadingModel named value:</p>
+<p>
+[HKCR\CLSID\{23156321-2312-11d0-2213-0080C73925BA}\InprocServer32]</p>
+<p>
+@=&quot;C:\rect.dll&quot;</p>
+<p>
+ThreadingModel=&quot;Both&quot;</p>
+<p>
+Each CLSID in a DLL can have its own ThreadingModel value. COM currently supports four in-process Threading&shy;Models. The absence of a ThreadingModel value implies that the class is completely thread-ignorant and can only run in the main single-threaded apartment (STA) in a process. The main STA is defined as the first STA to be created in the process via a call to CoInitializeEx using the COINIT_APARTMENTTHREADED flag. Threading&shy;Model=Apartment indicates that the class can execute in any STA in the process (not just the main STA), but cannot execute in the multithreaded apartment (MTA). ThreadingModel=Both indicates that the class can execute in either an MTA or any STA in the process. Threading&shy;Model=Free indicates that the class can execute only in an MTA and can never execute in an STA. </p>
+<p>
+To understand why ThreadingModel=Free exists, it is useful to look at what happens during an in-process ac&shy;tivation request. Consider the following call to Co&shy;CreateInstance:</p>
+<p>
+IPoint *pPoint = 0;</p>
+<p>
+CoCreateInstance(CLSID_Point, 0,</p>
+<p>
+                 CLSCTX_INPROC_SERVER, </p>
+<p>
+                 IID_IPoint, (void**)&amp;pPoint);</p>
+<p>
+To make this call, the caller must first enter an apartment by calling CoInitializeEx, indicating which type of apartment to enter. If the caller’s apartment is compatible with the CLSID_Point’s threading model, then COM will instantiate the object directly in the apartment of the caller. This is by far the most efficient scenario, as no intermediate proxy is needed. If the client’s apartment is incompatible with the CLSID_Point’s threading model, then COM will silently instantiate the object in a distinct apartment and a proxy will be returned to the client. This means that method invocation performance will decrease by a factor of roughly 1000. </p>
+<p>
+If the caller is executing in the MTA and CLSID_Point is marked ThreadingModel=Apartment, the class object (and subsequent instances) will execute in a new COM-created STA for the class. This ensures that the object (which is not prepared for concurrent access) will have all of its calls serialized automatically by COM. If CLSID_Point does not have a ThreadingModel value, then the class object (and subsequent instances) must execute in a main STA of the process. If the caller happens to be the main STA thread, then the object will be accessed directly. Otherwise, the client will get back a proxy. If no STAs exist in the process (that is, if no threads have called CoInitializeEx with the COINIT_APARTMENTTHREADED flag), then COM will create a new STA to act as the main STA for the process. An interesting case is where the caller is executing in an STA and CLSID_Point is marked ThreadingModel=Free. In this case, COM will activate the class object (and subsequent instances) in the MTA and return a proxy to the caller. This means that all of the object’s methods will execute inside the MTA.</p>
+<p>
+Implementors who mark their classes as Threading&shy;Model=Apartment are stating that their instances must only be accessed from one thread for the lifetime of the object. This implies that there is no need to protect instance state (that is, per-object data members). However, any state that is shared by multiple instances of the class must be protected. Implementors who mark their classes as either ThreadingModel=Free or Threading&shy;Model=Both are making the statement that instances of their class may run in the MTA, which means that a single instance of the class may be accessed concurrently. Because of this, implementors must protect all resources that are used by a single instance against concurrent access. This applies not only to shared static variables, but also to per-object data members. For heap-based objects, this implies that, at the very least, the reference count data member must be protected using InterlockedIncrement/InterlockedDecrement. Other class-specific instance states need to be protected as well. </p>
+<p>
+At first glance, it is less than obvious why Threading&shy;Model=Free exists, since the requirements of running in an MTA are often seen as a superset of the requirements for STA-compatibility. One reason not to run in an STA is because all method invocations will happen on the client’s thread. This means that the object’s methods will not be serviced unless the client services its message pump regularly. Beyond this, ThreadingModel=Free is useful for objects that create or use additional worker threads as part of their normal operation. Assuming that the worker threads need access to the object, it is highly advantageous to keep the object from being created in an STA, especially if the object uses other COM objects to do its work. </p>
+<p>
+Objects that run in an STA cannot be manipulated safely by other threads in the process. Because no worker threads can enter the apartment of an STA-based object, any worker-thread access will by definition be from a different apartment. If a class is marked ThreadingModel=Both or ThreadingModel=Apartment and an activation request is made from an STA-based thread, the object will live in an STA, causing this situation to occur.</p>
+<p>
+As shown in Figure 1, this implies that the worker threads (which will probably run in the MTA or other STAs in the process) must access the object using inter-apartment method calls, which are considerably less efficient than intra-apartment method invocations. It is extremely tempting to cheat and simply pass a raw C++ pointer to the worker threads. This may work, provided the object does not use any other apartment-specific resources. But many objects use the services of other objects, and the interface pointers to these objects are definitely apartment-specific and cannot be accessed by worker threads that cheat and call into the object without a proxy. Attempts to do this are often rewarded with the infamous RPC_E_WRONG_<BR>THREAD error code, or better yet, with random program faults 20 seconds after the offending access.</p>
+<p>
+<img src="actx1.gif" border=0></p>
+<p>
+Figure 1  ThreadingModel=Both with STA</p>
+<p>
+If the object’s class had been marked Threading&shy;Model=Free, then any activation requests would force the new instance to be created in the MTA, even if the caller <BR>is running in an STA. This means that any MTA-based worker threads can access the object directly and safely. However, as shown in Figure 2, an STA-based client will <BR>not get a pointer to the object, but instead will receive a pointer to a proxy. This means that when the STA-based client invokes methods on the object, the invocation cost will be considerably higher. However, the worker threads will experience much better performance without violating the rules of COM. Depending on the usage patterns of the object, this may or may not be a reasonable tradeoff. If <BR>the worker threads will manipulate the object frequently, then this is probably a good optimization. If the worker threads manipulate the object infrequently relative to the client’s activity, then ThreadingModel=Free will actually hurt performance. </p>
+<p>
+<img src="actx2.gif" border=0></p>
+<p>
+Figure 2  ThreadingModel=Free with STA</p>
+<p>
+QThe Active Template Library (ATL) Object Wizard has a checkbox that says FreeThreaded Marshaler (see Figure 3). Lately, I have been using this option a lot and have noticed that some of my classes work much faster, but other classes just blow up randomly. What on earth have I done?</p>
+<p>
+<i>Sarah Shor</i></p>
+<p>
+<i>Truth or Consequences, NM</i></p>
+<p>
+<img src="actx3.gif" border=0></p>
+<p>
+Figure 3  The ATL Object Wizard</p>
+<p>
+AIt looks like you have let the ease of use of ATL and its wizards lull you into a temporary state of COM-unawareness. Fortunately, those pesky runtime errors have yanked you out of your dreamlike state. Let’s fix this situation by investigating what the FreeThreaded Marshaler does and when it should be used. </p>
+<p>
+The FreeThreaded Marshaler is primarily designed for classes that are marked ThreadingModel=Both. When a class is marked ThreadingModel=Both, it is indicating that its instances and its class object can safely reside in either an STA or an MTA. According to the rules of COM, any given instance can only reside in one apartment. If an object implementor has gone to the length of ensuring that an object can safely reside in an MTA, it might be the case that the object does not care about apartments at all. Some <BR>(but by no means all) objects can be safely accessed concurrently not only by multiple threads in the MTA, but also by non-MTA-based threads (for example, threads that are executing in an STA). In COM, it is impossible for clients to know that such access is safe for a particular object, so it is illegal to simply pass a raw interface pointer from one apartment to another. Instead, all cross-apartment interface pointer sharing must be established using an explicit marshaling technique, such as using CoMarshal&shy;Inter&shy;ThreadInterface&shy;InStream. The implication is that all access to an in-process object will be via proxy/stub pairs unless the caller is executing in the apartment that originally created the object.</p>
+<p>
+Unlike clients, objects do know about their relationships to apartments, concurrency, and reentrancy. Objects that are satisfied with proxy/stub pairs when accessed from multiple apartments in the same process get this behavior by default. However, an object that is unhappy with proxy/stub-based access has the opportunity to bypass this by implementing custom marshaling. When CoMarshal&shy;Interface or CoMarshalInterThreadInterfaceInStream are called on an object, it can elect to bypass the creation of a stub by implementing the IMarshal interface. This is the definition of custom marshaling. Objects that custom marshal are required to indicate the CLSID of a custom proxy that will be created when the receiving apartment calls CoUnmarshalInterface or CoGetInterfaceAndRelease&shy;Stream. Inside CoMarshalInterface, the object’s IMarshal::<BR>MarshalInterface implementation is asked to write out any data needed to properly initialize the new custom proxy. CoUnmarshalInterface then presents this initialization data to the new custom proxy’s IMarshal::Unmarshal&shy;Interface method, bringing the proxy to life.</p>
+<p>
+For objects that can be safely accessed concurrently from multiple apartments in a process, custom marshaling can be used to bypass the creation of a standard stub and instead simply pass raw pointers from apartment to apartment. To accomplish this, the object’s IMarshal::Marshal&shy;Interface method simply writes out the raw pointer into the initialization data:</p>
+<p>
+HRESULT Object::MarshalInterface(IStream *pStm,…,      </p>
+<p>
+                                 DWORD mshlflags){</p>
+<p>
+  if (MSHLFLAGS_TABLEWEAK != mhlflags)</p>
+<p>
+    this-&gt;AddRef(); // OBJREF keeps alive</p>
+<p>
+  pStm-&gt;Write(&amp;mshlflags, sizeof(mshlflags), 0);</p>
+<p>
+  pStm-&gt;Write(this, sizeof(this), 0);</p>
+<p>
+  return S_OK;</p>
+<p>
+}</p>
+<p>
+The corresponding implementation of IMarshal::Un&shy;marshalInterface on the custom proxy would then simply read the raw pointer from the marshaled object reference and return it to CoUnmarshalInterface:</p>
+<p>
+HRESULT Proxy::UnmarshalInterface(IStream *pStm,</p>
+<p>
+                                  REFIID riid, </p>
+<p>
+                                  void**ppv){</p>
+<p>
+  DWORD mhlflags;</p>
+<p>
+  Object *pObject;</p>
+<p>
+  pStm-&gt;Read(&amp;mshlflags, sizeof(mshlflags), 0);</p>
+<p>
+  pStm-&gt;Read(pObject, sizeof(pObject), 0);</p>
+<p>
+  if (mshlflags != MSHLFLAGS_NORMAL)</p>
+<p>
+    pObject-&gt;AddRef();</p>
+<p>
+  return pObject-&gt;QueryInterface(riid, ppv);</p>
+<p>
+}</p>
+<p>
+Clients would still pass the object’s interface pointers across apartment boundaries using CoMarshalInterface and friends; however, the object would conspire with a custom proxy to simply pass a raw pointer to the actual object. Note that CoMarshalInterface is also called by MIDL-generated interface proxies and stubs to serialize method parameters. This means that, when a reference to an object that uses this technique is passed as a method parameter to another object, the other object will receive a raw pointer, not a proxy.</p>
+<p>
+While the technique shown above will work perfectly for intraprocess marshaling, it will fail miserably for inter&shy;process marshaling. Fortunately, for objects that only want to custom marshal for a subset of all possible marshaling contexts (for example, in-process, local, remote), the object can get an instance of the standard marshaler and use it to implement its IMarshal methods for contexts that are not supported. To get a pointer to the standard marshaler, objects can call the CoGetStandardMarshal method:</p>
+<p>
+HRESULT CoGetStandardMarshal(</p>
+<p>
+    [in]REFIID riid,  // type if itf.</p>
+<p>
+    [in, iid_is(riid)] IUnknown *pUnk, // the itf.</p>
+<p>
+    [in] DWORD dwDestCtx,  // MSHCTX</p>
+<p>
+    [in] void *pvDestCtx,  // reserved</p>
+<p>
+    [in] DWORD mshlflags,  // normal vs. table</p>
+<p>
+    [out] IMarshal **ppMarshal); // std. Marshal</p>
+<p>
+Given that the technique shown above only works for intraprocess marshaling, the object’s implementation of MarshalInterface would need to look something like this:</p>
+<p>
+HRESULT Object::MarshalInterface(IStream *pStm,…,      </p>
+<p>
+                                 DWORD mshlflags){</p>
+<p>
+  if (dwDestCtx != MSHCTX_INPROC) {</p>
+<p>
+    IMarshal *pMsh = 0;</p>
+<p>
+    HRESULT hr = CoGetStandardMarshal(riid,pUnk,</p>
+<p>
+                                      dwDestCtx, </p>
+<p>
+                                      pvDestCtx, </p>
+<p>
+                                      mshlflags, </p>
+<p>
+                                      &amp;pMsh);</p>
+<p>
+    if (SUCCEEDED(hr)) {</p>
+<p>
+      hr = pMsh-&gt;MarshalInterface(pStm,riid,pUnk,</p>
+<p>
+                                  dwDestCtx, pvDestCtx, </p>
+<p>
+                                  mshlflags);</p>
+<p>
+      pMsh-&gt;Release();</p>
+<p>
+    }</p>
+<p>
+  }</p>
+<p>
+  else // do inproc stuff shown earlier</p>
+<p>
+  {</p>
+<p>
+  }</p>
+<p>
+}</p>
+<p>
+The standard marshaler would also be needed in the object’s implementations of the DisconnectObject, GetUnmarshal&shy;Class, and GetMarshalSizeMax methods.</p>
+<p>
+Because the behavior described above is useful to a large class of objects, COM provides an aggregatable implementation of IMarshal that accomplishes exactly what was just described. This implementation is called the FreeThreaded Marshaler and can be created using the CoCreateFree&shy;Threaded&shy;Marshaler API call:</p>
+<p>
+HRESULT CoCreateFreeThreadedMarshaler(</p>
+<p>
+                    [in] IUnknown *pUnkOuter,</p>
+<p>
+                    [out] IUnknown **ppUnkInner);</p>
+<p>
+It is more efficient to use the FreeThreaded Marshaler than to implement its functionality by hand, as the COM library contains special-case code that detects when the FreeThreaded Marshaler is in use and can bypass certain intermediate steps that are generally required by most custom marshaling implementations. </p>
+<p>
+As shown in Figure 4, a class that wants to use the FreeThreaded Marshaler simply aggregates an instance either at initialization time or on-demand at the first QueryInterface request for IMarshal. The following class preinstantiates the FreeThreaded Marshaler at construction time:</p>
+<p>
+class Point : public IPoint {</p>
+<p>
+  LONG m_cRef;  IUnknown *m_pUnkFTM;</p>
+<p>
+  long m_x; long m_y;</p>
+<p>
+  Point(void) : m_cRef(0), m_x(0), m_y(0) {</p>
+<p>
+    HRESULT hr = CoCreateFreeThreadedMarshaler(this,</p>
+<p>
+                                           &amp;m_pUnkFTM);</p>
+<p>
+    assert(SUCCEEDED(hr));</p>
+<p>
+  }</p>
+<p>
+  virtual ~Point(void) { m_pUnkFTM-&gt;Release(); }</p>
+<p>
+};</p>
+<p>
+The corresponding QueryInterface implementation would simply request the IMarshal interface from the Free&shy;Threaded &shy;Marshaler:</p>
+<p>
+STDMETHODIMP Point::QueryInterface(REFIID riid, </p>
+<p>
+                                   void **ppv) {</p>
+<p>
+  if (riid == IID_IUnknown || riid == IID_IPoint)</p>
+<p>
+    *ppv = static_cast&lt;IPoint*&gt;(this);</p>
+<p>
+  else if (riid == IID_IMarshal)</p>
+<p>
+    return m_pUnkFTM-&gt;QueryInterface(riid, ppv);</p>
+<p>
+  else</p>
+<p>
+    return (*ppv = 0), E_NOINTERFACE;</p>
+<p>
+  ((IUnknown*)*ppv)-&gt;AddRef();</p>
+<p>
+  return S_OK;</p>
+<p>
+}</p>
+<p>
+<img src="actx4.gif" border=0></p>
+<p>
+Figure 4  Using the FreeThreaded Marshaler</p>
+<p>
+Once the FreeThreaded Marshaler is in place, whenever references to Point objects are marshaled across intraprocess apartment boundaries, no proxies will ever be used. This applies both to explicit calls to CoMarshalInterface/CoUn&shy;marshalInterface, as well as when references to Point objects are passed as method parameters to intraprocess proxies to non-Point objects. When you select the FreeThreaded Marshaler option in the ATL Object Wizard, the ATL equivalent of the code is generated.</p>
+<p>
+The FreeThreaded Marshaler consumes at least 16 bytes of memory. Since many in-process objects are never used outside of their original apartments, preallocating the FreeThreaded Marshaler may not be the best use of available resources. Assuming that the class is prepared for concurrent access, it is highly likely that the object will already have some thread synchronization primitive. If this is the case, then the FreeThreaded Marshaler can be lazy-aggregated at the first QueryInterface for IMarshal. To achieve this, assume the following class definition:</p>
+<p>
+class LazyPoint : public IPoint {</p>
+<p>
+  LONG m_cRef;  IUnknown *m_pUnkFTM;</p>
+<p>
+  long m_x; long m_y;</p>
+<p>
+  LazyPoint(void) :   </p>
+<p>
+      m_cRef(0),m_pUnkFTM(0),m_x(0),m_y(0) {}</p>
+<p>
+  virtual ~LazyPoint(void) </p>
+<p>
+  { if (m_pUnkFTM) m_pUnkFTM-&gt;Release(); }</p>
+<p>
+  void Lock(void);   // acquire object-specific lock</p>
+<dl>
+<dt>
+  void Unlock(void); // release object-specific lock</dt>
+<dd>
+•<p>
+•</p>
+<p>
+•</p>
+</dd>
+</dl>
+<p>
+};</p>
+<p>
+Based on the class definition shown above, the QueryInterface implementation shown in Figure 5 will correctly aggregate the FreeThreaded Marshaler on demand. The disadvantage of this approach is that all QueryInter&shy;face requests for IMarshal will be serialized; however, if IMarshal is never requested, then fewer resources will be acquired. As always, the technique to use varies based on the context of your particular class and its anticipated clients.</p>
+<dl>
+<dt>
+Figure 5  QueryInterface Implementation</dt>
+<dd>
+STDMETHODIMP Point::QueryInterface(REFIID riid, void **pp) {<p>
+  if (riid == IID_IUnknown || riid == IID_IPoint)</p>
+<p>
+    *ppv = static_cast&lt;IPoint*&gt;(this);</p>
+<p>
+  else if (riid == IID_IMarshal) {</p>
+<p>
+    this-&gt;Lock();</p>
+<p>
+    HRESULt hr = E_NOINTERFACE; *ppv = 0;</p>
+<p>
+    if (m_pUnkFTM == 0) // acquire FTM 1st time </p>
+<p>
+       CoCreateFreeThreadedMarshaler(this, </p>
+<p>
+                                     &amp;m_pUnkFTM);</p>
+<p>
+    if (m_pUnkFTM != 0) // has FTM been acquired</p>
+<p>
+      hr = m_pUnkFTM-&gt;QueryInterface(riid, ppv);</p>
+<p>
+    this-&gt;Unlock();</p>
+<p>
+    return hr;</p>
+<p>
+  }</p>
+<p>
+  else</p>
+<p>
+    return (*ppv = 0), E_NOINTERFACE;</p>
+<p>
+  ((IUnknown*)*ppv)-&gt;AddRef();</p>
+<p>
+  return S_OK;</p>
+<p>
+}</p>
+</dd>
+</dl>
+<p>
+Given the relative ease of using the FreeThreaded Marshaler, it is interesting to consider when its use is inappropriate. Certainly, objects that can only live in STAs should not use the FreeThreaded Marshaler, as they are highly unlikely to be expecting concurrent access. This does not mean that all objects capable of running in the MTA should use the FreeThreaded Marshaler. One notable case is an object that has interface pointers as data members. Such objects must use extreme caution when using the FreeThreaded Marshaler. </p>
+<p>
+Consider the class shown in Figure 6 that uses other COM objects to perform its operations. Assume that the class Rect is an in-process class and is marked Threading&shy;Model=Both. The constructor for a given Rect object will always execute in the apartment of the thread that calls CoCreateInstance(CLSID_Rect). This means that the two calls to CoCreateInstance(CLSID_Point) will also execute in the client’s apartment. The rules of COM indicate that the data members m_pPtTopLeft and m_pPtBottomRight can only be accessed from the apartment that executes the CoCreateInstance calls. </p>
+<dl>
+<dt>
+Figure 6  classRect</dt>
+<dd>
+class Rect : public IRect {<p>
+  LONG m_cRef;</p>
+<p>
+  IPoint *m_pPtTopLeft;</p>
+<p>
+  IPoint *m_pPtBottomRight;</p>
+<p>
+  Rect(void) : m_cRef(0) {</p>
+<p>
+    HRESULT hr = CoCreateInstance(CLSID_Point, 0, </p>
+<p>
+           CLSCTX_INPROC, IID_IPoint,</p>
+<p>
+           (void**)&amp;m_pPtTopLeft);</p>
+<p>
+    assert(SUCCEEDED(hr));</p>
+<p>
+    hr = CoCreateInstance(CLSID_Point, 0, </p>
+<p>
+           CLSCTX_INPROC, IID_IPoint, </p>
+<p>
+           (void**)&amp;m_pPtBottomRight);</p>
+<p>
+    assert(SUCCEEDED(hr));</p>
+<dl>
+<dt>
+  }</dt>
+<dd>
+•<p>
+•</p>
+<p>
+•</p>
+</dd>
+</dl>
+<p>
+}</p>
+</dd>
+</dl>
+<p>
+It is likely that at least one of the Rect methods uses the two interface pointer data members to perform its work:</p>
+<p>
+STDMETHODIMP Rect::get_Volume(long *pn) {</p>
+<p>
+/* (Volume? Yo, Don! Sounds like Area to us!—Ed.) */</p>
+<p>
+  long top, left, bottom, right;</p>
+<p>
+  HRESULT hr = m_pPtTopLeft-&gt;GetCoords(&amp;left, </p>
+<p>
+                                       &amp;top);</p>
+<p>
+  assert(SUCCEEDED(hr));</p>
+<p>
+  hr = m_pPtBottomRight-&gt;GetCoords(&amp;right, </p>
+<p>
+                                   &amp;bottom);</p>
+<p>
+  assert(SUCCEEDED(hr));</p>
+<p>
+  *pn = (right – left) * (bottom – top);</p>
+<p>
+  return S_OK;</p>
+<p>
+}</p>
+<p>
+If the class Rect were to use the FreeThreaded Marshaler, then it would be possible to invoke this method from apartments other than the apartment that made the initial CoCreateInstance calls. Unfortunately, that would cause this method to violate the rules of COM since the two interface pointer data members are only valid in the original apartment. If the Point class also happened to use the FreeThreaded Marshaler, then this would technically not be a problem. </p>
+<p>
+In general, clients (such as the Rect class) should not make assumptions about this very specific implementation detail. In fact, if the Point objects did not use the FreeThreaded Marshaler and happened to be created in a different apartment due to ThreadingModel incompatibilities, the Rect object would be holding pointers to proxies. Proxies are notorious for enforcing the rules of COM and correctly return RPC_E_WRONG_THREAD when accessed from the wrong apartment. User-defined objects are also notorious for enforcing the rules of COM by failing randomly when accessed from the wrong apartment.</p>
+<p>
+The problem of cross-apartment data member access leaves the Rect implementor with two choices. One choice would be to not use the FreeThreaded Marshaler and to simply accept the fact that, when clients pass Rect object references between apartments, proxies will be used to access instances of class Rect. This is certainly the easiest solution, as it involves no additional code and will simply work without requiring any thought. The other choice is to no longer keep raw interface pointers as data members, but to instead keep some marshaled form of an interface pointer as a data member. </p>
+<p>
+It would be tempting to simply keep marshaled interface pointers as data members. When initializing the data member, the object could simply call CoMarshalInter&shy;ThreadInterfaceInStream, knowing that the object now holds an apartment-independent representation of an interface pointer. However, the CoMarshalInterThread&shy;Inter&shy;faceInStream simply calls CoMarshalInterface using the MSHLFLAGS_NORMAL flag, which means that the interface pointer can only be unmarshaled once. For other scenarios, this is not a problem. If the object will use the FreeThreaded Marshaler, each method invocation will need to unmarshal the pointer to ensure that any interface pointers are valid in the currently executing apartment. Most developers turn to the MSHLFLAGS_TABLE&shy;STRONG flag at this point, hoping to marshal once and unmarshal as many times as is necessary (once per method invocation). Unfortunately, table marshaling (unlike normal marshaling) is not supported if the original pointer is a proxy, which is often the case, especially in distributed applications. </p>
+<p>
+To address this need, the Windows NT&reg; 4.0 Service Pack 3 release of COM introduced the Global Interface Table (GIT). The GIT is an optimization of CoMarshalInterface/CoUnmarshalInterface that allows interface pointers to be accessed by all apartments in a process. COM internally implements one GIT per process. The GIT contains marshaled interface pointers that can be efficiently unmarshaled multiple times within the same process. This is the semantic equivalent of using table marshaling, but the GIT can be used with both objects and proxies. </p>
+<p>
+The GIT exposes the IGlobalInterfaceTable interface:</p>
+<p>
+interface IGlobalInterfaceTable : IUnknown {</p>
+<p>
+// marshal an interface into the GIT</p>
+<p>
+  HRESULT RegisterInterfaceInGlobal(</p>
+<p>
+              [in] REFIID riid,</p>
+<p>
+              [in, iid_is(riid)] IUnknown *pItf,</p>
+<p>
+              [out] DWORD *pdwCookie);</p>
+<p>
+// destroy the marshaled object reference</p>
+<p>
+  HRESULT RevokeInterfaceFromGlobal(</p>
+<p>
+              [in] DWORD dwCookie);</p>
+<p>
+// unmarshal an interface from the GIT</p>
+<p>
+  HRESULT GetInterfaceFromGlobal (</p>
+<p>
+              [in] DWORD dwCookie</p>
+<p>
+              [in] REFIID riid,</p>
+<p>
+              [out, iid_is(riid)] void **ppv);</p>
+<p>
+}</p>
+<p>
+Clients gain access to the GIT for their process by calling CoCreateInstance using the class CLSID_StdGlobalInter&shy;faceTable. Each call to CoCreateInstance using this CLSID returns a pointer to the single GIT of the process. Like the IStream interface returned by CoMarshalInterThreadInter&shy;faceInStream, interface pointers to the GIT can be accessed from any apartment without requiring marshaling.</p>
+<p>
+To make an interface pointer available to all apartments in the process, the apartment that owns the interface pointer must register it with the GIT by calling the RegisterInterfaceInGlobal method. The GIT will return a DWORD to the caller that represents the pointer globally across all apartments in the process. This DWORD can be used from any apartment in the process to unmarshal a new proxy by calling the GetInterfaceFromGlobal method. This DWORD can be used to unmarshal proxies repeatedly until a call to RevokeInterfaceFromGlobal invalidates the global interface pointer. Applications that use the global interface table usually bind a single module-wide interface pointer at startup:</p>
+<p>
+IGlobalInterfaceTable *g_pGIT = 0;</p>
+<p>
+HRESULT InitOnce(void) {</p>
+<p>
+  assert(g_pGIT == 0);</p>
+<p>
+  return CoCreateInstance(CLSID_StdGlobalInterfaceTable, 0,</p>
+<p>
+                 CLSCTX_INPROC_SERVER, </p>
+<p>
+                 IID_IGlobalInterfaceTable, </p>
+<p>
+                 (void**)&amp;g_pGIT);</p>
+<p>
+}</p>
+<p>
+Once the global interface table is available, passing an interface pointer to another apartment simply means registering the pointer with the global interface table:</p>
+<p>
+HRESULT WritePtrToGIT(IPoint *pPoint) {</p>
+<p>
+  HRESULT hr = g_pGIT-&gt;RegisterInterfaceInGlobal(</p>
+<p>
+                      IID_IPoint, pPoint, &amp;g_dwCookie);</p>
+<p>
+  return hr;</p>
+<p>
+}</p>
+<p>
+The following code correctly unmarshals the object reference and can be called from any apartment in the same process:</p>
+<p>
+HRESULT ReadPtrFromGIT(IPoint *&amp;rpRacer, </p>
+<p>
+                       bool bLastUnmarshal) {</p>
+<p>
+  HRESULT hr = g_pGIT-&gt;GetInterfaceFromGlobal(</p>
+<p>
+             g_dwCookie, IID_IPoint, (void**)&amp;rpPoint);</p>
+<p>
+// if we are the last to unmarshal, revoke </p>
+<p>
+  if (bLastUnmarshal)</p>
+<p>
+    g_pGIT-&gt;RevokeInterfaceFromGlobal(g_dwCookie);</p>
+<p>
+  return hr;</p>
+<p>
+}</p>
+<p>
+Note that a critical feature of these code fragments is that the GIT supports unmarshaling more than one proxy. This makes the GIT the ideal place to store interface pointer data members for objects that use the FreeThreaded Marshaler.</p>
+<p>
+To use the GIT to safely hold its interface pointers, the Rect class would keep DWORD cookies as data members in lieu of raw interface pointers:</p>
+<p>
+class SafeRect : public IRect {</p>
+<p>
+  LONG m_cRef;          // COM reference count</p>
+<p>
+  IUnknown *m_pUnkFTM;  // cache for FTM aggregate</p>
+<p>
+  DWORD m_dwTopLeft;    // GIT cookie for top/left</p>
+<dl>
+<dt>
+  DWORD m_dwBottomRight;// GIT cookie for btm/rght</dt>
+<dd>
+•<p>
+•</p>
+<p>
+•</p>
+</dd>
+</dl>
+<p>
+}</p>
+<p>
+The constructor would still create two instances of Point, but instead of holding the raw pointers, the constructor would register the interface pointers with the GIT (see Figure 7). As long as the interface pointer is registered in the GIT, no additional references must be held by the object. Once the class has been converted to use the GIT instead of raw interface pointers, it must unmarshal a new proxy in each method call that needs access to the registered interfaces (see Figure 8).</p>
+<dl>
+<dt>
+Figure 7  Registering Interface Pointers</dt>
+<dd>
+SafeRect::SafeRect(void) : m_cRef(0), m_pUnkFTM(0) {<p>
+// assume ptr to GIT is initialized elsewhere</p>
+<p>
+  extern IGlobalInterfaceTable *g_pGIT; </p>
+<p>
+  assert(g_pGIT != 0);</p>
+<p>
+  IPoint *pPoint = 0;</p>
+<p>
+// create instance of class Point</p>
+<p>
+  HRESULT hr = CoCreateInstance(CLSID_Point, 0, </p>
+<p>
+          CLSCTX_INPROC, IID_IPoint, </p>
+<p>
+          (void**)&amp;pPoint);</p>
+<p>
+  assert(SUCCEEDED(hr));</p>
+<p>
+// register interface pointer in GIT</p>
+<p>
+  hr = g_pGIT-&gt;RegisterObjectInGlobal(pPoint, </p>
+<p>
+                      IID_IPoint, &amp;m_dwTopLeft);</p>
+<p>
+  assert(SUCCEEDED(hr));</p>
+<p>
+  pPoint-&gt;Release(); // reference now held in GIT</p>
+<p>
+// create instance of class point</p>
+<p>
+  hr = CoCreateInstance(CLSID_Point, 0, </p>
+<p>
+             CLSCTX_INPROC, IID_IPoint, </p>
+<p>
+             (void**)&amp;pPoint);</p>
+<p>
+  assert(SUCCEEDED(hr));</p>
+<p>
+// register interface pointer in GIT</p>
+<p>
+  hr = g_pGIT-&gt;RegisterObjectInGlobal(pPoint, </p>
+<p>
+                  IID_IPoint, &amp;m_dwBottomRight);</p>
+<p>
+  assert(SUCCEEDED(hr));</p>
+<p>
+  pPoint-&gt;Release(); // reference now held in GIT</p>
+<p>
+}</p>
+<br>
+</dd>
+<dt>
+Figure 8  Unmarshaling Interface Pointers</dt>
+<dd>
+STDMETHODIMP SafeRect::get_Volume(long *pn) {<p>
+  extern IGlobalInterfaceTable *g_pGIT; </p>
+<p>
+  assert(g_pGIT != 0);</p>
+<p>
+// unmarshal the two interface pointers from GIT</p>
+<p>
+  IPoint *ptl = 0, *pbr = 0;</p>
+<p>
+  HRESULT hr = g_pGIT-&gt;GetInterfaceFromGlobal( </p>
+<p>
+         m_dwPtTopLeft, IID_IPoint, (void**)&amp;ptl);</p>
+<p>
+  assert(SUCCEEDED(hr));</p>
+<p>
+  hr = g_pGIT-&gt;GetInterfaceFromGlobal( </p>
+<p>
+      m_dwPtBottomRight, IID_IPoint,(void**)&amp;pbr);</p>
+<p>
+// use temp ptrs to implement method</p>
+<p>
+  long top, left, bottom, right;</p>
+<p>
+  HRESULT hr = ptl-&gt;GetCoords(&amp;left, &amp;top);</p>
+<p>
+  assert(SUCCEEDED(hr));</p>
+<p>
+  hr = pbr-&gt;GetCoords(&amp;right, &amp;bottom);</p>
+<p>
+  assert(SUCCEEDED(hr));</p>
+<p>
+  *pn = (right – left) * (bottom – top);</p>
+<p>
+// release temp ptrs. </p>
+<p>
+  ptl-&gt;Release();</p>
+<p>
+  pbr-&gt;Release();</p>
+<p>
+  return S_OK;</p>
+<p>
+}</p>
+</dd>
+</dl>
+<p>
+Because the implementation of SafeRect uses the FreeThreaded Marshaler, it is pointless to try keeping the unmarshaled interface pointers across method invocations, since it is unknown if the next method invocation will happen in the same apartment. Fortunately, the GIT is optimized to make this as efficient as possible.</p>
+<p>
+The GIT keeps registered interface pointers alive until they are explicitly removed. This means that the SafeRect class must explicitly revoke the GIT entries for its two data members at destruction-time:</p>
+<p>
+SafeRect::~SafeRect(void) {</p>
+<p>
+  extern IGlobalInterfaceTable *g_pGIT;   </p>
+<p>
+  assert(g_pGIT != 0);</p>
+<p>
+  HRESULT hr=g_pGIT-&gt;RevokeInterfaceFromGlobal( </p>
+<p>
+                                   m_dwTopLeft);</p>
+<p>
+  assert(SUCCEEDED(hr));</p>
+<p>
+  hr = g_pGIT-&gt;RevokeInterfaceFromGlobal( </p>
+<p>
+                                m_dwBottomRight);</p>
+<p>
+  assert(SUCCEEDED(hr));</p>
+<p>
+}</p>
+<p>
+Removing an interface pointer from the GIT releases any references held on the object.</p>
+<p>
+In this article, I’ve investigated various issues related to writing in-process COM classes that execute in MTAs. The ThreadingModel=Free option is useful for forcing an object to always run in the MTA of a process, making worker thread access most efficient. The FreeThreaded Marshaler is a built-in implementation of IMarshal that allows multi-apartment access to an object within the same process. The FreeThreaded Marshaler is intended for classes that are marked ThreadingModel=Both, but special care is required when an object’s methods use other objects to complete their work. Also explored was the GIT (introduced with Windows NT 4.0 Service Pack 3), which allows an object reference to be used efficiently from any apartment in a process. I invite you to utilize a family of C++ convenience classes for dealing with the GIT. This code is available at http://www.develop.com/dbox/com/git.                                     u</p>
+<p>
+To obtain complete source code listings, see page 5.</p>
+<p>
+Have a question about programming with ActiveX or COM? Send your questions via email to Don Box: dbox@develop.com or http://www.develop.com/dbox</p>
+</font></BODY>
+</HTML>
